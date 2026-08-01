@@ -7,7 +7,7 @@ mod simulation;
 mod strategic;
 mod transactions;
 
-pub use bootstrap::build_new_game;
+pub use bootstrap::{NewGameError, build_new_game};
 pub use commands::{
     CommandError, CommandOutcome, CrisisResponse, LaborResponse, PlayerCommand,
     apply_player_command,

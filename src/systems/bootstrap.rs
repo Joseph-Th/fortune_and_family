@@ -14,28 +14,75 @@ use crate::money::{Money, Quantity};
 use crate::registry::Registry;
 use crate::rng::DeterministicRng;
 use std::collections::BTreeMap;
+use thiserror::Error;
+
+const MAX_DYNASTY_NAME_CHARACTERS: usize = 80;
+const MAX_FOUNDER_NAME_CHARACTERS: usize = 120;
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum NewGameError {
+    #[error("dynasty name must not be empty")]
+    EmptyDynastyName,
+    #[error("founder name must not be empty")]
+    EmptyFounderName,
+    #[error(
+        "dynasty name contains {actual} characters, exceeding the supported maximum of {maximum}"
+    )]
+    DynastyNameTooLong { actual: usize, maximum: usize },
+    #[error(
+        "founder name contains {actual} characters, exceeding the supported maximum of {maximum}"
+    )]
+    FounderNameTooLong { actual: usize, maximum: usize },
+    #[error("dynasty name contains unsupported control character {character:?}")]
+    InvalidDynastyNameCharacter { character: char },
+    #[error("founder name contains unsupported control character {character:?}")]
+    InvalidFounderNameCharacter { character: char },
+}
 
 /// Builds a complete deterministic Rivergate campaign from authored definitions.
 ///
+/// # Errors
+///
+/// Returns a dedicated error when a user-authored dynasty or founder name is empty, exceeds the
+/// supported input limit, or contains a non-whitespace control character.
+///
 /// # Panics
 ///
-/// Panics when names are empty or the supplied registry is missing required Rivergate content.
-#[must_use]
-pub fn build_new_game(registry: &Registry, config: NewGameConfig) -> AppState {
+/// Panics when the supplied registry is missing required Rivergate content.
+pub fn build_new_game(
+    registry: &Registry,
+    config: NewGameConfig,
+) -> Result<AppState, NewGameError> {
     let NewGameConfig {
         seed,
         dynasty_name,
         founder_name,
         background,
     } = config;
-    assert!(
-        !dynasty_name.trim().is_empty(),
-        "dynasty name must not be empty"
-    );
-    assert!(
-        !founder_name.trim().is_empty(),
-        "founder name must not be empty"
-    );
+    let dynasty_name = normalize_player_name(&dynasty_name)
+        .map_err(|character| NewGameError::InvalidDynastyNameCharacter { character })?;
+    let founder_name = normalize_player_name(&founder_name)
+        .map_err(|character| NewGameError::InvalidFounderNameCharacter { character })?;
+    if dynasty_name.is_empty() {
+        return Err(NewGameError::EmptyDynastyName);
+    }
+    if founder_name.is_empty() {
+        return Err(NewGameError::EmptyFounderName);
+    }
+    let dynasty_name_characters = dynasty_name.chars().count();
+    if dynasty_name_characters > MAX_DYNASTY_NAME_CHARACTERS {
+        return Err(NewGameError::DynastyNameTooLong {
+            actual: dynasty_name_characters,
+            maximum: MAX_DYNASTY_NAME_CHARACTERS,
+        });
+    }
+    let founder_name_characters = founder_name.chars().count();
+    if founder_name_characters > MAX_FOUNDER_NAME_CHARACTERS {
+        return Err(NewGameError::FounderNameTooLong {
+            actual: founder_name_characters,
+            maximum: MAX_FOUNDER_NAME_CHARACTERS,
+        });
+    }
 
     let mut state = empty_state(registry, seed);
     let player_dynasty_id = insert_player_foundation(
@@ -58,7 +105,27 @@ pub fn build_new_game(registry: &Registry, config: NewGameConfig) -> AppState {
         seed,
     );
     super::validate_invariants(registry, &state);
-    state
+    Ok(state)
+}
+
+fn normalize_player_name(value: &str) -> Result<String, char> {
+    let mut normalized = String::with_capacity(value.len());
+    let mut needs_separator = false;
+    for character in value.chars() {
+        if character.is_whitespace() {
+            needs_separator = !normalized.is_empty();
+            continue;
+        }
+        if character.is_control() {
+            return Err(character);
+        }
+        if needs_separator {
+            normalized.push(' ');
+            needs_separator = false;
+        }
+        normalized.push(character);
+    }
+    Ok(normalized)
 }
 
 fn empty_state(registry: &Registry, seed: u64) -> AppState {
@@ -520,5 +587,119 @@ fn insert_household_groups(state: &mut AppState, registry: &Registry) {
                 food_satisfaction_basis_points: 8_000,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::rivergate_registry_for_test as test_registry;
+
+    #[test]
+    fn names_reject_empty_dynasty() {
+        let registry = test_registry();
+        let empty_dynasty = NewGameConfig {
+            dynasty_name: "   ".to_owned(),
+            ..NewGameConfig::default()
+        };
+
+        assert_eq!(
+            build_new_game(registry, empty_dynasty),
+            Err(NewGameError::EmptyDynastyName)
+        );
+    }
+
+    #[test]
+    fn names_reject_empty_founder() {
+        let registry = test_registry();
+        let empty_founder = NewGameConfig {
+            founder_name: "\n\t".to_owned(),
+            ..NewGameConfig::default()
+        };
+
+        assert_eq!(
+            build_new_game(registry, empty_founder),
+            Err(NewGameError::EmptyFounderName)
+        );
+    }
+
+    #[test]
+    fn names_normalize_internal_whitespace_at_the_input_boundary() {
+        let registry = test_registry();
+        let config = NewGameConfig {
+            dynasty_name: "  House\tValeri  ".to_owned(),
+            founder_name: "  Elian\n  Valeri  ".to_owned(),
+            ..NewGameConfig::default()
+        };
+
+        let state = build_new_game(registry, config).expect("game must build");
+        let dynasty = state
+            .get_dynasty(state.player_dynasty_id())
+            .expect("player dynasty must exist");
+        let founder = state
+            .characters()
+            .get(dynasty.head_id())
+            .expect("founder must exist");
+
+        assert_eq!(dynasty.name(), "House Valeri");
+        assert_eq!(founder.name(), "Elian Valeri");
+    }
+
+    #[test]
+    fn names_reject_terminal_control_characters() {
+        let registry = test_registry();
+
+        assert_eq!(
+            build_new_game(
+                registry,
+                NewGameConfig {
+                    dynasty_name: "Valeri\u{1b}[31m".to_owned(),
+                    ..NewGameConfig::default()
+                }
+            ),
+            Err(NewGameError::InvalidDynastyNameCharacter {
+                character: '\u{1b}',
+            })
+        );
+    }
+
+    #[test]
+    fn names_reject_overlong_dynasty_by_character_count() {
+        let registry = test_registry();
+        let dynasty_name = "V".repeat(MAX_DYNASTY_NAME_CHARACTERS + 1);
+
+        assert_eq!(
+            build_new_game(
+                registry,
+                NewGameConfig {
+                    dynasty_name,
+                    ..NewGameConfig::default()
+                }
+            ),
+            Err(NewGameError::DynastyNameTooLong {
+                actual: MAX_DYNASTY_NAME_CHARACTERS + 1,
+                maximum: MAX_DYNASTY_NAME_CHARACTERS,
+            })
+        );
+    }
+
+    #[test]
+    fn names_reject_overlong_unicode_founder_by_character_count() {
+        let registry = test_registry();
+        let founder_name = "É".repeat(MAX_FOUNDER_NAME_CHARACTERS + 1);
+
+        assert_eq!(
+            build_new_game(
+                registry,
+                NewGameConfig {
+                    founder_name,
+                    ..NewGameConfig::default()
+                }
+            ),
+            Err(NewGameError::FounderNameTooLong {
+                actual: MAX_FOUNDER_NAME_CHARACTERS + 1,
+                maximum: MAX_FOUNDER_NAME_CHARACTERS,
+            })
+        );
     }
 }

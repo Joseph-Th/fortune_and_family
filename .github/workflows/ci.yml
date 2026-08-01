@@ -17,12 +17,18 @@ jobs:
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
+      - name: Shell syntax
+        run: bash -n scripts/test.sh scripts/verify_cli.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
         run: cargo check --all-targets --locked
-      - name: Test
-        run: cargo test --locked -j 2
+      - name: Fast tests
+        run: bash scripts/test.sh fast
+      - name: Soak tests
+        run: bash scripts/test.sh soak
+      - name: CLI smoke test
+        run: bash scripts/verify_cli.sh
       - name: Clippy
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Documentation

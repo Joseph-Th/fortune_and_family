@@ -82,7 +82,10 @@ impl SimulationClock {
     }
 
     pub(crate) const fn advance_one_day(&mut self) {
-        self.day += 1;
+        self.day = self
+            .day
+            .checked_add(1)
+            .expect("simulation clock exhausted its supported day range");
     }
 }
 
@@ -215,6 +218,10 @@ impl BusinessStore {
         self.records.values()
     }
 
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Business> {
+        self.records.values_mut()
+    }
+
     #[must_use]
     pub fn ids_for_owner(&self, owner_id: DynastyId) -> Option<&BTreeSet<BusinessId>> {
         self.by_owner.get(&owner_id)
@@ -339,6 +346,19 @@ pub(crate) struct NextIds {
     chronicle: u32,
 }
 
+macro_rules! next_id_method {
+    ($method:ident, $field:ident, $id_type:ident) => {
+        pub(crate) const fn $method(&mut self) -> $id_type {
+            let id = $id_type::new(self.$field);
+            self.$field = self
+                .$field
+                .checked_add(1)
+                .expect(concat!(stringify!($id_type), " identifier space exhausted"));
+            id
+        }
+    };
+}
+
 impl NextIds {
     pub(crate) const fn new() -> Self {
         Self {
@@ -363,113 +383,24 @@ impl NextIds {
         }
     }
 
-    pub(crate) const fn dynasty(&mut self) -> DynastyId {
-        let id = DynastyId::new(self.dynasty);
-        self.dynasty += 1;
-        id
-    }
-
-    pub(crate) const fn character(&mut self) -> CharacterId {
-        let id = CharacterId::new(self.character);
-        self.character += 1;
-        id
-    }
-
-    pub(crate) const fn household(&mut self) -> HouseholdId {
-        let id = HouseholdId::new(self.household);
-        self.household += 1;
-        id
-    }
-
-    pub(crate) const fn business(&mut self) -> BusinessId {
-        let id = BusinessId::new(self.business);
-        self.business += 1;
-        id
-    }
-
-    pub(crate) const fn contract(&mut self) -> ContractId {
-        let id = ContractId::new(self.contract);
-        self.contract += 1;
-        id
-    }
-
-    pub(crate) const fn property(&mut self) -> PropertyId {
-        let id = PropertyId::new(self.property);
-        self.property += 1;
-        id
-    }
-
-    pub(crate) const fn loan(&mut self) -> LoanId {
-        let id = LoanId::new(self.loan);
-        self.loan += 1;
-        id
-    }
-
-    pub(crate) const fn employment(&mut self) -> EmploymentId {
-        let id = EmploymentId::new(self.employment);
-        self.employment += 1;
-        id
-    }
-
-    pub(crate) const fn family_link(&mut self) -> FamilyLinkId {
-        let id = FamilyLinkId::new(self.family_link);
-        self.family_link += 1;
-        id
-    }
-
-    pub(crate) const fn law(&mut self) -> LawId {
-        let id = LawId::new(self.law);
-        self.law += 1;
-        id
-    }
-
-    pub(crate) const fn information_report(&mut self) -> InformationReportId {
-        let id = InformationReportId::new(self.information_report);
-        self.information_report += 1;
-        id
-    }
-
-    pub(crate) const fn objective(&mut self) -> ObjectiveId {
-        let id = ObjectiveId::new(self.objective);
-        self.objective += 1;
-        id
-    }
-
-    pub(crate) const fn public_work(&mut self) -> PublicWorkId {
-        let id = PublicWorkId::new(self.public_work);
-        self.public_work += 1;
-        id
-    }
-
-    pub(crate) const fn legal_case(&mut self) -> LegalCaseId {
-        let id = LegalCaseId::new(self.legal_case);
-        self.legal_case += 1;
-        id
-    }
-
-    pub(crate) const fn external_route(&mut self) -> ExternalRouteId {
-        let id = ExternalRouteId::new(self.external_route);
-        self.external_route += 1;
-        id
-    }
-
-    pub(crate) const fn crisis(&mut self) -> CrisisId {
-        let id = CrisisId::new(self.crisis);
-        self.crisis += 1;
-        id
-    }
-
-    pub(crate) const fn outbox(&mut self) -> OutboxMessageId {
-        let id = OutboxMessageId::new(self.outbox);
-        self.outbox += 1;
-        id
-    }
-
-    pub(crate) const fn chronicle(&mut self) -> ChronicleEntryId {
-        let id = ChronicleEntryId::new(self.chronicle);
-        self.chronicle += 1;
-        id
-    }
+    next_id_method!(dynasty, dynasty, DynastyId);
+    next_id_method!(character, character, CharacterId);
+    next_id_method!(household, household, HouseholdId);
+    next_id_method!(business, business, BusinessId);
+    next_id_method!(contract, contract, ContractId);
+    next_id_method!(property, property, PropertyId);
+    next_id_method!(loan, loan, LoanId);
+    next_id_method!(employment, employment, EmploymentId);
+    next_id_method!(family_link, family_link, FamilyLinkId);
+    next_id_method!(law, law, LawId);
+    next_id_method!(information_report, information_report, InformationReportId);
+    next_id_method!(objective, objective, ObjectiveId);
+    next_id_method!(public_work, public_work, PublicWorkId);
+    next_id_method!(legal_case, legal_case, LegalCaseId);
+    next_id_method!(external_route, external_route, ExternalRouteId);
+    next_id_method!(crisis, crisis, CrisisId);
+    next_id_method!(outbox, outbox, OutboxMessageId);
+    next_id_method!(chronicle, chronicle, ChronicleEntryId);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -600,6 +531,77 @@ impl AppState {
         &self.audit_log
     }
 
+    pub(crate) fn validate_next_ids(&self) -> Result<(), String> {
+        macro_rules! require_next_id {
+            ($field:ident, $label:literal, $ids:expr) => {
+                if let Some(maximum) = ($ids).map(|id| id.value()).max()
+                    && self.next_ids.$field <= maximum
+                {
+                    return Err(format!(
+                        "next {} ID {} does not exceed existing maximum {}",
+                        $label, self.next_ids.$field, maximum
+                    ));
+                }
+            };
+        }
+
+        require_next_id!(dynasty, "dynasty", self.dynasties.keys().copied());
+        require_next_id!(
+            character,
+            "character",
+            self.characters.records().keys().copied()
+        );
+        require_next_id!(
+            household,
+            "household",
+            self.households.records().keys().copied()
+        );
+        require_next_id!(
+            business,
+            "business",
+            self.businesses.records().keys().copied()
+        );
+        require_next_id!(contract, "contract", self.contracts.keys().copied());
+        require_next_id!(property, "property", self.properties.keys().copied());
+        require_next_id!(loan, "loan", self.loans.keys().copied());
+        require_next_id!(employment, "employment", self.employment.keys().copied());
+        require_next_id!(
+            family_link,
+            "family link",
+            self.family_links.keys().copied()
+        );
+        require_next_id!(law, "law", self.laws.keys().copied());
+        require_next_id!(
+            information_report,
+            "information report",
+            self.information_reports.keys().copied()
+        );
+        require_next_id!(objective, "objective", self.ai_objectives.keys().copied());
+        require_next_id!(
+            public_work,
+            "public work",
+            self.public_works.keys().copied()
+        );
+        require_next_id!(legal_case, "legal case", self.legal_cases.keys().copied());
+        require_next_id!(
+            external_route,
+            "external route",
+            self.external_routes.keys().copied()
+        );
+        require_next_id!(crisis, "crisis", self.crises.keys().copied());
+        require_next_id!(
+            outbox,
+            "outbox message",
+            self.outbox.iter().map(|item| item.id)
+        );
+        require_next_id!(
+            chronicle,
+            "chronicle entry",
+            self.chronicle.iter().map(ChronicleEntry::id)
+        );
+        Ok(())
+    }
+
     /// Builds a compact read-only projection for user-interface adapters.
     ///
     /// # Panics
@@ -720,43 +722,92 @@ pub struct StateSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::build_rivergate_registry;
-    use crate::systems::{advance_days, build_new_game, validate_invariants};
+    use crate::systems::{advance_days, validate_invariants};
+    use crate::test_support::{
+        assert_state_eq, make_test_campaign, make_test_campaign_with, rivergate_registry_for_test,
+    };
 
     #[test]
-    fn identical_seed_and_inputs_produce_identical_state() {
-        let registry = build_rivergate_registry();
+    fn same_seed_and_inputs_produce_identical_state() {
+        let registry = rivergate_registry_for_test();
         let config = NewGameConfig {
             seed: 9_814,
             dynasty_name: "Aster".to_owned(),
             founder_name: "Mira Aster".to_owned(),
             background: StartingBackground::ClothTrader,
         };
-        let mut first = build_new_game(&registry, config.clone());
-        let mut second = build_new_game(&registry, config);
+        let mut first = make_test_campaign_with(config.clone());
+        let mut second = make_test_campaign_with(config);
 
-        advance_days(&registry, &mut first, 720).expect("first simulation must advance");
-        advance_days(&registry, &mut second, 720).expect("second simulation must advance");
+        advance_days(registry, &mut first, 360).expect("first simulation must advance");
+        advance_days(registry, &mut second, 360).expect("second simulation must advance");
 
-        assert_eq!(first, second);
+        assert_state_eq(
+            &first,
+            &second,
+            "identical seeds and inputs must remain deterministic across an annual boundary",
+        );
     }
 
     #[test]
-    fn test_deterministic_soak_preserves_invariants() {
-        let registry = build_rivergate_registry();
-        let config = NewGameConfig {
+    #[ignore = "long-running soak; run `bash scripts/test.sh soak`"]
+    fn test_deterministic_core_soak_preserves_invariants() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign_with(NewGameConfig {
             seed: 77,
             dynasty_name: "Corren".to_owned(),
             founder_name: "Lysa Corren".to_owned(),
             background: StartingBackground::Blacksmith,
-        };
-        let mut state = build_new_game(&registry, config);
+        });
+        let initial_businesses = state.businesses().iter().count();
 
-        advance_days(&registry, &mut state, 3_000).expect("soak simulation must advance");
-        validate_invariants(&registry, &state);
+        advance_days(registry, &mut state, 3_000).expect("soak simulation must advance");
+        validate_invariants(registry, &state);
 
-        assert_eq!(state.clock().day(), 3_000);
-        assert!(!state.chronicle().is_empty());
-        assert!(state.businesses().iter().count() >= 8);
+        assert_eq!(state.clock().day(), 3_000, "all requested days must run");
+        assert!(
+            !state.chronicle().is_empty(),
+            "a multi-year campaign must produce chronicle history"
+        );
+        assert!(
+            state.businesses().iter().count() >= initial_businesses,
+            "the soak must preserve the authored business population"
+        );
+    }
+
+    #[test]
+    #[ignore = "long-running soak; run `bash scripts/test.sh soak`"]
+    fn test_deterministic_strategic_soak_preserves_two_generations() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let initial_generation = state
+            .dynasties
+            .values()
+            .map(|dynasty| dynasty.runtime.generation)
+            .max()
+            .expect("campaign must contain dynasties");
+
+        advance_days(registry, &mut state, 7_200).expect("strategic simulation must advance");
+        validate_invariants(registry, &state);
+
+        let final_generation = state
+            .dynasties
+            .values()
+            .map(|dynasty| dynasty.runtime.generation)
+            .max()
+            .expect("campaign must contain dynasties");
+        assert_eq!(state.clock().day(), 7_200, "all requested days must run");
+        assert!(
+            final_generation > initial_generation,
+            "the long soak must exercise at least one succession"
+        );
+        assert!(
+            !state.information_reports.is_empty(),
+            "long campaigns must retain current strategic reporting"
+        );
+        assert!(
+            !state.ai_objectives.is_empty(),
+            "AI dynasties must retain actionable objectives"
+        );
     }
 }

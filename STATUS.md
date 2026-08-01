@@ -16,7 +16,9 @@ The repository now implements the full architectural foundation and a broad, int
 - Serializable state-owned deterministic RNG.
 - Private synchronized character, business, and household stores.
 - Canonical validate / resolve / commit mutation paths.
+- Revalidated commit tokens for cross-record contracts and loans.
 - Dedicated error enums for persistence, simulation, strategic operations, and commands.
+- Fallible, bounded, whitespace-normalizing new-campaign input handling.
 - Explicit daily, weekly, monthly, and annual execution order.
 - Debug invariant validation after every simulated day and every CLI command.
 - No business rules in CLI, persistence, projection, or rendering adapters.
@@ -80,7 +82,8 @@ The repository now implements the full architectural foundation and a broad, int
 - Membership, powers, budgets, legitimacy, terms, and officeholders.
 - Deterministic elections using capability, legitimacy, and stable tie-breaking.
 - Persistent laws and supersession.
-- Bread ceilings, emergency imports, interest limits, tolls, fire codes, rent rules, guild rules, and public-debt authorization records.
+- Bread ceilings, emergency imports, interest limits, tolls, fire codes, rent rules, and guild rules.
+- Public-debt authorization remains a reserved law kind and is rejected before cost or mutation until a civic debt ledger exists.
 - Player law sponsorship and office nominations.
 
 ### Relationships, information, and AI
@@ -103,14 +106,15 @@ The repository now implements the full architectural foundation and a broad, int
 
 ### Adapters and presentation
 
-- Human-readable JSON persistence.
+- Human-readable JSON persistence with synchronized same-directory temporary writes and atomic replacement.
 - Schema version 2.
 - Explicit migrations from versions 0 and 1.
 - Deterministic strategic hydration for version 1 Rivergate saves.
+- Release-mode load validation for registry alignment, references, synchronized indexes, numeric ranges, reciprocal collateral, and next-ID allocators.
 - Durable outbox notifications.
 - Compact state summary.
 - Complete campaign projection.
-- Self-contained HTML dashboard.
+- Self-contained HTML dashboard with escaped visible content and script-safe embedded JSON.
 - CLI commands for new, simulate, summary, inspect, dashboard, execute, and validate.
 - JSON `PlayerCommand` API for every consequential player mutation currently exposed.
 
@@ -138,12 +142,14 @@ The release gate requires all of the following to pass:
 
 - `cargo fmt --all -- --check`
 - `cargo check --all-targets --locked`
-- `cargo test --locked -j 2`
+- `bash scripts/test.sh fast`
+- `bash scripts/test.sh soak`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked`
-- CLI create, simulate, inspect, execute, dashboard, and validate smoke tests
+- `bash scripts/verify_cli.sh`
+- CLI create, simulate, summary, inspect, execute, dashboard, validate, and invalid-input smoke tests
 
-The automated suite includes a 3,000-day core invariant soak and a 7,200-day strategic soak.
+The fast suite uses a shared immutable registry fixture and fresh per-test campaign state. Long-running deterministic checks are co-located in `src/core/state.rs` and explicitly invoked by the soak test mode. The automated suite includes failure-path rollback coverage, atomic save replacement, a 3,000-day core invariant soak, and a 7,200-day strategic soak.
 
 ## Deliberate boundaries
 

@@ -85,8 +85,8 @@ fn validate_market(registry: &Registry, state: &AppState, ids: &RegistryIds) {
             "Lifecycle Validity: market stock must remain nonnegative for good {good_id}"
         );
         debug_assert!(
-            !quote.target_stock.is_negative(),
-            "Definition/Runtime Separation: market target stock must remain nonnegative"
+            quote.target_stock > crate::money::Quantity::ZERO,
+            "Definition/Runtime Separation: market target stock must remain positive"
         );
     }
 }
@@ -359,8 +359,11 @@ fn validate_institutions(state: &AppState, ids: &RegistryIds) {
         );
         if let Some(holder_id) = institution.office_holder_id {
             debug_assert!(
-                state.characters.get(holder_id).is_some(),
-                "Record Reference Validity: institution office holder does not exist"
+                state
+                    .characters
+                    .get(holder_id)
+                    .is_some_and(|character| { character.status() == CharacterStatus::Active }),
+                "Lifecycle Validity: institution office holder must exist and be active"
             );
         }
     }
@@ -414,15 +417,22 @@ fn validate_institution_runtime(state: &AppState, ids: &RegistryIds) {
                 institution.members.contains(&holder_id),
                 "Ownership Exclusivity: officeholder is not an institution member"
             );
-            debug_assert_eq!(
+            debug_assert!(
                 state
-                    .institutions
-                    .get(institution_id)
-                    .and_then(|legacy| legacy.office_holder_id),
-                Some(holder_id),
-                "Derived Data Consistency: legacy and strategic officeholders differ"
+                    .characters
+                    .get(holder_id)
+                    .is_some_and(|character| { character.status() == CharacterStatus::Active }),
+                "Lifecycle Validity: strategic officeholder must be active"
             );
         }
+        debug_assert_eq!(
+            state
+                .institutions
+                .get(institution_id)
+                .and_then(|legacy| legacy.office_holder_id),
+            institution.office_holder_id,
+            "Derived Data Consistency: legacy and strategic officeholders differ"
+        );
     }
 }
 
@@ -547,10 +557,27 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
             }
         }
         if let Some(loan_id) = property.collateral_loan_id {
+            let loan = state.loans.get(&loan_id);
             debug_assert!(
-                state.loans.contains_key(&loan_id),
+                loan.is_some(),
                 "Record Reference Validity: property collateral loan does not exist"
             );
+            if let Some(loan) = loan {
+                debug_assert_eq!(
+                    loan.collateral_property_id,
+                    Some(*property_id),
+                    "Derived Data Consistency: collateral property and loan references differ"
+                );
+                debug_assert_eq!(
+                    property.owner_dynasty_id,
+                    Some(loan.borrower_dynasty_id),
+                    "Ownership Exclusivity: pledged property is not owned by its borrower"
+                );
+                debug_assert!(
+                    !matches!(loan.status, LoanStatus::Defaulted | LoanStatus::Repaid),
+                    "Lifecycle Validity: settled loan retains an active collateral pledge"
+                );
+            }
         }
     }
 }
@@ -601,6 +628,11 @@ fn validate_loans(state: &AppState) {
                     property.and_then(|property| property.collateral_loan_id),
                     Some(*loan_id),
                     "Derived Data Consistency: active collateral does not reference its loan"
+                );
+                debug_assert_eq!(
+                    property.and_then(|property| property.owner_dynasty_id),
+                    Some(loan.borrower_dynasty_id),
+                    "Ownership Exclusivity: active collateral is not owned by the borrower"
                 );
             }
         }
@@ -679,13 +711,30 @@ fn validate_family_state(state: &AppState) {
             council.unity_basis_points <= 10_000,
             "Lifecycle Validity: family unity is outside basis-point range"
         );
+        let dynasty = state
+            .dynasties
+            .get(dynasty_id)
+            .expect("validated family council dynasty must exist");
+        debug_assert!(
+            council.members.contains(&dynasty.head_id()),
+            "Index Completeness: family council omits the dynasty head"
+        );
+        if let Some(heir_id) = dynasty.heir_id() {
+            debug_assert!(
+                council.members.contains(&heir_id),
+                "Index Completeness: family council omits the dynasty heir"
+            );
+        }
         for character_id in &council.members {
             debug_assert!(
                 state
                     .characters
                     .get(*character_id)
-                    .is_some_and(|character| character.dynasty_id() == *dynasty_id),
-                "Ownership Exclusivity: family council member belongs to another dynasty"
+                    .is_some_and(|character| {
+                        character.dynasty_id() == *dynasty_id
+                            && character.status() == CharacterStatus::Active
+                    }),
+                "Lifecycle Validity: family council member must be active and belong to its dynasty"
             );
         }
     }

@@ -20,6 +20,8 @@ use thiserror::Error;
 pub enum StrategicError {
     #[error("business {business_id} does not exist")]
     MissingBusiness { business_id: BusinessId },
+    #[error("business {business_id} is not active")]
+    BusinessInactive { business_id: BusinessId },
     #[error("dynasty {dynasty_id} does not exist")]
     MissingDynasty { dynasty_id: DynastyId },
     #[error("property {property_id} does not exist")]
@@ -32,6 +34,8 @@ pub enum StrategicError {
     NonPositiveAmount,
     #[error("quantity must be positive")]
     NonPositiveQuantity,
+    #[error("contract duration must contain at least one week")]
+    EmptyContractDuration,
     #[error("seller business {seller_business_id} cannot produce good {good_id}")]
     SellerCannotProduce {
         seller_business_id: BusinessId,
@@ -47,6 +51,18 @@ pub enum StrategicError {
         dynasty_id: DynastyId,
         available: Money,
         required: Money,
+    },
+    #[error("loan interest {interest_basis_points} is outside the 0..=10000 basis-point range")]
+    InterestOutOfRange { interest_basis_points: u16 },
+    #[error("property {property_id} is not owned by borrower dynasty {borrower_dynasty_id}")]
+    CollateralNotOwned {
+        property_id: PropertyId,
+        borrower_dynasty_id: DynastyId,
+    },
+    #[error("property {property_id} is already pledged to loan {loan_id}")]
+    PropertyAlreadyPledged {
+        property_id: PropertyId,
+        loan_id: crate::ids::LoanId,
     },
     #[error("property {property_id} is already owned")]
     PropertyAlreadyOwned { property_id: PropertyId },
@@ -79,41 +95,63 @@ pub struct ValidatedSupplyContract {
 }
 
 impl ValidatedSupplyContract {
-    pub fn commit(self, state: &mut AppState) -> crate::ids::ContractId {
-        let id = state.next_ids.contract();
-        let day = state.clock.day();
-        let end_day = day.saturating_add(i64::from(self.terms.duration_weeks).saturating_mul(7));
-        state.contracts.insert(
-            id,
-            SupplyContract {
-                id,
-                buyer_business_id: self.terms.buyer_business_id,
-                seller_business_id: self.terms.seller_business_id,
-                good_id: self.terms.good_id,
-                quantity_per_week: self.terms.quantity_per_week,
-                unit_price: self.terms.unit_price,
-                penalty: self.terms.penalty,
-                next_due_day: day.saturating_add(7),
-                end_day,
-                fulfilled_deliveries: 0,
-                missed_deliveries: 0,
-                status: ContractStatus::Active,
-            },
-        );
-        push_outbox(
-            state,
-            OutboxKind::Contract,
-            format!("Supply contract {id} signed"),
-            format!(
-                "Business {} will deliver {} of good {} to business {} each week.",
-                self.terms.seller_business_id,
-                self.terms.quantity_per_week,
-                self.terms.good_id,
-                self.terms.buyer_business_id
-            ),
-        );
-        id
+    /// Revalidates and commits a supply contract exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns the current validation error if state changed after the token was created.
+    pub fn commit(
+        self,
+        registry: &Registry,
+        state: &mut AppState,
+    ) -> Result<crate::ids::ContractId, StrategicError> {
+        validate_supply_contract_terms(registry, state, &self.terms)?;
+        Ok(commit_supply_contract(state, &self.terms))
     }
+}
+
+fn commit_supply_contract(
+    state: &mut AppState,
+    terms: &SupplyContractTerms,
+) -> crate::ids::ContractId {
+    let &SupplyContractTerms {
+        buyer_business_id,
+        seller_business_id,
+        good_id,
+        quantity_per_week,
+        unit_price,
+        penalty,
+        duration_weeks,
+    } = terms;
+    let id = state.next_ids.contract();
+    let day = state.clock.day();
+    let end_day = day.saturating_add(i64::from(duration_weeks).saturating_mul(7));
+    state.contracts.insert(
+        id,
+        SupplyContract {
+            id,
+            buyer_business_id,
+            seller_business_id,
+            good_id,
+            quantity_per_week,
+            unit_price,
+            penalty,
+            next_due_day: day.saturating_add(7),
+            end_day,
+            fulfilled_deliveries: 0,
+            missed_deliveries: 0,
+            status: ContractStatus::Active,
+        },
+    );
+    push_outbox(
+        state,
+        OutboxKind::Contract,
+        format!("Supply contract {id} signed"),
+        format!(
+            "Business {seller_business_id} will deliver {quantity_per_week} of good {good_id} to business {buyer_business_id} each week."
+        ),
+    );
+    id
 }
 
 #[derive(Debug)]
@@ -122,63 +160,67 @@ pub struct ValidatedLoan {
 }
 
 impl ValidatedLoan {
-    /// Commits a previously validated loan atomically.
+    /// Revalidates and commits a previously validated loan atomically.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the validated parties or collateral were removed before commit.
-    pub fn commit(self, state: &mut AppState) -> crate::ids::LoanId {
-        let id = state.next_ids.loan();
-        let lender = state
-            .dynasties
-            .get_mut(&self.terms.lender_dynasty_id)
-            .expect("validated lender must exist");
-        lender.resources.treasury = lender
-            .resources
-            .treasury
-            .saturating_sub(self.terms.principal);
-        let borrower = state
-            .dynasties
-            .get_mut(&self.terms.borrower_dynasty_id)
-            .expect("validated borrower must exist");
-        borrower.resources.treasury = borrower
-            .resources
-            .treasury
-            .saturating_add(self.terms.principal);
-        if let Some(property_id) = self.terms.collateral_property_id {
-            state
-                .properties
-                .get_mut(&property_id)
-                .expect("validated collateral must exist")
-                .collateral_loan_id = Some(id);
-        }
-        state.loans.insert(
-            id,
-            Loan {
-                id,
-                lender_dynasty_id: self.terms.lender_dynasty_id,
-                borrower_dynasty_id: self.terms.borrower_dynasty_id,
-                principal: self.terms.principal,
-                balance: self.terms.principal,
-                weekly_payment: self.terms.weekly_payment,
-                interest_basis_points: self.terms.interest_basis_points.min(10_000),
-                next_due_day: state.clock.day().saturating_add(7),
-                missed_payments: 0,
-                collateral_property_id: self.terms.collateral_property_id,
-                status: LoanStatus::Current,
-            },
-        );
-        push_outbox(
-            state,
-            OutboxKind::Finance,
-            format!("Loan {id} issued"),
-            format!(
-                "Dynasty {} lent {} to dynasty {}.",
-                self.terms.lender_dynasty_id, self.terms.principal, self.terms.borrower_dynasty_id
-            ),
-        );
-        id
+    /// Returns the current validation error if state changed after the token was created.
+    pub fn commit(self, state: &mut AppState) -> Result<crate::ids::LoanId, StrategicError> {
+        validate_loan_terms(state, &self.terms)?;
+        Ok(commit_loan(state, &self.terms))
     }
+}
+
+fn commit_loan(state: &mut AppState, terms: &LoanTerms) -> crate::ids::LoanId {
+    let &LoanTerms {
+        lender_dynasty_id,
+        borrower_dynasty_id,
+        principal,
+        weekly_payment,
+        interest_basis_points,
+        collateral_property_id,
+    } = terms;
+    let id = state.next_ids.loan();
+    let lender = state
+        .dynasties
+        .get_mut(&lender_dynasty_id)
+        .expect("validated lender must exist");
+    lender.resources.treasury = lender.resources.treasury.saturating_sub(principal);
+    let borrower = state
+        .dynasties
+        .get_mut(&borrower_dynasty_id)
+        .expect("validated borrower must exist");
+    borrower.resources.treasury = borrower.resources.treasury.saturating_add(principal);
+    if let Some(property_id) = collateral_property_id {
+        state
+            .properties
+            .get_mut(&property_id)
+            .expect("validated collateral must exist")
+            .collateral_loan_id = Some(id);
+    }
+    state.loans.insert(
+        id,
+        Loan {
+            id,
+            lender_dynasty_id,
+            borrower_dynasty_id,
+            principal,
+            balance: principal,
+            weekly_payment,
+            interest_basis_points,
+            next_due_day: state.clock.day().saturating_add(7),
+            missed_payments: 0,
+            collateral_property_id,
+            status: LoanStatus::Current,
+        },
+    );
+    push_outbox(
+        state,
+        OutboxKind::Finance,
+        format!("Loan {id} issued"),
+        format!("Dynasty {lender_dynasty_id} lent {principal} to dynasty {borrower_dynasty_id}."),
+    );
+    id
 }
 
 /// Validates a supply contract without mutating state.
@@ -195,6 +237,15 @@ pub fn validate_supply_contract(
     state: &AppState,
     terms: SupplyContractTerms,
 ) -> Result<ValidatedSupplyContract, StrategicError> {
+    validate_supply_contract_terms(registry, state, &terms)?;
+    Ok(ValidatedSupplyContract { terms })
+}
+
+fn validate_supply_contract_terms(
+    registry: &Registry,
+    state: &AppState,
+    terms: &SupplyContractTerms,
+) -> Result<(), StrategicError> {
     if terms.buyer_business_id == terms.seller_business_id {
         return Err(StrategicError::SameContractParty);
     }
@@ -203,6 +254,9 @@ pub fn validate_supply_contract(
     }
     if terms.unit_price <= Money::ZERO || terms.penalty < Money::ZERO {
         return Err(StrategicError::NonPositiveAmount);
+    }
+    if terms.duration_weeks == 0 {
+        return Err(StrategicError::EmptyContractDuration);
     }
     let buyer =
         state
@@ -218,6 +272,16 @@ pub fn validate_supply_contract(
             .ok_or(StrategicError::MissingBusiness {
                 business_id: terms.seller_business_id,
             })?;
+    for business in [buyer, seller] {
+        if matches!(
+            business.status(),
+            crate::core::BusinessStatus::Insolvent | crate::core::BusinessStatus::Closed
+        ) {
+            return Err(StrategicError::BusinessInactive {
+                business_id: business.id(),
+            });
+        }
+    }
     let seller_recipe = registry
         .get_recipe(seller.recipe_id())
         .expect("business recipe references must be validated");
@@ -240,7 +304,7 @@ pub fn validate_supply_contract(
             good_id: terms.good_id,
         });
     }
-    Ok(ValidatedSupplyContract { terms })
+    Ok(())
 }
 
 /// Validates and creates a supply contract through its canonical commit token.
@@ -253,7 +317,7 @@ pub fn create_supply_contract(
     state: &mut AppState,
     terms: SupplyContractTerms,
 ) -> Result<crate::ids::ContractId, StrategicError> {
-    Ok(validate_supply_contract(registry, state, terms)?.commit(state))
+    validate_supply_contract(registry, state, terms)?.commit(registry, state)
 }
 
 /// Validates a loan without mutating state.
@@ -262,11 +326,21 @@ pub fn create_supply_contract(
 ///
 /// Returns an error for missing parties, invalid terms, insufficient lender funds, or invalid collateral.
 pub fn validate_loan(state: &AppState, terms: LoanTerms) -> Result<ValidatedLoan, StrategicError> {
+    validate_loan_terms(state, &terms)?;
+    Ok(ValidatedLoan { terms })
+}
+
+fn validate_loan_terms(state: &AppState, terms: &LoanTerms) -> Result<(), StrategicError> {
     if terms.lender_dynasty_id == terms.borrower_dynasty_id {
         return Err(StrategicError::SameLoanParty);
     }
     if terms.principal <= Money::ZERO || terms.weekly_payment <= Money::ZERO {
         return Err(StrategicError::NonPositiveAmount);
+    }
+    if terms.interest_basis_points > 10_000 {
+        return Err(StrategicError::InterestOutOfRange {
+            interest_basis_points: terms.interest_basis_points,
+        });
     }
     let lender =
         state
@@ -293,10 +367,19 @@ pub fn validate_loan(state: &AppState, terms: LoanTerms) -> Result<ValidatedLoan
             .get(&property_id)
             .ok_or(StrategicError::MissingProperty { property_id })?;
         if property.owner_dynasty_id != Some(terms.borrower_dynasty_id) {
-            return Err(StrategicError::MissingProperty { property_id });
+            return Err(StrategicError::CollateralNotOwned {
+                property_id,
+                borrower_dynasty_id: terms.borrower_dynasty_id,
+            });
+        }
+        if let Some(loan_id) = property.collateral_loan_id {
+            return Err(StrategicError::PropertyAlreadyPledged {
+                property_id,
+                loan_id,
+            });
         }
     }
-    Ok(ValidatedLoan { terms })
+    Ok(())
 }
 
 /// Validates and issues a loan through its canonical commit token.
@@ -308,7 +391,7 @@ pub fn issue_loan(
     state: &mut AppState,
     terms: LoanTerms,
 ) -> Result<crate::ids::LoanId, StrategicError> {
-    Ok(validate_loan(state, terms)?.commit(state))
+    validate_loan(state, terms)?.commit(state)
 }
 
 /// Transfers an unowned property to a dynasty after validating price and ownership.
@@ -736,8 +819,9 @@ fn initialize_contracts(registry: &Registry, state: &mut AppState) {
                 penalty: cost_for(input.quantity(), price).saturating_mul(2),
                 duration_weeks: 52,
             };
-            if let Ok(token) = validate_supply_contract(registry, state, terms) {
-                token.commit(state);
+            if let Ok(token) = validate_supply_contract(registry, state, terms)
+                && token.commit(registry, state).is_ok()
+            {
                 created = created.saturating_add(1);
             }
             if created >= 8 {
@@ -766,7 +850,7 @@ fn initialize_loans(state: &mut AppState) {
                 .map(|property| property.id),
         };
         if let Ok(token) = validate_loan(state, terms) {
-            token.commit(state);
+            let _ = token.commit(state);
         }
     }
 }
@@ -873,9 +957,27 @@ fn initialize_information(state: &mut AppState) {
 }
 
 pub(crate) fn run_daily_strategic_systems(registry: &Registry, state: &mut AppState) {
+    apply_route_laws(state);
     apply_external_route_supply(state);
-    apply_law_price_controls(registry, state);
     apply_crisis_daily_effects(registry, state);
+}
+
+fn active_law_value(state: &AppState, kind: LawKind) -> Option<i64> {
+    state
+        .laws
+        .values()
+        .find(|law| law.active && law.kind == kind)
+        .map(|law| law.value)
+}
+
+fn apply_route_laws(state: &mut AppState) {
+    let Some(toll) = active_law_value(state, LawKind::ForeignMerchantToll) else {
+        return;
+    };
+    let toll = u16::try_from(toll.clamp(0, 10_000)).unwrap_or(10_000);
+    for route in state.external_routes.values_mut() {
+        route.toll_basis_points = toll;
+    }
 }
 
 fn apply_external_route_supply(state: &mut AppState) {
@@ -884,12 +986,14 @@ fn apply_external_route_supply(state: &mut AppState) {
         .values()
         .filter(|route| route.active)
         .map(|route| {
-            let available_basis_points = 10_000_u16.saturating_sub(route.disruption_basis_points);
+            let disruption_availability = 10_000_u16.saturating_sub(route.disruption_basis_points);
+            let toll_availability = 10_000_u16.saturating_sub(route.toll_basis_points);
             (
                 route.good_id,
                 route
                     .daily_capacity
-                    .saturating_mul_ratio(i64::from(available_basis_points), 10_000),
+                    .saturating_mul_ratio(i64::from(disruption_availability), 10_000)
+                    .saturating_mul_ratio(i64::from(toll_availability), 10_000),
             )
         })
         .collect();
@@ -904,12 +1008,8 @@ fn apply_external_route_supply(state: &mut AppState) {
     }
 }
 
-fn apply_law_price_controls(registry: &Registry, state: &mut AppState) {
-    let ceiling = state
-        .laws
-        .values()
-        .find(|law| law.active && law.kind == LawKind::BreadPriceCeiling)
-        .map(|law| law.value);
+pub(crate) fn apply_law_price_controls(registry: &Registry, state: &mut AppState) {
+    let ceiling = active_law_value(state, LawKind::BreadPriceCeiling);
     let Some(ceiling) = ceiling else {
         return;
     };
@@ -946,10 +1046,10 @@ fn apply_crisis_daily_effects(registry: &Registry, state: &mut AppState) {
                         .quotes
                         .get_mut(&bread_id)
                         .expect("bread quote must exist");
-                    quote.target_stock = quote.target_stock.saturating_mul_ratio(
-                        10_000_i64.saturating_add(i64::from(severity) / 4),
-                        10_000,
-                    );
+                    let crisis_demand = quote
+                        .target_stock
+                        .saturating_mul_ratio(i64::from(severity), 100_000);
+                    quote.demand_today = quote.demand_today.saturating_add(crisis_demand);
                 }
             }
             CrisisKind::UrbanFire => {
@@ -977,7 +1077,56 @@ fn apply_crisis_daily_effects(registry: &Registry, state: &mut AppState) {
                     route.disruption_basis_points = route.disruption_basis_points.max(severity);
                 }
             }
-            CrisisKind::BankingPanic | CrisisKind::GuildRevolt | CrisisKind::NobleDemand => {}
+            CrisisKind::GuildRevolt => {
+                if let Some(district_id) = district_id
+                    && let Some(district) = state.districts.get_mut(&district_id)
+                {
+                    district.employment_basis_points = district
+                        .employment_basis_points
+                        .saturating_sub((severity / 100).max(1));
+                    district.unrest_basis_points = district
+                        .unrest_basis_points
+                        .saturating_add((severity / 200).max(1))
+                        .min(10_000);
+                }
+            }
+            CrisisKind::BankingPanic => {
+                apply_banking_panic_losses(state, severity);
+            }
+            CrisisKind::NobleDemand => {
+                if let Some(treasury_id) = registry.get_institution_id("treasury")
+                    && let Some(treasury) = state.institution_runtime.get_mut(&treasury_id)
+                {
+                    let levy = Money::from_copper(i64::from(severity) / 20).min(treasury.budget);
+                    treasury.budget = treasury.budget.saturating_sub(levy);
+                }
+                if let Some(district_id) = district_id
+                    && let Some(district) = state.districts.get_mut(&district_id)
+                {
+                    district.unrest_basis_points = district
+                        .unrest_basis_points
+                        .saturating_add((severity / 500).max(1))
+                        .min(10_000);
+                }
+            }
+        }
+    }
+}
+
+fn apply_banking_panic_losses(state: &mut AppState, severity: u16) {
+    for business in state.businesses.iter_mut() {
+        let loss = Money::from_copper(
+            business
+                .finance
+                .cash
+                .copper()
+                .saturating_mul(i64::from(severity))
+                / 1_000_000,
+        );
+        if loss > Money::ZERO {
+            business.finance.cash = business.finance.cash.saturating_sub(loss);
+            business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(loss);
+            business.finance.version = business.finance.version.saturating_add(1);
         }
     }
 }
@@ -987,7 +1136,7 @@ pub(crate) fn run_weekly_strategic_systems(registry: &Registry, state: &mut AppS
     settle_loans(state);
     settle_property_rents(state);
     settle_employment(state);
-    progress_public_works(state);
+    progress_public_works(registry, state);
     update_relationships_from_obligations(state);
     apply_law_economic_effects(registry, state);
 }
@@ -1025,17 +1174,15 @@ fn settle_contracts(state: &mut AppState) {
             .get(buyer_id)
             .expect("contract buyer must exist")
             .cash();
-        let fulfilled = seller_inventory >= quantity && buyer_cash >= payment;
-        if fulfilled {
+        let seller_can_deliver = seller_inventory >= quantity;
+        let buyer_can_pay = buyer_cash >= payment;
+        if seller_can_deliver && buyer_can_pay {
             {
                 let seller = state
                     .businesses
                     .get_mut(seller_id)
                     .expect("contract seller must exist");
                 seller.remove_inventory(good_id, quantity);
-                seller.finance.cash = seller.finance.cash.saturating_add(payment);
-                seller.finance.lifetime_revenue =
-                    seller.finance.lifetime_revenue.saturating_add(payment);
             }
             {
                 let buyer = state
@@ -1043,30 +1190,24 @@ fn settle_contracts(state: &mut AppState) {
                     .get_mut(buyer_id)
                     .expect("contract buyer must exist");
                 buyer.add_inventory(good_id, quantity);
-                buyer.finance.cash = buyer.finance.cash.saturating_sub(payment);
-                buyer.finance.lifetime_costs = buyer.finance.lifetime_costs.saturating_add(payment);
             }
+            transfer_contract_money(state, buyer_id, seller_id, payment);
             let contract = state.contracts.get_mut(&id).expect("contract must exist");
             contract.fulfilled_deliveries = contract.fulfilled_deliveries.saturating_add(1);
             contract.next_due_day = contract.next_due_day.saturating_add(7);
         } else {
+            let (penalty_payer_id, penalty_recipient_id) = if seller_can_deliver {
+                (buyer_id, seller_id)
+            } else {
+                (seller_id, buyer_id)
+            };
             let available = state
                 .businesses
-                .get(seller_id)
-                .expect("contract seller must exist")
+                .get(penalty_payer_id)
+                .expect("contract penalty payer must exist")
                 .cash();
             let paid_penalty = penalty.min(available);
-            state
-                .businesses
-                .get_mut(seller_id)
-                .expect("contract seller must exist")
-                .finance
-                .cash = available.saturating_sub(paid_penalty);
-            let buyer = state
-                .businesses
-                .get_mut(buyer_id)
-                .expect("contract buyer must exist");
-            buyer.finance.cash = buyer.finance.cash.saturating_add(paid_penalty);
+            transfer_contract_money(state, penalty_payer_id, penalty_recipient_id, paid_penalty);
             let contract = state.contracts.get_mut(&id).expect("contract must exist");
             contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
             contract.next_due_day = contract.next_due_day.saturating_add(7);
@@ -1087,8 +1228,39 @@ fn settle_contracts(state: &mut AppState) {
     }
 }
 
+fn transfer_contract_money(
+    state: &mut AppState,
+    payer_id: BusinessId,
+    recipient_id: BusinessId,
+    amount: Money,
+) {
+    if amount == Money::ZERO {
+        return;
+    }
+    {
+        let payer = state
+            .businesses
+            .get_mut(payer_id)
+            .expect("contract payer must exist");
+        payer.finance.cash = payer.finance.cash.saturating_sub(amount);
+        payer.finance.lifetime_costs = payer.finance.lifetime_costs.saturating_add(amount);
+        payer.finance.version = payer.finance.version.saturating_add(1);
+    }
+    {
+        let recipient = state
+            .businesses
+            .get_mut(recipient_id)
+            .expect("contract recipient must exist");
+        recipient.finance.cash = recipient.finance.cash.saturating_add(amount);
+        recipient.finance.lifetime_revenue =
+            recipient.finance.lifetime_revenue.saturating_add(amount);
+        recipient.finance.version = recipient.finance.version.saturating_add(1);
+    }
+}
+
 fn settle_loans(state: &mut AppState) {
     let day = state.clock.day();
+    let interest_limit = active_interest_limit(state);
     let due: Vec<_> = state
         .loans
         .values()
@@ -1111,43 +1283,29 @@ fn settle_loans(state: &mut AppState) {
         })
         .collect();
     for (id, lender_id, borrower_id, weekly_payment, balance, interest, collateral) in due {
-        let interest_due =
-            Money::from_copper(balance.copper().saturating_mul(i64::from(interest)) / 10_000 / 52);
-        let amount_due = weekly_payment.min(balance.saturating_add(interest_due));
+        let effective_interest = interest_limit.map_or(interest, |limit| interest.min(limit));
+        let interest_due = Money::from_copper(
+            balance
+                .copper()
+                .saturating_mul(i64::from(effective_interest))
+                / 10_000
+                / 52,
+        );
+        let accrued_balance = balance.saturating_add(interest_due);
+        let amount_due = weekly_payment.min(accrued_balance);
         let borrower_treasury = state
             .dynasties
             .get(&borrower_id)
             .expect("loan borrower must exist")
             .treasury();
+        state.loans.get_mut(&id).expect("loan must exist").balance = accrued_balance;
         if borrower_treasury >= amount_due {
-            state
-                .dynasties
-                .get_mut(&borrower_id)
-                .expect("loan borrower must exist")
-                .resources
-                .treasury = borrower_treasury.saturating_sub(amount_due);
-            let lender = state
-                .dynasties
-                .get_mut(&lender_id)
-                .expect("loan lender must exist");
-            lender.resources.treasury = lender.resources.treasury.saturating_add(amount_due);
+            apply_loan_payment(state, id, amount_due);
             let loan = state.loans.get_mut(&id).expect("loan must exist");
-            loan.balance = loan
-                .balance
-                .saturating_add(interest_due)
-                .saturating_sub(amount_due);
             loan.next_due_day = loan.next_due_day.saturating_add(7);
             loan.missed_payments = 0;
-            loan.status = if loan.balance <= Money::ZERO {
-                LoanStatus::Repaid
-            } else {
-                LoanStatus::Current
-            };
-            if loan.status == LoanStatus::Repaid
-                && let Some(property_id) = collateral
-                && let Some(property) = state.properties.get_mut(&property_id)
-            {
-                property.collateral_loan_id = None;
+            if loan.status != LoanStatus::Repaid {
+                loan.status = LoanStatus::Current;
             }
         } else {
             let loan = state.loans.get_mut(&id).expect("loan must exist");
@@ -1180,7 +1338,62 @@ fn settle_loans(state: &mut AppState) {
     }
 }
 
+fn active_interest_limit(state: &AppState) -> Option<u16> {
+    active_law_value(state, LawKind::InterestLimit)
+        .map(|value| u16::try_from(value.clamp(0, 10_000)).unwrap_or(10_000))
+}
+
+fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount: Money) -> Money {
+    let (lender_id, borrower_id, balance, collateral) = {
+        let loan = state.loans.get(&loan_id).expect("loan must exist");
+        (
+            loan.lender_dynasty_id,
+            loan.borrower_dynasty_id,
+            loan.balance,
+            loan.collateral_property_id,
+        )
+    };
+    let payment = amount.min(balance);
+    if payment == Money::ZERO {
+        return Money::ZERO;
+    }
+    let borrower_treasury = state
+        .dynasties
+        .get(&borrower_id)
+        .expect("loan borrower must exist")
+        .treasury();
+    debug_assert!(
+        borrower_treasury >= payment,
+        "validated loan payment exceeds borrower treasury"
+    );
+    state
+        .dynasties
+        .get_mut(&borrower_id)
+        .expect("loan borrower must exist")
+        .resources
+        .treasury = borrower_treasury.saturating_sub(payment);
+    let lender = state
+        .dynasties
+        .get_mut(&lender_id)
+        .expect("loan lender must exist");
+    lender.resources.treasury = lender.resources.treasury.saturating_add(payment);
+    let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+    loan.balance = loan.balance.saturating_sub(payment);
+    if loan.balance == Money::ZERO {
+        loan.status = LoanStatus::Repaid;
+        loan.missed_payments = 0;
+        if let Some(property_id) = collateral
+            && let Some(property) = state.properties.get_mut(&property_id)
+        {
+            property.collateral_loan_id = None;
+        }
+    }
+    payment
+}
+
 fn settle_property_rents(state: &mut AppState) {
+    let annual_rent_limit =
+        active_law_value(state, LawKind::RentRestriction).map(|value| value.clamp(0, 10_000));
     let rents: Vec<_> = state
         .properties
         .values()
@@ -1189,10 +1402,20 @@ fn settle_property_rents(state: &mut AppState) {
                 property.owner_dynasty_id?,
                 property.tenant_dynasty_id?,
                 property.weekly_rent,
+                property.value,
             ))
         })
         .collect();
-    for (owner_id, tenant_id, rent) in rents {
+    for (owner_id, tenant_id, contractual_rent, property_value) in rents {
+        let rent = annual_rent_limit.map_or(contractual_rent, |limit| {
+            let annual_cap = Money::from_copper(
+                property_value
+                    .copper()
+                    .saturating_mul(limit)
+                    .saturating_div(10_000),
+            );
+            contractual_rent.min(Money::from_copper(annual_cap.copper() / 52))
+        });
         if owner_id == tenant_id || rent <= Money::ZERO {
             continue;
         }
@@ -1237,12 +1460,13 @@ fn settle_employment(state: &mut AppState) {
             .expect("employment business must exist")
             .cash();
         let paid = wage.min(business_cash);
-        state
+        let business = state
             .businesses
             .get_mut(business_id)
-            .expect("employment business must exist")
-            .finance
-            .cash = business_cash.saturating_sub(paid);
+            .expect("employment business must exist");
+        business.finance.cash = business_cash.saturating_sub(paid);
+        business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(paid);
+        business.finance.version = business.finance.version.saturating_add(1);
         let household = state
             .households
             .get_mut(household_id)
@@ -1275,56 +1499,115 @@ fn settle_employment(state: &mut AppState) {
     }
 }
 
-fn progress_public_works(state: &mut AppState) {
+fn apply_public_work_completion(
+    state: &mut AppState,
+    district_id: DistrictId,
+    kind: PublicWorkKind,
+) {
+    let Some(district) = state.districts.get_mut(&district_id) else {
+        return;
+    };
+    match kind {
+        PublicWorkKind::Drainage | PublicWorkKind::Hospital => {
+            district.sanitation_basis_points = district
+                .sanitation_basis_points
+                .saturating_add(1_200)
+                .min(10_000);
+        }
+        PublicWorkKind::WatchStation => {
+            district.safety_basis_points = district
+                .safety_basis_points
+                .saturating_add(1_200)
+                .min(10_000);
+        }
+        PublicWorkKind::Road
+        | PublicWorkKind::Bridge
+        | PublicWorkKind::Market
+        | PublicWorkKind::Granary
+        | PublicWorkKind::School => {
+            district.employment_basis_points = district
+                .employment_basis_points
+                .saturating_add(600)
+                .min(10_000);
+        }
+    }
+    district.unrest_basis_points = district.unrest_basis_points.saturating_sub(500);
+}
+
+fn progress_public_works(registry: &Registry, state: &mut AppState) {
+    let treasury_id = registry.get_institution_id("treasury");
     let ids: Vec<_> = state
         .public_works
         .values()
-        .filter(|work| work.status == PublicWorkStatus::Building)
+        .filter(|work| {
+            matches!(
+                work.status,
+                PublicWorkStatus::Building | PublicWorkStatus::Suspended
+            )
+        })
         .map(|work| work.id)
         .collect();
     for id in ids {
-        let work = state
-            .public_works
-            .get_mut(&id)
-            .expect("public work must exist");
-        let remaining = work.budget.saturating_sub(work.spent);
-        let weekly_spend = Money::from_copper(1_500).min(remaining);
-        work.spent = work.spent.saturating_add(weekly_spend);
-        let progress = if work.budget.copper() <= 0 {
-            10_000
-        } else {
-            work.spent.copper().saturating_mul(10_000) / work.budget.copper()
+        let (remaining, was_suspended) = {
+            let work = state.public_works.get(&id).expect("public work must exist");
+            (
+                work.budget.saturating_sub(work.spent),
+                work.status == PublicWorkStatus::Suspended,
+            )
         };
-        work.progress_basis_points = u16::try_from(progress.clamp(0, 10_000)).unwrap_or(10_000);
-        if work.progress_basis_points >= 10_000 {
-            work.status = PublicWorkStatus::Completed;
-            if let Some(district) = state.districts.get_mut(&work.district_id) {
-                match work.kind {
-                    PublicWorkKind::Drainage | PublicWorkKind::Hospital => {
-                        district.sanitation_basis_points = district
-                            .sanitation_basis_points
-                            .saturating_add(1_200)
-                            .min(10_000);
-                    }
-                    PublicWorkKind::WatchStation => {
-                        district.safety_basis_points = district
-                            .safety_basis_points
-                            .saturating_add(1_200)
-                            .min(10_000);
-                    }
-                    PublicWorkKind::Road
-                    | PublicWorkKind::Bridge
-                    | PublicWorkKind::Market
-                    | PublicWorkKind::Granary
-                    | PublicWorkKind::School => {
-                        district.employment_basis_points = district
-                            .employment_basis_points
-                            .saturating_add(600)
-                            .min(10_000);
-                    }
-                }
-                district.unrest_basis_points = district.unrest_basis_points.saturating_sub(500);
+        let requested = Money::from_copper(1_500).min(remaining);
+        let weekly_spend = treasury_id
+            .and_then(|treasury_id| state.institution_runtime.get(&treasury_id))
+            .map_or(Money::ZERO, |treasury| requested.min(treasury.budget));
+        if weekly_spend > Money::ZERO
+            && let Some(treasury_id) = treasury_id
+        {
+            let treasury = state
+                .institution_runtime
+                .get_mut(&treasury_id)
+                .expect("civic treasury runtime must exist");
+            treasury.budget = treasury.budget.saturating_sub(weekly_spend);
+        }
+
+        let completion = {
+            let work = state
+                .public_works
+                .get_mut(&id)
+                .expect("public work must exist");
+            if remaining > Money::ZERO && weekly_spend == Money::ZERO {
+                work.status = PublicWorkStatus::Suspended;
+                None
+            } else {
+                work.status = PublicWorkStatus::Building;
+                work.spent = work.spent.saturating_add(weekly_spend);
+                let progress = work.spent.copper().saturating_mul(10_000) / work.budget.copper();
+                work.progress_basis_points =
+                    u16::try_from(progress.clamp(0, 10_000)).unwrap_or(10_000);
+                (work.progress_basis_points >= 10_000).then_some((work.district_id, work.kind))
             }
+        };
+
+        if !was_suspended
+            && completion.is_none()
+            && state
+                .public_works
+                .get(&id)
+                .is_some_and(|work| work.status == PublicWorkStatus::Suspended)
+        {
+            push_outbox(
+                state,
+                OutboxKind::Politics,
+                format!("Public work {id} suspended"),
+                "Civic treasury funding is insufficient to continue construction.".to_owned(),
+            );
+        }
+        if let Some((district_id, kind)) = completion {
+            state
+                .public_works
+                .get_mut(&id)
+                .expect("public work must exist")
+                .status = PublicWorkStatus::Completed;
+            apply_public_work_completion(state, district_id, kind);
             push_outbox(
                 state,
                 OutboxKind::Politics,
@@ -1353,27 +1636,18 @@ fn update_relationships_from_obligations(state: &mut AppState) {
 }
 
 fn apply_law_economic_effects(registry: &Registry, state: &mut AppState) {
-    let emergency_imports = state
-        .laws
-        .values()
-        .any(|law| law.active && law.kind == LawKind::EmergencyImports);
-    if emergency_imports && let Some(grain_id) = registry.get_good_id("grain") {
+    let emergency_imports = active_law_value(state, LawKind::EmergencyImports)
+        .map_or(Quantity::ZERO, |value| Quantity::from_units(value.max(0)));
+    if emergency_imports > Quantity::ZERO
+        && let Some(grain_id) = registry.get_good_id("grain")
+    {
         let quote = state
             .market
             .quotes
             .get_mut(&grain_id)
             .expect("grain quote must exist");
-        quote.stock = quote.stock.saturating_add(Quantity::from_units(150));
-    }
-    let interest_limit = state
-        .laws
-        .values()
-        .find(|law| law.active && law.kind == LawKind::InterestLimit)
-        .map(|law| u16::try_from(law.value.clamp(0, 10_000)).unwrap_or(10_000));
-    if let Some(limit) = interest_limit {
-        for loan in state.loans.values_mut() {
-            loan.interest_basis_points = loan.interest_basis_points.min(limit);
-        }
+        quote.stock = quote.stock.saturating_add(emergency_imports);
+        quote.supply_today = quote.supply_today.saturating_add(emergency_imports);
     }
 }
 
@@ -1384,7 +1658,14 @@ pub(crate) fn run_monthly_strategic_systems(registry: &Registry, state: &mut App
     update_information_reports(registry, state);
     resolve_legal_cases(state);
     update_external_route_risk(state);
+    recover_external_routes(state);
     detect_and_advance_crises(registry, state);
+}
+
+fn recover_external_routes(state: &mut AppState) {
+    for route in state.external_routes.values_mut() {
+        route.disruption_basis_points = route.disruption_basis_points.saturating_sub(750);
+    }
 }
 
 fn update_district_conditions(state: &mut AppState) {
@@ -1617,6 +1898,11 @@ fn ai_secure_supply(registry: &Registry, state: &mut AppState, dynasty_id: Dynas
             let seller_id = state.businesses.iter().find_map(|seller| {
                 let seller_recipe = registry.get_recipe(seller.recipe_id())?;
                 (seller.owner_dynasty_id() != dynasty_id
+                    && !matches!(
+                        seller.status(),
+                        crate::core::BusinessStatus::Insolvent
+                            | crate::core::BusinessStatus::Closed
+                    )
                     && seller_recipe.output_good_id() == input.good_id())
                 .then_some(seller.id())
             });
@@ -1649,7 +1935,10 @@ fn ai_reduce_debt(state: &mut AppState, dynasty_id: DynastyId) -> bool {
         .values()
         .find(|loan| {
             loan.borrower_dynasty_id == dynasty_id
-                && matches!(loan.status, LoanStatus::Current | LoanStatus::Delinquent)
+                && matches!(
+                    loan.status,
+                    LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
+                )
         })
         .map(|loan| loan.id);
     let Some(loan_id) = loan_id else {
@@ -1660,16 +1949,17 @@ fn ai_reduce_debt(state: &mut AppState, dynasty_id: DynastyId) -> bool {
         .get(&dynasty_id)
         .expect("AI dynasty must exist")
         .treasury();
-    let extra = Money::from_copper(1_000).min(treasury);
+    let balance = state
+        .loans
+        .get(&loan_id)
+        .expect("AI loan must exist")
+        .balance;
+    let extra = Money::from_copper(1_000).min(treasury).min(balance);
+    apply_loan_payment(state, loan_id, extra);
     state
-        .dynasties
-        .get_mut(&dynasty_id)
-        .expect("AI dynasty must exist")
-        .resources
-        .treasury = treasury.saturating_sub(extra);
-    let loan = state.loans.get_mut(&loan_id).expect("AI loan must exist");
-    loan.balance = loan.balance.saturating_sub(extra);
-    loan.balance <= Money::ZERO
+        .loans
+        .get(&loan_id)
+        .is_some_and(|loan| loan.status == LoanStatus::Repaid)
 }
 
 fn ai_improve_legitimacy(state: &mut AppState, dynasty_id: DynastyId) -> bool {
@@ -1691,6 +1981,9 @@ fn ai_improve_legitimacy(state: &mut AppState, dynasty_id: DynastyId) -> bool {
 }
 
 fn ai_contain_rival(state: &mut AppState, dynasty_id: DynastyId) -> bool {
+    if dynasty_id == state.player_dynasty_id {
+        return true;
+    }
     let pair = DynastyPair::new(dynasty_id, state.player_dynasty_id);
     let Some(relationship) = state.relationships.get_mut(&pair) else {
         return true;
@@ -1912,6 +2205,170 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
             "The regional prince demanded an extraordinary payment from Rivergate.",
         );
     }
+    detect_periodic_crises(state, day);
+}
+
+fn has_active_crisis(state: &AppState, kind: CrisisKind) -> bool {
+    state.crises.values().any(|crisis| {
+        crisis.kind == kind
+            && matches!(crisis.status, CrisisStatus::Emerging | CrisisStatus::Active)
+    })
+}
+
+fn detect_periodic_crises(state: &mut AppState, day: i64) {
+    if day <= 0 || day % 180 != 0 {
+        return;
+    }
+    detect_urban_fire(state);
+    detect_epidemic(state);
+    detect_trade_disruption(state);
+    detect_guild_revolt(state);
+}
+
+fn detect_urban_fire(state: &mut AppState) {
+    if has_active_crisis(state, CrisisKind::UrbanFire) {
+        return;
+    }
+    let Some((district_id, safety)) = state
+        .districts
+        .iter()
+        .min_by_key(|(_, district)| district.safety_basis_points)
+        .map(|(id, district)| (*id, district.safety_basis_points))
+    else {
+        return;
+    };
+    let fire_code = active_law_value(state, LawKind::FireCode)
+        .unwrap_or(0)
+        .clamp(0, 10_000);
+    let chance = urban_fire_chance_basis_points(safety, fire_code);
+    if state.rng.chance_basis_points(chance) {
+        create_crisis(
+            state,
+            CrisisKind::UrbanFire,
+            Some(district_id),
+            urban_fire_severity_basis_points(safety, fire_code),
+            "Unsafe buildings and weak fire prevention allowed an urban fire to spread.",
+        );
+    }
+}
+
+fn urban_fire_chance_basis_points(safety: u16, fire_code: i64) -> u16 {
+    let deficiency = 10_000_u16.saturating_sub(safety);
+    let chance = i64::from(deficiency)
+        .saturating_div(4)
+        .saturating_add(500)
+        .saturating_sub(fire_code / 5)
+        .clamp(0, 10_000);
+    u16::try_from(chance).unwrap_or(0)
+}
+
+fn urban_fire_severity_basis_points(safety: u16, fire_code: i64) -> u16 {
+    let deficiency = 10_000_u16.saturating_sub(safety);
+    let severity = 4_000_i64
+        .saturating_add(i64::from(deficiency) / 5)
+        .saturating_sub(fire_code / 4)
+        .clamp(1_000, 9_000);
+    u16::try_from(severity).unwrap_or(9_000)
+}
+
+fn detect_epidemic(state: &mut AppState) {
+    if has_active_crisis(state, CrisisKind::Epidemic) {
+        return;
+    }
+    let Some((district_id, sanitation)) = state
+        .districts
+        .iter()
+        .min_by_key(|(_, district)| district.sanitation_basis_points)
+        .map(|(id, district)| (*id, district.sanitation_basis_points))
+    else {
+        return;
+    };
+    let deficiency = 10_000_u16.saturating_sub(sanitation);
+    let chance = deficiency.saturating_div(4).saturating_add(250).min(10_000);
+    if state.rng.chance_basis_points(chance) {
+        create_crisis(
+            state,
+            CrisisKind::Epidemic,
+            Some(district_id),
+            3_000_u16.saturating_add(deficiency / 5).min(9_000),
+            "Poor sanitation allowed an epidemic to take hold.",
+        );
+    }
+}
+
+fn detect_trade_disruption(state: &mut AppState) {
+    if has_active_crisis(state, CrisisKind::TradeDisruption) {
+        return;
+    }
+    let disruption = state
+        .external_routes
+        .values()
+        .map(|route| route.disruption_basis_points)
+        .max()
+        .unwrap_or(0);
+    if disruption >= 7_000 {
+        create_crisis(
+            state,
+            CrisisKind::TradeDisruption,
+            None,
+            disruption,
+            "Multiple external routes became too disrupted to sustain normal trade.",
+        );
+    }
+}
+
+fn detect_guild_revolt(state: &mut AppState) {
+    if has_active_crisis(state, CrisisKind::GuildRevolt) {
+        return;
+    }
+    let disputed_district = state.employment.values().find_map(|agreement| {
+        (agreement.status == EmploymentStatus::Disputed)
+            .then(|| state.businesses.get(agreement.business_id))
+            .flatten()
+            .map(crate::core::Business::district_id)
+    });
+    let disputed_count = state
+        .employment
+        .values()
+        .filter(|agreement| agreement.status == EmploymentStatus::Disputed)
+        .count();
+    let restriction = active_law_value(state, LawKind::GuildEntryRestriction)
+        .unwrap_or(0)
+        .clamp(0, 10_000);
+    let chance = 400_i64
+        .saturating_add(restriction / 5)
+        .saturating_add(
+            i64::try_from(disputed_count)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(800),
+        )
+        .clamp(0, 10_000);
+    if disputed_count >= 2
+        || state
+            .rng
+            .chance_basis_points(u16::try_from(chance).unwrap_or(10_000))
+    {
+        let district_id = disputed_district.or_else(|| {
+            state
+                .districts
+                .iter()
+                .max_by_key(|(_, district)| district.unrest_basis_points)
+                .map(|(id, _)| *id)
+        });
+        create_crisis(
+            state,
+            CrisisKind::GuildRevolt,
+            district_id,
+            2_500_u16
+                .saturating_add(
+                    u16::try_from(disputed_count)
+                        .unwrap_or(u16::MAX)
+                        .saturating_mul(500),
+                )
+                .min(9_000),
+            "Labor disputes and restrictive guild rules triggered organized resistance.",
+        );
+    }
 }
 
 fn create_crisis(
@@ -1978,26 +2435,34 @@ fn form_dynastic_marriage(state: &mut AppState) {
         .dynasties
         .values()
         .filter_map(|dynasty| Some((dynasty.id(), dynasty.heir_id()?)))
+        .filter(|(_, heir_id)| {
+            state
+                .characters
+                .get(*heir_id)
+                .is_some_and(|character| character.status() == crate::core::CharacterStatus::Active)
+        })
         .collect();
-    let Some((left_dynasty, left_heir)) = heirs.first().copied() else {
-        return;
+    let is_married = |character_id| {
+        state.family_links.values().any(|link| {
+            link.active
+                && link.kind == FamilyLinkKind::Marriage
+                && (link.first_character_id == character_id
+                    || link.second_character_id == character_id)
+        })
     };
-    let Some((right_dynasty, right_heir)) = heirs
-        .iter()
-        .copied()
-        .find(|(dynasty_id, _)| *dynasty_id != left_dynasty)
-    else {
-        return;
-    };
-    let already_linked = state.family_links.values().any(|link| {
-        link.active
-            && link.kind == FamilyLinkKind::Marriage
-            && ((link.first_character_id == left_heir && link.second_character_id == right_heir)
-                || (link.first_character_id == right_heir && link.second_character_id == left_heir))
+    let selected_pair = heirs.iter().enumerate().find_map(|(index, left)| {
+        if is_married(left.1) {
+            return None;
+        }
+        heirs
+            .iter()
+            .skip(index + 1)
+            .find(|right| !is_married(right.1))
+            .map(|right| (*left, *right))
     });
-    if already_linked {
+    let Some(((left_dynasty, left_heir), (right_dynasty, right_heir))) = selected_pair else {
         return;
-    }
+    };
     let id = state.next_ids.family_link();
     state.family_links.insert(
         id,
@@ -2064,43 +2529,76 @@ pub(crate) fn push_outbox(state: &mut AppState, kind: OutboxKind, subject: Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::NewGameConfig;
-    use crate::registry::build_rivergate_registry;
-    use crate::systems::{advance_days, build_new_game, validate_invariants};
+    use crate::systems::{advance_days, validate_invariants};
+    use crate::test_support::{
+        assert_state_eq, make_test_campaign, rivergate_registry_for_test as test_registry,
+    };
+
+    fn make_test_contract_terms(state: &AppState) -> SupplyContractTerms {
+        let contract = state
+            .contracts
+            .values()
+            .next()
+            .expect("bootstrap must create a supply contract");
+        SupplyContractTerms {
+            buyer_business_id: contract.buyer_business_id,
+            seller_business_id: contract.seller_business_id,
+            good_id: contract.good_id,
+            quantity_per_week: contract.quantity_per_week,
+            unit_price: contract.unit_price,
+            penalty: contract.penalty,
+            duration_weeks: 4,
+        }
+    }
+
+    fn make_test_loan_terms(state: &AppState) -> LoanTerms {
+        let mut dynasty_ids = state.dynasties.keys().copied();
+        let lender_dynasty_id = dynasty_ids.next().expect("lender dynasty must exist");
+        let borrower_dynasty_id = dynasty_ids.next().expect("borrower dynasty must exist");
+        LoanTerms {
+            lender_dynasty_id,
+            borrower_dynasty_id,
+            principal: Money::from_copper(1),
+            weekly_payment: Money::from_copper(1),
+            interest_basis_points: 500,
+            collateral_property_id: None,
+        }
+    }
 
     #[test]
-    fn strategic_bootstrap_creates_connected_records() {
-        let registry = build_rivergate_registry();
-        let state = build_new_game(&registry, NewGameConfig::default());
+    fn bootstrap_strategic_records_enter_the_weekly_simulation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let deliveries_before: u32 = state
+            .contracts
+            .values()
+            .map(|contract| {
+                u32::from(contract.fulfilled_deliveries)
+                    .saturating_add(u32::from(contract.missed_deliveries))
+            })
+            .sum();
 
-        assert!(!state.properties.is_empty());
-        assert!(!state.contracts.is_empty());
-        assert!(!state.employment.is_empty());
-        assert_eq!(state.districts.len(), registry.districts().len());
-        assert_eq!(
-            state.institution_runtime.len(),
-            registry.institutions().len()
+        advance_days(registry, &mut state, 7).expect("first campaign week must advance");
+
+        let deliveries_after: u32 = state
+            .contracts
+            .values()
+            .map(|contract| {
+                u32::from(contract.fulfilled_deliveries)
+                    .saturating_add(u32::from(contract.missed_deliveries))
+            })
+            .sum();
+        assert!(
+            deliveries_after > deliveries_before,
+            "bootstrap contracts must participate in weekly settlement"
         );
+        validate_invariants(registry, &state);
     }
 
     #[test]
-    fn strategic_systems_remain_valid_across_two_generations() {
-        let registry = build_rivergate_registry();
-        let mut state = build_new_game(&registry, NewGameConfig::default());
-
-        advance_days(&registry, &mut state, 7_200).expect("strategic simulation must advance");
-        validate_invariants(&registry, &state);
-
-        assert!(state.clock.day() >= 7_200);
-        assert!(!state.information_reports.is_empty());
-        assert!(!state.ai_objectives.is_empty());
-    }
-
-    #[test]
-    fn invalid_supply_contract_does_not_mutate_state() {
-        let registry = build_rivergate_registry();
-        let state = build_new_game(&registry, NewGameConfig::default());
-        let before = state.clone();
+    fn contracts_reject_identical_buyer_and_seller() {
+        let registry = test_registry();
+        let state = make_test_campaign();
         let business_id = state
             .businesses
             .iter()
@@ -2110,7 +2608,7 @@ mod tests {
         let good_id = registry.goods()[0].id();
 
         let result = validate_supply_contract(
-            &registry,
+            registry,
             &state,
             SupplyContractTerms {
                 buyer_business_id: business_id,
@@ -2123,7 +2621,760 @@ mod tests {
             },
         );
 
-        assert!(matches!(result, Err(StrategicError::SameContractParty)));
-        assert_eq!(state, before);
+        assert_eq!(
+            result.expect_err("identical contract parties must be rejected"),
+            StrategicError::SameContractParty
+        );
+    }
+
+    #[test]
+    fn contracts_reject_zero_week_duration() {
+        let registry = test_registry();
+        let state = make_test_campaign();
+        let mut terms = make_test_contract_terms(&state);
+        terms.duration_weeks = 0;
+
+        assert_eq!(
+            validate_supply_contract(registry, &state, terms)
+                .expect_err("zero-duration contracts must be rejected"),
+            StrategicError::EmptyContractDuration
+        );
+    }
+
+    #[test]
+    fn contracts_revalidate_parties_before_commit() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let terms = make_test_contract_terms(&state);
+        let seller_business_id = terms.seller_business_id;
+        let token = validate_supply_contract(registry, &state, terms)
+            .expect("contract terms must initially validate");
+        state
+            .businesses
+            .get_mut(seller_business_id)
+            .expect("seller must exist")
+            .operations
+            .status = crate::core::BusinessStatus::Closed;
+        let before_commit = state.clone();
+
+        let result = token.commit(registry, &mut state);
+
+        assert_eq!(
+            result,
+            Err(StrategicError::BusinessInactive {
+                business_id: seller_business_id,
+            })
+        );
+        assert_state_eq(
+            &before_commit,
+            &state,
+            "a failed stale-token commit must not partially mutate state",
+        );
+    }
+
+    #[test]
+    fn loans_reject_interest_above_one_hundred_percent() {
+        let state = make_test_campaign();
+        let mut invalid_interest = make_test_loan_terms(&state);
+        invalid_interest.interest_basis_points = 10_001;
+
+        assert_eq!(
+            validate_loan(&state, invalid_interest).expect_err("interest must be rejected"),
+            StrategicError::InterestOutOfRange {
+                interest_basis_points: 10_001,
+            }
+        );
+    }
+
+    #[test]
+    fn loans_reject_collateral_already_pledged_to_an_active_loan() {
+        let state = make_test_campaign();
+        let existing_loan = state
+            .loans
+            .values()
+            .find(|loan| loan.collateral_property_id.is_some())
+            .expect("bootstrap must create a collateralized loan");
+        let property_id = existing_loan
+            .collateral_property_id
+            .expect("selected loan must have collateral");
+        let pledged_terms = LoanTerms {
+            lender_dynasty_id: existing_loan.lender_dynasty_id,
+            borrower_dynasty_id: existing_loan.borrower_dynasty_id,
+            principal: Money::from_copper(1),
+            weekly_payment: Money::from_copper(1),
+            interest_basis_points: 500,
+            collateral_property_id: Some(property_id),
+        };
+
+        assert_eq!(
+            validate_loan(&state, pledged_terms).expect_err("pledged collateral must be rejected"),
+            StrategicError::PropertyAlreadyPledged {
+                property_id,
+                loan_id: existing_loan.id,
+            }
+        );
+    }
+
+    #[test]
+    fn loans_revalidate_lender_funds_before_commit() {
+        let mut state = make_test_campaign();
+        let terms = make_test_loan_terms(&state);
+        let lender_dynasty_id = terms.lender_dynasty_id;
+        let token = validate_loan(&state, terms).expect("loan terms must initially validate");
+        state
+            .dynasties
+            .get_mut(&lender_dynasty_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let before_commit = state.clone();
+
+        let result = token.commit(&mut state);
+
+        assert_eq!(
+            result,
+            Err(StrategicError::InsufficientDynastyFunds {
+                dynasty_id: lender_dynasty_id,
+                available: Money::ZERO,
+                required: Money::from_copper(1),
+            })
+        );
+        assert_state_eq(
+            &before_commit,
+            &state,
+            "a failed stale-token commit must not partially mutate state",
+        );
+    }
+
+    #[test]
+    fn contracts_charge_nonpayment_penalty_to_the_buyer() {
+        let mut state = make_test_campaign();
+        let contract_id = *state
+            .contracts
+            .keys()
+            .next()
+            .expect("bootstrap must create a contract");
+        let (buyer_id, seller_id, good_id, quantity) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.unit_price = Money::from_copper(10_000);
+            contract.penalty = Money::from_copper(500);
+            contract.next_due_day = state.clock.day();
+            (
+                contract.buyer_business_id,
+                contract.seller_business_id,
+                contract.good_id,
+                contract.quantity_per_week,
+            )
+        };
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .add_inventory(good_id, quantity);
+        state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist")
+            .finance
+            .cash = Money::from_copper(500);
+        let seller_before = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .cash();
+
+        settle_contracts(&mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(buyer_id)
+                .expect("buyer must exist")
+                .cash(),
+            Money::ZERO
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(seller_id)
+                .expect("seller must exist")
+                .cash(),
+            seller_before.saturating_add(Money::from_copper(500))
+        );
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .missed_deliveries,
+            1,
+            "buyer nonpayment must count as a missed contract delivery"
+        );
+    }
+
+    #[test]
+    fn loans_accrue_interest_when_payment_is_missed() {
+        let mut state = make_test_campaign();
+        let loan_id = *state
+            .loans
+            .keys()
+            .next()
+            .expect("bootstrap must create a loan");
+        let borrower_id = state
+            .loans
+            .get(&loan_id)
+            .expect("loan must exist")
+            .borrower_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::ZERO;
+        {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.balance = Money::from_copper(52_000);
+            loan.interest_basis_points = 1_000;
+            loan.next_due_day = state.clock.day();
+        }
+
+        settle_loans(&mut state);
+
+        let loan = state.loans.get(&loan_id).expect("loan must exist");
+        assert_eq!(
+            loan.balance,
+            Money::from_copper(52_100),
+            "weekly interest must accrue before recording the missed payment"
+        );
+        assert_eq!(loan.missed_payments, 1, "one due payment was missed");
+        assert_eq!(
+            loan.status,
+            LoanStatus::Delinquent,
+            "a first missed payment must make the loan delinquent"
+        );
+    }
+
+    #[test]
+    fn laws_interest_limit_caps_settlement_without_rewriting_terms() {
+        let mut state = make_test_campaign();
+        let loan_id = *state
+            .loans
+            .keys()
+            .next()
+            .expect("bootstrap must create a loan");
+        let borrower_id = {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.balance = Money::from_copper(52_000);
+            loan.weekly_payment = Money::from_copper(1_000);
+            loan.interest_basis_points = 1_000;
+            loan.next_due_day = state.clock.day();
+            loan.borrower_dynasty_id
+        };
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::InterestLimit,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: None,
+                value: 0,
+                active: true,
+            },
+        );
+
+        settle_loans(&mut state);
+
+        let loan = state.loans.get(&loan_id).expect("loan must exist");
+        assert_eq!(
+            loan.interest_basis_points, 1_000,
+            "statutory limits must not rewrite the agreed contract rate"
+        );
+        assert_eq!(
+            loan.balance,
+            Money::from_copper(51_000),
+            "a zero-rate statutory cap must prevent interest accrual for settlement"
+        );
+    }
+
+    #[test]
+    fn crises_grain_shortage_adds_demand_without_changing_target_stock() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let bread_id = registry
+            .get_good_id("bread")
+            .expect("registry must define bread");
+        let target_before = state
+            .market
+            .get_quote(bread_id)
+            .expect("bread quote must exist")
+            .target_stock;
+        create_crisis(
+            &mut state,
+            CrisisKind::GrainShortage,
+            None,
+            5_000,
+            "test shortage",
+        );
+
+        apply_crisis_daily_effects(registry, &mut state);
+
+        let quote = state
+            .market
+            .get_quote(bread_id)
+            .expect("bread quote must exist");
+        assert_eq!(
+            quote.target_stock, target_before,
+            "temporary crisis pressure must not rewrite the market baseline"
+        );
+        assert!(
+            quote.demand_today > Quantity::ZERO,
+            "an active grain shortage must add bread demand"
+        );
+    }
+
+    #[test]
+    fn laws_foreign_toll_reduces_route_supply_and_updates_runtime_rate() {
+        let mut state = make_test_campaign();
+        let law = state
+            .laws
+            .values_mut()
+            .find(|law| law.kind == LawKind::ForeignMerchantToll && law.active)
+            .expect("bootstrap must enact a foreign toll");
+        law.value = 2_500;
+        let route_id = *state
+            .external_routes
+            .keys()
+            .next()
+            .expect("bootstrap must create an external route");
+        let (good_id, capacity) = {
+            let route = state
+                .external_routes
+                .get_mut(&route_id)
+                .expect("route must exist");
+            route.disruption_basis_points = 0;
+            (route.good_id, route.daily_capacity)
+        };
+        let stock_before = state
+            .market
+            .get_quote(good_id)
+            .expect("route good quote must exist")
+            .stock;
+
+        apply_route_laws(&mut state);
+        apply_external_route_supply(&mut state);
+
+        let route = state
+            .external_routes
+            .get(&route_id)
+            .expect("route must exist");
+        assert_eq!(route.toll_basis_points, 2_500);
+        assert_eq!(
+            state
+                .market
+                .get_quote(good_id)
+                .expect("route good quote must exist")
+                .stock,
+            stock_before.saturating_add(capacity.saturating_mul_ratio(7_500, 10_000))
+        );
+    }
+
+    #[test]
+    fn laws_rent_restriction_caps_payment_without_rewriting_the_lease() {
+        let mut state = make_test_campaign();
+        let property_id = *state
+            .properties
+            .iter()
+            .find_map(|(id, property)| property.owner_dynasty_id.map(|_| id))
+            .expect("bootstrap must create an owned property");
+        let owner_id = state
+            .properties
+            .get(&property_id)
+            .and_then(|property| property.owner_dynasty_id)
+            .expect("property must have owner");
+        let tenant_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != owner_id)
+            .expect("campaign must include a second dynasty");
+        let (owner_id, tenant_id) = {
+            let property = state
+                .properties
+                .get_mut(&property_id)
+                .expect("property must exist");
+            property.value = Money::from_copper(52_000);
+            property.weekly_rent = Money::from_copper(1_000);
+            property.tenant_dynasty_id = Some(tenant_id);
+            (
+                property.owner_dynasty_id.expect("property must have owner"),
+                property
+                    .tenant_dynasty_id
+                    .expect("property must have tenant"),
+            )
+        };
+        state
+            .dynasties
+            .get_mut(&tenant_id)
+            .expect("tenant must exist")
+            .resources
+            .treasury = Money::from_copper(10_000);
+        let owner_before = state
+            .dynasties
+            .get(&owner_id)
+            .expect("owner must exist")
+            .treasury();
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::RentRestriction,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: None,
+                value: 1_000,
+                active: true,
+            },
+        );
+
+        settle_property_rents(&mut state);
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&owner_id)
+                .expect("owner must exist")
+                .treasury(),
+            owner_before.saturating_add(Money::from_copper(100))
+        );
+        assert_eq!(
+            state
+                .properties
+                .get(&property_id)
+                .expect("property must exist")
+                .weekly_rent,
+            Money::from_copper(1_000)
+        );
+    }
+
+    #[test]
+    fn laws_emergency_imports_use_the_enacted_quantity() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let grain_id = registry
+            .get_good_id("grain")
+            .expect("registry must define grain");
+        let stock_before = state
+            .market
+            .get_quote(grain_id)
+            .expect("grain quote must exist")
+            .stock;
+        let supply_before = state
+            .market
+            .get_quote(grain_id)
+            .expect("grain quote must exist")
+            .supply_today;
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::EmergencyImports,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: None,
+                value: 7,
+                active: true,
+            },
+        );
+
+        apply_law_economic_effects(registry, &mut state);
+
+        let quote = state
+            .market
+            .get_quote(grain_id)
+            .expect("grain quote must exist");
+        assert_eq!(
+            quote.stock,
+            stock_before.saturating_add(Quantity::from_units(7))
+        );
+        assert_eq!(
+            quote.supply_today,
+            supply_before.saturating_add(Quantity::from_units(7))
+        );
+    }
+
+    #[test]
+    fn crises_severe_route_disruption_creates_trade_crisis() {
+        let mut state = make_test_campaign();
+        for route in state.external_routes.values_mut() {
+            route.disruption_basis_points = 7_500;
+        }
+
+        detect_trade_disruption(&mut state);
+
+        assert!(
+            has_active_crisis(&state, CrisisKind::TradeDisruption),
+            "severe network-wide disruption must create a trade crisis"
+        );
+    }
+
+    #[test]
+    fn routes_recover_after_disruption() {
+        let mut state = make_test_campaign();
+        let before: Vec<_> = state
+            .external_routes
+            .values()
+            .map(|route| route.disruption_basis_points)
+            .collect();
+        for route in state.external_routes.values_mut() {
+            route.disruption_basis_points = 7_500;
+        }
+
+        recover_external_routes(&mut state);
+
+        for (route, original) in state.external_routes.values().zip(before) {
+            assert!(
+                route.disruption_basis_points < 7_500,
+                "route disruption must decline during recovery"
+            );
+            assert!(
+                route.disruption_basis_points >= original,
+                "one recovery step must not over-correct below the route's prior baseline"
+            );
+        }
+    }
+
+    #[test]
+    fn laws_fire_code_reduces_fire_probability_and_severity() {
+        let safety = 2_000;
+
+        assert!(
+            urban_fire_chance_basis_points(safety, 8_000)
+                < urban_fire_chance_basis_points(safety, 0),
+            "stronger fire codes must reduce outbreak probability"
+        );
+        assert!(
+            urban_fire_severity_basis_points(safety, 8_000)
+                < urban_fire_severity_basis_points(safety, 0),
+            "stronger fire codes must reduce fire severity"
+        );
+    }
+
+    #[test]
+    fn crises_banking_panic_records_business_liquidity_losses() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.cash() > Money::from_copper(100))
+            .expect("bootstrap must create a funded business")
+            .id();
+        let before = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .finance
+            .clone();
+        create_crisis(
+            &mut state,
+            CrisisKind::BankingPanic,
+            None,
+            10_000,
+            "test panic",
+        );
+
+        apply_crisis_daily_effects(registry, &mut state);
+
+        let after = &state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .finance;
+        assert!(
+            after.cash < before.cash,
+            "a banking panic must reduce liquid business cash"
+        );
+        assert!(
+            after.lifetime_costs > before.lifetime_costs,
+            "liquidity losses must be recorded as business costs"
+        );
+        assert!(
+            after.version > before.version,
+            "financial mutation must invalidate stale business tokens"
+        );
+    }
+
+    #[test]
+    fn crises_noble_demand_drains_civic_treasury_and_raises_unrest() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define treasury");
+        let district_id = *state
+            .districts
+            .keys()
+            .next()
+            .expect("bootstrap must create a district");
+        let treasury_before = state
+            .institution_runtime
+            .get(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget;
+        let unrest_before = state
+            .districts
+            .get(&district_id)
+            .expect("district must exist")
+            .unrest_basis_points;
+        create_crisis(
+            &mut state,
+            CrisisKind::NobleDemand,
+            Some(district_id),
+            10_000,
+            "test demand",
+        );
+
+        apply_crisis_daily_effects(registry, &mut state);
+
+        let treasury_after = state
+            .institution_runtime
+            .get(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget;
+        assert!(
+            treasury_after < treasury_before,
+            "an active noble demand must levy civic funds"
+        );
+        assert!(
+            treasury_after >= Money::ZERO,
+            "a levy must never make the civic treasury negative"
+        );
+        assert!(
+            state
+                .districts
+                .get(&district_id)
+                .expect("district must exist")
+                .unrest_basis_points
+                > unrest_before,
+            "noble extraction must increase local unrest"
+        );
+    }
+
+    #[test]
+    fn ai_debt_repayment_transfers_money_and_releases_collateral() {
+        let mut state = make_test_campaign();
+        let loan_id = state
+            .loans
+            .values()
+            .find(|loan| loan.collateral_property_id.is_some())
+            .expect("bootstrap must create a collateralized loan")
+            .id;
+        let (lender_id, borrower_id, property_id) = {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.balance = Money::from_copper(500);
+            (
+                loan.lender_dynasty_id,
+                loan.borrower_dynasty_id,
+                loan.collateral_property_id
+                    .expect("selected loan must have collateral"),
+            )
+        };
+        let lender_before = state
+            .dynasties
+            .get(&lender_id)
+            .expect("lender must exist")
+            .treasury();
+        let borrower_before = state
+            .dynasties
+            .get(&borrower_id)
+            .expect("borrower must exist")
+            .treasury();
+
+        assert!(
+            ai_reduce_debt(&mut state, borrower_id),
+            "the AI objective should report completion after full repayment"
+        );
+
+        assert_eq!(
+            state.loans.get(&loan_id).expect("loan must exist").status,
+            LoanStatus::Repaid
+        );
+        assert_eq!(
+            state
+                .properties
+                .get(&property_id)
+                .expect("property must exist")
+                .collateral_loan_id,
+            None
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&lender_id)
+                .expect("lender must exist")
+                .treasury(),
+            lender_before.saturating_add(Money::from_copper(500))
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&borrower_id)
+                .expect("borrower must exist")
+                .treasury(),
+            borrower_before.saturating_sub(Money::from_copper(500))
+        );
+    }
+
+    #[test]
+    fn public_works_progress_matches_civic_treasury_spending() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define civic treasury");
+        let work_id = *state
+            .public_works
+            .keys()
+            .next()
+            .expect("bootstrap must create a public work");
+        let treasury_before = state
+            .institution_runtime
+            .get(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget;
+        let spent_before = state
+            .public_works
+            .get(&work_id)
+            .expect("public work must exist")
+            .spent;
+
+        advance_days(registry, &mut state, 7).expect("simulation must advance");
+
+        let treasury_after = state
+            .institution_runtime
+            .get(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget;
+        let spent_after = state
+            .public_works
+            .get(&work_id)
+            .expect("public work must exist")
+            .spent;
+        assert_eq!(
+            treasury_before.saturating_sub(treasury_after),
+            spent_after.saturating_sub(spent_before),
+            "recorded project spending must equal the treasury funds consumed"
+        );
+        validate_invariants(registry, &state);
     }
 }

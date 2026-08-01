@@ -233,6 +233,26 @@ pub enum LawKind {
     PublicDebtAuthorization,
 }
 
+impl LawKind {
+    #[must_use]
+    pub const fn is_implemented(self) -> bool {
+        !matches!(self, Self::PublicDebtAuthorization)
+    }
+
+    #[must_use]
+    pub const fn accepts_value(self, value: i64) -> bool {
+        match self {
+            Self::BreadPriceCeiling | Self::PublicDebtAuthorization => value > 0,
+            Self::ForeignMerchantToll
+            | Self::InterestLimit
+            | Self::FireCode
+            | Self::RentRestriction
+            | Self::GuildEntryRestriction
+            | Self::EmergencyImports => value >= 0 && value <= 10_000,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnactedLaw {
     pub(crate) id: LawId,
@@ -258,7 +278,13 @@ pub struct DynastyPair {
 
 impl DynastyPair {
     #[must_use]
+    /// Creates a canonical pair of distinct dynasties.
+    ///
+    /// # Panics
+    ///
+    /// Panics when both identifiers refer to the same dynasty.
     pub fn new(left: DynastyId, right: DynastyId) -> Self {
+        assert_ne!(left, right, "dynasty relationship pair must be distinct");
         if left <= right {
             Self {
                 first: left,
@@ -297,6 +323,11 @@ impl<'de> Deserialize<'de> for DynastyPair {
         let second = second
             .parse::<u32>()
             .map_err(|_| serde::de::Error::custom("invalid second dynasty ID"))?;
+        if first == second {
+            return Err(serde::de::Error::custom(
+                "dynasty relationship pair must be distinct",
+            ));
+        }
         Ok(Self::new(DynastyId::new(first), DynastyId::new(second)))
     }
 }

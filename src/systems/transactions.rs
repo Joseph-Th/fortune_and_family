@@ -154,29 +154,40 @@ fn validate_business_cash_transfer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::NewGameConfig;
-    use crate::registry::build_rivergate_registry;
-    use crate::systems::build_new_game;
+    use crate::test_support::{assert_state_eq, make_test_campaign};
 
     #[test]
-    fn invalid_transfer_leaves_state_unchanged() {
-        let registry = build_rivergate_registry();
-        let mut state = build_new_game(&registry, NewGameConfig::default());
-        let ids: Vec<_> = state
+    fn transfers_reject_insufficient_cash_without_mutation() {
+        let mut state = make_test_campaign();
+        let (from_business_id, to_business_id) = {
+            let mut businesses = state.businesses().iter().map(crate::core::Business::id);
+            (
+                businesses.next().expect("source business must exist"),
+                businesses.next().expect("target business must exist"),
+            )
+        };
+        let available = state
             .businesses()
-            .iter()
-            .take(2)
-            .map(crate::core::Business::id)
-            .collect();
+            .get(from_business_id)
+            .expect("source business must exist")
+            .cash();
+        let required = Money::from_copper(i64::MAX);
         let before = state.clone();
 
-        let result =
-            transfer_business_cash(&mut state, ids[0], ids[1], Money::from_copper(i64::MAX));
+        let result = transfer_business_cash(&mut state, from_business_id, to_business_id, required);
 
-        assert!(matches!(
+        assert_eq!(
             result,
-            Err(SimulationError::InsufficientBusinessCash { .. })
-        ));
-        assert_eq!(state, before);
+            Err(SimulationError::InsufficientBusinessCash {
+                business_id: from_business_id,
+                available,
+                required,
+            })
+        );
+        assert_state_eq(
+            &before,
+            &state,
+            "failed transfers must not mutate balances, versions, or the audit log",
+        );
     }
 }

@@ -27,6 +27,7 @@ The Rivergate campaign includes:
 - Systemic grain, banking, fire, epidemic, trade, guild, and external-authority crises.
 - Durable player notifications, chronicle records, and audit records.
 - A complete read-only campaign projection for dynasty, district, market, contract, finance, property, institution, law, court, crisis, information, and notification views.
+- A self-contained dashboard that HTML-escapes visible content and safely encodes embedded JSON against script-block breakout.
 
 ## Deterministic simulation
 
@@ -53,7 +54,7 @@ The same seed, state, inputs, and commands produce the same result.
 
 ## Persistence
 
-Campaigns are stored as human-readable JSON. Schema version 2 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation.
+Campaigns are stored as human-readable JSON. Schema version 2 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation. Saves are serialized to a same-directory temporary file, synchronized, and atomically persisted over the destination so an interrupted write does not truncate the previous campaign.
 
 Explicit migrations are provided for schema versions 0 and 1. Version 1 Rivergate saves are deterministically hydrated with the strategic records introduced in version 2.
 
@@ -121,19 +122,23 @@ The crate exposes:
 - `save_state` and `load_state`
 - `validate_invariants`
 
-Adapters receive immutable projections and submit explicit commands. They do not mutate records or own business rules.
+`build_new_game` returns a dedicated `NewGameError` for invalid user-authored names. Adapters receive immutable projections and submit explicit commands. They do not mutate records or own business rules.
 
 ## Verification
 
 ```bash
 cargo fmt --all -- --check
 cargo check --all-targets --locked
-cargo test --locked -j 2
+bash scripts/test.sh fast
+bash scripts/test.sh soak
 cargo clippy --all-targets --all-features --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+bash scripts/verify_cli.sh
 ```
 
-The test suite includes deterministic replay, transaction rollback, command rollback, registry validation, schema migration, exact save/load equality, projection rendering, a 3,000-day invariant soak, and a 7,200-day strategic soak spanning multiple generations.
+`bash scripts/test.sh fast` runs the normal Cargo test graph, including library, binary, integration, and documentation tests. An optional name filter supports focused runs such as `bash scripts/test.sh fast loans_`. Long deterministic simulations are explicitly ignored by ordinary test runs and are collected under `bash scripts/test.sh soak`. `bash scripts/test.sh all` validates shell syntax, then runs fast tests, soak tests, and the CLI smoke suite in sequence.
+
+Tests share one immutable Rivergate registry but build a fresh campaign state for every case. The suite includes deterministic replay, transaction rollback, stale-token revalidation, command rollback, bounded input validation, registry validation, schema migration, atomic save replacement, exact save/load equality, projection rendering, a 3,000-day invariant soak, and a 7,200-day strategic soak spanning multiple generations. The CLI smoke script validates campaign creation, simulation, structured summaries, complete projections, commands, dashboard generation, save validation, and rejected input.
 
 ## Repository structure
 

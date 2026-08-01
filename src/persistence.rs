@@ -1,15 +1,36 @@
 //! JSON persistence adapter with explicit schema migration and contextual errors.
 
 use crate::core::{AppState, CURRENT_SCHEMA_VERSION};
+use crate::money::{Money, Quantity};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use tempfile::Builder;
 use thiserror::Error;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StateValidationKind {
+    Schema,
+    Scenario,
+    DefinitionReferences,
+    PrimaryRecords,
+    StrategicRecords,
+    NumericRanges,
+    IdentifierAllocation,
+}
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
     #[error("failed to create save directory {path}: {source}")]
     CreateDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to create temporary save beside {path}: {source}")]
+    CreateTemporary {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -45,20 +66,42 @@ pub enum PersistenceError {
     UnsupportedSchema { version: u32 },
     #[error("schema migration from version {version} failed: {reason}")]
     Migration { version: u32, reason: String },
+    #[error("save file {path} contains invalid {kind:?} state: {reason}")]
+    InvalidState {
+        path: PathBuf,
+        kind: StateValidationKind,
+        reason: String,
+    },
+}
+
+#[derive(Debug)]
+struct StateValidationError {
+    kind: StateValidationKind,
+    reason: String,
+}
+
+impl StateValidationError {
+    fn new(kind: StateValidationKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: reason.into(),
+        }
+    }
 }
 
 /// Serializes the complete application state to a JSON save file.
 ///
 /// # Errors
 ///
-/// Returns an error when the parent directory cannot be created, serialization fails, or the
-/// destination cannot be written.
+/// Returns an error when the parent directory or temporary file cannot be created, serialization
+/// fails, or the destination cannot be atomically replaced.
 pub fn save_state(path: impl AsRef<Path>, state: &AppState) -> Result<(), PersistenceError> {
     let path = path.as_ref();
-    if let Some(parent) = path
+    let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-    {
+        .unwrap_or_else(|| Path::new("."));
+    if parent != Path::new(".") {
         fs::create_dir_all(parent).map_err(|source| PersistenceError::CreateDirectory {
             path: parent.to_path_buf(),
             source,
@@ -66,10 +109,31 @@ pub fn save_state(path: impl AsRef<Path>, state: &AppState) -> Result<(), Persis
     }
     let bytes = serde_json::to_vec_pretty(state)
         .map_err(|source| PersistenceError::Serialize { source })?;
-    fs::write(path, bytes).map_err(|source| PersistenceError::Write {
-        path: path.to_path_buf(),
-        source,
-    })
+    let prefix = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map_or_else(|| ".campaign-save-".to_owned(), |name| format!(".{name}."));
+    let mut temporary = Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)
+        .map_err(|source| PersistenceError::CreateTemporary {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    temporary
+        .write_all(&bytes)
+        .and_then(|()| temporary.as_file_mut().sync_all())
+        .map_err(|source| PersistenceError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    temporary
+        .persist(path)
+        .map_err(|error| PersistenceError::Write {
+            path: path.to_path_buf(),
+            source: error.error,
+        })?;
+    Ok(())
 }
 
 /// Loads, migrates, and deserializes a JSON save file.
@@ -88,18 +152,634 @@ pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> 
             path: path.to_path_buf(),
             source,
         })?;
+    let source_schema_version = read_schema_version(&value, path)?;
     let migrated = migrate_to_current(value, path)?;
     let mut state: AppState =
         serde_json::from_value(migrated).map_err(|source| PersistenceError::Parse {
             path: path.to_path_buf(),
             source,
         })?;
-    hydrate_strategic_state(&mut state);
+    hydrate_strategic_state(&mut state, source_schema_version < 2);
+    validate_loaded_state(&state).map_err(|error| PersistenceError::InvalidState {
+        path: path.to_path_buf(),
+        kind: error.kind,
+        reason: error.reason,
+    })?;
     Ok(state)
 }
 
-fn hydrate_strategic_state(state: &mut AppState) {
-    if !state.properties.is_empty() || state.scenario_key != "rivergate" {
+fn validate_loaded_state(state: &AppState) -> Result<(), StateValidationError> {
+    if state.schema_version != CURRENT_SCHEMA_VERSION {
+        return Err(StateValidationError::new(
+            StateValidationKind::Schema,
+            format!(
+                "state schema {} does not match current schema {CURRENT_SCHEMA_VERSION}",
+                state.schema_version
+            ),
+        ));
+    }
+    if state.scenario_key != "rivergate" {
+        return Err(StateValidationError::new(
+            StateValidationKind::Scenario,
+            format!("unsupported scenario key {:?}", state.scenario_key),
+        ));
+    }
+    let registry = crate::registry::build_rivergate_registry();
+    validate_definition_references(&registry, state).map_err(|reason| {
+        StateValidationError::new(StateValidationKind::DefinitionReferences, reason)
+    })?;
+    validate_primary_records(&registry, state)
+        .map_err(|reason| StateValidationError::new(StateValidationKind::PrimaryRecords, reason))?;
+    validate_strategic_records(state).map_err(|reason| {
+        StateValidationError::new(StateValidationKind::StrategicRecords, reason)
+    })?;
+    validate_numeric_ranges(state)
+        .map_err(|reason| StateValidationError::new(StateValidationKind::NumericRanges, reason))?;
+    state.validate_next_ids().map_err(|reason| {
+        StateValidationError::new(StateValidationKind::IdentifierAllocation, reason)
+    })
+}
+
+fn validate_numeric_ranges(state: &AppState) -> Result<(), String> {
+    validate_core_numeric_ranges(state)?;
+    validate_financial_numeric_ranges(state)?;
+    validate_civic_numeric_ranges(state)
+}
+
+fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
+    for dynasty in state.dynasties.values() {
+        if dynasty.treasury() < Money::ZERO
+            || dynasty.resources.legitimacy_basis_points > 10_000
+            || dynasty.resources.reputation_quality_basis_points > 10_000
+            || dynasty.resources.reputation_reliability_basis_points > 10_000
+            || dynasty.runtime.succession_risk_basis_points > 10_000
+        {
+            return Err(format!(
+                "dynasty {} has an invalid resource value",
+                dynasty.id()
+            ));
+        }
+    }
+    for character in state.characters.iter() {
+        if character.runtime.health_basis_points > 10_000
+            || character.runtime.loyalty_basis_points > 10_000
+        {
+            return Err(format!(
+                "character {} has an invalid basis-point value",
+                character.id()
+            ));
+        }
+    }
+    for household in state.households.iter() {
+        if household.cash() < Money::ZERO || household.food_satisfaction_basis_points() > 10_000 {
+            return Err(format!(
+                "household {} has an invalid economic value",
+                household.id()
+            ));
+        }
+    }
+    for business in state.businesses.iter() {
+        if business.cash() < Money::ZERO
+            || business.finance.debt < Money::ZERO
+            || business.operations.condition_basis_points > 10_000
+            || business.operations.quality_basis_points > 10_000
+            || business
+                .inventory()
+                .values()
+                .any(|quantity| *quantity < Quantity::ZERO)
+        {
+            return Err(format!(
+                "business {} has an invalid economic value",
+                business.id()
+            ));
+        }
+    }
+    for quote in state.market.quotes.values() {
+        if quote.price <= Money::ZERO
+            || quote.previous_price <= Money::ZERO
+            || quote.stock < Quantity::ZERO
+            || quote.target_stock <= Quantity::ZERO
+            || quote.demand_today < Quantity::ZERO
+            || quote.supply_today < Quantity::ZERO
+        {
+            return Err(format!(
+                "market quote {} has an invalid value",
+                quote.good_id()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
+    for loan in state.loans.values() {
+        if loan.principal < Money::ZERO
+            || loan.balance < Money::ZERO
+            || loan.weekly_payment < Money::ZERO
+            || loan.interest_basis_points > 10_000
+        {
+            return Err(format!("loan {} has an invalid financial value", loan.id));
+        }
+    }
+    for property in state.properties.values() {
+        if property.value < Money::ZERO
+            || property.weekly_rent < Money::ZERO
+            || property.condition_basis_points > 10_000
+        {
+            return Err(format!(
+                "property {} has an invalid financial value",
+                property.id
+            ));
+        }
+    }
+    for agreement in state.employment.values() {
+        if agreement.weekly_wage < Money::ZERO
+            || agreement.conditions_basis_points > 10_000
+            || agreement.loyalty_basis_points > 10_000
+        {
+            return Err(format!(
+                "employment agreement {} has an invalid financial value",
+                agreement.id
+            ));
+        }
+    }
+    for contract in state.contracts.values() {
+        if contract.quantity_per_week <= Quantity::ZERO
+            || contract.unit_price < Money::ZERO
+            || contract.penalty < Money::ZERO
+        {
+            return Err(format!(
+                "supply contract {} has an invalid financial value",
+                contract.id
+            ));
+        }
+    }
+    for institution in state.institution_runtime.values() {
+        if institution.budget < Money::ZERO || institution.legitimacy_basis_points > 10_000 {
+            return Err(format!(
+                "institution {} has an invalid financial value",
+                institution.institution_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
+    for district in state.districts.values() {
+        if district.employment_basis_points > 10_000
+            || district.sanitation_basis_points > 10_000
+            || district.safety_basis_points > 10_000
+            || district.unrest_basis_points > 10_000
+            || district
+                .dynasty_support
+                .iter()
+                .any(|(_, support)| *support > 10_000)
+        {
+            return Err(format!(
+                "district {} has an invalid basis-point value",
+                district.district_id
+            ));
+        }
+    }
+    for work in state.public_works.values() {
+        if work.budget <= Money::ZERO
+            || work.spent < Money::ZERO
+            || work.spent > work.budget
+            || work.progress_basis_points > 10_000
+        {
+            return Err(format!(
+                "public work {} has an invalid progress value",
+                work.id
+            ));
+        }
+    }
+    for route in state.external_routes.values() {
+        if route.daily_capacity < Quantity::ZERO
+            || route.risk_basis_points > 10_000
+            || route.disruption_basis_points > 10_000
+            || route.toll_basis_points > 10_000
+        {
+            return Err(format!("external route {} has an invalid value", route.id));
+        }
+    }
+    for crisis in state.crises.values() {
+        if crisis.severity_basis_points > 10_000 {
+            return Err(format!("crisis {} has an invalid severity", crisis.id));
+        }
+    }
+    for relationship in state.relationships.values() {
+        if relationship.trust_basis_points > 10_000
+            || relationship.fear_basis_points > 10_000
+            || relationship.respect_basis_points > 10_000
+            || relationship.resentment_basis_points > 10_000
+        {
+            return Err("relationship contains an invalid basis-point value".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn validate_definition_references(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<(), String> {
+    let expected_goods: BTreeSet<_> = registry
+        .goods()
+        .iter()
+        .map(crate::registry::GoodDef::id)
+        .collect();
+    let actual_goods: BTreeSet<_> = state.market.quotes.keys().copied().collect();
+    if actual_goods != expected_goods {
+        return Err("market quote IDs do not match the scenario registry".to_owned());
+    }
+    if state
+        .market
+        .quotes
+        .iter()
+        .any(|(good_id, quote)| quote.good_id() != *good_id)
+    {
+        return Err("market quote map key differs from its record ID".to_owned());
+    }
+    let expected_districts: BTreeSet<_> = registry
+        .districts()
+        .iter()
+        .map(crate::registry::DistrictDef::id)
+        .collect();
+    let actual_districts: BTreeSet<_> = state.districts.keys().copied().collect();
+    if actual_districts != expected_districts {
+        return Err("district runtime IDs do not match the scenario registry".to_owned());
+    }
+    if state
+        .districts
+        .iter()
+        .any(|(district_id, district)| district.district_id != *district_id)
+    {
+        return Err("district runtime map key differs from its record ID".to_owned());
+    }
+    let expected_institutions: BTreeSet<_> = registry
+        .institutions()
+        .iter()
+        .map(crate::registry::InstitutionDef::id)
+        .collect();
+    let legacy_institutions: BTreeSet<_> = state.institutions.keys().copied().collect();
+    let runtime_institutions: BTreeSet<_> = state.institution_runtime.keys().copied().collect();
+    if legacy_institutions != expected_institutions || runtime_institutions != expected_institutions
+    {
+        return Err("institution state IDs do not match the scenario registry".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_primary_records(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<(), String> {
+    if !state.dynasties.contains_key(&state.player_dynasty_id) {
+        return Err("player dynasty does not exist".to_owned());
+    }
+    for (dynasty_id, dynasty) in &state.dynasties {
+        if dynasty.id() != *dynasty_id {
+            return Err(format!(
+                "dynasty map key {dynasty_id} differs from record ID"
+            ));
+        }
+        for character_id in [Some(dynasty.head_id()), dynasty.heir_id()]
+            .into_iter()
+            .flatten()
+        {
+            let character = state.characters.get(character_id).ok_or_else(|| {
+                format!("dynasty {dynasty_id} references missing character {character_id}")
+            })?;
+            if character.dynasty_id() != *dynasty_id {
+                return Err(format!(
+                    "dynasty {dynasty_id} references character {character_id} from another dynasty"
+                ));
+            }
+        }
+    }
+
+    let mut character_index: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+    for (character_id, character) in state.characters.records() {
+        if character.id() != *character_id || !state.dynasties.contains_key(&character.dynasty_id())
+        {
+            return Err(format!(
+                "character {character_id} has an invalid identity reference"
+            ));
+        }
+        character_index
+            .entry(character.dynasty_id())
+            .or_default()
+            .insert(*character_id);
+    }
+    if &character_index != state.characters.index() {
+        return Err("character dynasty index is stale or incomplete".to_owned());
+    }
+
+    let mut household_index: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+    for (household_id, household) in state.households.records() {
+        if household.id() != *household_id
+            || registry.get_district(household.district_id()).is_none()
+        {
+            return Err(format!(
+                "household {household_id} has an invalid identity reference"
+            ));
+        }
+        household_index
+            .entry(household.district_id())
+            .or_default()
+            .insert(*household_id);
+    }
+    if &household_index != state.households.index() {
+        return Err("household district index is stale or incomplete".to_owned());
+    }
+
+    validate_business_records(registry, state)
+}
+
+fn validate_business_records(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<(), String> {
+    let mut owner_index: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+    let mut district_index: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+    for (business_id, business) in state.businesses.records() {
+        let owner_id = business.owner_dynasty_id();
+        if business.id() != *business_id
+            || !state.dynasties.contains_key(&owner_id)
+            || registry.get_district(business.district_id()).is_none()
+            || registry.get_recipe(business.recipe_id()).is_none()
+        {
+            return Err(format!(
+                "business {business_id} has an invalid definition reference"
+            ));
+        }
+        let manager = state
+            .characters
+            .get(business.manager_id())
+            .ok_or_else(|| format!("business {business_id} references a missing manager"))?;
+        if manager.dynasty_id() != owner_id {
+            return Err(format!(
+                "business {business_id} manager belongs to another dynasty"
+            ));
+        }
+        if business
+            .inventory()
+            .keys()
+            .any(|good_id| registry.get_good(*good_id).is_none())
+        {
+            return Err(format!(
+                "business {business_id} contains an unknown inventory good"
+            ));
+        }
+        owner_index
+            .entry(owner_id)
+            .or_default()
+            .insert(*business_id);
+        district_index
+            .entry(business.district_id())
+            .or_default()
+            .insert(*business_id);
+    }
+    if &owner_index != state.businesses.owner_index()
+        || &district_index != state.businesses.district_index()
+    {
+        return Err("business ownership or district index is stale or incomplete".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_strategic_records(state: &AppState) -> Result<(), String> {
+    for (contract_id, contract) in &state.contracts {
+        if contract.id != *contract_id
+            || !state
+                .businesses
+                .records()
+                .contains_key(&contract.buyer_business_id)
+            || !state
+                .businesses
+                .records()
+                .contains_key(&contract.seller_business_id)
+            || !state.market.quotes.contains_key(&contract.good_id)
+        {
+            return Err(format!(
+                "supply contract {contract_id} has an invalid reference"
+            ));
+        }
+    }
+    for (property_id, property) in &state.properties {
+        if property.id != *property_id || !state.districts.contains_key(&property.district_id) {
+            return Err(format!(
+                "property {property_id} has an invalid identity reference"
+            ));
+        }
+        for dynasty_id in [property.owner_dynasty_id, property.tenant_dynasty_id]
+            .into_iter()
+            .flatten()
+        {
+            if !state.dynasties.contains_key(&dynasty_id) {
+                return Err(format!(
+                    "property {property_id} references a missing dynasty"
+                ));
+            }
+        }
+        if let Some(loan_id) = property.collateral_loan_id {
+            let loan = state
+                .loans
+                .get(&loan_id)
+                .ok_or_else(|| format!("property {property_id} references a missing loan"))?;
+            if loan.collateral_property_id != Some(*property_id) {
+                return Err(format!(
+                    "property {property_id} collateral reference is not reciprocal"
+                ));
+            }
+        }
+    }
+    validate_finance_and_organization_records(state)
+}
+
+fn validate_finance_and_organization_records(state: &AppState) -> Result<(), String> {
+    for (loan_id, loan) in &state.loans {
+        if loan.id != *loan_id
+            || !state.dynasties.contains_key(&loan.lender_dynasty_id)
+            || !state.dynasties.contains_key(&loan.borrower_dynasty_id)
+        {
+            return Err(format!("loan {loan_id} has an invalid dynasty reference"));
+        }
+        if let Some(property_id) = loan.collateral_property_id
+            && !state.properties.contains_key(&property_id)
+        {
+            return Err(format!(
+                "loan {loan_id} references a missing collateral property"
+            ));
+        }
+    }
+    for (employment_id, agreement) in &state.employment {
+        if agreement.id != *employment_id
+            || state.businesses.get(agreement.business_id).is_none()
+            || state.households.get(agreement.household_id).is_none()
+        {
+            return Err(format!(
+                "employment agreement {employment_id} has an invalid reference"
+            ));
+        }
+    }
+    for (link_id, link) in &state.family_links {
+        if link.id != *link_id
+            || state.characters.get(link.first_character_id).is_none()
+            || state.characters.get(link.second_character_id).is_none()
+        {
+            return Err(format!(
+                "family link {link_id} has an invalid character reference"
+            ));
+        }
+    }
+    for (dynasty_id, council) in &state.family_councils {
+        if council.dynasty_id != *dynasty_id
+            || !state.dynasties.contains_key(dynasty_id)
+            || council
+                .members
+                .iter()
+                .any(|character_id| state.characters.get(*character_id).is_none())
+        {
+            return Err(format!(
+                "family council {dynasty_id} has an invalid reference"
+            ));
+        }
+    }
+    validate_institution_and_misc_records(state)
+}
+
+fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String> {
+    for (institution_id, runtime) in &state.institution_runtime {
+        let legacy = state
+            .institutions
+            .get(institution_id)
+            .ok_or_else(|| format!("institution {institution_id} lacks legacy state"))?;
+        if runtime.institution_id != *institution_id
+            || legacy.institution_id() != *institution_id
+            || runtime.office_holder_id != legacy.office_holder_id
+            || runtime
+                .members
+                .iter()
+                .any(|character_id| state.characters.get(*character_id).is_none())
+            || runtime
+                .office_holder_id
+                .is_some_and(|holder| !runtime.members.contains(&holder))
+        {
+            return Err(format!(
+                "institution {institution_id} has inconsistent runtime state"
+            ));
+        }
+    }
+    for (pair, relationship) in &state.relationships {
+        if relationship.pair != *pair
+            || pair.first == pair.second
+            || !state.dynasties.contains_key(&pair.first)
+            || !state.dynasties.contains_key(&pair.second)
+        {
+            return Err("relationship map contains an invalid dynasty pair".to_owned());
+        }
+    }
+    validate_misc_record_ids_and_refs(state)
+}
+
+fn validate_misc_record_ids_and_refs(state: &AppState) -> Result<(), String> {
+    for (law_id, law) in &state.laws {
+        if law.id != *law_id
+            || !law.kind.accepts_value(law.value)
+            || law
+                .sponsor_dynasty_id
+                .is_some_and(|dynasty_id| !state.dynasties.contains_key(&dynasty_id))
+        {
+            return Err(format!("law {law_id} has an invalid identity reference"));
+        }
+        if law.active
+            && state
+                .laws
+                .values()
+                .any(|other| other.id != law.id && other.active && other.kind == law.kind)
+        {
+            return Err(format!(
+                "law kind {:?} has multiple active records",
+                law.kind
+            ));
+        }
+    }
+    for (report_id, report) in &state.information_reports {
+        if report.id != *report_id || !state.dynasties.contains_key(&report.owner_dynasty_id) {
+            return Err(format!(
+                "information report {report_id} has an invalid reference"
+            ));
+        }
+    }
+    for (objective_id, objective) in &state.ai_objectives {
+        if objective.id != *objective_id
+            || !state.dynasties.contains_key(&objective.dynasty_id)
+            || objective
+                .target_dynasty_id
+                .is_some_and(|dynasty_id| !state.dynasties.contains_key(&dynasty_id))
+        {
+            return Err(format!(
+                "AI objective {objective_id} has an invalid reference"
+            ));
+        }
+    }
+    for (work_id, work) in &state.public_works {
+        if work.id != *work_id
+            || !state.districts.contains_key(&work.district_id)
+            || work
+                .sponsor_dynasty_id
+                .is_some_and(|dynasty_id| !state.dynasties.contains_key(&dynasty_id))
+        {
+            return Err(format!("public work {work_id} has an invalid reference"));
+        }
+    }
+    for (case_id, legal_case) in &state.legal_cases {
+        if legal_case.id != *case_id
+            || !state
+                .dynasties
+                .contains_key(&legal_case.plaintiff_dynasty_id)
+            || !state
+                .dynasties
+                .contains_key(&legal_case.defendant_dynasty_id)
+        {
+            return Err(format!("legal case {case_id} has an invalid reference"));
+        }
+    }
+    for (route_id, route) in &state.external_routes {
+        if route.id != *route_id || !state.market.quotes.contains_key(&route.good_id) {
+            return Err(format!(
+                "external route {route_id} has an invalid reference"
+            ));
+        }
+    }
+    for (crisis_id, crisis) in &state.crises {
+        if crisis.id != *crisis_id
+            || crisis
+                .district_id
+                .is_some_and(|district_id| !state.districts.contains_key(&district_id))
+        {
+            return Err(format!("crisis {crisis_id} has an invalid reference"));
+        }
+    }
+    let outbox_ids: BTreeSet<_> = state.outbox.iter().map(|message| message.id).collect();
+    if outbox_ids.len() != state.outbox.len() {
+        return Err("outbox contains duplicate message IDs".to_owned());
+    }
+    let chronicle_ids: BTreeSet<_> = state
+        .chronicle
+        .iter()
+        .map(crate::core::ChronicleEntry::id)
+        .collect();
+    if chronicle_ids.len() != state.chronicle.len() {
+        return Err("chronicle contains duplicate entry IDs".to_owned());
+    }
+    Ok(())
+}
+
+fn hydrate_strategic_state(state: &mut AppState, migrated_from_legacy: bool) {
+    if !migrated_from_legacy || state.scenario_key != "rivergate" {
         return;
     }
     let registry = crate::registry::build_rivergate_registry();
@@ -107,16 +787,7 @@ fn hydrate_strategic_state(state: &mut AppState) {
 }
 
 fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, PersistenceError> {
-    let raw_version = value
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| PersistenceError::MissingSchemaVersion {
-            path: path.to_path_buf(),
-        })?;
-    let mut version = u32::try_from(raw_version).map_err(|_| PersistenceError::Migration {
-        version: u32::MAX,
-        reason: format!("schema version {raw_version} does not fit u32"),
-    })?;
+    let mut version = read_schema_version(&value, path)?;
     if version > CURRENT_SCHEMA_VERSION {
         return Err(PersistenceError::FutureSchema {
             found: version,
@@ -133,6 +804,19 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
         version += 1;
     }
     Ok(value)
+}
+
+fn read_schema_version(value: &Value, path: &Path) -> Result<u32, PersistenceError> {
+    let raw_version = value
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| PersistenceError::MissingSchemaVersion {
+            path: path.to_path_buf(),
+        })?;
+    u32::try_from(raw_version).map_err(|_| PersistenceError::Migration {
+        version: u32::MAX,
+        reason: format!("schema version {raw_version} does not fit u32"),
+    })
 }
 
 fn migrate_v0_to_v1(mut value: Value) -> Result<Value, PersistenceError> {
@@ -214,29 +898,69 @@ fn migrate_v1_to_v2(mut value: Value) -> Result<Value, PersistenceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::NewGameConfig;
-    use crate::registry::build_rivergate_registry;
-    use crate::systems::{advance_days, build_new_game};
-    use pretty_assertions::assert_eq;
+    use crate::systems::advance_days;
+    use crate::test_support::{
+        assert_state_eq, make_test_campaign, rivergate_registry_for_test, write_test_json_fixture,
+    };
+
+    fn assert_invalid_state_kind(
+        result: Result<AppState, PersistenceError>,
+        expected: StateValidationKind,
+    ) {
+        match result {
+            Err(PersistenceError::InvalidState { kind, reason, .. }) => {
+                assert_eq!(kind, expected, "unexpected validation category: {reason}");
+            }
+            Err(error) => panic!("expected invalid-state error, got {error:?}"),
+            Ok(_) => panic!("invalid save unexpectedly loaded"),
+        }
+    }
 
     #[test]
-    fn save_load_round_trip_preserves_deterministic_state() {
-        let registry = build_rivergate_registry();
-        let mut state = build_new_game(&registry, NewGameConfig::default());
-        advance_days(&registry, &mut state, 40).expect("simulation must advance");
+    fn round_trip_preserves_deterministic_state() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        advance_days(registry, &mut state, 40).expect("simulation must advance");
         let directory = tempfile::tempdir().expect("temporary directory must be created");
         let path = directory.path().join("campaign.json");
 
         save_state(&path, &state).expect("state must save");
         let loaded = load_state(&path).expect("state must load");
 
-        assert_eq!(loaded, state);
+        assert_state_eq(
+            &state,
+            &loaded,
+            "save/load round-trip must preserve the complete deterministic state",
+        );
     }
 
     #[test]
-    fn version_zero_migration_adds_audit_log() {
-        let registry = build_rivergate_registry();
-        let state = build_new_game(&registry, NewGameConfig::default());
+    fn atomic_save_replaces_the_previous_campaign() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("campaign.json");
+        save_state(&path, &state).expect("initial state must save");
+        advance_days(registry, &mut state, 7).expect("simulation must advance");
+
+        save_state(&path, &state).expect("updated state must replace the original save");
+        let loaded = load_state(&path).expect("replacement state must load");
+        let files: Vec<_> = fs::read_dir(directory.path())
+            .expect("save directory must be readable")
+            .map(|entry| entry.expect("directory entry must be readable").file_name())
+            .collect();
+
+        assert_state_eq(
+            &state,
+            &loaded,
+            "atomic replacement must persist the updated campaign",
+        );
+        assert_eq!(files, vec![path.file_name().expect("save name must exist")]);
+    }
+
+    #[test]
+    fn migration_v0_adds_audit_log() {
+        let state = make_test_campaign();
         let mut value = serde_json::to_value(state).expect("state must serialize");
         let object = value.as_object_mut().expect("state JSON must be an object");
         object.insert("schema_version".to_owned(), Value::from(0));
@@ -245,14 +969,23 @@ mod tests {
         let migrated =
             migrate_to_current(value, Path::new("memory.json")).expect("version zero must migrate");
 
-        assert_eq!(migrated["schema_version"], Value::from(2));
-        assert!(migrated["audit_log"].is_array());
+        assert_eq!(
+            migrated["schema_version"],
+            Value::from(CURRENT_SCHEMA_VERSION)
+        );
+        assert!(
+            migrated["audit_log"].is_array(),
+            "version-zero migration must add the audit log collection"
+        );
     }
 
     #[test]
-    fn version_one_load_hydrates_strategic_state() {
-        let registry = build_rivergate_registry();
-        let state = build_new_game(&registry, NewGameConfig::default());
+    fn migration_v1_hydrates_strategic_state() {
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign();
+        let dynasty_ids: Vec<_> = state.dynasties.keys().copied().collect();
+        let character_ids: Vec<_> = state.characters.records().keys().copied().collect();
+        let business_ids: Vec<_> = state.businesses.records().keys().copied().collect();
         let mut value = serde_json::to_value(state).expect("state must serialize");
         let object = value.as_object_mut().expect("state JSON must be an object");
         object.insert("schema_version".to_owned(), Value::from(1));
@@ -298,20 +1031,101 @@ mod tests {
         ] {
             next_ids.remove(field);
         }
-        let directory = tempfile::tempdir().expect("temporary directory must be created");
-        let path = directory.path().join("version-one.json");
-        fs::write(
-            &path,
-            serde_json::to_vec_pretty(&value).expect("legacy state must serialize"),
-        )
-        .expect("legacy save must be written");
+        let (_directory, path) = write_test_json_fixture("version-one.json", &value);
 
         let loaded = load_state(&path).expect("version one save must load");
 
-        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
-        assert!(!loaded.properties.is_empty());
-        assert!(!loaded.contracts.is_empty());
-        assert_eq!(loaded.districts.len(), registry.districts().len());
-        crate::systems::validate_invariants(&registry, &loaded);
+        assert_eq!(
+            loaded.schema_version(),
+            CURRENT_SCHEMA_VERSION,
+            "migration must advance to the current schema"
+        );
+        assert_eq!(
+            loaded.dynasties.keys().copied().collect::<Vec<_>>(),
+            dynasty_ids,
+            "migration must preserve dynasty identity"
+        );
+        assert_eq!(
+            loaded
+                .characters
+                .records()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            character_ids,
+            "migration must preserve character identity"
+        );
+        assert_eq!(
+            loaded
+                .businesses
+                .records()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            business_ids,
+            "migration must preserve business identity"
+        );
+        assert_eq!(
+            loaded.districts.len(),
+            registry.districts().len(),
+            "migration must hydrate every district runtime"
+        );
+        assert_eq!(
+            loaded.institution_runtime.len(),
+            registry.institutions().len(),
+            "migration must hydrate every institution runtime"
+        );
+        assert!(
+            !loaded.contracts.is_empty()
+                && !loaded.loans.is_empty()
+                && !loaded.properties.is_empty()
+                && !loaded.employment.is_empty(),
+            "migration must hydrate the connected strategic economy"
+        );
+        crate::systems::validate_invariants(registry, &loaded);
+    }
+
+    #[test]
+    fn validation_rejects_missing_player_dynasty_reference() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["player_dynasty_id"] = Value::from(u32::MAX);
+        let (_directory, path) = write_test_json_fixture("invalid-player.json", &value);
+
+        assert_invalid_state_kind(load_state(&path), StateValidationKind::PrimaryRecords);
+    }
+
+    #[test]
+    fn validation_rejects_stale_business_indexes() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["businesses"]["by_owner"] = Value::Object(serde_json::Map::new());
+        let (_directory, path) = write_test_json_fixture("stale-index.json", &value);
+
+        assert_invalid_state_kind(load_state(&path), StateValidationKind::PrimaryRecords);
+    }
+
+    #[test]
+    fn validation_rejects_stale_next_id_allocators() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["next_ids"]["business"] = Value::from(0);
+        let (_directory, path) = write_test_json_fixture("stale-next-id.json", &value);
+
+        assert_invalid_state_kind(load_state(&path), StateValidationKind::IdentifierAllocation);
+    }
+
+    #[test]
+    fn validation_rejects_negative_business_cash() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let business = value["businesses"]["records"]
+            .as_object_mut()
+            .and_then(|records| records.values_mut().next())
+            .expect("serialized state must contain a business");
+        business["finance"]["cash"] = Value::from(-1);
+        let (_directory, path) = write_test_json_fixture("negative-business-cash.json", &value);
+
+        assert_invalid_state_kind(load_state(&path), StateValidationKind::NumericRanges);
     }
 }

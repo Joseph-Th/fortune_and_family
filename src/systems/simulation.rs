@@ -4,7 +4,7 @@ use super::SimulationError;
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
     CharacterCapabilities, CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus,
-    ChronicleEntry, ChronicleKind, MarketCause,
+    ChronicleEntry, ChronicleKind, FamilyLink, FamilyLinkKind, MarketCause,
 };
 use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, GoodId};
 use crate::money::{Money, Quantity, affordable_quantity, cost_for};
@@ -107,12 +107,22 @@ pub fn advance_days(
             registry_scenario: registry.scenario().key().to_owned(),
         });
     }
+    validate_market_quotes(registry, state)?;
 
     for _ in 0..days {
         run_one_day(registry, state)?;
         super::validate_invariants(registry, state);
     }
 
+    Ok(())
+}
+
+fn validate_market_quotes(registry: &Registry, state: &AppState) -> Result<(), SimulationError> {
+    for good in registry.goods() {
+        if state.market.get_quote(good.id()).is_none() {
+            return Err(SimulationError::MarketQuoteMissing { good_id: good.id() });
+        }
+    }
     Ok(())
 }
 
@@ -137,6 +147,7 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
 
     apply_market_spoilage(registry, state);
     update_market_prices(registry, state);
+    super::strategic::apply_law_price_controls(registry, state);
     update_business_lifecycle(registry, state);
 
     state.clock.advance_one_day();
@@ -1116,6 +1127,51 @@ fn decide_successions(state: &mut AppState) -> Vec<SuccessionLine> {
     lines
 }
 
+fn retire_outgoing_head(state: &mut AppState, outgoing_head_id: CharacterId) {
+    state
+        .characters
+        .get_mut(outgoing_head_id)
+        .expect("succession outgoing head must exist")
+        .runtime
+        .status = CharacterStatus::Deceased;
+    for link in state.family_links.values_mut().filter(|link| {
+        link.active
+            && link.kind == FamilyLinkKind::Marriage
+            && (link.first_character_id == outgoing_head_id
+                || link.second_character_id == outgoing_head_id)
+    }) {
+        link.active = false;
+    }
+}
+
+fn update_institutions_for_succession(
+    state: &mut AppState,
+    outgoing_head_id: CharacterId,
+    incoming_head_id: CharacterId,
+) {
+    let mut vacated_institutions = Vec::new();
+    for institution in state.institution_runtime.values_mut() {
+        if institution.members.remove(&outgoing_head_id) {
+            institution.members.insert(incoming_head_id);
+        }
+        if institution.office_holder_id == Some(outgoing_head_id) {
+            institution.office_holder_id = None;
+            institution.next_selection_day = institution
+                .next_selection_day
+                .min(state.clock.day().saturating_add(30));
+            vacated_institutions.push(institution.institution_id);
+        }
+    }
+    for institution_id in vacated_institutions {
+        let legacy = state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("vacated institution must have legacy state");
+        legacy.office_holder_id = None;
+        legacy.policy_version = legacy.policy_version.saturating_add(1);
+    }
+}
+
 fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
     for line in lines {
         let SuccessionLine {
@@ -1126,12 +1182,7 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
             new_heir_birth_day,
             new_heir_capabilities,
         } = line;
-        state
-            .characters
-            .get_mut(outgoing_head_id)
-            .expect("succession outgoing head must exist")
-            .runtime
-            .status = CharacterStatus::Deceased;
+        retire_outgoing_head(state, outgoing_head_id);
         {
             let incoming = state
                 .characters
@@ -1140,6 +1191,8 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
             incoming.runtime.role = CharacterRole::HeadOfHouse;
             incoming.runtime.loyalty_basis_points = 10_000;
         }
+
+        update_institutions_for_succession(state, outgoing_head_id, incoming_head_id);
 
         let managed_business_ids: Vec<_> = state
             .businesses
@@ -1180,6 +1233,26 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
             },
         });
 
+        let family_link_id = state.next_ids.family_link();
+        state.family_links.insert(
+            family_link_id,
+            FamilyLink {
+                id: family_link_id,
+                first_character_id: incoming_head_id,
+                second_character_id: new_heir_id,
+                kind: FamilyLinkKind::ParentChild,
+                active: true,
+                property_claim_basis_points: 8_000,
+            },
+        );
+        let council = state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("succession dynasty must have a family council");
+        council.members.remove(&outgoing_head_id);
+        council.members.insert(incoming_head_id);
+        council.members.insert(new_heir_id);
+
         let dynasty = state
             .dynasties
             .get_mut(&dynasty_id)
@@ -1200,5 +1273,68 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
                 "Dynasty {dynasty_id} passed from character {outgoing_head_id} to {incoming_head_id}."
             ),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{EnactedLaw, LawKind};
+    use crate::test_support::{assert_state_eq, make_test_campaign, rivergate_registry_for_test};
+
+    #[test]
+    fn missing_market_quote_fails_before_day_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let missing_good_id = registry.goods()[0].id();
+        state.market.quotes.remove(&missing_good_id);
+        let before = state.clone();
+
+        let result = advance_days(registry, &mut state, 1);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::MarketQuoteMissing {
+                good_id: missing_good_id,
+            })
+        );
+        assert_state_eq(
+            &before,
+            &state,
+            "preflight failure must leave the entire campaign unchanged",
+        );
+    }
+
+    #[test]
+    fn bread_price_ceiling_is_enforced_after_price_formation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::BreadPriceCeiling,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                value: 1,
+                active: true,
+            },
+        );
+
+        advance_days(registry, &mut state, 1).expect("simulation must advance");
+
+        let bread_id = registry
+            .get_good_id("bread")
+            .expect("registry must define bread");
+        assert_eq!(
+            state
+                .market
+                .get_quote(bread_id)
+                .expect("bread quote must exist")
+                .price(),
+            Money::from_copper(1),
+            "the statutory ceiling must be the final daily price constraint"
+        );
     }
 }

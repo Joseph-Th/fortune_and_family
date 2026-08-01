@@ -689,7 +689,7 @@ pub fn render_campaign_html(
     state: &AppState,
 ) -> Result<String, serde_json::Error> {
     let projection = build_campaign_projection(registry, state);
-    let data = serde_json::to_string_pretty(&projection)?;
+    let data = escape_json_for_html_script(&serde_json::to_string_pretty(&projection)?);
     let player = &projection.player;
     let district_rows = render_district_rows(&projection.districts);
     let market_rows = render_market_rows(&projection.market);
@@ -798,35 +798,102 @@ fn escape_html(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+fn escape_json_for_html_script(value: &str) -> String {
+    value
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::NewGameConfig;
-    use crate::registry::build_rivergate_registry;
-    use crate::systems::build_new_game;
+    use crate::test_support::{
+        make_test_campaign, make_test_campaign_with, rivergate_registry_for_test,
+    };
 
     #[test]
     fn campaign_projection_contains_every_primary_view() {
-        let registry = build_rivergate_registry();
-        let state = build_new_game(&registry, NewGameConfig::default());
-        let projection = build_campaign_projection(&registry, &state);
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign();
+        let projection = build_campaign_projection(registry, &state);
 
         assert_eq!(projection.districts.len(), registry.districts().len());
         assert_eq!(projection.market.len(), registry.goods().len());
         assert_eq!(projection.dynasties.len(), state.dynasties.len());
-        assert!(!projection.contracts.is_empty());
-        assert!(!projection.institutions.is_empty());
+        assert_eq!(projection.contracts.len(), state.contracts.len());
+        assert_eq!(projection.loans.len(), state.loans.len());
+        assert_eq!(projection.properties.len(), state.properties.len());
+        assert_eq!(projection.laws.len(), state.laws.len());
+        assert_eq!(projection.public_works.len(), state.public_works.len());
+        assert_eq!(projection.legal_cases.len(), state.legal_cases.len());
+        assert_eq!(projection.crises.len(), state.crises.len());
+        assert_eq!(
+            projection.information.len(),
+            state.information_reports.len()
+        );
+        assert_eq!(projection.notifications.len(), state.outbox.len());
+        assert_eq!(
+            projection.institutions.len(),
+            registry.institutions().len(),
+            "every authored institution must appear in the read model"
+        );
     }
 
     #[test]
     fn html_dashboard_embeds_projection_data() {
-        let registry = build_rivergate_registry();
-        let state = build_new_game(&registry, NewGameConfig::default());
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign();
+        let player_name = state
+            .get_dynasty(state.player_dynasty_id())
+            .expect("player dynasty must exist")
+            .name();
 
-        let html = render_campaign_html(&registry, &state).expect("dashboard must render");
+        let html = render_campaign_html(registry, &state).expect("dashboard must render");
 
-        assert!(html.contains("Civic Dynasty"));
-        assert!(html.contains("campaign-data"));
-        assert!(html.contains("House Valeri"));
+        assert!(
+            html.contains("<!doctype html>"),
+            "dashboard must be standalone HTML"
+        );
+        assert!(
+            html.contains("campaign-data"),
+            "dashboard must embed its complete projection payload"
+        );
+        assert!(
+            html.contains(registry.scenario().name()),
+            "dashboard must identify the current scenario"
+        );
+        assert!(
+            html.contains(player_name),
+            "dashboard must identify the player dynasty"
+        );
+    }
+
+    #[test]
+    fn html_dashboard_cannot_be_broken_out_by_user_authored_names() {
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign_with(NewGameConfig {
+            dynasty_name: "</script><script>alert('dynasty')</script>".to_owned(),
+            founder_name: "Founder & Steward".to_owned(),
+            ..NewGameConfig::default()
+        });
+
+        let html = render_campaign_html(registry, &state).expect("dashboard must render");
+
+        assert!(
+            !html.contains("</script><script>alert('dynasty')</script>"),
+            "user-authored names must not create executable markup"
+        );
+        assert!(
+            html.contains("House &lt;/script&gt;&lt;script&gt;alert"),
+            "visible user-authored text must be HTML escaped"
+        );
+        assert!(
+            html.contains("\\u003c/script\\u003e\\u003cscript\\u003e"),
+            "embedded JSON must escape script-delimiter characters"
+        );
     }
 }

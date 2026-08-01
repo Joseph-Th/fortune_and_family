@@ -2,8 +2,8 @@
 
 use civic_dynasty::core::StartingBackground;
 use civic_dynasty::{
-    CommandError, NewGameConfig, PersistenceError, PlayerCommand, Registry, SimulationError,
-    advance_days, apply_player_command, build_campaign_projection, build_new_game,
+    CommandError, NewGameConfig, NewGameError, PersistenceError, PlayerCommand, Registry,
+    SimulationError, advance_days, apply_player_command, build_campaign_projection, build_new_game,
     build_rivergate_registry, load_state, render_campaign_html, save_state, validate_invariants,
 };
 use clap::{Parser, Subcommand, ValueEnum};
@@ -89,6 +89,8 @@ impl From<BackgroundArg> for StartingBackground {
 #[derive(Debug, Error)]
 enum CliError {
     #[error(transparent)]
+    NewGame(#[from] NewGameError),
+    #[error(transparent)]
     Persistence(#[from] PersistenceError),
     #[error(transparent)]
     Simulation(#[from] SimulationError),
@@ -141,7 +143,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 founder_name: founder,
                 background: background.into(),
             };
-            let mut state = build_new_game(&registry, config);
+            let mut state = build_new_game(&registry, config)?;
             if advance > 0 {
                 advance_days(&registry, &mut state, advance)?;
             }
