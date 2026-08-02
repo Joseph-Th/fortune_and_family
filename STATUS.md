@@ -120,8 +120,8 @@ The repository now implements the full architectural foundation and a broad, int
 ### Adapters and presentation
 
 - Human-readable JSON persistence with synchronized same-directory temporary writes and atomic replacement.
-- Schema version 4.
-- Explicit migrations from versions 0, 1, 2, and 3.
+- Schema version 5, including deterministic migration of legacy duplicate officeholders.
+- Explicit migrations from versions 0 through 4.
 - Deterministic strategic hydration for version 1 Rivergate saves, including preservation of legacy officeholders.
 - Version 2 migration consolidates duplicate institution state and removes redundant business staffing data.
 - Version 3 migration removes the unused parallel business-debt aggregate; explicit loan records remain authoritative.
@@ -169,6 +169,8 @@ The August 2026 codebase audit removed or corrected:
 
 - Negative sale quantities caused by treating integer saturation as domain clamping.
 - Repeated office-nomination, governance, policy, crisis-exploitation, and AI legitimacy exploits.
+- Simultaneous multi-office holding, which allowed one character to capture every institution and
+  made political competition collapse into a deterministic sweep.
 - Production spending through protected cash reserves.
 - Free positive-value transfers caused by fixed-point truncation.
 - Inert quality targets, manager capabilities, health, loyalty, succession risk, and reputation fields.
@@ -188,6 +190,15 @@ The August 2026 codebase audit removed or corrected:
 - Missing audit-log ordering checks and incomplete market-flow and business-quality assertions.
 - Silent omission of authored bootstrap contracts or loans when an immediately committed validated
   token failed.
+- Negative and zero inventory deltas at the record mutation boundary, stale reusable cash-transfer
+  tokens, and invalid in-memory campaigns reaching the filesystem before save validation.
+- Inactive employers retaining operational labor agreements, stalled AI objectives remaining
+  permanent, and zero-health house heads evading succession below the ordinary retirement age.
+- Household starvation when finished bread was unavailable despite market flour or grain, duplicate
+  recipe inputs that could overconsume inventory, and automatic governance changes without audit or
+  notification records.
+- Project-enum wildcard matches in gameplay policy code and the missing documentation-test step in
+  the continuous-integration workflow.
 
 ## Gameplay harness tuning
 
@@ -217,16 +228,42 @@ The review corrected the underlying systems rather than only retuning agent prio
   with an annual charter-amendment interval that prevents constitutional churn.
 - Business operating policies have a 90-day strategy interval, preventing weekly template churn
   while preserving deliberate operational pivots.
+- Player-filed legal cases have a 90-day strategy interval, keeping litigation consequential rather
+  than a routine every-hearing action.
+- Gameplay agents only propose supply contracts that fit aggregate weekly production and input
+  capacity, maintain four weeks of buyer working cash, and leave sellers able to finance the first
+  delivery cycle. This prevents reports from being dominated by obviously underfunded obligations.
 - Crisis responses have a response interval, notification acknowledgement clears a backlog, and the
-  harness no longer spends most decision cycles repeatedly selecting housekeeping actions.
+  harness only offers acknowledgement after a meaningful batch accumulates instead of repeatedly
+  selecting housekeeping actions for isolated messages.
+- Public-work sponsorship has a 90-day strategic interval and duplicate unfinished projects are
+  rejected, with at most two unfinished dynasty-sponsored projects, preventing weekly project spam
+  and civic-treasury queue starvation.
 
-The gameplay report schema is now version 4. It separates causal from ambient domain transitions,
-distinguishes persistent immediate effects from genuinely delayed consequences, probes slow commands
-over command-specific bounded horizons, measures distinct viable command families rather than raw
-candidate variants, excludes notification acknowledgement from substantive scores, tracks mid-campaign
-collapse and recovery, records peak office attainment rather than relying on endpoint incumbency, and
-emits direct findings for severe single-campaign food collapse, labor, contracts, credit, notification
-overload, crisis concentration, and autonomous-but-unresponsive systems.
+The gameplay report schema is now version 7. It separates causal from ambient domain transitions,
+counts the decision cycles that actually offer each command family, distinguishes persistent effects
+from newly delayed consequences, probes slow commands over command-specific bounded horizons, measures
+distinct viable command families rather than raw candidate variants, excludes notification
+acknowledgement from substantive scores, separates quiet cooldown cycles from blocked choices, tracks
+mid-campaign collapse and recovery, records peak office attainment against the number of available
+offices and unfinished public-work load, measures food minima after the first simulation advance,
+and emits direct findings for severe food collapse, labor, contracts, credit, single-campaign or
+broad notification overload, crisis concentration, public-work backlog, and
+autonomous-but-unresponsive systems. Contract findings distinguish player-involved agreements from
+ambient city contracts.
+
+The final economic audit repeated the same 12-seed, six-year matrix across all four personas and
+three starting backgrounds: 144 campaigns and 311,040 simulated days. The earlier run found 10
+campaigns below 10% food satisfaction; the corrected run found none and retained an overall score of
+89 with full command and domain coverage.
+
+The subsequent interaction audit ran 72 three-year campaigns and 48 six-year campaigns after the
+political exclusivity, notification batching, and report-observability changes. Both matrices retained
+full command and causal-domain coverage and emitted no material concerns. The three-year matrix scored
+87 overall and the six-year matrix scored 86. Post-start food satisfaction never fell below 90.42%,
+player contract fulfillment substantially exceeded breaches, no endpoint business was insolvent,
+peak political control remained two of eleven offices, and peak unread notifications remained 44 in
+the three-year matrix and 73 in the six-year matrix.
 
 ## Verification status
 
@@ -242,7 +279,7 @@ The release gate requires all of the following to pass:
 - `bash scripts/verify_cli.sh`
 - CLI create, simulate, summary, inspect, execute, dashboard, validate, playtest, and invalid-input smoke tests
 
-The fast suite compiles and runs only non-ignored library tests. It currently contains 125 passing
+The fast suite compiles and runs only non-ignored library tests. It currently contains 151 passing
 tests, with two ignored long-horizon tests in the soak tier. It uses a shared immutable registry
 fixture and fresh per-test campaign state, with domain filters and exact-name execution for focused
 iteration. Large suites live in dedicated `*_tests.rs` files and are grouped by contracts, loans,

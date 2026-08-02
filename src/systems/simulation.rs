@@ -702,6 +702,12 @@ fn decide_household_consumption(
     let bread_id = registry
         .get_good_id("bread")
         .expect("Rivergate registry must define bread");
+    let flour_id = registry
+        .get_good_id("flour")
+        .expect("Rivergate registry must define flour");
+    let grain_id = registry
+        .get_good_id("grain")
+        .expect("Rivergate registry must define grain");
     let ale_id = registry
         .get_good_id("ale")
         .expect("Rivergate registry must define ale");
@@ -725,47 +731,47 @@ fn decide_household_consumption(
 
     for household in state.households.iter() {
         let mut cash = household.cash;
-        let mut bread_acquired = Quantity::ZERO;
+        let mut food_acquired = Quantity::ZERO;
+        for good_id in [bread_id, flour_id, grain_id] {
+            let remaining_need = household.bread_need_daily.saturating_sub(food_acquired);
+            if remaining_need.is_zero() {
+                break;
+            }
+            let quantity = plan_household_purchase(
+                state,
+                household.id(),
+                good_id,
+                remaining_need,
+                &mut cash,
+                &mut stock,
+                &mut lines,
+            )?;
+            food_acquired = food_acquired.saturating_add(quantity);
+        }
         let (charcoal_need, cloth_need, tools_need) =
             household_secondary_needs(household.social_class());
         for (good_id, need) in [
-            (bread_id, household.bread_need_daily),
             (ale_id, household.ale_need_daily),
             (charcoal_id, charcoal_need),
             (cloth_id, cloth_need),
             (tools_id, tools_need),
         ] {
-            let quote = state
-                .market
-                .quotes
-                .get(&good_id)
-                .ok_or(SimulationError::MarketQuoteMissing { good_id })?;
-            let available = stock.get(&good_id).copied().unwrap_or(Quantity::ZERO);
-            let quantity = need
-                .min(available)
-                .min(affordable_quantity(cash, quote.price));
-            if quantity.is_zero() {
-                continue;
-            }
-            let cost = cost_for(quantity, quote.price);
-            stock.insert(good_id, available.saturating_sub(quantity));
-            cash = cash.saturating_sub(cost);
-            if good_id == bread_id {
-                bread_acquired = quantity;
-            }
-            lines.push(HouseholdPurchaseLine {
-                household_id: household.id(),
+            plan_household_purchase(
+                state,
+                household.id(),
                 good_id,
-                quantity,
-                cost,
-            });
+                need,
+                &mut cash,
+                &mut stock,
+                &mut lines,
+            )?;
         }
 
         let daily_satisfaction = if household.bread_need_daily.is_zero() {
             10_000
         } else {
             u16::try_from(
-                bread_acquired.milliunits().saturating_mul(10_000)
+                food_acquired.milliunits().saturating_mul(10_000)
                     / household.bread_need_daily.milliunits(),
             )
             .unwrap_or(10_000)
@@ -784,6 +790,39 @@ fn decide_household_consumption(
         lines,
         food_satisfaction,
     })
+}
+
+fn plan_household_purchase(
+    state: &AppState,
+    household_id: crate::ids::HouseholdId,
+    good_id: GoodId,
+    need: Quantity,
+    cash: &mut Money,
+    stock: &mut BTreeMap<GoodId, Quantity>,
+    lines: &mut Vec<HouseholdPurchaseLine>,
+) -> Result<Quantity, SimulationError> {
+    let quote = state
+        .market
+        .quotes
+        .get(&good_id)
+        .ok_or(SimulationError::MarketQuoteMissing { good_id })?;
+    let available = stock.get(&good_id).copied().unwrap_or(Quantity::ZERO);
+    let quantity = need
+        .min(available)
+        .min(affordable_quantity(*cash, quote.price));
+    if quantity.is_zero() {
+        return Ok(Quantity::ZERO);
+    }
+    let cost = cost_for(quantity, quote.price);
+    stock.insert(good_id, available.saturating_sub(quantity));
+    *cash = cash.saturating_sub(cost);
+    lines.push(HouseholdPurchaseLine {
+        household_id,
+        good_id,
+        quantity,
+        cost,
+    });
+    Ok(quantity)
 }
 
 fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, Quantity) {
@@ -1194,6 +1233,11 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
         snapshots
     {
         if prior_status == BusinessStatus::Closed {
+            super::synchronize_employment_for_business_status(
+                state,
+                business_id,
+                BusinessStatus::Closed,
+            );
             continue;
         }
         let recipe = registry
@@ -1208,16 +1252,16 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
         } else {
             BusinessStatus::Active
         };
-        if new_status == prior_status {
-            continue;
+        if new_status != prior_status {
+            state
+                .businesses
+                .get_mut(business_id)
+                .expect("lifecycle business must exist")
+                .operations
+                .status = new_status;
+            events.push((business_id, prior_status, new_status));
         }
-        state
-            .businesses
-            .get_mut(business_id)
-            .expect("lifecycle business must exist")
-            .operations
-            .status = new_status;
-        events.push((business_id, prior_status, new_status));
+        super::synchronize_employment_for_business_status(state, business_id, new_status);
     }
 
     for (business_id, prior_status, new_status) in events {
@@ -1313,6 +1357,9 @@ fn update_character_health(state: &mut AppState) {
 }
 
 fn resolve_annual_health(current: u16, age_years: i64, epidemic_severity: u16) -> u16 {
+    if current == 0 {
+        return 0;
+    }
     let age_delta = match age_years {
         ..=39 => 100,
         40..=54 => -100,
@@ -1400,7 +1447,8 @@ fn decide_successions(state: &mut AppState) -> Vec<SuccessionLine> {
             .expect("dynasty head reference must be valid");
         let age_days = state.clock.day().saturating_sub(head.birth_day());
         let age_years = age_days / 360;
-        if age_years < 55 {
+        let health_forces_succession = head.runtime.health_basis_points == 0;
+        if age_years < 55 && !health_forces_succession {
             continue;
         }
         let annual_chance = succession_chance_basis_points(
@@ -1408,7 +1456,7 @@ fn decide_successions(state: &mut AppState) -> Vec<SuccessionLine> {
             succession_risk_basis_points,
             head.runtime.health_basis_points,
         );
-        if !state.rng.is_chance_success(annual_chance) {
+        if !health_forces_succession && !state.rng.is_chance_success(annual_chance) {
             continue;
         }
         let next_generation = generation.saturating_add(1);

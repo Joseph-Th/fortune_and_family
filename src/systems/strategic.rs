@@ -129,6 +129,8 @@ enum ObjectiveProgress {
     Achieved,
 }
 
+const AI_OBJECTIVE_REVIEW_DAYS: i64 = 720;
+
 impl ObjectiveProgress {
     const fn from_achieved(achieved: bool) -> Self {
         if achieved {
@@ -769,6 +771,7 @@ fn commit_business_acquisition(
     business.finance.cash = business.finance.cash.saturating_add(recapitalization);
     business.finance.version = business.finance.version.saturating_add(1);
     business.operations.status = BusinessStatus::Active;
+    super::synchronize_employment_for_business_status(state, business_id, BusinessStatus::Active);
 
     record_business_acquisition(state, buyer_dynasty_id, manager_id, recapitalization, quote);
 }
@@ -1235,6 +1238,13 @@ fn initialize_loans(state: &mut AppState) {
 }
 
 fn initialize_objectives(state: &mut AppState) {
+    const INITIAL_OBJECTIVE_ROTATION: [ObjectiveKind; 5] = [
+        ObjectiveKind::AcquireProperty,
+        ObjectiveKind::WinOffice,
+        ObjectiveKind::SecureSupply,
+        ObjectiveKind::ImproveLegitimacy,
+        ObjectiveKind::AccumulateCash,
+    ];
     let dynasty_ids: Vec<_> = state
         .dynasties
         .keys()
@@ -1242,13 +1252,7 @@ fn initialize_objectives(state: &mut AppState) {
         .filter(|id| *id != state.player_dynasty_id)
         .collect();
     for (index, dynasty_id) in dynasty_ids.into_iter().enumerate() {
-        let kind = match index % 5 {
-            0 => ObjectiveKind::AcquireProperty,
-            1 => ObjectiveKind::WinOffice,
-            2 => ObjectiveKind::SecureSupply,
-            3 => ObjectiveKind::ImproveLegitimacy,
-            _ => ObjectiveKind::AccumulateCash,
-        };
+        let kind = INITIAL_OBJECTIVE_ROTATION[index % INITIAL_OBJECTIVE_ROTATION.len()];
         let id = state.next_ids.objective();
         state.ai_objectives.insert(
             id,
@@ -2666,6 +2670,12 @@ fn resolve_institution_selections(state: &mut AppState) {
             .iter()
             .filter_map(|character_id| state.characters.get(*character_id))
             .filter(|character| character.status() == crate::core::CharacterStatus::Active)
+            .filter(|character| {
+                !state.institutions.values().any(|other| {
+                    other.institution_id != institution_id
+                        && other.office_holder_id == Some(character.id())
+                })
+            })
             .map(|character| {
                 let dynasty = state
                     .dynasties
@@ -2716,13 +2726,21 @@ fn resolve_institution_selections(state: &mut AppState) {
 }
 
 fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
+    let day = state.clock.day();
     let objectives: Vec<_> = state
         .ai_objectives
         .values()
         .filter(|objective| objective.status == ObjectiveStatus::Pursuing)
-        .map(|objective| (objective.id, objective.dynasty_id, objective.kind))
+        .map(|objective| {
+            (
+                objective.id,
+                objective.dynasty_id,
+                objective.kind,
+                objective.created_day,
+            )
+        })
         .collect();
-    for (objective_id, dynasty_id, kind) in objectives {
+    for (objective_id, dynasty_id, kind, created_day) in objectives {
         let progress = match kind {
             ObjectiveKind::AcquireProperty => advance_ai_property_objective(state, dynasty_id),
             ObjectiveKind::WinOffice => advance_ai_office_objective(state, dynasty_id),
@@ -2737,13 +2755,35 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
             ),
             ObjectiveKind::ContainRival => advance_ai_rival_objective(state, dynasty_id),
         };
-        if progress == ObjectiveProgress::Achieved {
+        let terminal_status = match progress {
+            ObjectiveProgress::Achieved => Some(ObjectiveStatus::Achieved),
+            ObjectiveProgress::Pending => (day.saturating_sub(created_day)
+                >= AI_OBJECTIVE_REVIEW_DAYS)
+                .then_some(ObjectiveStatus::Abandoned),
+        };
+        if let Some(terminal_status) = terminal_status {
             let objective = state
                 .ai_objectives
                 .get_mut(&objective_id)
                 .expect("AI objective must exist");
-            objective.status = ObjectiveStatus::Achieved;
+            objective.status = terminal_status;
+            if terminal_status == ObjectiveStatus::Abandoned {
+                objective.rationale.push_str(
+                    " The house abandoned this route after two years without decisive progress.",
+                );
+            }
             let new_id = state.next_ids.objective();
+            let rationale = match terminal_status {
+                ObjectiveStatus::Achieved => {
+                    "The prior objective was completed; the house selected the next strongest route to durable power."
+                }
+                ObjectiveStatus::Abandoned => {
+                    "The prior objective stalled; the house redirected resources toward a more viable route to durable power."
+                }
+                ObjectiveStatus::Planned | ObjectiveStatus::Pursuing => {
+                    unreachable!("only terminal objectives are replaced")
+                }
+            };
             state.ai_objectives.insert(
                 new_id,
                 AiObjective {
@@ -2752,9 +2792,9 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
                     kind: next_objective_kind(kind),
                     target_dynasty_id: Some(state.player_dynasty_id),
                     priority: 50,
-                    created_day: state.clock.day(),
+                    created_day: day,
                     status: ObjectiveStatus::Pursuing,
-                    rationale: "The prior objective was completed; the house selected the next strongest route to durable power.".to_owned(),
+                    rationale: rationale.to_owned(),
                 },
             );
         }
@@ -3499,6 +3539,7 @@ fn update_family_councils(state: &mut AppState) {
         })
         .collect();
 
+    let mut governance_changes = Vec::new();
     for (dynasty_id, loyalty_adjustment) in loyalty_adjustments {
         let council = state
             .family_councils
@@ -3524,9 +3565,29 @@ fn update_family_councils(state: &mut AppState) {
         if council.unity_basis_points < 3_000
             && council.governance == HouseGovernance::Primogeniture
         {
+            let prior = council.governance;
             council.governance = HouseGovernance::FamilyPartnership;
             council.charter_version = council.charter_version.saturating_add(1);
+            governance_changes.push((dynasty_id, prior, council.governance));
         }
+    }
+    for (dynasty_id, prior, governance) in governance_changes {
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::HouseGovernanceChange,
+            subject: format!("dynasty:{dynasty_id}"),
+            detail: format!(
+                "automatic=true;from={prior:?};governance={governance:?};reason=low_unity"
+            ),
+        });
+        push_outbox(
+            state,
+            OutboxKind::Family,
+            format!("House {dynasty_id} charter changed under pressure"),
+            format!(
+                "Low family unity forced a transition from {prior:?} to {governance:?} governance."
+            ),
+        );
     }
 }
 

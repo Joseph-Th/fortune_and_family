@@ -54,9 +54,9 @@ The same seed, state, inputs, and commands produce the same result.
 
 ## Persistence
 
-Campaigns are stored as human-readable JSON. Schema version 4 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation. Saves are serialized to a same-directory temporary file, synchronized, and atomically persisted over the destination so an interrupted write does not truncate the previous campaign.
+Campaigns are stored as human-readable JSON. Schema version 5 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation. Version 4 saves migrate deterministically by retaining at most one office per character. Saves are serialized to a same-directory temporary file, synchronized, and atomically persisted over the destination so an interrupted write does not truncate the previous campaign.
 
-Explicit migrations are provided for schema versions 0, 1, 2, and 3. Version 1 Rivergate saves are deterministically hydrated with strategic records, version 2 saves consolidate institution runtime and remove redundant staffing fields, and version 3 saves remove the unused parallel business-debt aggregate in favor of explicit loan records.
+Explicit migrations are provided for schema versions 0 through 4. Version 1 Rivergate saves are deterministically hydrated with strategic records, version 2 saves consolidate institution runtime and remove redundant staffing fields, version 3 saves remove the unused parallel business-debt aggregate in favor of explicit loan records, and version 4 saves resolve duplicate simultaneous officeholders in stable institution order.
 
 ## CLI
 
@@ -161,6 +161,7 @@ The crate exposes:
 cargo fmt --all -- --check
 cargo check --all-targets --locked
 bash scripts/test.sh fast
+cargo test --quiet --locked --doc
 bash scripts/test.sh soak
 cargo clippy --all-targets --all-features --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked

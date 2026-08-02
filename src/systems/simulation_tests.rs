@@ -93,6 +93,56 @@ mod inventory_policy {
     use super::*;
 
     #[test]
+    #[should_panic(expected = "inventory additions must not be negative")]
+    fn negative_inventory_additions_are_rejected() {
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let good_id = state
+            .market
+            .quotes
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain a market good");
+
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("business must exist")
+            .add_inventory(good_id, Quantity::from_units(-1));
+    }
+
+    #[test]
+    #[should_panic(expected = "inventory removals must not be negative")]
+    fn negative_inventory_removals_are_rejected() {
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let good_id = state
+            .market
+            .quotes
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain a market good");
+
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("business must exist")
+            .remove_inventory(good_id, Quantity::from_units(-1));
+    }
+
+    #[test]
     fn output_reserve_scales_with_daily_capacity() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -338,6 +388,86 @@ mod household_demand {
     use super::*;
 
     #[test]
+    fn households_use_upstream_staples_when_bread_is_unavailable() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let bread_id = registry
+            .get_good_id("bread")
+            .expect("registry must define bread");
+        let flour_id = registry
+            .get_good_id("flour")
+            .expect("registry must define flour");
+        let grain_id = registry
+            .get_good_id("grain")
+            .expect("registry must define grain");
+        for household in state.households.iter_mut() {
+            household.cash = Money::from_copper(100_000);
+        }
+        for quote in state.market.quotes.values_mut() {
+            quote.stock = Quantity::ZERO;
+        }
+        state
+            .market
+            .quotes
+            .get_mut(&flour_id)
+            .expect("flour quote must exist")
+            .stock = Quantity::from_units(10_000);
+        state
+            .market
+            .quotes
+            .get_mut(&grain_id)
+            .expect("grain quote must exist")
+            .stock = Quantity::from_units(10_000);
+
+        let plan =
+            decide_household_consumption(registry, &state).expect("household demand must resolve");
+
+        assert!(plan.lines.iter().all(|line| line.good_id != bread_id));
+        assert!(
+            plan.lines
+                .iter()
+                .any(|line| line.good_id == flour_id || line.good_id == grain_id),
+            "households must consume available upstream staples instead of starving"
+        );
+        assert!(plan.food_satisfaction.iter().all(|(household_id, value)| {
+            *value
+                > state
+                    .households
+                    .get(*household_id)
+                    .expect("planned household must exist")
+                    .food_satisfaction_basis_points()
+        }));
+    }
+
+    #[test]
+    fn households_prefer_bread_before_upstream_staples() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let flour_id = registry
+            .get_good_id("flour")
+            .expect("registry must define flour");
+        let grain_id = registry
+            .get_good_id("grain")
+            .expect("registry must define grain");
+        for household in state.households.iter_mut() {
+            household.cash = Money::from_copper(100_000);
+        }
+        for quote in state.market.quotes.values_mut() {
+            quote.stock = Quantity::from_units(10_000);
+        }
+
+        let plan =
+            decide_household_consumption(registry, &state).expect("household demand must resolve");
+
+        assert!(
+            plan.lines
+                .iter()
+                .all(|line| line.good_id != flour_id && line.good_id != grain_id),
+            "upstream staples must remain a fallback rather than displacing available bread"
+        );
+    }
+
+    #[test]
     fn households_create_demand_for_nonfood_consumer_goods() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -540,6 +670,46 @@ mod business_lifecycle {
     use super::*;
 
     #[test]
+    fn insolvency_suspends_attached_employment() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.operations.status = BusinessStatus::Active;
+            business.finance.cash = Money::ZERO;
+            business.inventory.clear();
+        }
+
+        update_business_lifecycle(registry, &mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .status(),
+            BusinessStatus::Insolvent
+        );
+        assert!(
+            state
+                .employment
+                .values()
+                .filter(|agreement| agreement.business_id == business_id)
+                .all(|agreement| agreement.status == EmploymentStatus::Suspended),
+            "inactive employers must not retain active or disputed labor agreements"
+        );
+    }
+
+    #[test]
     fn cash_locked_in_policy_reserve_counts_as_distress() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -621,6 +791,13 @@ mod business_lifecycle {
             business.operations.status = BusinessStatus::Insolvent;
             business.finance.cash = Money::from_copper(100_000);
         }
+        for agreement in state
+            .employment
+            .values_mut()
+            .filter(|agreement| agreement.business_id == business_id)
+        {
+            agreement.status = EmploymentStatus::Suspended;
+        }
         let chronicle_before = state.chronicle.len();
 
         update_business_lifecycle(registry, &mut state);
@@ -634,6 +811,14 @@ mod business_lifecycle {
             BusinessStatus::Active
         );
         assert_eq!(state.chronicle.len(), chronicle_before + 1);
+        assert!(
+            state
+                .employment
+                .values()
+                .filter(|agreement| agreement.business_id == business_id)
+                .all(|agreement| agreement.status == EmploymentStatus::Disputed),
+            "reopening after insolvency must preserve labor consequences instead of resetting loyalty"
+        );
         assert_eq!(
             state
                 .chronicle
@@ -691,7 +876,45 @@ mod health_and_succession {
     use super::*;
 
     #[test]
+    fn zero_health_forces_succession_before_normal_retirement_age() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let head_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let age_years = state.clock.day().saturating_sub(
+            state
+                .characters
+                .get(head_id)
+                .expect("dynasty head must exist")
+                .birth_day(),
+        ) / 360;
+        assert!(age_years < 55, "fixture head must be younger than 55");
+        state
+            .characters
+            .get_mut(head_id)
+            .expect("dynasty head must exist")
+            .runtime
+            .health_basis_points = 0;
+
+        let successions = decide_successions(&mut state);
+
+        assert!(
+            successions
+                .iter()
+                .any(|line| { line.dynasty_id == dynasty_id && line.outgoing_head_id == head_id })
+        );
+    }
+
+    #[test]
     fn annual_health_reflects_age_and_epidemic_pressure() {
+        assert_eq!(
+            resolve_annual_health(0, 30, 0),
+            0,
+            "zero health must be terminal rather than recovering automatically"
+        );
         assert_eq!(
             resolve_annual_health(9_000, 30, 0),
             9_100,

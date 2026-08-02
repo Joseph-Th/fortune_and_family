@@ -95,12 +95,14 @@ This is a deterministic intervention test. It does not prove philosophical causa
 
 ## Report measures
 
-The human report is compact enough for CI logs. The JSON report retains all campaign statistics and representative traces. It includes a top-level `schema_version` so automated consumers can reject incompatible report contracts explicitly. Schema version 4 adds trajectory-level office attainment so a completed political term is not lost merely because another dynasty holds office on the final simulated day.
+The human report is compact enough for CI logs. The JSON report retains all campaign statistics and representative traces. It includes a top-level `schema_version` so automated consumers can reject incompatible report contracts explicitly. Schema version 7 records how many decision cycles offered each command family, separates persistent consequences from newly delayed consequences, tracks building and peak unfinished public works, separates player-involved contract outcomes from ambient city contracts, records available offices so universal political capture can be detected explicitly, and measures minimum food satisfaction only after simulation begins so the authored starting value cannot mask trajectory changes. This prevents short horizons from misclassifying event-dependent commands as broken, makes slow durable actions visible, and keeps economic, political, and household findings tied to the player-facing loop.
 
 ### Actionability
 
-The share of decision cycles with at least one substantive command that passes canonical validation.
-Notification acknowledgement is excluded from this measure.
+The share of cycles with at least one substantive candidate in which a substantive command passes
+canonical validation. Cycles where no substantive route is offered because systems are on deliberate
+cooldowns are recorded as quiet rather than inaccessible. Cycles with substantive candidates but no
+viable action are recorded as blocked. Notification acknowledgement is excluded from this measure.
 
 ### Variety
 
@@ -137,7 +139,7 @@ A weighted summary of actionability, variety, interconnection, feedback, and res
 
 The harness emits explicit findings for conditions such as:
 
-- A command family has no reachable candidate.
+- A command family is never offered during the configured horizon, is offered but never probed, is always rejected, or is viable but never selected.
 - Candidates exist but canonical validation always rejects them.
 - A viable command is never selected by any configured persona.
 - A command executes without an observed domain consequence.
@@ -147,10 +149,14 @@ The harness emits explicit findings for conditions such as:
 - Any campaign falls below 10% food satisfaction, food access collapses broadly, contracts breach more often than they complete, credit defaults outnumber
   repayments, or labor disputes dominate active employment.
 - Notification volume becomes unusable or crisis responses crowd out strategic play.
+- Public works accumulate faster than the civic treasury can complete them.
 - Raw choice counts hide a low number of distinct viable command families.
 - Experience scores vary sharply by background, persona, or seed.
 
-The command table separates generated, probed, viable, selected, and rejected choices. This distinguishes a missing gameplay route from a probe-budget or ranking problem, and distinguishes both from canonical validation barriers.
+Command and domain absence is evaluated against days per campaign, not total days across the matrix.
+Event-dependent systems remain informational until their normal activation horizon has elapsed.
+
+The command table separates cycles in which a family was offered, generated variants, probed variants, viable variants, selected actions, persistent consequences, and newly delayed consequences. Campaign and aggregate records also separate quiet cycles from blocked cycles. This distinguishes a command that simply did not become relevant in a short run, or a deliberate waiting period, from a probe-budget, validation, ranking, or consequence-attribution problem.
 
 Rejection counts are retained because blocked choices are part of the player experience. Repeated insufficient-funds failures, unchanged-policy requests, or inaccessible targets can indicate pacing, discoverability, or candidate-quality problems.
 
@@ -181,7 +187,7 @@ Use a release build for broad or multi-seed analysis. Focused debug runs remain 
 
 A harness finding is evidence, not an automatic design verdict.
 
-- No candidate may mean the game truly lacks a route to that action, or the candidate generator does not understand the route yet.
+- A command not exercised in a short run is informational when it was never offered. Event-dependent actions should become warnings or critical findings only after the world exposes their prerequisites or generated candidates fail validation or selection.
 - High rejection rates may reveal meaningful constraints, poor pacing, or low-quality candidate generation.
 - Business distress may be intended pressure, but insolvency across most personas and starts usually
   indicates weak recovery tools or a harsh opening economy.

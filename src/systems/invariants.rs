@@ -401,6 +401,7 @@ fn validate_institutions(state: &AppState, ids: &RegistryIds) {
         ids.institutions.len(),
         "Registry Reference Validity: runtime institutions must match registry definitions"
     );
+    let mut officeholders = BTreeSet::new();
     for (institution_id, institution) in &state.institutions {
         debug_assert_eq!(
             *institution_id, institution.institution_id,
@@ -438,6 +439,10 @@ fn validate_institutions(state: &AppState, ids: &RegistryIds) {
                     .get(holder_id)
                     .is_some_and(|character| { character.status() == CharacterStatus::Active }),
                 "Lifecycle Validity: institution office holder must exist and be active"
+            );
+            debug_assert!(
+                officeholders.insert(holder_id),
+                "Ownership Exclusivity: a character cannot hold multiple offices simultaneously"
             );
         }
     }

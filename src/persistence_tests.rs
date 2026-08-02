@@ -225,6 +225,73 @@ mod migrations {
     }
 
     #[test]
+    fn v4_resolves_duplicate_officeholders_deterministically() {
+        let state = make_test_campaign();
+        let holder_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let object = value.as_object_mut().expect("state JSON must be an object");
+        object.insert("schema_version".to_owned(), Value::from(4));
+        let institutions = object
+            .get_mut("institutions")
+            .and_then(Value::as_object_mut)
+            .expect("institutions must be an object");
+        let mut ordered: Vec<_> = institutions
+            .iter()
+            .map(|(key, institution)| {
+                (
+                    institution["institution_id"]
+                        .as_u64()
+                        .expect("institution ID must be numeric"),
+                    key.clone(),
+                )
+            })
+            .collect();
+        ordered.sort_unstable();
+        let selected = &ordered[..2];
+        for (_, key) in selected {
+            let institution = institutions
+                .get_mut(key)
+                .and_then(Value::as_object_mut)
+                .expect("selected institution must remain present");
+            institution.insert(
+                "office_holder_id".to_owned(),
+                Value::from(holder_id.value()),
+            );
+            let members = institution
+                .get_mut("members")
+                .and_then(Value::as_array_mut)
+                .expect("institution members must be an array");
+            if !members
+                .iter()
+                .any(|member| member == &Value::from(holder_id.value()))
+            {
+                members.push(Value::from(holder_id.value()));
+            }
+        }
+
+        let migrated =
+            migrate_to_current(value, Path::new("memory.json")).expect("version four must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        let retained: Vec<_> = loaded
+            .institutions
+            .iter()
+            .filter_map(|(institution_id, institution)| {
+                (institution.office_holder_id == Some(holder_id)).then_some(*institution_id)
+            })
+            .collect();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(u64::from(retained[0].value()), selected[0].0);
+        validate_state(&loaded).expect("migrated office ownership must be valid");
+    }
+
+    #[test]
     fn v1_hydrates_strategic_state() {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
@@ -298,6 +365,36 @@ mod migrations {
 
 mod validation {
     use super::*;
+
+    #[test]
+    fn save_rejects_invalid_state_before_creating_files() {
+        let mut state = make_test_campaign();
+        state
+            .businesses
+            .iter_mut()
+            .next()
+            .expect("campaign must contain a business")
+            .finance
+            .cash = Money::from_copper(-1);
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let parent = directory.path().join("nested");
+        let path = parent.join("invalid.json");
+
+        let result = save_state(&path, &state);
+
+        match result {
+            Err(PersistenceError::InvalidState { kind, reason, .. }) => {
+                assert_eq!(kind, StateValidationKind::NumericRanges);
+                assert!(reason.contains("invalid economic value"));
+            }
+            Err(error) => panic!("expected invalid-state error, got {error:?}"),
+            Ok(()) => panic!("invalid in-memory state unexpectedly saved"),
+        }
+        assert!(
+            !parent.exists(),
+            "validation must run before persistence creates directories or files"
+        );
+    }
 
     #[test]
     fn rejects_missing_player_dynasty_reference() {

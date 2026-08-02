@@ -94,10 +94,15 @@ impl StateValidationError {
 ///
 /// # Errors
 ///
-/// Returns an error when the parent directory or temporary file cannot be created, serialization
-/// fails, or the destination cannot be atomically replaced.
+/// Returns an error when state validation fails, the parent directory or temporary file cannot be
+/// created, serialization fails, or the destination cannot be atomically replaced.
 pub fn save_state(path: impl AsRef<Path>, state: &AppState) -> Result<(), PersistenceError> {
     let path = path.as_ref();
+    validate_state(state).map_err(|error| PersistenceError::InvalidState {
+        path: path.to_path_buf(),
+        kind: error.kind,
+        reason: error.reason,
+    })?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -169,7 +174,7 @@ pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> 
     if let Some(officeholders) = legacy_officeholders {
         restore_legacy_officeholders(&mut state, officeholders);
     }
-    validate_loaded_state(&state).map_err(|error| PersistenceError::InvalidState {
+    validate_state(&state).map_err(|error| PersistenceError::InvalidState {
         path: path.to_path_buf(),
         kind: error.kind,
         reason: error.reason,
@@ -226,8 +231,11 @@ fn restore_legacy_officeholders(
     state: &mut AppState,
     officeholders: BTreeMap<crate::ids::InstitutionId, Option<crate::ids::CharacterId>>,
 ) {
+    let mut retained_officeholders = BTreeSet::new();
     for (institution_id, office_holder_id) in officeholders {
         if let Some(institution) = state.institutions.get_mut(&institution_id) {
+            let office_holder_id = office_holder_id
+                .filter(|character_id| retained_officeholders.insert(*character_id));
             if let Some(character_id) = office_holder_id {
                 institution.members.insert(character_id);
             }
@@ -236,7 +244,7 @@ fn restore_legacy_officeholders(
     }
 }
 
-fn validate_loaded_state(state: &AppState) -> Result<(), StateValidationError> {
+fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     if state.schema_version != CURRENT_SCHEMA_VERSION {
         return Err(StateValidationError::new(
             StateValidationKind::Schema,
@@ -968,6 +976,7 @@ fn validate_family_records(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String> {
+    let mut officeholders = BTreeSet::new();
     for (institution_id, institution) in &state.institutions {
         if institution.institution_id != *institution_id
             || institution.members.iter().any(|character_id| {
@@ -984,6 +993,14 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
         {
             return Err(format!(
                 "institution {institution_id} has inconsistent runtime state"
+            ));
+        }
+        if institution
+            .office_holder_id
+            .is_some_and(|holder_id| !officeholders.insert(holder_id))
+        {
+            return Err(format!(
+                "institution {institution_id} duplicates an existing officeholder"
             ));
         }
     }
@@ -1192,6 +1209,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             1 => migrate_v1_to_v2(value)?,
             2 => migrate_v2_to_v3(value)?,
             3 => migrate_v3_to_v4(value)?,
+            4 => migrate_v4_to_v5(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -1356,6 +1374,56 @@ fn migrate_v3_to_v4(mut value: Value) -> Result<Value, PersistenceError> {
         finance.remove("debt");
     }
     object.insert("schema_version".to_owned(), Value::from(4));
+    Ok(value)
+}
+
+fn migrate_v4_to_v5(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 4,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    {
+        let institutions = object
+            .get_mut("institutions")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 4,
+                reason: "save institutions must be an object".to_owned(),
+            })?;
+        let mut ordered_institutions = institutions
+            .iter()
+            .map(|(key, institution)| {
+                let institution_id = institution
+                    .get("institution_id")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| PersistenceError::Migration {
+                        version: 4,
+                        reason: format!("institution {key} has an invalid institution_id"),
+                    })?;
+                Ok((institution_id, key.clone()))
+            })
+            .collect::<Result<Vec<_>, PersistenceError>>()?;
+        ordered_institutions.sort_unstable();
+        let mut retained_officeholders = BTreeSet::new();
+        for (_, key) in ordered_institutions {
+            let institution = institutions
+                .get_mut(&key)
+                .and_then(Value::as_object_mut)
+                .expect("collected institution key must remain present");
+            let duplicate = institution
+                .get("office_holder_id")
+                .filter(|holder| !holder.is_null())
+                .and_then(Value::as_u64)
+                .is_some_and(|holder_id| !retained_officeholders.insert(holder_id));
+            if duplicate {
+                institution.insert("office_holder_id".to_owned(), Value::Null);
+            }
+        }
+    }
+    object.insert("schema_version".to_owned(), Value::from(5));
     Ok(value)
 }
 

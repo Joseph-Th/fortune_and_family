@@ -436,12 +436,17 @@ impl RegistryBuilder {
             "recipe {key} has negative operating cost"
         );
         let id = RecipeId::new(u32::try_from(self.recipes.len()).expect("too many recipes"));
+        let mut input_goods = BTreeSet::new();
         let inputs = inputs
             .into_iter()
             .map(|(good_id, quantity)| {
                 assert!(
                     !quantity.is_negative() && !quantity.is_zero(),
                     "recipe {key} has invalid input quantity"
+                );
+                assert!(
+                    input_goods.insert(good_id),
+                    "recipe {key} repeats input good {good_id}"
                 );
                 RecipeInput { good_id, quantity }
             })
@@ -863,6 +868,33 @@ fn register_civic_institutions(builder: &mut RegistryBuilder, districts: Riverga
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "repeats input good")]
+    fn duplicate_recipe_inputs_are_rejected() {
+        let mut builder = RegistryBuilder::new(ScenarioDef {
+            key: "test".to_owned(),
+            name: "Test".to_owned(),
+            start_year: 1,
+        });
+        let good_id = builder.register_good(
+            "input",
+            "Input",
+            GoodCategory::Material,
+            Money::from_copper(1),
+            Quantity::ONE,
+            0,
+        );
+
+        builder.register_recipe(
+            "duplicate",
+            "Duplicate",
+            vec![(good_id, Quantity::ONE), (good_id, Quantity::ONE)],
+            (good_id, Quantity::ONE),
+            Money::ZERO,
+            1,
+        );
+    }
 
     #[test]
     fn rivergate_registry_resolves_every_registered_key() {

@@ -794,6 +794,43 @@ mod family_councils {
     use super::*;
 
     #[test]
+    fn forced_governance_changes_are_audited_and_reported() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        {
+            let council = state
+                .family_councils
+                .get_mut(&dynasty_id)
+                .expect("player family council must exist");
+            council.governance = HouseGovernance::Primogeniture;
+            council.unity_basis_points = 1;
+        }
+        let audit_before = state.audit_log.len();
+        let outbox_before = state.outbox.len();
+
+        update_family_councils(&mut state);
+
+        assert_eq!(
+            state
+                .family_councils
+                .get(&dynasty_id)
+                .expect("player family council must exist")
+                .governance,
+            HouseGovernance::FamilyPartnership
+        );
+        assert_eq!(state.audit_log.len(), audit_before + 1);
+        let record = state.audit_log.last().expect("change must be audited");
+        assert_eq!(record.kind(), AuditKind::HouseGovernanceChange);
+        assert_eq!(record.subject(), format!("dynasty:{dynasty_id}"));
+        assert!(record.detail().contains("automatic=true"));
+        assert_eq!(state.outbox.len(), outbox_before + 1);
+        assert_eq!(
+            state.outbox.last().expect("change must be reported").kind,
+            OutboxKind::Family
+        );
+    }
+
+    #[test]
     fn member_loyalty_affects_annual_council_unity() {
         let state = make_test_campaign();
         let dynasty_id = *state
@@ -1676,6 +1713,65 @@ mod routes {
 
 mod ai {
     use super::*;
+
+    #[test]
+    fn stalled_objectives_are_abandoned_and_replaced() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let objective_id = state
+            .ai_objectives
+            .values()
+            .find(|objective| objective.status == ObjectiveStatus::Pursuing)
+            .expect("campaign must contain a pursuing AI objective")
+            .id;
+        let dynasty_id = state
+            .ai_objectives
+            .get(&objective_id)
+            .expect("objective must exist")
+            .dynasty_id;
+        {
+            let objective = state
+                .ai_objectives
+                .get_mut(&objective_id)
+                .expect("objective must exist");
+            objective.kind = ObjectiveKind::AccumulateCash;
+            objective.created_day = 0;
+        }
+        for objective in state
+            .ai_objectives
+            .values_mut()
+            .filter(|objective| objective.id != objective_id)
+        {
+            objective.status = ObjectiveStatus::Planned;
+        }
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("objective dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        for _ in 0..AI_OBJECTIVE_REVIEW_DAYS {
+            state.clock.advance_one_day();
+        }
+        let objective_count_before = state.ai_objectives.len();
+
+        advance_ai_objectives(registry, &mut state);
+
+        let abandoned = state
+            .ai_objectives
+            .get(&objective_id)
+            .expect("original objective must remain traceable");
+        assert_eq!(abandoned.status, ObjectiveStatus::Abandoned);
+        assert!(abandoned.rationale.contains("abandoned this route"));
+        assert_eq!(state.ai_objectives.len(), objective_count_before + 1);
+        assert!(state.ai_objectives.values().any(|objective| {
+            objective.id != objective_id
+                && objective.dynasty_id == dynasty_id
+                && objective.status == ObjectiveStatus::Pursuing
+                && objective.kind == ObjectiveKind::AcquireProperty
+                && objective.created_day == state.clock.day()
+        }));
+    }
 
     #[test]
     fn debt_repayment_transfers_money_and_releases_collateral() {

@@ -25,6 +25,8 @@ jobs:
         run: cargo check --all-targets --locked
       - name: Fast tests
         run: bash scripts/test.sh fast
+      - name: Documentation tests
+        run: cargo test --quiet --locked --doc
       - name: Soak tests
         run: bash scripts/test.sh soak
       - name: CLI smoke test

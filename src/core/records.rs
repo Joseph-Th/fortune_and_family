@@ -402,12 +402,26 @@ impl Business {
     }
 
     pub(crate) fn add_inventory(&mut self, good_id: GoodId, quantity: Quantity) {
+        assert!(
+            !quantity.is_negative(),
+            "inventory additions must not be negative"
+        );
+        if quantity.is_zero() {
+            return;
+        }
         let current = self.inventory_quantity(good_id);
         self.inventory
             .insert(good_id, current.saturating_add(quantity));
     }
 
     pub(crate) fn remove_inventory(&mut self, good_id: GoodId, quantity: Quantity) {
+        assert!(
+            !quantity.is_negative(),
+            "inventory removals must not be negative"
+        );
+        if quantity.is_zero() {
+            return;
+        }
         let current = self.inventory_quantity(good_id);
         assert!(
             current >= quantity,
@@ -549,6 +563,7 @@ pub enum AuditKind {
     BusinessPolicyChange,
     BusinessAcquisition,
     BusinessDividend,
+    PublicWorkStarted,
     CrisisResponse,
     OfficeNomination,
     HouseGovernanceChange,

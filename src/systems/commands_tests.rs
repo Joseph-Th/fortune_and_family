@@ -39,6 +39,151 @@ mod validation {
             "a rejected command must not partially mutate campaign state",
         );
     }
+
+    #[test]
+    fn rejects_duplicate_unfinished_public_work_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let existing = state
+            .public_works
+            .values()
+            .find(|work| {
+                matches!(
+                    work.status,
+                    PublicWorkStatus::Building | PublicWorkStatus::Suspended
+                )
+            })
+            .expect("campaign must contain an unfinished public work");
+        let command = PlayerCommand::StartPublicWork {
+            district_id: existing.district_id,
+            kind: existing.kind,
+            budget: Money::from_copper(10_000),
+        };
+        let expected = Err(CommandError::DuplicateActivePublicWork {
+            district_id: existing.district_id,
+            kind: existing.kind,
+        });
+        let before = state.clone();
+
+        let result = apply_player_command(registry, &mut state, command);
+
+        assert_eq!(result, expected);
+        assert_state_unchanged(
+            &before,
+            &state,
+            "duplicate public works must be rejected before charging the sponsor",
+        );
+    }
+
+    #[test]
+    fn enforces_public_work_sponsorship_interval_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let mut districts = registry
+            .districts()
+            .iter()
+            .map(crate::registry::DistrictDef::id);
+        let first_district = districts.next().expect("registry must contain a district");
+        let second_district = districts
+            .nth(1)
+            .expect("registry must contain several districts");
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::StartPublicWork {
+                district_id: first_district,
+                kind: PublicWorkKind::Bridge,
+                budget: Money::from_copper(10_000),
+            },
+        )
+        .expect("first public work must succeed");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::StartPublicWork {
+                district_id: second_district,
+                kind: PublicWorkKind::Market,
+                budget: Money::from_copper(10_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::PublicWorkCooldown {
+                next_start_day: PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "public-work cooldown failures must not charge funds or create records",
+        );
+    }
+
+    #[test]
+    fn rejects_public_work_above_sponsored_capacity_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let district_ids: Vec<_> = registry
+            .districts()
+            .iter()
+            .map(crate::registry::DistrictDef::id)
+            .collect();
+        for (index, district_id) in district_ids
+            .iter()
+            .copied()
+            .take(MAX_ACTIVE_SPONSORED_PUBLIC_WORKS)
+            .enumerate()
+        {
+            let id = state.next_ids.public_work();
+            state.public_works.insert(
+                id,
+                PublicWork {
+                    id,
+                    district_id,
+                    kind: if index == 0 {
+                        PublicWorkKind::Bridge
+                    } else {
+                        PublicWorkKind::Market
+                    },
+                    sponsor_dynasty_id: Some(state.player_dynasty_id),
+                    budget: Money::from_copper(10_000),
+                    spent: Money::from_copper(1_000),
+                    progress_basis_points: 1_000,
+                    status: PublicWorkStatus::Building,
+                },
+            );
+        }
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::StartPublicWork {
+                district_id: *district_ids
+                    .last()
+                    .expect("registry must contain districts"),
+                kind: PublicWorkKind::School,
+                budget: Money::from_copper(10_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::PublicWorkCapacity {
+                active: MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+                maximum: MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "public-work capacity failures must not charge funds or create records",
+        );
+    }
+
     #[test]
     fn rejects_unchanged_business_policy_without_version_mutation() {
         let registry = rivergate_registry_for_test();
@@ -224,6 +369,13 @@ mod business_acquisition {
     #[test]
     fn acquires_and_recapitalizes_distressed_business() {
         let (registry, mut state, business_id, manager_id, quote) = acquisition_fixture();
+        for agreement in state
+            .employment
+            .values_mut()
+            .filter(|agreement| agreement.business_id == business_id)
+        {
+            agreement.status = crate::core::EmploymentStatus::Suspended;
+        }
         let buyer_id = state.player_dynasty_id;
         let buyer_before = state
             .dynasties
@@ -256,6 +408,14 @@ mod business_acquisition {
         assert_eq!(business.manager_id(), manager_id);
         assert_eq!(business.status(), crate::core::BusinessStatus::Active);
         assert_eq!(business.cash(), quote.minimum_recapitalization);
+        assert!(
+            state
+                .employment
+                .values()
+                .filter(|agreement| agreement.business_id == business_id)
+                .all(|agreement| agreement.status == crate::core::EmploymentStatus::Disputed),
+            "acquisition must reactivate suspended workers through the dispute lifecycle"
+        );
         assert!(
             state
                 .businesses
@@ -656,6 +816,60 @@ mod politics {
     }
 
     #[test]
+    fn current_officeholder_cannot_be_nominated_to_a_second_institution() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        let held_institution_id = state
+            .institutions
+            .keys()
+            .next()
+            .copied()
+            .expect("campaign must contain an institution");
+        state
+            .institutions
+            .get_mut(&held_institution_id)
+            .expect("held institution must exist")
+            .office_holder_id = Some(character_id);
+        let target_institution_id = state
+            .institutions
+            .values()
+            .find(|institution| {
+                institution.institution_id != held_institution_id
+                    && !institution.members.contains(&character_id)
+            })
+            .map(|institution| institution.institution_id)
+            .expect("another institution must accept a nomination attempt");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id: target_institution_id,
+                character_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::NomineeAlreadyHoldsOffice {
+                character_id,
+                institution_id: held_institution_id,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an officeholder cannot campaign for a second simultaneous office",
+        );
+    }
+
+    #[test]
     fn unchanged_house_governance_is_rejected_without_charter_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -871,6 +1085,50 @@ mod notifications {
 
 mod legal_cases {
     use super::*;
+
+    #[test]
+    fn rejects_rapid_repeat_filing_without_charging_cost() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let prior = state
+            .legal_cases
+            .values()
+            .find(|legal_case| legal_case.plaintiff_dynasty_id == state.player_dynasty_id)
+            .expect("campaign must contain a player-filed opening case");
+        let defendant_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| {
+                *dynasty_id != state.player_dynasty_id && *dynasty_id != prior.defendant_dynasty_id
+            })
+            .expect("campaign must contain another nonplayer dynasty");
+        let next_filing_day = prior
+            .filed_day
+            .saturating_add(LEGAL_CASE_FILING_INTERVAL_DAYS);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FileLegalCase {
+                defendant_dynasty_id,
+                kind: LegalCaseKind::Fraud,
+                evidence_basis_points: 7_000,
+                damages: Money::from_copper(4_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::LegalCaseCooldown { next_filing_day })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "legal filing cooldowns must fail before charging the filing cost",
+        );
+    }
 
     #[test]
     fn rejects_duplicate_unresolved_case_without_charging_filing_cost() {

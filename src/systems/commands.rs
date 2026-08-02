@@ -116,6 +116,9 @@ struct BusinessPolicyInput {
 }
 
 pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 90;
+pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 90;
+pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 90;
+pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum CommandError {
@@ -164,6 +167,17 @@ pub enum CommandError {
     },
     #[error("public-work budget must be positive")]
     InvalidPublicWorkBudget,
+    #[error("an unfinished {kind:?} public work already exists in district {district_id}")]
+    DuplicateActivePublicWork {
+        district_id: DistrictId,
+        kind: PublicWorkKind,
+    },
+    #[error("the player dynasty cannot sponsor another public work before day {next_start_day}")]
+    PublicWorkCooldown { next_start_day: i64 },
+    #[error(
+        "the player dynasty already has {active} unfinished public works, the maximum is {maximum}"
+    )]
+    PublicWorkCapacity { active: usize, maximum: usize },
     #[error("legal case cannot target the player dynasty")]
     SameLegalParty,
     #[error("legal evidence or damages are invalid")]
@@ -173,6 +187,8 @@ pub enum CommandError {
         defendant_dynasty_id: DynastyId,
         kind: LegalCaseKind,
     },
+    #[error("the player dynasty cannot file another legal case before day {next_filing_day}")]
+    LegalCaseCooldown { next_filing_day: i64 },
     #[error("family council for dynasty {dynasty_id} does not exist")]
     MissingFamilyCouncil { dynasty_id: DynastyId },
     #[error("house governance is already {governance:?}")]
@@ -188,6 +204,11 @@ pub enum CommandError {
     },
     #[error("character {character_id} is not an active member of the player dynasty")]
     InvalidNominee { character_id: CharacterId },
+    #[error("character {character_id} already holds office in institution {institution_id}")]
+    NomineeAlreadyHoldsOffice {
+        character_id: CharacterId,
+        institution_id: InstitutionId,
+    },
     #[error("crisis {crisis_id} does not exist")]
     MissingCrisis { crisis_id: CrisisId },
     #[error("crisis {crisis_id} is no longer active")]
@@ -591,6 +612,46 @@ fn apply_public_work(
     if budget <= Money::ZERO {
         return Err(CommandError::InvalidPublicWorkBudget);
     }
+    if state.public_works.values().any(|work| {
+        work.district_id == district_id
+            && work.kind == kind
+            && matches!(
+                work.status,
+                PublicWorkStatus::Building | PublicWorkStatus::Suspended
+            )
+    }) {
+        return Err(CommandError::DuplicateActivePublicWork { district_id, kind });
+    }
+    let active_sponsored = state
+        .public_works
+        .values()
+        .filter(|work| {
+            work.sponsor_dynasty_id == Some(state.player_dynasty_id)
+                && matches!(
+                    work.status,
+                    PublicWorkStatus::Building | PublicWorkStatus::Suspended
+                )
+        })
+        .count();
+    if active_sponsored >= MAX_ACTIVE_SPONSORED_PUBLIC_WORKS {
+        return Err(CommandError::PublicWorkCapacity {
+            active: active_sponsored,
+            maximum: MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+        });
+    }
+    let subject = format!("dynasty:{}", state.player_dynasty_id);
+    if let Some(last_start_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::PublicWorkStarted && record.subject() == subject)
+        .map(AuditRecord::day)
+    {
+        let next_start_day = last_start_day.saturating_add(PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS);
+        if state.clock.day() < next_start_day {
+            return Err(CommandError::PublicWorkCooldown { next_start_day });
+        }
+    }
     let contribution = Money::from_copper((budget.copper() / 10).max(1)).min(budget);
     spend_player_treasury(state, contribution)?;
     let progress_basis_points =
@@ -611,6 +672,17 @@ fn apply_public_work(
             status: PublicWorkStatus::Building,
         },
     );
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::PublicWorkStarted,
+        subject,
+        detail: format!(
+            "district={};kind={kind:?};budget={};contribution={}",
+            district_id.value(),
+            budget.copper(),
+            contribution.copper()
+        ),
+    });
     super::strategic::push_outbox(
         state,
         OutboxKind::Politics,
@@ -653,6 +725,18 @@ fn apply_legal_case(
             defendant_dynasty_id,
             kind,
         });
+    }
+    if let Some(last_filing_day) = state
+        .legal_cases
+        .values()
+        .filter(|legal_case| legal_case.plaintiff_dynasty_id == state.player_dynasty_id)
+        .map(|legal_case| legal_case.filed_day)
+        .max()
+    {
+        let next_filing_day = last_filing_day.saturating_add(LEGAL_CASE_FILING_INTERVAL_DAYS);
+        if state.clock.day() < next_filing_day {
+            return Err(CommandError::LegalCaseCooldown { next_filing_day });
+        }
     }
     spend_player_treasury(state, Money::from_copper(300))?;
     let id = state.next_ids.legal_case();
@@ -748,6 +832,17 @@ fn apply_office_nomination(
         || character.status() != crate::core::CharacterStatus::Active
     {
         return Err(CommandError::InvalidNominee { character_id });
+    }
+    if let Some(existing_institution_id) = state
+        .institutions
+        .values()
+        .find(|institution| institution.office_holder_id == Some(character_id))
+        .map(|institution| institution.institution_id)
+    {
+        return Err(CommandError::NomineeAlreadyHoldsOffice {
+            character_id,
+            institution_id: existing_institution_id,
+        });
     }
     let institution = state
         .institutions

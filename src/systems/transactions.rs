@@ -32,7 +32,7 @@ pub enum SimulationError {
     MarketQuoteMissing { good_id: GoodId },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ValidatedCashTransfer {
     from_business_id: BusinessId,
     to_business_id: BusinessId,
@@ -40,18 +40,24 @@ pub struct ValidatedCashTransfer {
 }
 
 impl ValidatedCashTransfer {
-    /// Commits a previously validated two-business cash transfer exactly once.
+    /// Revalidates and commits a previously validated two-business cash transfer exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns the current validation error if application state changed after the token was
+    /// created.
     ///
     /// # Panics
     ///
-    /// Panics only when application state changed after validation and a validated business no
-    /// longer exists.
-    pub fn commit(self, state: &mut AppState) {
+    /// Panics only if a validated business disappears between the internal revalidation and commit
+    /// steps within this synchronous call.
+    pub fn commit(self, state: &mut AppState) -> Result<(), SimulationError> {
         let Self {
             from_business_id,
             to_business_id,
             amount,
         } = self;
+        validate_business_cash_transfer(state, from_business_id, to_business_id, amount)?;
 
         {
             let source = state
@@ -76,6 +82,7 @@ impl ValidatedCashTransfer {
             subject: format!("business:{from_business_id}->business:{to_business_id}"),
             detail: format!("amount={}", amount.copper()),
         });
+        Ok(())
     }
 }
 
@@ -91,13 +98,16 @@ pub fn transfer_business_cash(
     to_business_id: BusinessId,
     amount: Money,
 ) -> Result<(), SimulationError> {
-    let validated =
-        validate_business_cash_transfer(state, from_business_id, to_business_id, amount)?;
-    validated.commit(state);
-    Ok(())
+    validate_business_cash_transfer(state, from_business_id, to_business_id, amount)?.commit(state)
 }
 
-fn validate_business_cash_transfer(
+/// Validates a two-business cash transfer without mutating state.
+///
+/// # Errors
+///
+/// Returns a dedicated error for invalid amounts, missing or inactive businesses, identical
+/// endpoints, or insufficient source cash.
+pub fn validate_business_cash_transfer(
     state: &AppState,
     from_business_id: BusinessId,
     to_business_id: BusinessId,
@@ -188,6 +198,45 @@ mod tests {
             &before,
             &state,
             "failed transfers must not mutate balances, versions, or the audit log",
+        );
+    }
+
+    #[test]
+    fn validated_transfer_rechecks_changed_state_before_commit() {
+        let mut state = make_test_campaign();
+        let (from_business_id, to_business_id) = {
+            let mut businesses = state.businesses().iter().map(crate::core::Business::id);
+            (
+                businesses.next().expect("source business must exist"),
+                businesses.next().expect("target business must exist"),
+            )
+        };
+        let amount = Money::from_copper(1);
+        let token =
+            validate_business_cash_transfer(&state, from_business_id, to_business_id, amount)
+                .expect("initial transfer must validate");
+        state
+            .businesses
+            .get_mut(from_business_id)
+            .expect("source business must exist")
+            .finance
+            .cash = Money::ZERO;
+        let before = state.clone();
+
+        let result = token.commit(&mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::InsufficientBusinessCash {
+                business_id: from_business_id,
+                available: Money::ZERO,
+                required: amount,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "stale validation tokens must fail before mutating either business",
         );
     }
 }
