@@ -1,7 +1,7 @@
 //! JSON persistence adapter with explicit schema migration and contextual errors.
 
 use crate::core::{AppState, CURRENT_SCHEMA_VERSION};
-use crate::ids::BusinessId;
+use crate::ids::{BusinessId, HouseholdId};
 use crate::money::{Money, Quantity};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -861,6 +861,7 @@ fn validate_loan_records(state: &AppState) -> Result<(), String> {
 
 fn validate_employment_records(state: &AppState) -> Result<(), String> {
     let mut workers_by_business = BTreeMap::<BusinessId, u32>::new();
+    let mut workers_by_household = BTreeMap::<HouseholdId, u32>::new();
     for (employment_id, agreement) in &state.employment {
         let business = state.businesses.get(agreement.business_id);
         if agreement.id != *employment_id
@@ -884,6 +885,12 @@ fn validate_employment_records(state: &AppState) -> Result<(), String> {
                     *workers = workers.saturating_add(u32::from(agreement.workers));
                 })
                 .or_insert(u32::from(agreement.workers));
+            workers_by_household
+                .entry(agreement.household_id)
+                .and_modify(|workers| {
+                    *workers = workers.saturating_add(u32::from(agreement.workers));
+                })
+                .or_insert(u32::from(agreement.workers));
         }
     }
     for (business_id, workers) in workers_by_business {
@@ -895,6 +902,18 @@ fn validate_employment_records(state: &AppState) -> Result<(), String> {
         if workers > supported_workers {
             return Err(format!(
                 "business {business_id} employment exceeds operating capacity"
+            ));
+        }
+    }
+    for (household_id, workers) in workers_by_household {
+        let members = state
+            .households
+            .get(household_id)
+            .expect("validated employment household must exist")
+            .members();
+        if workers > u32::from(members) {
+            return Err(format!(
+                "household {household_id} employment exceeds household labor capacity"
             ));
         }
     }
@@ -1058,6 +1077,7 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
             return Err(format!("public work {work_id} has an invalid reference"));
         }
     }
+    let mut active_cases = BTreeSet::new();
     for (case_id, legal_case) in &state.legal_cases {
         if legal_case.id != *case_id
             || legal_case.plaintiff_dynasty_id == legal_case.defendant_dynasty_id
@@ -1076,6 +1096,18 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
             ) && legal_case.hearing_day > state.clock.day())
         {
             return Err(format!("legal case {case_id} has an invalid reference"));
+        }
+        if matches!(
+            legal_case.status,
+            crate::core::LegalCaseStatus::Filed | crate::core::LegalCaseStatus::Hearing
+        ) && !active_cases.insert((
+            legal_case.plaintiff_dynasty_id,
+            legal_case.defendant_dynasty_id,
+            legal_case.kind,
+        )) {
+            return Err(format!(
+                "legal case {case_id} duplicates an unresolved case between the same parties"
+            ));
         }
     }
     for (route_id, route) in &state.external_routes {
@@ -1127,12 +1159,12 @@ fn validate_persisted_history(state: &AppState) -> Result<(), String> {
         }
         prior_chronicle_day = entry.day();
     }
-    if state
-        .audit_log
-        .iter()
-        .any(|record| record.day() > state.clock.day())
-    {
-        return Err("audit log contains a future-dated record".to_owned());
+    let mut prior_audit_day = i64::MIN;
+    for record in &state.audit_log {
+        if record.day() < prior_audit_day || record.day() > state.clock.day() {
+            return Err("audit log is not chronologically valid".to_owned());
+        }
+        prior_audit_day = record.day();
     }
     Ok(())
 }

@@ -555,7 +555,7 @@ fn insert_household_groups(state: &mut AppState, registry: &Registry) {
                 social_class: *social_class,
                 cash: Money::from_copper(4_000 * income_multiplier),
                 weekly_income: Money::from_copper(1_500 * income_multiplier),
-                bread_need_daily: Quantity::from_milliunits(1_200 * income_multiplier.min(2)),
+                bread_need_daily: Quantity::from_milliunits(350 * income_multiplier.min(2)),
                 ale_need_daily: Quantity::from_milliunits(350 * income_multiplier),
                 food_satisfaction_basis_points: 8_000,
             });

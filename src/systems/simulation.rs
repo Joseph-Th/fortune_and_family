@@ -5,11 +5,11 @@ use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
     CharacterCapabilities, CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus,
     ChronicleEntry, ChronicleKind, CrisisKind, EmploymentStatus, FamilyLink, FamilyLinkKind,
-    MarketCause,
+    HouseGovernance, MarketCause, SocialClass,
 };
 use crate::ids::{BusinessId, CharacterId, DynastyId, GoodId};
 use crate::money::{Money, Quantity, affordable_quantity, cost_for};
-use crate::registry::{GoodCategory, Registry};
+use crate::registry::{GoodCategory, RecipeDef, Registry};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
@@ -333,62 +333,11 @@ fn decide_business_production(
         .characters
         .get(business.manager_id())
         .expect("business manager reference must be valid");
-    let dynasty = state
-        .dynasties
-        .get(&business.owner_dynasty_id())
-        .expect("business owner reference must be valid");
-    let administrative_efficiency = if dynasty.administrative_load() == 0
-        || dynasty.administrative_load() <= dynasty.administrative_capacity()
-    {
-        10_000_u16
-    } else {
-        u16::try_from(
-            u32::from(dynasty.administrative_capacity()) * 10_000
-                / u32::from(dynasty.administrative_load()),
-        )
-        .expect("administrative efficiency must fit u16")
-    };
-    let status_efficiency = match business.status() {
-        BusinessStatus::Active => 10_000_u16,
-        BusinessStatus::Distressed => 6_000_u16,
-        BusinessStatus::Insolvent | BusinessStatus::Closed => 0,
-    };
-    let condition_efficiency = business.operations.condition_basis_points.max(2_500);
-    let effective_basis_points = administrative_efficiency
-        .min(status_efficiency)
-        .min(condition_efficiency);
-    let nominal_batches = u32::from(business.operations.capacity_batches_per_day);
-    let mut batches = u16::try_from(nominal_batches * u32::from(effective_basis_points) / 10_000)
-        .expect("effective batches must fit u16")
-        .max(1);
-    let active_workers: u32 = state
-        .employment
-        .values()
-        .filter(|agreement| {
-            agreement.business_id == business.id() && agreement.status == EmploymentStatus::Active
-        })
-        .map(|agreement| u32::from(agreement.workers))
-        .sum();
-    batches = batches.min(
-        u16::try_from(active_workers / u32::from(super::WORKERS_PER_BATCH)).unwrap_or(u16::MAX),
-    );
-    for input in recipe.inputs() {
-        let available = business.inventory_quantity(input.good_id()).milliunits();
-        let per_batch = input.quantity().milliunits();
-        let input_limited = if per_batch == 0 {
-            0
-        } else {
-            available / per_batch
-        };
-        batches = batches.min(u16::try_from(input_limited.max(0)).unwrap_or(u16::MAX));
-    }
-    if recipe.daily_operating_cost().copper() > 0 {
-        let spendable = business
-            .cash()
-            .saturating_sub(business.policy.minimum_cash_reserve);
-        let affordable = spendable.copper() / recipe.daily_operating_cost().copper();
-        batches = batches.min(u16::try_from(affordable.max(0)).unwrap_or(u16::MAX));
-    }
+    let mut batches = effective_capacity_batches(state, business);
+    batches = batches.min(output_limited_batches(state, business, recipe));
+    batches = batches.min(worker_limited_batches(state, business.id()));
+    batches = batches.min(input_limited_batches(business, recipe));
+    batches = batches.min(cash_limited_batches(business, recipe));
     if batches == 0 {
         return None;
     }
@@ -402,7 +351,9 @@ fn decide_business_production(
             )
         })
         .collect();
-    let quality_efficiency = u32::from(business.operations.quality_basis_points.max(4_000));
+    let quality_efficiency = 9_000_u32
+        .saturating_add(u32::from(business.operations.quality_basis_points) / 10)
+        .min(10_000);
     let craft_efficiency = 9_000_u32
         .saturating_add(u32::from(manager.capabilities.craft).saturating_mul(10))
         .min(10_000);
@@ -419,6 +370,141 @@ fn decide_business_production(
             .daily_operating_cost()
             .saturating_mul(i64::from(batches)),
     })
+}
+
+fn effective_capacity_batches(state: &AppState, business: &crate::core::Business) -> u16 {
+    let dynasty = state
+        .dynasties
+        .get(&business.owner_dynasty_id())
+        .expect("business owner reference must be valid");
+    let governance = state
+        .family_councils
+        .get(&dynasty.id())
+        .expect("business owner dynasty must have family governance")
+        .governance;
+    let effective_administrative_capacity = u32::from(dynasty.administrative_capacity())
+        .saturating_mul(governance_administrative_multiplier(governance))
+        / 10_000;
+    let administrative_efficiency = if dynasty.administrative_load() == 0
+        || u32::from(dynasty.administrative_load()) <= effective_administrative_capacity
+    {
+        10_000_u16
+    } else {
+        u16::try_from(
+            effective_administrative_capacity * 10_000 / u32::from(dynasty.administrative_load()),
+        )
+        .expect("administrative efficiency must fit u16")
+    };
+    let status_efficiency = match business.status() {
+        BusinessStatus::Active => 10_000_u16,
+        BusinessStatus::Distressed => 6_000_u16,
+        BusinessStatus::Insolvent | BusinessStatus::Closed => 0,
+    };
+    let effective_basis_points = administrative_efficiency
+        .min(status_efficiency)
+        .min(business.operations.condition_basis_points.max(2_500));
+    let weighted_batches = u32::from(business.operations.capacity_batches_per_day)
+        .saturating_mul(u32::from(effective_basis_points));
+    u16::try_from(weighted_batches.saturating_add(5_000) / 10_000)
+        .expect("effective batches must fit u16")
+        .max(1)
+}
+
+fn output_limited_batches(
+    state: &AppState,
+    business: &crate::core::Business,
+    recipe: &RecipeDef,
+) -> u16 {
+    let output_good_id = recipe.output_good_id();
+    let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
+        .saturating_mul(i64::from(business.policy.target_output_days));
+    let policy_reserve = recipe
+        .output_quantity()
+        .saturating_mul_ratio(reserve_batches, 1);
+    let contract_reserve = state
+        .contracts
+        .values()
+        .filter(|contract| {
+            contract.status == crate::core::ContractStatus::Active
+                && contract.seller_business_id == business.id()
+                && contract.good_id == output_good_id
+        })
+        .fold(Quantity::ZERO, |total, contract| {
+            total.saturating_add(contract.quantity_per_week)
+        });
+    let market_capacity =
+        state
+            .market
+            .quotes
+            .get(&output_good_id)
+            .map_or(Quantity::ZERO, |quote| {
+                quote
+                    .target_stock
+                    .saturating_mul_ratio(3, 2)
+                    .saturating_sub(quote.stock)
+                    .max(Quantity::ZERO)
+            });
+    let output_headroom = policy_reserve
+        .saturating_add(contract_reserve)
+        .saturating_add(market_capacity)
+        .saturating_sub(business.inventory_quantity(output_good_id))
+        .max(Quantity::ZERO);
+    let output_per_batch = recipe.output_quantity().milliunits();
+    if output_per_batch <= 0 {
+        return 0;
+    }
+    u16::try_from((output_headroom.milliunits() / output_per_batch).max(0)).unwrap_or(u16::MAX)
+}
+
+fn worker_limited_batches(state: &AppState, business_id: BusinessId) -> u16 {
+    let active_workers: u32 = state
+        .employment
+        .values()
+        .filter(|agreement| agreement.business_id == business_id)
+        .map(|agreement| match agreement.status {
+            EmploymentStatus::Active => u32::from(agreement.workers),
+            EmploymentStatus::Disputed => u32::from(agreement.workers).div_ceil(2),
+            EmploymentStatus::Suspended | EmploymentStatus::Ended => 0,
+        })
+        .sum();
+    u16::try_from(active_workers / u32::from(super::WORKERS_PER_BATCH)).unwrap_or(u16::MAX)
+}
+
+fn input_limited_batches(business: &crate::core::Business, recipe: &RecipeDef) -> u16 {
+    recipe.inputs().iter().fold(u16::MAX, |limit, input| {
+        let available = business.inventory_quantity(input.good_id()).milliunits();
+        let per_batch = input.quantity().milliunits();
+        let input_limited = if per_batch == 0 {
+            0
+        } else {
+            available / per_batch
+        };
+        limit.min(u16::try_from(input_limited.max(0)).unwrap_or(u16::MAX))
+    })
+}
+
+fn cash_limited_batches(business: &crate::core::Business, recipe: &RecipeDef) -> u16 {
+    if recipe.daily_operating_cost().copper() <= 0 {
+        return u16::MAX;
+    }
+    let cash_reserve = if business.status() == BusinessStatus::Distressed {
+        Money::ZERO
+    } else {
+        business.policy.minimum_cash_reserve
+    };
+    let spendable = business.cash().saturating_sub(cash_reserve);
+    let affordable = spendable.copper() / recipe.daily_operating_cost().copper();
+    u16::try_from(affordable.max(0)).unwrap_or(u16::MAX)
+}
+
+const fn governance_administrative_multiplier(governance: HouseGovernance) -> u32 {
+    match governance {
+        HouseGovernance::HeadCommand => 11_000,
+        HouseGovernance::Primogeniture => 10_000,
+        HouseGovernance::FamilyPartnership => 10_500,
+        HouseGovernance::BranchFederation => 11_500,
+        HouseGovernance::ElectedHead => 9_500,
+    }
 }
 
 fn apply_production(state: &mut AppState, plan: ProductionPlan) {
@@ -503,9 +589,32 @@ fn decide_business_sales(
         let inventory = business.inventory_quantity(good_id);
         let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
             .saturating_mul(i64::from(business.policy.target_output_days));
-        let reserve = recipe
+        let policy_reserve = recipe
             .output_quantity()
             .saturating_mul_ratio(reserve_batches, 1);
+        let contract_reserve = state
+            .contracts
+            .values()
+            .filter(|contract| {
+                contract.status == crate::core::ContractStatus::Active
+                    && contract.seller_business_id == business.id()
+                    && contract.good_id == good_id
+            })
+            .fold(Quantity::ZERO, |total, contract| {
+                total.saturating_add(contract.quantity_per_week)
+            });
+        let policy_reserve_basis_points = match business.status() {
+            BusinessStatus::Distressed | BusinessStatus::Insolvent | BusinessStatus::Closed => 0,
+            BusinessStatus::Active
+                if business.cash() < recipe.daily_operating_cost().saturating_mul(2) =>
+            {
+                5_000
+            }
+            BusinessStatus::Active => 10_000,
+        };
+        let adjusted_policy_reserve =
+            policy_reserve.saturating_mul_ratio(policy_reserve_basis_points, 10_000);
+        let reserve = adjusted_policy_reserve.saturating_add(contract_reserve);
         let surplus = inventory.saturating_sub(reserve).max(Quantity::ZERO);
         let capacity = market_capacity
             .get(&good_id)
@@ -596,6 +705,15 @@ fn decide_household_consumption(
     let ale_id = registry
         .get_good_id("ale")
         .expect("Rivergate registry must define ale");
+    let charcoal_id = registry
+        .get_good_id("charcoal")
+        .expect("Rivergate registry must define charcoal");
+    let cloth_id = registry
+        .get_good_id("cloth")
+        .expect("Rivergate registry must define cloth");
+    let tools_id = registry
+        .get_good_id("tools")
+        .expect("Rivergate registry must define tools");
     let mut stock: BTreeMap<GoodId, Quantity> = state
         .market
         .quotes
@@ -608,9 +726,14 @@ fn decide_household_consumption(
     for household in state.households.iter() {
         let mut cash = household.cash;
         let mut bread_acquired = Quantity::ZERO;
+        let (charcoal_need, cloth_need, tools_need) =
+            household_secondary_needs(household.social_class());
         for (good_id, need) in [
             (bread_id, household.bread_need_daily),
             (ale_id, household.ale_need_daily),
+            (charcoal_id, charcoal_need),
+            (cloth_id, cloth_need),
+            (tools_id, tools_need),
         ] {
             let quote = state
                 .market
@@ -661,6 +784,20 @@ fn decide_household_consumption(
         lines,
         food_satisfaction,
     })
+}
+
+fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, Quantity) {
+    let (charcoal, cloth, tools) = match social_class {
+        SocialClass::Laboring => (180, 100, 10),
+        SocialClass::Artisan => (240, 200, 60),
+        SocialClass::Merchant => (300, 300, 80),
+        SocialClass::Elite => (360, 400, 100),
+    };
+    (
+        Quantity::from_milliunits(charcoal),
+        Quantity::from_milliunits(cloth),
+        Quantity::from_milliunits(tools),
+    )
 }
 
 fn apply_household_consumption(state: &mut AppState, plan: HouseholdConsumptionPlan) {
@@ -852,6 +989,7 @@ fn apply_market_spoilage(registry: &Registry, state: &mut AppState) {
 
 fn update_market_prices(registry: &Registry, state: &mut AppState) {
     let day_of_year = state.clock.day_of_year();
+    let production_floors = production_price_floors(registry, state);
     let mut price_shocks = Vec::new();
 
     for good in registry.goods() {
@@ -877,7 +1015,12 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) {
             .copper()
             .saturating_mul(10_000 + total_pressure)
             / 10_000;
-        let minimum_price = (good.base_price().copper() / 4).max(1);
+        let minimum_price = production_floors
+            .get(&good.id())
+            .copied()
+            .unwrap_or_else(|| Money::from_copper((good.base_price().copper() / 2).max(1)))
+            .copper()
+            .max((good.base_price().copper() / 2).max(1));
         let maximum_price = good.base_price().copper().saturating_mul(4);
         quote.previous_price = previous_price;
         quote.price = Money::from_copper(raw_price.clamp(minimum_price, maximum_price));
@@ -910,6 +1053,72 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) {
             summary: format!("{good_name} moved by {change_basis_points} basis points to {price}."),
         });
     }
+}
+
+fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<GoodId, Money> {
+    let mut floors = BTreeMap::new();
+    for business in state.businesses.iter().filter(|business| {
+        !matches!(
+            business.status(),
+            BusinessStatus::Closed | BusinessStatus::Insolvent
+        )
+    }) {
+        let recipe = registry
+            .get_recipe(business.recipe_id())
+            .expect("business recipe must exist");
+        let output_milliunits = recipe.output_quantity().milliunits();
+        if output_milliunits <= 0 {
+            continue;
+        }
+        let weekly_labor = state
+            .employment
+            .values()
+            .filter(|agreement| {
+                agreement.business_id == business.id()
+                    && agreement.status != EmploymentStatus::Ended
+            })
+            .fold(Money::ZERO, |total, agreement| {
+                total.saturating_add(agreement.weekly_wage)
+            });
+        let daily_labor = Money::from_copper(ceil_div_nonnegative(weekly_labor.copper(), 7));
+        let daily_maintenance = Money::from_copper(
+            recipe
+                .daily_operating_cost()
+                .copper()
+                .saturating_mul(i64::from(business.policy.maintenance_basis_points))
+                / 20_000,
+        );
+        let overhead_per_batch = daily_labor.saturating_add(daily_maintenance);
+        let batch_cost = recipe.inputs().iter().fold(
+            recipe
+                .daily_operating_cost()
+                .saturating_add(overhead_per_batch),
+            |total, input| {
+                let price = state
+                    .market
+                    .quotes
+                    .get(&input.good_id())
+                    .expect("recipe input good must have a market quote")
+                    .price;
+                total.saturating_add(cost_for(input.quantity(), price))
+            },
+        );
+        let numerator = batch_cost.copper().saturating_mul(1_000);
+        let break_even = ceil_div_nonnegative(numerator, output_milliunits);
+        let sustainable =
+            Money::from_copper(ceil_div_nonnegative(break_even.saturating_mul(11), 10));
+        floors
+            .entry(recipe.output_good_id())
+            .and_modify(|floor: &mut Money| *floor = (*floor).min(sustainable))
+            .or_insert(sustainable);
+    }
+    floors
+}
+
+fn ceil_div_nonnegative(numerator: i64, denominator: i64) -> i64 {
+    debug_assert!(numerator >= 0 && denominator > 0);
+    let quotient = numerator / denominator;
+    quotient.saturating_add(i64::from(numerator % denominator != 0))
 }
 
 fn seasonal_pressure_basis_points(category: GoodCategory, day_of_year: u16) -> i64 {
@@ -971,6 +1180,7 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
                 business.status(),
                 business.cash(),
                 business.recipe_id(),
+                business.policy.minimum_cash_reserve,
                 business
                     .inventory
                     .values()
@@ -980,7 +1190,9 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
         .collect();
     let mut events = Vec::new();
 
-    for (business_id, prior_status, cash, recipe_id, has_inventory) in snapshots {
+    for (business_id, prior_status, cash, recipe_id, minimum_cash_reserve, has_inventory) in
+        snapshots
+    {
         if prior_status == BusinessStatus::Closed {
             continue;
         }
@@ -989,7 +1201,9 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
             .expect("business recipe reference must be valid");
         let new_status = if cash == Money::ZERO && !has_inventory {
             BusinessStatus::Insolvent
-        } else if cash < recipe.daily_operating_cost().saturating_mul(2) {
+        } else if cash
+            < minimum_cash_reserve.saturating_add(recipe.daily_operating_cost().saturating_mul(2))
+        {
             BusinessStatus::Distressed
         } else {
             BusinessStatus::Active
@@ -1123,14 +1337,38 @@ fn update_campaign_phases(state: &mut AppState) {
         30..=49 => CampaignPhase::Dominion,
         _ => CampaignPhase::Legacy,
     };
+    let governance: BTreeMap<_, _> = state
+        .family_councils
+        .iter()
+        .map(|(dynasty_id, council)| (*dynasty_id, council.governance))
+        .collect();
     for dynasty in state.dynasties.values_mut() {
         dynasty.runtime.phase = phase;
         let overextension = dynasty
             .administrative_load()
             .saturating_sub(dynasty.administrative_capacity());
-        dynasty.runtime.succession_risk_basis_points = 1_000_u16
-            .saturating_add(overextension.saturating_mul(25))
-            .min(9_500);
+        let base_risk = i32::from(
+            1_000_u16
+                .saturating_add(overextension.saturating_mul(25))
+                .min(9_500),
+        );
+        let governance_adjustment = match governance
+            .get(&dynasty.id())
+            .copied()
+            .unwrap_or(HouseGovernance::Primogeniture)
+        {
+            HouseGovernance::HeadCommand => 500,
+            HouseGovernance::Primogeniture => -400,
+            HouseGovernance::FamilyPartnership => -250,
+            HouseGovernance::BranchFederation => 200,
+            HouseGovernance::ElectedHead => 700,
+        };
+        dynasty.runtime.succession_risk_basis_points = u16::try_from(
+            base_risk
+                .saturating_add(governance_adjustment)
+                .clamp(0, 9_500),
+        )
+        .expect("clamped succession risk must fit u16");
     }
 }
 

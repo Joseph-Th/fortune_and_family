@@ -115,6 +115,8 @@ struct BusinessPolicyInput {
     quality_target_basis_points: u16,
 }
 
+pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 90;
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum CommandError {
     #[error(transparent)]
@@ -131,10 +133,19 @@ pub enum CommandError {
     InvalidBusinessPolicy,
     #[error("business {business_id} already uses the requested operating policy")]
     UnchangedBusinessPolicy { business_id: BusinessId },
+    #[error(
+        "business {business_id} cannot change operating policy again before day {next_change_day}"
+    )]
+    BusinessPolicyCooldown {
+        business_id: BusinessId,
+        next_change_day: i64,
+    },
     #[error("business investment must be positive")]
     InvalidBusinessInvestment,
     #[error("law {kind:?} does not support value {value}")]
     InvalidLawValue { kind: LawKind, value: i64 },
+    #[error("law {kind:?} is already active with value {value}")]
+    UnchangedLaw { kind: LawKind, value: i64 },
     #[error("law {kind:?} is not implemented by the current simulation")]
     UnsupportedLaw { kind: LawKind },
     #[error("district {district_id} does not exist")]
@@ -157,10 +168,17 @@ pub enum CommandError {
     SameLegalParty,
     #[error("legal evidence or damages are invalid")]
     InvalidLegalTerms,
+    #[error("an unresolved {kind:?} case against dynasty {defendant_dynasty_id} already exists")]
+    DuplicateActiveLegalCase {
+        defendant_dynasty_id: DynastyId,
+        kind: LegalCaseKind,
+    },
     #[error("family council for dynasty {dynasty_id} does not exist")]
     MissingFamilyCouncil { dynasty_id: DynastyId },
     #[error("house governance is already {governance:?}")]
     UnchangedHouseGovernance { governance: HouseGovernance },
+    #[error("house governance cannot change again before day {next_change_day}")]
+    HouseGovernanceCooldown { next_change_day: i64 },
     #[error("institution {institution_id} does not exist")]
     MissingInstitution { institution_id: InstitutionId },
     #[error("character {character_id} is already a member of institution {institution_id}")]
@@ -174,10 +192,23 @@ pub enum CommandError {
     MissingCrisis { crisis_id: CrisisId },
     #[error("crisis {crisis_id} is no longer active")]
     InactiveCrisis { crisis_id: CrisisId },
+    #[error("crisis {crisis_id} cannot receive another response before day {next_response_day}")]
+    CrisisResponseCooldown {
+        crisis_id: CrisisId,
+        next_response_day: i64,
+    },
     #[error("employment agreement {employment_id} does not exist")]
     MissingEmployment { employment_id: EmploymentId },
     #[error("employment agreement {employment_id} is not a player labor dispute")]
     InvalidLaborDispute { employment_id: EmploymentId },
+    #[error(
+        "district {district_id} has no replacement household able to supply {workers} workers for employment {employment_id}"
+    )]
+    NoReplacementLaborAvailable {
+        employment_id: EmploymentId,
+        district_id: DistrictId,
+        workers: u16,
+    },
     #[error("notification {message_id} does not exist")]
     MissingNotification { message_id: OutboxMessageId },
 }
@@ -379,6 +410,16 @@ fn apply_business_policy(
         quality_target_basis_points,
     } = input;
     ensure_owned_business(state, business_id)?;
+    if state.businesses.get(business_id).is_some_and(|business| {
+        matches!(
+            business.status(),
+            BusinessStatus::Insolvent | BusinessStatus::Closed
+        )
+    }) {
+        return Err(CommandError::Strategic(StrategicError::BusinessInactive {
+            business_id,
+        }));
+    }
     if target_input_days > 30
         || target_output_days > 30
         || minimum_cash_reserve.is_negative()
@@ -399,6 +440,24 @@ fn apply_business_policy(
     {
         return Err(CommandError::UnchangedBusinessPolicy { business_id });
     }
+    let subject = format!("business:{business_id}");
+    if let Some(last_change_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::BusinessPolicyChange && record.subject() == subject
+        })
+        .map(AuditRecord::day)
+    {
+        let next_change_day = last_change_day.saturating_add(BUSINESS_POLICY_CHANGE_INTERVAL_DAYS);
+        if state.clock.day() < next_change_day {
+            return Err(CommandError::BusinessPolicyCooldown {
+                business_id,
+                next_change_day,
+            });
+        }
+    }
     let business = state
         .businesses
         .get_mut(business_id)
@@ -409,6 +468,15 @@ fn apply_business_policy(
     business.policy.maintenance_basis_points = maintenance_basis_points;
     business.policy.quality_target_basis_points = quality_target_basis_points;
     business.finance.version = business.finance.version.saturating_add(1);
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::BusinessPolicyChange,
+        subject,
+        detail: format!(
+            "input_days={target_input_days}; output_days={target_output_days}; reserve={}; maintenance={maintenance_basis_points}; quality={quality_target_basis_points}",
+            minimum_cash_reserve.copper()
+        ),
+    });
     Ok(CommandOutcome {
         summary: format!("Updated operating policy for business {business_id}."),
     })
@@ -470,6 +538,13 @@ fn apply_law(
     }
     if !kind.is_value_valid(value) {
         return Err(CommandError::InvalidLawValue { kind, value });
+    }
+    if state
+        .laws
+        .values()
+        .any(|law| law.active && law.kind == kind && law.value == value)
+    {
+        return Err(CommandError::UnchangedLaw { kind, value });
     }
     let cost = Money::from_copper(2_000);
     spend_player_treasury(state, cost)?;
@@ -565,6 +640,20 @@ fn apply_legal_case(
     if evidence_basis_points > 10_000 || damages.is_negative() {
         return Err(CommandError::InvalidLegalTerms);
     }
+    if state.legal_cases.values().any(|legal_case| {
+        legal_case.plaintiff_dynasty_id == state.player_dynasty_id
+            && legal_case.defendant_dynasty_id == defendant_dynasty_id
+            && legal_case.kind == kind
+            && matches!(
+                legal_case.status,
+                LegalCaseStatus::Filed | LegalCaseStatus::Hearing
+            )
+    }) {
+        return Err(CommandError::DuplicateActiveLegalCase {
+            defendant_dynasty_id,
+            kind,
+        });
+    }
     spend_player_treasury(state, Money::from_copper(300))?;
     let id = state.next_ids.legal_case();
     state.legal_cases.insert(
@@ -600,19 +689,46 @@ fn apply_house_governance(
     let dynasty_id = state.player_dynasty_id;
     let council = state
         .family_councils
-        .get_mut(&dynasty_id)
+        .get(&dynasty_id)
         .ok_or(CommandError::MissingFamilyCouncil { dynasty_id })?;
     if council.governance == governance {
         return Err(CommandError::UnchangedHouseGovernance { governance });
     }
+    let subject = format!("dynasty:{dynasty_id}");
+    if let Some(last_change_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::HouseGovernanceChange && record.subject() == subject
+        })
+        .map(AuditRecord::day)
+    {
+        let next_change_day = last_change_day.saturating_add(360);
+        if state.clock.day() < next_change_day {
+            return Err(CommandError::HouseGovernanceCooldown { next_change_day });
+        }
+    }
+    let council = state
+        .family_councils
+        .get_mut(&dynasty_id)
+        .expect("validated family council must exist");
     council.governance = governance;
     council.charter_version = council.charter_version.saturating_add(1);
     council.unity_basis_points = council.unity_basis_points.saturating_sub(250);
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::HouseGovernanceChange,
+        subject,
+        detail: format!("governance={governance:?}"),
+    });
     super::strategic::push_outbox(
         state,
         OutboxKind::Family,
         "House charter amended".to_owned(),
-        format!("The dynasty adopted {governance:?} governance."),
+        format!(
+            "The dynasty adopted {governance:?} governance, changing administrative coordination, family cohesion, and succession risk."
+        ),
     );
     Ok(CommandOutcome {
         summary: format!("Changed house governance to {governance:?}."),
@@ -635,14 +751,23 @@ fn apply_office_nomination(
     }
     let institution = state
         .institutions
-        .get_mut(&institution_id)
+        .get(&institution_id)
         .ok_or(CommandError::MissingInstitution { institution_id })?;
-    if !institution.members.insert(character_id) {
+    if institution.members.contains(&character_id) {
         return Err(CommandError::AlreadyInstitutionMember {
             institution_id,
             character_id,
         });
     }
+    let campaign_cost = Money::from_copper(300);
+    spend_player_treasury(state, campaign_cost)?;
+    let selection_day = state.clock.day().saturating_add(60);
+    let institution = state
+        .institutions
+        .get_mut(&institution_id)
+        .expect("validated institution must exist");
+    institution.members.insert(character_id);
+    institution.next_selection_day = institution.next_selection_day.min(selection_day);
     let dynasty = state
         .dynasties
         .get_mut(&state.player_dynasty_id)
@@ -650,11 +775,33 @@ fn apply_office_nomination(
     dynasty.resources.legitimacy_basis_points = dynasty
         .resources
         .legitimacy_basis_points
-        .saturating_add(75)
+        .saturating_add(150)
         .min(10_000);
+    let subject = office_nomination_subject(institution_id, character_id);
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::OfficeNomination,
+        subject,
+        detail: format!("campaign_cost={}", campaign_cost.copper()),
+    });
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Politics,
+        format!("Office campaign launched for character {character_id}"),
+        format!(
+            "The dynasty nominated character {character_id} to institution {institution_id}; selection is scheduled by day {selection_day}."
+        ),
+    );
     Ok(CommandOutcome {
         summary: format!("Nominated character {character_id} for institution {institution_id}."),
     })
+}
+
+pub(super) fn office_nomination_subject(
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> String {
+    format!("institution:{institution_id}:character:{character_id}")
 }
 
 fn apply_crisis_response(
@@ -668,6 +815,22 @@ fn apply_crisis_response(
         .ok_or(CommandError::MissingCrisis { crisis_id })?;
     if !crisis.status.is_active() {
         return Err(CommandError::InactiveCrisis { crisis_id });
+    }
+    let subject = format!("crisis:{crisis_id}");
+    if let Some(last_response_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::CrisisResponse && record.subject() == subject)
+        .map(AuditRecord::day)
+    {
+        let next_response_day = last_response_day.saturating_add(30);
+        if state.clock.day() < next_response_day {
+            return Err(CommandError::CrisisResponseCooldown {
+                crisis_id,
+                next_response_day,
+            });
+        }
     }
     let severity = crisis.severity_basis_points;
     let district_id = crisis.district_id;
@@ -727,6 +890,12 @@ fn apply_crisis_response(
         format!("Response applied to crisis {crisis_id}"),
         format!("The dynasty chose {response:?}."),
     );
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::CrisisResponse,
+        subject,
+        detail: format!("response={response:?}"),
+    });
     Ok(CommandOutcome {
         summary: format!("Applied {response:?} response to crisis {crisis_id}."),
     })
@@ -792,7 +961,18 @@ fn apply_labor_response(
         .get(&employment_id)
         .ok_or(CommandError::MissingEmployment { employment_id })?;
     let business_id = agreement.business_id;
+    let workers = agreement.workers;
     ensure_owned_business(state, business_id)?;
+    if state.businesses.get(business_id).is_some_and(|business| {
+        matches!(
+            business.status(),
+            BusinessStatus::Insolvent | BusinessStatus::Closed
+        )
+    }) {
+        return Err(CommandError::Strategic(StrategicError::BusinessInactive {
+            business_id,
+        }));
+    }
     if agreement.status != EmploymentStatus::Disputed {
         return Err(CommandError::InvalidLaborDispute { employment_id });
     }
@@ -833,9 +1013,19 @@ fn apply_labor_response(
             let replacement = state
                 .households
                 .ids_for_district(district_id)
-                .and_then(|ids| ids.iter().find(|id| **id != agreement.household_id))
+                .and_then(|ids| {
+                    ids.iter().find(|id| {
+                        **id != agreement.household_id
+                            && super::available_household_workers(state, **id, None)
+                                >= u32::from(workers)
+                    })
+                })
                 .copied()
-                .ok_or(CommandError::InvalidLaborDispute { employment_id })?;
+                .ok_or(CommandError::NoReplacementLaborAvailable {
+                    employment_id,
+                    district_id,
+                    workers,
+                })?;
             let agreement = state
                 .employment
                 .get_mut(&employment_id)
@@ -910,14 +1100,22 @@ fn apply_acknowledgement(
     state: &mut AppState,
     message_id: OutboxMessageId,
 ) -> Result<CommandOutcome, CommandError> {
-    let message = state
+    if !state.outbox.iter().any(|message| message.id == message_id) {
+        return Err(CommandError::MissingNotification { message_id });
+    }
+    let mut acknowledged = 0_u32;
+    for message in state
         .outbox
         .iter_mut()
-        .find(|message| message.id == message_id)
-        .ok_or(CommandError::MissingNotification { message_id })?;
-    message.acknowledged = true;
+        .filter(|message| message.id <= message_id && !message.acknowledged)
+    {
+        message.acknowledged = true;
+        acknowledged = acknowledged.saturating_add(1);
+    }
     Ok(CommandOutcome {
-        summary: format!("Acknowledged notification {message_id}."),
+        summary: format!(
+            "Acknowledged {acknowledged} notifications through notification {message_id}."
+        ),
     })
 }
 

@@ -143,6 +143,266 @@ mod public_works {
     }
 }
 
+mod gameplay_stability {
+    use super::*;
+
+    #[test]
+    fn disputed_employment_can_recover_through_sustained_full_payroll() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let employment_id = *state
+            .employment
+            .keys()
+            .next()
+            .expect("campaign must contain employment");
+        let business_id = {
+            let agreement = state
+                .employment
+                .get_mut(&employment_id)
+                .expect("employment must exist");
+            agreement.status = EmploymentStatus::Disputed;
+            agreement.loyalty_basis_points = 2_800;
+            agreement.conditions_basis_points = 2_900;
+            agreement.business_id
+        };
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("employment business must exist")
+            .finance
+            .cash = Money::from_copper(100_000);
+
+        settle_employment(registry, &mut state);
+        settle_employment(registry, &mut state);
+
+        assert_eq!(
+            state
+                .employment
+                .get(&employment_id)
+                .expect("employment must exist")
+                .status,
+            EmploymentStatus::Active,
+            "reliable payroll must provide a systemic recovery path from labor disputes"
+        );
+    }
+
+    #[test]
+    fn saturated_business_pays_only_a_retainer_without_creating_a_dispute() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let employment_id = *state
+            .employment
+            .keys()
+            .next()
+            .expect("campaign must contain employment");
+        state.employment.retain(|id, _| *id == employment_id);
+        let (business_id, household_id, weekly_wage) = {
+            let agreement = state
+                .employment
+                .get(&employment_id)
+                .expect("employment must exist");
+            (
+                agreement.business_id,
+                agreement.household_id,
+                agreement.weekly_wage,
+            )
+        };
+        let output_good_id = {
+            let business = state
+                .businesses
+                .get(business_id)
+                .expect("employment business must exist");
+            registry
+                .get_recipe(business.recipe_id())
+                .expect("business recipe must exist")
+                .output_good_id()
+        };
+        state
+            .contracts
+            .retain(|_, contract| contract.seller_business_id != business_id);
+        {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&output_good_id)
+                .expect("output quote must exist");
+            quote.stock = quote.target_stock.saturating_mul_ratio(3, 2);
+        }
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("employment business must exist");
+            business
+                .inventory
+                .insert(output_good_id, Quantity::from_units(10_000));
+            business.finance.cash = Money::from_copper(100_000);
+        }
+        let business_cash_before = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .cash();
+        let household_cash_before = state
+            .households
+            .get(household_id)
+            .expect("household must exist")
+            .cash();
+
+        settle_employment(registry, &mut state);
+
+        let retainer = Money::from_copper(weekly_wage.copper() / 4);
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .cash(),
+            business_cash_before.saturating_sub(retainer)
+        );
+        assert_eq!(
+            state
+                .households
+                .get(household_id)
+                .expect("household must exist")
+                .cash(),
+            household_cash_before.saturating_add(retainer)
+        );
+        assert_eq!(
+            state
+                .employment
+                .get(&employment_id)
+                .expect("employment must exist")
+                .status,
+            EmploymentStatus::Active,
+            "market saturation must not manufacture a labor dispute"
+        );
+    }
+
+    #[test]
+    fn profitable_businesses_return_excess_cash_to_their_dynasty() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let owner_id = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .owner_dynasty_id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.operations.status = BusinessStatus::Active;
+            business.finance.cash = Money::from_copper(100_000);
+            business.finance.lifetime_revenue = Money::from_copper(200_000);
+            business.finance.lifetime_costs = Money::from_copper(10_000);
+        }
+        let treasury_before = state
+            .dynasties
+            .get(&owner_id)
+            .expect("owner dynasty must exist")
+            .treasury();
+
+        distribute_business_dividends(registry, &mut state);
+
+        assert!(
+            state
+                .dynasties
+                .get(&owner_id)
+                .expect("owner dynasty must exist")
+                .treasury()
+                > treasury_before,
+            "profitable businesses must create usable dynasty income"
+        );
+    }
+
+    #[test]
+    fn unoccupied_owned_property_generates_external_rent() {
+        let mut state = make_test_campaign();
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id.is_none()
+                    && property.tenant_dynasty_id.is_none()
+                    && property.occupant_business_id.is_none()
+                    && property.weekly_rent > Money::ZERO
+            })
+            .expect("campaign must contain rentable unowned property")
+            .id;
+        state
+            .properties
+            .get_mut(&property_id)
+            .expect("property must exist")
+            .owner_dynasty_id = Some(state.player_dynasty_id);
+        let treasury_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        settle_property_rents(&mut state);
+
+        assert!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury()
+                > treasury_before,
+            "property acquisition must create a durable economic consequence"
+        );
+    }
+
+    #[test]
+    fn office_powers_create_holder_and_world_effects() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define treasury");
+        let player_head = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("treasury institution must exist")
+            .office_holder_id = Some(player_head);
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let cash_before = state
+            .businesses
+            .get(business_id)
+            .expect("player business must exist")
+            .cash();
+
+        apply_office_power_effects(registry, &mut state);
+
+        assert!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("player business must exist")
+                .cash()
+                > cash_before,
+            "holding an office with city-contract power must affect the holder's economy"
+        );
+    }
+}
+
 mod contracts {
     use super::*;
 
@@ -402,6 +662,91 @@ mod contracts {
             "a missed final obligation must not be recorded as contract fulfillment"
         );
     }
+
+    #[test]
+    fn inactive_contract_party_terminates_without_mutating_business_finances() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (buyer_id, seller_id, good_id, quantity) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.next_due_day = state.clock.day();
+            (
+                contract.buyer_business_id,
+                contract.seller_business_id,
+                contract.good_id,
+                contract.quantity_per_week,
+            )
+        };
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .add_inventory(good_id, quantity);
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .operations
+            .status = BusinessStatus::Closed;
+        let buyer_before = state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .finance
+            .clone();
+        let seller_before = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .finance
+            .clone();
+        let seller_inventory_before = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .inventory_quantity(good_id);
+
+        settle_contracts(&mut state);
+
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .status,
+            ContractStatus::Breached
+        );
+        assert_eq!(
+            &state
+                .businesses
+                .get(buyer_id)
+                .expect("buyer must exist")
+                .finance,
+            &buyer_before,
+            "inactive-party termination must not charge the other business"
+        );
+        assert_eq!(
+            &state
+                .businesses
+                .get(seller_id)
+                .expect("seller must exist")
+                .finance,
+            &seller_before,
+            "a closed business must not be financially mutated by settlement"
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(seller_id)
+                .expect("seller must exist")
+                .inventory_quantity(good_id),
+            seller_inventory_before,
+            "a closed business must not ship inventory"
+        );
+    }
 }
 
 mod reputation {
@@ -513,6 +858,7 @@ mod employment {
 
     #[test]
     fn zero_payment_does_not_invalidate_business_finance_version() {
+        let registry = test_registry();
         let mut state = make_test_campaign();
         let employment_id = state
             .employment
@@ -560,7 +906,7 @@ mod employment {
             .expect("employment household must exist")
             .cash();
 
-        settle_employment(&mut state);
+        settle_employment(registry, &mut state);
 
         assert_eq!(
             state
@@ -1209,6 +1555,23 @@ mod crises {
             "noble extraction must increase local unrest"
         );
     }
+
+    #[test]
+    fn guild_revolt_requires_material_pressure() {
+        assert_eq!(
+            guild_revolt_probability_basis_points(0, 0),
+            0,
+            "a city without disputes or restrictive guild law must not roll for revolt"
+        );
+        assert!(
+            guild_revolt_probability_basis_points(1, 0) > 0,
+            "an actual labor dispute must create revolt pressure"
+        );
+        assert!(
+            guild_revolt_probability_basis_points(0, 5_000) > 0,
+            "restrictive guild law must create revolt pressure"
+        );
+    }
 }
 
 mod routes {
@@ -1229,6 +1592,85 @@ mod routes {
                 "monthly recovery must remove exactly 750 basis points"
             );
         }
+    }
+
+    #[test]
+    fn active_trade_crisis_reduces_supply_on_the_same_day() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        state.crises.clear();
+        for law in state.laws.values_mut() {
+            if law.kind == LawKind::ForeignMerchantToll {
+                law.active = false;
+            }
+        }
+        let route_id = *state
+            .external_routes
+            .keys()
+            .next()
+            .expect("campaign must contain an external route");
+        for route in state.external_routes.values_mut() {
+            route.active = false;
+        }
+        let (good_id, daily_capacity) = {
+            let route = state
+                .external_routes
+                .get_mut(&route_id)
+                .expect("selected route must exist");
+            route.active = true;
+            route.disruption_basis_points = 0;
+            route.toll_basis_points = 0;
+            (route.good_id, route.daily_capacity)
+        };
+        let stock_before = state
+            .market
+            .get_quote(good_id)
+            .expect("route good must have a quote")
+            .stock();
+        insert_crisis(
+            &mut state,
+            CrisisKind::TradeDisruption,
+            None,
+            8_000,
+            "test route disruption",
+        );
+
+        run_daily_strategic_systems(registry, &mut state);
+
+        let stock_after = state
+            .market
+            .get_quote(good_id)
+            .expect("route good must have a quote")
+            .stock();
+        assert_eq!(
+            stock_after.saturating_sub(stock_before),
+            daily_capacity.saturating_mul_ratio(2_000, 10_000),
+            "trade disruption must constrain route supply before that day's imports arrive"
+        );
+    }
+
+    #[test]
+    fn monthly_detection_precedes_route_recovery() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        state.crises.clear();
+        for route in state.external_routes.values_mut() {
+            route.risk_basis_points = 0;
+            route.disruption_basis_points = 0;
+        }
+        state
+            .external_routes
+            .values_mut()
+            .next()
+            .expect("campaign must contain an external route")
+            .disruption_basis_points = 7_300;
+
+        run_monthly_strategic_systems(registry, &mut state);
+
+        assert!(
+            has_active_crisis(&state, CrisisKind::TradeDisruption),
+            "severe disruption must be detected before routine monthly recovery masks it"
+        );
     }
 }
 

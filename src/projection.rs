@@ -113,6 +113,11 @@ pub struct BusinessProjection {
     pub capacity_batches_per_day: u16,
     pub condition_basis_points: u16,
     pub quality_basis_points: u16,
+    pub target_input_days: u16,
+    pub target_output_days: u16,
+    pub minimum_cash_reserve: Money,
+    pub maintenance_basis_points: u16,
+    pub quality_target_basis_points: u16,
     pub inventory: Vec<BusinessInventoryProjection>,
     pub acquisition: Option<BusinessAcquisitionProjection>,
 }
@@ -509,6 +514,11 @@ fn build_business_projections(registry: &Registry, state: &AppState) -> Vec<Busi
                 capacity_batches_per_day: business.operations.capacity_batches_per_day,
                 condition_basis_points: business.operations.condition_basis_points,
                 quality_basis_points: business.operations.quality_basis_points,
+                target_input_days: business.policy.target_input_days,
+                target_output_days: business.policy.target_output_days,
+                minimum_cash_reserve: business.policy.minimum_cash_reserve,
+                maintenance_basis_points: business.policy.maintenance_basis_points,
+                quality_target_basis_points: business.policy.quality_target_basis_points,
                 inventory,
                 acquisition,
             }
@@ -804,7 +814,7 @@ pub fn render_campaign_html(
 <section><small>Commercial position</small><div class="metric">{businesses} businesses</div><p>{properties} properties · {loans} current borrowing relationships</p></section>
 <section><small>Civic condition</small><div class="metric">{food:.1}% food satisfaction</div><p>{crises} active crises</p></section>
 </div>
-<h2>Businesses</h2><section class="scroll"><table><thead><tr><th>Business</th><th>Owner</th><th>Status</th><th>Cash</th><th>Condition</th><th>Manager</th><th>Acquisition</th></tr></thead><tbody>{business_rows}</tbody></table></section>
+<h2>Businesses</h2><section class="scroll"><table><thead><tr><th>Business</th><th>Owner</th><th>Status</th><th>Cash</th><th>Condition</th><th>Policy</th><th>Manager</th><th>Acquisition</th></tr></thead><tbody>{business_rows}</tbody></table></section>
 <h2>Districts</h2><section class="scroll"><table><thead><tr><th>District</th><th>Food</th><th>Employment</th><th>Sanitation</th><th>Unrest</th><th>Causes</th></tr></thead><tbody>{district_rows}</tbody></table></section>
 <h2>Market</h2><section class="scroll"><table><thead><tr><th>Good</th><th>Price</th><th>Stock</th><th>Causes</th></tr></thead><tbody>{market_rows}</tbody></table></section>
 <h2>Recent notices</h2><div class="grid">{alerts}</div>
@@ -844,7 +854,7 @@ fn render_business_rows(businesses: &[BusinessProjection]) -> String {
         );
         write!(
             rows,
-            "<tr><td>{}<br><small>{} · {}</small></td><td>{}</td><td>{:?}</td><td>{}</td><td>{:.1}%</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}<br><small>{} · {}</small></td><td>{}</td><td>{:?}</td><td>{}</td><td>{:.1}%</td><td>inputs {}d · outputs {}d · reserve {} · maintenance {:.1}% · quality {:.1}%</td><td>{}</td><td>{}</td></tr>",
             escape_html(&business.name),
             escape_html(&business.district),
             escape_html(&business.recipe),
@@ -852,6 +862,11 @@ fn render_business_rows(businesses: &[BusinessProjection]) -> String {
             business.status,
             business.cash,
             f64::from(business.condition_basis_points) / 100.0,
+            business.target_input_days,
+            business.target_output_days,
+            business.minimum_cash_reserve,
+            f64::from(business.maintenance_basis_points) / 100.0,
+            f64::from(business.quality_target_basis_points) / 100.0,
             escape_html(&business.manager),
             escape_html(&acquisition),
         )

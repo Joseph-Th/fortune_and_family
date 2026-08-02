@@ -282,6 +282,9 @@ struct PlaytestArgs {
     /// Maximum candidate commands validated per decision.
     #[arg(long, default_value_t = 24)]
     max_probes: u16,
+    /// Maximum simulated days used to attribute delayed command consequences.
+    #[arg(long, default_value_t = 360)]
+    consequence_horizon: u16,
     /// Representative decisions retained per campaign.
     #[arg(long, default_value_t = 40)]
     trace_limit: u16,
@@ -326,6 +329,7 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
         days_per_campaign: args.days,
         decision_interval_days: args.decision_interval,
         max_candidate_probes: args.max_probes,
+        max_consequence_horizon_days: args.consequence_horizon,
         trace_limit_per_campaign: args.trace_limit,
         personas,
         backgrounds,

@@ -36,6 +36,7 @@ Useful controls:
 - `--days`: simulated days per campaign.
 - `--decision-interval`: days advanced after each player decision. The default is seven.
 - `--max-probes`: maximum candidate commands validated per decision cycle.
+- `--consequence-horizon`: maximum days used by command-specific counterfactual consequence probes.
 - `--trace-limit`: retained representative decisions per campaign.
 - `--persona`: repeatable filter for steward, entrepreneur, power-broker, or opportunist.
 - `--background`: repeatable filter for baker, cloth-trader, or blacksmith.
@@ -76,10 +77,16 @@ Ordinary simulation activity changes many records every week. Crediting all of t
 1. The action branch applies the selected player command and advances time.
 2. The baseline branch applies no command and advances the same number of days.
 
+The consequence horizon is command-specific. Reactive actions use the normal decision interval,
+while policies, contracts, finance, property, law, public works, legal cases, governance, and office
+nominations are probed over longer bounded horizons. This avoids declaring a slow system inert
+merely because it cannot resolve inside one week.
+
 The report classifies changes as:
 
 - Immediate: state changed at command commit time.
-- Delayed: the action branch differs from the no-action branch after simulation.
+- Persistent: an immediate change still differs from baseline at the consequence horizon.
+- Delayed: a new action-attributable domain change appears after commit time.
 - Ambient: the no-action branch changed from the initial state.
 
 Only immediate and delayed changes create command-to-domain interaction edges. Ambient changes still count toward general system activity and appear in traces.
@@ -88,30 +95,39 @@ This is a deterministic intervention test. It does not prove philosophical causa
 
 ## Report measures
 
-The human report is compact enough for CI logs. The JSON report retains all campaign statistics and representative traces. It includes a top-level `schema_version` so automated consumers can reject incompatible report contracts explicitly.
+The human report is compact enough for CI logs. The JSON report retains all campaign statistics and representative traces. It includes a top-level `schema_version` so automated consumers can reject incompatible report contracts explicitly. Schema version 4 adds trajectory-level office attainment so a completed political term is not lost merely because another dynasty holds office on the final simulated day.
 
 ### Actionability
 
-The share of decision cycles with at least one command that passes canonical validation. A low score means the player frequently has no legal or affordable action.
+The share of decision cycles with at least one substantive command that passes canonical validation.
+Notification acknowledgement is excluded from this measure.
 
 ### Variety
 
-Combines command-family coverage with action distribution. It penalizes runs where one command dominates despite broad nominal reachability.
+Combines command-family coverage, action distribution, and distinct viable command families per
+decision. Multiple templates or targets from one command family no longer masquerade as broad
+strategic choice.
 
 ### Interconnection
 
-Measures distinct causal command-to-domain edges and average causal consequence breadth. It uses the counterfactual action branch comparison, not ambient simulation changes.
+Measures distinct causal command-to-domain edges and average causal consequence breadth. The target
+is several meaningful system links per command family, not an unrealistic expectation that every
+command alter every domain. It uses the counterfactual action branch comparison, not ambient
+simulation changes.
 
 ### Feedback
 
-The share of executed actions that produce immediate or delayed durable feedback through the outbox or chronicle.
+The share of substantive executed actions that produce a direct state/projection change or genuinely
+delayed durable feedback through the outbox or chronicle. Persistent immediate messages are not
+counted twice.
 
 ### Resilience
 
-A coarse outcome signal based on operating businesses, food satisfaction, player treasury, and
-escalated crises. Distressed businesses remain operational but receive a lower score than healthy
-ones. This is not a win score; it exists to identify play styles or starts that systematically
-collapse.
+A coarse outcome and trajectory signal based on operating businesses, food satisfaction, player
+treasury, escalated crises, minimum operating businesses, minimum food access, peak labor disputes,
+and peak crisis load. Distressed businesses remain operational but receive a lower score than
+healthy ones. This is not a win score; it exists to identify play styles or starts that collapse or
+recover only after a prolonged dead period.
 
 ### Overall
 
@@ -126,8 +142,12 @@ The harness emits explicit findings for conditions such as:
 - A viable command is never selected by any configured persona.
 - A command executes without an observed domain consequence.
 - One action dominates the decision distribution.
-- A domain remains static for the entire run.
+- A domain remains static, or changes autonomously without attributable player influence.
 - Entire player portfolios frequently end distressed, insolvent, or non-operational.
+- Any campaign falls below 10% food satisfaction, food access collapses broadly, contracts breach more often than they complete, credit defaults outnumber
+  repayments, or labor disputes dominate active employment.
+- Notification volume becomes unusable or crisis responses crowd out strategic play.
+- Raw choice counts hide a low number of distinct viable command families.
 - Experience scores vary sharply by background, persona, or seed.
 
 The command table separates generated, probed, viable, selected, and rejected choices. This distinguishes a missing gameplay route from a probe-budget or ranking problem, and distinguishes both from canonical validation barriers.
@@ -140,16 +160,20 @@ Each campaign retains a bounded deterministic trace. It includes:
 
 - Simulation day.
 - Candidate and viable-choice counts.
+- Distinct viable command families.
 - Selected command and canonical command outcome.
 - Representative rejection categories.
-- Immediate, delayed, and ambient changed domains.
+- Immediate, persistent, delayed, and ambient changed domains.
 - Immediate, delayed, and ambient durable feedback flags.
 
 The trace sampler keeps opening and closing decisions plus the highest-consequence decisions. Increasing `--trace-limit` preserves more detail without changing simulation behavior.
 
 ## Performance characteristics
 
-The main cost is candidate probing because each probe clones campaign state and invokes canonical validation. `--max-probes` bounds this cost. The no-action counterfactual doubles time advancement per decision cycle but substantially improves consequence attribution.
+The main costs are candidate probing and consequence attribution because both clone campaign state.
+`--max-probes` bounds validation work and `--consequence-horizon` bounds long-term intervention
+simulation. Long-horizon governance and office analysis is intentionally more expensive than a
+weekly smoke test.
 
 Use a release build for broad or multi-seed analysis. Focused debug runs remain useful while editing candidate policies and assertions.
 

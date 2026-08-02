@@ -1,7 +1,7 @@
 //! Behavioral tests for daily simulation planning, ordering, and preflight validation.
 
 use super::*;
-use crate::core::{EnactedLaw, LawKind};
+use crate::core::{ContractStatus, EnactedLaw, LawKind};
 use crate::test_support::{
     assert_state_unchanged, make_test_campaign, rivergate_registry_for_test,
 };
@@ -37,15 +37,32 @@ mod labor {
     use super::*;
 
     #[test]
-    fn disputed_employment_prevents_production() {
+    fn disputed_employment_reduces_but_does_not_deadlock_production() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
+        let candidate_id = state
+            .businesses
+            .iter()
+            .find(|business| business.operations.capacity_batches_per_day >= 2)
+            .expect("campaign must contain a multi-batch business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(candidate_id)
+                .expect("selected business must exist");
+            business.operations.condition_basis_points = 10_000;
+            business.finance.cash = Money::from_copper(100_000);
+            business.policy.minimum_cash_reserve = Money::ZERO;
+        }
         let initial_plan = decide_production(registry, &state);
-        let business_id = initial_plan
+        let initial_line = initial_plan
             .lines
-            .first()
+            .iter()
+            .find(|line| line.business_id == candidate_id)
             .expect("bootstrap must include a business able to produce")
-            .business_id;
+            .clone();
+        let business_id = initial_line.business_id;
         for agreement in state
             .employment
             .values_mut()
@@ -55,12 +72,19 @@ mod labor {
         }
 
         let plan = decide_production(registry, &state);
+        let disputed_line = plan
+            .lines
+            .iter()
+            .find(|line| line.business_id == business_id)
+            .expect("a disputed workforce must retain reduced productive capacity");
 
         assert!(
-            plan.lines
-                .iter()
-                .all(|line| line.business_id != business_id),
-            "a business without active workers must not produce"
+            disputed_line.output_quantity < initial_line.output_quantity,
+            "a labor dispute must reduce output"
+        );
+        assert!(
+            disputed_line.output_quantity > Quantity::ZERO,
+            "a labor dispute must not permanently remove the firm's ability to recover"
         );
     }
 }
@@ -171,6 +195,179 @@ mod inventory_policy {
                 .all(|line| line.business_id != business_id),
             "inventory below the policy reserve must not produce a negative sale"
         );
+    }
+
+    #[test]
+    fn active_contract_inventory_is_reserved_from_market_sales() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let contract = state
+            .contracts
+            .values()
+            .find(|contract| contract.status == ContractStatus::Active)
+            .expect("campaign must contain an active contract")
+            .clone();
+        let seller_id = contract.seller_business_id;
+        let good_id = contract.good_id;
+        {
+            let seller = state
+                .businesses
+                .get_mut(seller_id)
+                .expect("contract seller must exist");
+            seller.policy.target_output_days = 0;
+            seller.inventory.insert(
+                good_id,
+                contract
+                    .quantity_per_week
+                    .saturating_add(Quantity::from_units(10)),
+            );
+        }
+        let manager_id = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .manager_id();
+        state
+            .characters
+            .get_mut(manager_id)
+            .expect("seller manager must exist")
+            .capabilities
+            .commerce = 100;
+        state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("contract good quote must exist")
+            .stock = Quantity::ZERO;
+
+        let plan = decide_business_sales(registry, &state).expect("sale plan must resolve");
+        apply_business_sales(&mut state, plan);
+
+        assert!(
+            state
+                .businesses
+                .get(seller_id)
+                .expect("seller must exist")
+                .inventory_quantity(good_id)
+                >= contract.quantity_per_week,
+            "market sales must preserve the next active contract delivery"
+        );
+    }
+
+    #[test]
+    fn distressed_business_liquidates_policy_reserve_but_preserves_contract_stock() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let contract = state
+            .contracts
+            .values()
+            .find(|contract| contract.status == ContractStatus::Active)
+            .expect("campaign must contain an active contract")
+            .clone();
+        let seller_id = contract.seller_business_id;
+        let good_id = contract.good_id;
+        let recipe_id = state
+            .businesses
+            .get(seller_id)
+            .expect("contract seller must exist")
+            .recipe_id();
+        let recipe = registry
+            .get_recipe(recipe_id)
+            .expect("seller recipe must exist");
+        let policy_reserve = recipe.output_quantity().saturating_mul_ratio(
+            i64::from(
+                state
+                    .businesses
+                    .get(seller_id)
+                    .expect("seller must exist")
+                    .operations
+                    .capacity_batches_per_day,
+            )
+            .saturating_mul(2),
+            1,
+        );
+        let initial_inventory = policy_reserve.saturating_add(contract.quantity_per_week);
+        {
+            let seller = state
+                .businesses
+                .get_mut(seller_id)
+                .expect("contract seller must exist");
+            seller.policy.target_output_days = 2;
+            seller.operations.status = BusinessStatus::Distressed;
+            seller.finance.cash = Money::ZERO;
+            seller.inventory.insert(good_id, initial_inventory);
+        }
+        let manager_id = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .manager_id();
+        state
+            .characters
+            .get_mut(manager_id)
+            .expect("seller manager must exist")
+            .capabilities
+            .commerce = 100;
+        state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("contract good quote must exist")
+            .stock = Quantity::ZERO;
+
+        let plan = decide_business_sales(registry, &state).expect("sale plan must resolve");
+        apply_business_sales(&mut state, plan);
+
+        let seller = state.businesses.get(seller_id).expect("seller must exist");
+        assert!(
+            seller.inventory_quantity(good_id) < initial_inventory,
+            "a distressed firm must liquidate policy inventory to restore cash"
+        );
+        assert!(
+            seller.inventory_quantity(good_id) >= contract.quantity_per_week,
+            "distress liquidation must still preserve active contract obligations"
+        );
+        assert!(
+            seller.cash() > Money::ZERO,
+            "liquidation must provide working cash for recovery"
+        );
+    }
+}
+
+mod household_demand {
+    use super::*;
+
+    #[test]
+    fn households_create_demand_for_nonfood_consumer_goods() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let charcoal_id = registry
+            .get_good_id("charcoal")
+            .expect("registry must define charcoal");
+        let cloth_id = registry
+            .get_good_id("cloth")
+            .expect("registry must define cloth");
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("registry must define tools");
+        for household in state.households.iter_mut() {
+            household.cash = Money::from_copper(100_000);
+        }
+        for quote in state.market.quotes.values_mut() {
+            quote.stock = Quantity::from_units(10_000);
+        }
+
+        let plan =
+            decide_household_consumption(registry, &state).expect("household demand must resolve");
+
+        for good_id in [charcoal_id, cloth_id, tools_id] {
+            assert!(
+                plan.lines
+                    .iter()
+                    .any(|line| line.good_id == good_id && line.quantity > Quantity::ZERO),
+                "households must create durable demand for good {good_id}"
+            );
+        }
     }
 }
 
@@ -343,6 +540,40 @@ mod business_lifecycle {
     use super::*;
 
     #[test]
+    fn cash_locked_in_policy_reserve_counts_as_distress() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let reserve = Money::from_copper(500);
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.operations.status = BusinessStatus::Active;
+            business.policy.minimum_cash_reserve = reserve;
+            business.finance.cash = reserve;
+        }
+
+        update_business_lifecycle(registry, &mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .status(),
+            BusinessStatus::Distressed,
+            "gross cash is not operating liquidity when all of it is policy-reserved"
+        );
+    }
+
+    #[test]
     fn closed_businesses_do_not_reopen_automatically() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -496,6 +727,58 @@ mod health_and_succession {
             succession_chance_basis_points(54, 10_000, 0),
             0,
             "the minimum succession age remains explicit"
+        );
+    }
+}
+
+mod market_prices {
+    use super::*;
+
+    #[test]
+    fn production_floor_covers_operating_labor_and_maintenance_costs() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let flour_id = registry
+            .get_good_id("flour")
+            .expect("registry must define flour");
+        let floor = production_price_floors(registry, &state)
+            .get(&flour_id)
+            .copied()
+            .expect("an operating mill must define a flour price floor");
+        let authored_floor = Money::from_copper(
+            registry
+                .get_good(flour_id)
+                .expect("flour definition must exist")
+                .base_price()
+                .copper()
+                / 2,
+        );
+        assert!(
+            floor > authored_floor,
+            "the sustainable floor must include staffing and maintenance overhead"
+        );
+        {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&flour_id)
+                .expect("flour quote must exist");
+            quote.price = Money::from_copper(1);
+            quote.stock = quote.target_stock.saturating_mul_ratio(4, 1);
+            quote.demand_today = Quantity::ZERO;
+            quote.supply_today = Quantity::from_units(10_000);
+        }
+
+        update_market_prices(registry, &mut state);
+
+        assert!(
+            state
+                .market
+                .get_quote(flour_id)
+                .expect("flour quote must exist")
+                .price()
+                >= floor,
+            "oversupply must not push a produced good below sustainable cost"
         );
     }
 }

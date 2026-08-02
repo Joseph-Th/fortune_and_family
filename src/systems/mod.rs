@@ -14,7 +14,31 @@ pub(crate) fn supported_worker_capacity(business: &crate::core::Business) -> u32
         .saturating_mul(u32::from(WORKERS_PER_BATCH))
 }
 
+pub(crate) fn available_household_workers(
+    state: &crate::core::AppState,
+    household_id: crate::ids::HouseholdId,
+    excluding_employment_id: Option<crate::ids::EmploymentId>,
+) -> u32 {
+    let members = state
+        .households
+        .get(household_id)
+        .map_or(0, |household| u32::from(household.members()));
+    let assigned = state
+        .employment
+        .values()
+        .filter(|agreement| {
+            agreement.household_id == household_id
+                && agreement.status != crate::core::EmploymentStatus::Ended
+                && Some(agreement.id) != excluding_employment_id
+        })
+        .fold(0_u32, |total, agreement| {
+            total.saturating_add(u32::from(agreement.workers))
+        });
+    members.saturating_sub(assigned)
+}
+
 pub use bootstrap::{NewGameError, build_new_game};
+pub(crate) use commands::BUSINESS_POLICY_CHANGE_INTERVAL_DAYS;
 pub use commands::{
     CommandError, CommandOutcome, CrisisResponse, LaborResponse, PlayerCommand,
     apply_player_command,

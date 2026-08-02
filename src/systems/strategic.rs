@@ -10,7 +10,9 @@ use crate::core::{
     Property, PropertyKind, PublicWork, PublicWorkKind, PublicWorkStatus, RelationshipState,
     SupplyContract,
 };
-use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, GoodId, PropertyId};
+use crate::ids::{
+    BusinessId, CharacterId, DistrictId, DynastyId, EmploymentId, GoodId, HouseholdId, PropertyId,
+};
 use crate::money::{Money, Quantity, cost_for};
 use crate::registry::{InstitutionKind, Registry};
 use serde::{Deserialize, Serialize};
@@ -1010,7 +1012,11 @@ fn initialize_employment(state: &mut AppState) {
         let Some(household_id) = state
             .households
             .ids_for_district(district_id)
-            .and_then(|ids| ids.iter().next())
+            .and_then(|ids| {
+                ids.iter().find(|id| {
+                    super::available_household_workers(state, **id, None) >= u32::from(workers)
+                })
+            })
             .copied()
         else {
             continue;
@@ -1023,7 +1029,7 @@ fn initialize_employment(state: &mut AppState) {
                 business_id,
                 household_id,
                 workers,
-                weekly_wage: Money::from_copper(i64::from(workers).saturating_mul(95)),
+                weekly_wage: Money::from_copper(i64::from(workers).saturating_mul(35)),
                 loyalty_basis_points: 6_500,
                 conditions_basis_points: 6_800,
                 status: EmploymentStatus::Active,
@@ -1189,9 +1195,10 @@ fn initialize_contracts(registry: &Registry, state: &mut AppState) {
                 penalty: cost_for(input.quantity(), price).saturating_mul(2),
                 duration_weeks: 52,
             };
-            if let Ok(token) = validate_supply_contract(registry, state, terms)
-                && token.commit(registry, state).is_ok()
-            {
+            if let Ok(token) = validate_supply_contract(registry, state, terms) {
+                token.commit(registry, state).expect(
+                    "validated bootstrap contract must commit without intervening mutation",
+                );
                 created = created.saturating_add(1);
             }
             if created >= 8 {
@@ -1219,9 +1226,11 @@ fn initialize_loans(state: &mut AppState) {
                 .find(|property| property.owner_dynasty_id == Some(*borrower))
                 .map(|property| property.id),
         };
-        if let Ok(token) = validate_loan(state, terms) {
-            let _ = token.commit(state);
-        }
+        let token = validate_loan(state, terms)
+            .expect("authored bootstrap loan must satisfy strategic validation");
+        token
+            .commit(state)
+            .expect("validated bootstrap loan must commit without intervening mutation");
     }
 }
 
@@ -1328,8 +1337,8 @@ fn initialize_information(state: &mut AppState) {
 
 pub(crate) fn run_daily_strategic_systems(registry: &Registry, state: &mut AppState) {
     apply_route_laws(state);
-    apply_external_route_supply(state);
     apply_crisis_daily_effects(registry, state);
+    apply_external_route_supply(state);
 }
 
 fn active_law_value(state: &AppState, kind: LawKind) -> Option<i64> {
@@ -1505,7 +1514,8 @@ pub(crate) fn run_weekly_strategic_systems(registry: &Registry, state: &mut AppS
     settle_contracts(state);
     settle_loans(state);
     settle_property_rents(state);
-    settle_employment(state);
+    settle_employment(registry, state);
+    distribute_business_dividends(registry, state);
     progress_public_works(registry, state);
     update_relationships_from_obligations(state);
     update_quality_reputations(state);
@@ -1546,6 +1556,40 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) {
         .businesses
         .get(due.buyer_id)
         .expect("contract buyer must exist");
+    let seller_active = !matches!(
+        seller.status(),
+        BusinessStatus::Insolvent | BusinessStatus::Closed
+    );
+    let buyer_active = !matches!(
+        buyer.status(),
+        BusinessStatus::Insolvent | BusinessStatus::Closed
+    );
+    if !seller_active || !buyer_active {
+        let buyer_owner_id = buyer.owner_dynasty_id();
+        let seller_owner_id = seller.owner_dynasty_id();
+        let contract = state
+            .contracts
+            .get_mut(&due.id)
+            .expect("contract must exist");
+        contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
+        contract.status = ContractStatus::Breached;
+        if buyer_owner_id != seller_owner_id {
+            if !seller_active {
+                adjust_reliability_reputation(state, seller_owner_id, -120);
+            }
+            if !buyer_active {
+                adjust_reliability_reputation(state, buyer_owner_id, -120);
+            }
+        }
+        push_outbox(
+            state,
+            OutboxKind::Contract,
+            format!("Contract {} terminated", due.id),
+            "An inactive contract party could no longer perform the scheduled obligation."
+                .to_owned(),
+        );
+        return;
+    }
     let settlement = ContractSettlementState {
         buyer_owner_id: buyer.owner_dynasty_id(),
         seller_owner_id: seller.owner_dynasty_id(),
@@ -1843,13 +1887,14 @@ fn settle_property_rents(state: &mut AppState) {
         .filter_map(|property| {
             Some((
                 property.owner_dynasty_id?,
-                property.tenant_dynasty_id?,
+                property.tenant_dynasty_id,
+                property.occupant_business_id,
                 property.weekly_rent,
                 property.value,
             ))
         })
         .collect();
-    for (owner_id, tenant_id, contractual_rent, property_value) in rents {
+    for (owner_id, tenant_id, occupant_business_id, contractual_rent, property_value) in rents {
         let rent = annual_rent_limit.map_or(contractual_rent, |limit| {
             let annual_cap = Money::from_copper(
                 property_value
@@ -1859,21 +1904,35 @@ fn settle_property_rents(state: &mut AppState) {
             );
             contractual_rent.min(Money::from_copper(annual_cap.copper() / 52))
         });
-        if owner_id == tenant_id || rent <= Money::ZERO {
+        if rent <= Money::ZERO {
             continue;
         }
-        let tenant_cash = state
-            .dynasties
-            .get(&tenant_id)
-            .expect("property tenant dynasty must exist")
-            .treasury();
-        let paid = rent.min(tenant_cash);
-        state
-            .dynasties
-            .get_mut(&tenant_id)
-            .expect("property tenant dynasty must exist")
-            .resources
-            .treasury = tenant_cash.saturating_sub(paid);
+        let paid = if let Some(tenant_id) = tenant_id {
+            if owner_id == tenant_id {
+                continue;
+            }
+            let tenant_cash = state
+                .dynasties
+                .get(&tenant_id)
+                .expect("property tenant dynasty must exist")
+                .treasury();
+            let paid = rent.min(tenant_cash);
+            state
+                .dynasties
+                .get_mut(&tenant_id)
+                .expect("property tenant dynasty must exist")
+                .resources
+                .treasury = tenant_cash.saturating_sub(paid);
+            paid
+        } else if occupant_business_id.is_none() {
+            state.market.clearing_account = state.market.clearing_account.saturating_sub(rent);
+            rent
+        } else {
+            Money::ZERO
+        };
+        if paid == Money::ZERO {
+            continue;
+        }
         let owner = state
             .dynasties
             .get_mut(&owner_id)
@@ -1882,65 +1941,300 @@ fn settle_property_rents(state: &mut AppState) {
     }
 }
 
-fn settle_employment(state: &mut AppState) {
+fn distribute_business_dividends(registry: &Registry, state: &mut AppState) {
+    let dividends: Vec<_> = state
+        .businesses
+        .iter()
+        .filter_map(|business| {
+            if business.status() != BusinessStatus::Active
+                || business.finance.lifetime_revenue <= business.finance.lifetime_costs
+            {
+                return None;
+            }
+            let recipe = registry
+                .get_recipe(business.recipe_id())
+                .expect("business recipe must exist");
+            let operating_floor = business
+                .policy
+                .minimum_cash_reserve
+                .saturating_add(recipe.daily_operating_cost().saturating_mul(21));
+            let excess = business.cash().saturating_sub(operating_floor);
+            let dividend = Money::from_copper(excess.copper() / 10).min(Money::from_copper(1_000));
+            (dividend > Money::ZERO).then_some((
+                business.id(),
+                business.owner_dynasty_id(),
+                dividend,
+            ))
+        })
+        .collect();
+    let mut total = Money::ZERO;
+    for (business_id, owner_id, dividend) in dividends {
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("dividend business must exist");
+        business.finance.cash = business.finance.cash.saturating_sub(dividend);
+        business.finance.version = business.finance.version.saturating_add(1);
+        let owner = state
+            .dynasties
+            .get_mut(&owner_id)
+            .expect("dividend owner dynasty must exist");
+        owner.resources.treasury = owner.resources.treasury.saturating_add(dividend);
+        total = total.saturating_add(dividend);
+    }
+    if total > Money::ZERO {
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::BusinessDividend,
+            subject: "business-portfolio".to_owned(),
+            detail: format!("dividends={}", total.copper()),
+        });
+    }
+}
+
+fn settle_employment(registry: &Registry, state: &mut AppState) {
     let agreements: Vec<_> = state
         .employment
         .values()
-        .filter(|agreement| agreement.status == EmploymentStatus::Active)
+        .filter(|agreement| {
+            matches!(
+                agreement.status,
+                EmploymentStatus::Active | EmploymentStatus::Disputed
+            )
+        })
         .map(|agreement| {
             (
                 agreement.id,
                 agreement.business_id,
                 agreement.household_id,
                 agreement.weekly_wage,
+                agreement.status,
             )
         })
         .collect();
-    for (id, business_id, household_id, wage) in agreements {
-        let business_cash = state
-            .businesses
-            .get(business_id)
-            .expect("employment business must exist")
-            .cash();
-        let paid = wage.min(business_cash);
-        if paid > Money::ZERO {
-            let business = state
-                .businesses
-                .get_mut(business_id)
-                .expect("employment business must exist");
-            business.finance.cash = business_cash.saturating_sub(paid);
-            business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(paid);
-            business.finance.version = business.finance.version.saturating_add(1);
-            let household = state
-                .households
-                .get_mut(household_id)
-                .expect("employment household must exist");
-            household.cash = household.cash.saturating_add(paid);
-        }
-        let agreement = state
-            .employment
-            .get_mut(&id)
-            .expect("employment must exist");
-        if paid == wage {
-            agreement.loyalty_basis_points = agreement
-                .loyalty_basis_points
-                .saturating_add(30)
-                .min(10_000);
+    for (id, business_id, household_id, wage, prior_status) in agreements {
+        settle_employment_agreement(
+            registry,
+            state,
+            id,
+            business_id,
+            household_id,
+            wage,
+            prior_status,
+        );
+    }
+}
+
+fn settle_employment_agreement(
+    registry: &Registry,
+    state: &mut AppState,
+    employment_id: EmploymentId,
+    business_id: BusinessId,
+    household_id: HouseholdId,
+    wage: Money,
+    prior_status: EmploymentStatus,
+) {
+    let utilization_basis_points =
+        business_labor_utilization_basis_points(registry, state, business_id);
+    let scaled_wage = wage.saturating_mul(i64::from(utilization_basis_points));
+    let wage_due = Money::from_copper(scaled_wage.copper() / 10_000);
+    let paid = pay_employment_wage(registry, state, business_id, household_id, wage_due);
+    let (recovered, became_disputed) = update_employment_after_payment(
+        state,
+        employment_id,
+        prior_status,
+        utilization_basis_points,
+        paid,
+        wage_due,
+    );
+    emit_employment_outcome(state, business_id, recovered, became_disputed);
+}
+
+fn pay_employment_wage(
+    registry: &Registry,
+    state: &mut AppState,
+    business_id: BusinessId,
+    household_id: HouseholdId,
+    wage_due: Money,
+) -> Money {
+    let business = state
+        .businesses
+        .get(business_id)
+        .expect("employment business must exist");
+    let business_cash = business.cash();
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("employment business recipe must exist");
+    let payroll_reserve = if business.status() == BusinessStatus::Distressed {
+        recipe.daily_operating_cost()
+    } else {
+        business.policy.minimum_cash_reserve
+    };
+    let paid = wage_due.min(business_cash.saturating_sub(payroll_reserve));
+    if paid <= Money::ZERO {
+        return paid;
+    }
+    let business = state
+        .businesses
+        .get_mut(business_id)
+        .expect("employment business must exist");
+    business.finance.cash = business_cash.saturating_sub(paid);
+    business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(paid);
+    business.finance.version = business.finance.version.saturating_add(1);
+    let household = state
+        .households
+        .get_mut(household_id)
+        .expect("employment household must exist");
+    household.cash = household.cash.saturating_add(paid);
+    paid
+}
+
+fn update_employment_after_payment(
+    state: &mut AppState,
+    employment_id: EmploymentId,
+    prior_status: EmploymentStatus,
+    utilization_basis_points: u16,
+    paid: Money,
+    wage_due: Money,
+) -> (bool, bool) {
+    let agreement = state
+        .employment
+        .get_mut(&employment_id)
+        .expect("employment must exist");
+    if paid == wage_due {
+        return update_fully_paid_employment(agreement, prior_status, utilization_basis_points);
+    }
+    let loyalty_loss = if prior_status == EmploymentStatus::Disputed {
+        100
+    } else {
+        250
+    };
+    let condition_loss = if prior_status == EmploymentStatus::Disputed {
+        50
+    } else {
+        100
+    };
+    agreement.loyalty_basis_points = agreement.loyalty_basis_points.saturating_sub(loyalty_loss);
+    agreement.conditions_basis_points = agreement
+        .conditions_basis_points
+        .saturating_sub(condition_loss);
+    let became_disputed =
+        prior_status == EmploymentStatus::Active && agreement.loyalty_basis_points < 2_000;
+    if became_disputed {
+        agreement.status = EmploymentStatus::Disputed;
+    }
+    (false, became_disputed)
+}
+
+fn update_fully_paid_employment(
+    agreement: &mut EmploymentAgreement,
+    prior_status: EmploymentStatus,
+    utilization_basis_points: u16,
+) -> (bool, bool) {
+    if utilization_basis_points != 10_000 {
+        return (false, false);
+    }
+    agreement.loyalty_basis_points = agreement
+        .loyalty_basis_points
+        .saturating_add(if prior_status == EmploymentStatus::Disputed {
+            180
         } else {
-            agreement.loyalty_basis_points = agreement.loyalty_basis_points.saturating_sub(250);
-            agreement.conditions_basis_points =
-                agreement.conditions_basis_points.saturating_sub(100);
-            if agreement.loyalty_basis_points < 2_000 {
-                agreement.status = EmploymentStatus::Disputed;
-                push_outbox(
-                    state,
-                    OutboxKind::District,
-                    format!("Labor dispute at business {business_id}"),
-                    "Repeated wage shortfalls have caused organized workplace resistance."
-                        .to_owned(),
-                );
-            }
-        }
+            30
+        })
+        .min(10_000);
+    if prior_status != EmploymentStatus::Disputed {
+        return (false, false);
+    }
+    agreement.conditions_basis_points = agreement
+        .conditions_basis_points
+        .saturating_add(60)
+        .min(10_000);
+    let recovered =
+        agreement.loyalty_basis_points >= 3_000 && agreement.conditions_basis_points >= 3_000;
+    if recovered {
+        agreement.status = EmploymentStatus::Active;
+    }
+    (recovered, false)
+}
+
+fn emit_employment_outcome(
+    state: &mut AppState,
+    business_id: BusinessId,
+    recovered: bool,
+    became_disputed: bool,
+) {
+    if recovered {
+        push_outbox(
+            state,
+            OutboxKind::District,
+            format!("Labor dispute at business {business_id} settled"),
+            "Sustained full wage payments restored a workable labor agreement.".to_owned(),
+        );
+    }
+    if became_disputed {
+        push_outbox(
+            state,
+            OutboxKind::District,
+            format!("Labor dispute at business {business_id}"),
+            "Repeated wage shortfalls have caused organized workplace resistance.".to_owned(),
+        );
+    }
+}
+
+fn business_labor_utilization_basis_points(
+    registry: &Registry,
+    state: &AppState,
+    business_id: BusinessId,
+) -> u16 {
+    let business = state
+        .businesses
+        .get(business_id)
+        .expect("employment business must exist");
+    if matches!(
+        business.status(),
+        BusinessStatus::Closed | BusinessStatus::Insolvent
+    ) {
+        return 0;
+    }
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("employment business recipe must exist");
+    let output_good_id = recipe.output_good_id();
+    let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
+        .saturating_mul(i64::from(business.policy.target_output_days));
+    let policy_reserve = recipe
+        .output_quantity()
+        .saturating_mul_ratio(reserve_batches, 1);
+    let contract_reserve = state
+        .contracts
+        .values()
+        .filter(|contract| {
+            contract.status == ContractStatus::Active
+                && contract.seller_business_id == business_id
+                && contract.good_id == output_good_id
+        })
+        .fold(Quantity::ZERO, |total, contract| {
+            total.saturating_add(contract.quantity_per_week)
+        });
+    let market_capacity =
+        state
+            .market
+            .quotes
+            .get(&output_good_id)
+            .map_or(Quantity::ZERO, |quote| {
+                quote
+                    .target_stock
+                    .saturating_mul_ratio(3, 2)
+                    .saturating_sub(quote.stock)
+                    .max(Quantity::ZERO)
+            });
+    let required_inventory = policy_reserve
+        .saturating_add(contract_reserve)
+        .saturating_add(market_capacity);
+    if business.inventory_quantity(output_good_id) < required_inventory {
+        10_000
+    } else {
+        2_500
     }
 }
 
@@ -2148,18 +2442,157 @@ fn apply_law_economic_effects(registry: &Registry, state: &mut AppState) {
 pub(crate) fn run_monthly_strategic_systems(registry: &Registry, state: &mut AppState) {
     update_district_conditions(state);
     resolve_institution_selections(state);
+    apply_office_power_effects(registry, state);
     advance_ai_objectives(registry, state);
     update_information_reports(registry, state);
     resolve_legal_cases(state);
     update_external_route_risk(state);
-    recover_external_routes(state);
     detect_and_advance_crises(registry, state);
+    recover_external_routes(state);
 }
 
 fn recover_external_routes(state: &mut AppState) {
     for route in state.external_routes.values_mut() {
         route.disruption_basis_points = route.disruption_basis_points.saturating_sub(750);
     }
+}
+
+fn apply_office_power_effects(registry: &Registry, state: &mut AppState) {
+    let offices: Vec<_> = state
+        .institutions
+        .values()
+        .filter_map(|institution| {
+            let holder = state.characters.get(institution.office_holder_id?)?;
+            let district_id = registry
+                .get_institution(institution.institution_id)?
+                .district_id();
+            Some((
+                institution.institution_id,
+                holder.dynasty_id(),
+                district_id,
+                institution.powers.iter().copied().collect::<Vec<_>>(),
+            ))
+        })
+        .collect();
+    for (institution_id, dynasty_id, district_id, powers) in offices {
+        for power in powers {
+            match power {
+                OfficePower::Licenses => {
+                    let dynasty = state
+                        .dynasties
+                        .get_mut(&dynasty_id)
+                        .expect("officeholder dynasty must exist");
+                    dynasty.resources.legitimacy_basis_points = dynasty
+                        .resources
+                        .legitimacy_basis_points
+                        .saturating_add(15)
+                        .min(10_000);
+                }
+                OfficePower::Inspections => {
+                    let dynasty = state
+                        .dynasties
+                        .get_mut(&dynasty_id)
+                        .expect("officeholder dynasty must exist");
+                    dynasty.resources.reputation_quality_basis_points = dynasty
+                        .resources
+                        .reputation_quality_basis_points
+                        .saturating_add(15)
+                        .min(10_000);
+                }
+                OfficePower::MarketTolls | OfficePower::Taxation => {
+                    let revenue = Money::from_copper(100);
+                    state
+                        .institutions
+                        .get_mut(&institution_id)
+                        .expect("office institution must exist")
+                        .budget = state
+                        .institutions
+                        .get(&institution_id)
+                        .expect("office institution must exist")
+                        .budget
+                        .saturating_add(revenue);
+                    state.market.clearing_account =
+                        state.market.clearing_account.saturating_sub(revenue);
+                }
+                OfficePower::DebtEnforcement => {
+                    adjust_reliability_reputation(state, dynasty_id, 15);
+                }
+                OfficePower::CityContracts => {
+                    award_city_contract(state, institution_id, dynasty_id);
+                }
+                OfficePower::PublicWorks => {
+                    let district = state
+                        .districts
+                        .get_mut(&district_id)
+                        .expect("office district must exist");
+                    district.employment_basis_points = district
+                        .employment_basis_points
+                        .saturating_add(20)
+                        .min(10_000);
+                }
+                OfficePower::WatchPriorities => {
+                    let district = state
+                        .districts
+                        .get_mut(&district_id)
+                        .expect("office district must exist");
+                    district.safety_basis_points =
+                        district.safety_basis_points.saturating_add(40).min(10_000);
+                }
+                OfficePower::EmergencyImports => {
+                    if let Some(grain_id) = registry.get_good_id("grain") {
+                        let quote = state
+                            .market
+                            .quotes
+                            .get_mut(&grain_id)
+                            .expect("grain quote must exist");
+                        let quantity = Quantity::from_units(20);
+                        quote.stock = quote.stock.saturating_add(quantity);
+                        quote.supply_today = quote.supply_today.saturating_add(quantity);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn award_city_contract(
+    state: &mut AppState,
+    institution_id: crate::ids::InstitutionId,
+    dynasty_id: DynastyId,
+) {
+    let business_id = state
+        .businesses
+        .ids_for_owner(dynasty_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|business_id| state.businesses.get(*business_id))
+        .filter(|business| business.status() == BusinessStatus::Active)
+        .min_by_key(|business| (business.cash(), business.id()))
+        .map(crate::core::Business::id);
+    let Some(business_id) = business_id else {
+        return;
+    };
+    let institution_budget = state
+        .institutions
+        .get(&institution_id)
+        .expect("city contract institution must exist")
+        .budget;
+    let award = Money::from_copper(250).min(institution_budget);
+    if award == Money::ZERO {
+        return;
+    }
+    state
+        .institutions
+        .get_mut(&institution_id)
+        .expect("city contract institution must exist")
+        .budget = institution_budget.saturating_sub(award);
+    let business = state
+        .businesses
+        .get_mut(business_id)
+        .expect("city contract business must exist");
+    business.finance.cash = business.finance.cash.saturating_add(award);
+    business.finance.lifetime_revenue = business.finance.lifetime_revenue.saturating_add(award);
+    business.finance.version = business.finance.version.saturating_add(1);
 }
 
 fn update_district_conditions(state: &mut AppState) {
@@ -2238,9 +2671,22 @@ fn resolve_institution_selections(state: &mut AppState) {
                     .dynasties
                     .get(&character.dynasty_id())
                     .expect("candidate dynasty must exist");
+                let nomination_subject =
+                    super::commands::office_nomination_subject(institution_id, character.id());
+                let campaign_bonus = state
+                    .audit_log
+                    .iter()
+                    .rev()
+                    .find(|record| {
+                        record.kind() == AuditKind::OfficeNomination
+                            && record.subject() == nomination_subject
+                            && day.saturating_sub(record.day()) <= 180
+                    })
+                    .map_or(0_u32, |_| 4_000);
                 let score = u32::from(character.capabilities.social)
                     .saturating_mul(100)
-                    .saturating_add(u32::from(dynasty.resources.legitimacy_basis_points));
+                    .saturating_add(u32::from(dynasty.resources.legitimacy_basis_points))
+                    .saturating_add(campaign_bonus);
                 (score, character.id())
             })
             .collect();
@@ -2716,6 +3162,7 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
             "Multiple defaults damaged confidence in city credit.",
         );
     }
+    detect_trade_disruption(state);
     if day > 0
         && day % 720 == 0
         && !has_active_crisis(state, CrisisKind::NobleDemand)
@@ -2746,7 +3193,6 @@ fn detect_periodic_crises(state: &mut AppState, day: i64) {
     }
     detect_urban_fire(state);
     detect_epidemic(state);
-    detect_trade_disruption(state);
     detect_guild_revolt(state);
 }
 
@@ -2860,19 +3306,8 @@ fn detect_guild_revolt(state: &mut AppState) {
     let restriction = active_law_value(state, LawKind::GuildEntryRestriction)
         .unwrap_or(0)
         .clamp(0, 10_000);
-    let chance = 400_i64
-        .saturating_add(restriction / 5)
-        .saturating_add(
-            i64::try_from(disputed_count)
-                .unwrap_or(i64::MAX)
-                .saturating_mul(800),
-        )
-        .clamp(0, 10_000);
-    if disputed_count >= 2
-        || state
-            .rng
-            .is_chance_success(u16::try_from(chance).unwrap_or(10_000))
-    {
+    let chance = guild_revolt_probability_basis_points(disputed_count, restriction);
+    if disputed_count >= 2 || (chance > 0 && state.rng.is_chance_success(chance)) {
         let district_id = disputed_district.or_else(|| {
             state
                 .districts
@@ -2894,6 +3329,21 @@ fn detect_guild_revolt(state: &mut AppState) {
             "Labor disputes and restrictive guild rules triggered organized resistance.",
         );
     }
+}
+
+fn guild_revolt_probability_basis_points(disputed_count: usize, restriction: i64) -> u16 {
+    if disputed_count == 0 && restriction <= 0 {
+        return 0;
+    }
+    let chance = 400_i64
+        .saturating_add(restriction.clamp(0, 10_000) / 5)
+        .saturating_add(
+            i64::try_from(disputed_count)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(800),
+        )
+        .clamp(0, 10_000);
+    u16::try_from(chance).unwrap_or(10_000)
 }
 
 fn insert_crisis(
@@ -3056,10 +3506,18 @@ fn update_family_councils(state: &mut AppState) {
             .expect("family council must exist");
         let members = u16::try_from(council.members.len()).unwrap_or(u16::MAX);
         let branch_pressure = i32::from(members.saturating_sub(2).saturating_mul(80));
+        let governance_adjustment = match council.governance {
+            HouseGovernance::HeadCommand => -200,
+            HouseGovernance::Primogeniture => 50,
+            HouseGovernance::FamilyPartnership => 250,
+            HouseGovernance::BranchFederation => 120,
+            HouseGovernance::ElectedHead => -50,
+        };
         council.unity_basis_points = i32::from(council.unity_basis_points)
             .saturating_sub(branch_pressure)
             .saturating_add(50)
             .saturating_add(loyalty_adjustment)
+            .saturating_add(governance_adjustment)
             .clamp(0, 10_000)
             .try_into()
             .expect("clamped family unity must fit u16");

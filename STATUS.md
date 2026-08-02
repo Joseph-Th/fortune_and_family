@@ -177,6 +177,56 @@ The August 2026 codebase audit removed or corrected:
 - Release-save acceptance of invalid roles, dates, policies, indexes, administrative loads, histories, and unsupported active laws.
 - Duplicate business debt authority in favor of explicit loan records.
 - Oversized validation and settlement functions that violated the warning-free structural lint gate.
+- Operating-policy and labor mutations on inactive businesses, plus contract settlement that could
+  still move cash or inventory through closed and insolvent parties.
+- Household labor overallocation by enforcing finite worker pools in bootstrap, commands, debug
+  invariants, and release-save validation.
+- Duplicate unresolved lawsuits and identical law reenactments that could charge costs or create
+  redundant history without a new strategic decision.
+- Trade crises detected after route recovery, delayed trade effects, and guild revolts generated
+  without any labor dispute or restrictive guild pressure.
+- Missing audit-log ordering checks and incomplete market-flow and business-quality assertions.
+- Silent omission of authored bootstrap contracts or loans when an immediately committed validated
+  token failed.
+
+## Gameplay harness tuning
+
+The August 2026 gameplay review ran short, three-year, and six-year campaigns across every start,
+persona, and multiple deterministic seeds. The initial report exposed a collapse loop that the old
+headline score understated: most player portfolios lacked a healthy business, food access approached
+zero outside favorable starts, labor disputes became permanent, contract breaches and credit defaults
+outnumbered successful outcomes, crisis responses crowded out strategic play, and notification volume
+became unusable.
+
+The review corrected the underlying systems rather than only retuning agent priorities:
+
+- Production recipes, quality yield, payroll, maintenance, batch rounding, and cost-aware price
+  floors now support viable operating margins even at one-batch recovery utilization.
+- Production throttles against output reserves, active contract obligations, and actual market
+  capacity instead of spending indefinitely on saturated inventory.
+- Households create sustained demand for fuel, cloth, and tools in addition to bread and ale.
+- Contract sellers reserve inventory for delivery, and disputed workforces retain reduced capacity
+  with a systemic payroll-based recovery path.
+- Distressed firms liquidate discretionary reserves, preserve a one-batch operating float through
+  payroll, and are classified from usable operating cash rather than gross reserved cash.
+- Profitable businesses distribute bounded dividends, unoccupied commercial property earns external
+  rent, and office powers now affect contracts, budgets, reputation, imports, safety, and employment.
+- Funded office nominations schedule a timely election and can win political power; office powers
+  then produce monthly economic and civic effects.
+- Governance models affect administrative throughput, annual family cohesion, and succession risk,
+  with an annual charter-amendment interval that prevents constitutional churn.
+- Business operating policies have a 90-day strategy interval, preventing weekly template churn
+  while preserving deliberate operational pivots.
+- Crisis responses have a response interval, notification acknowledgement clears a backlog, and the
+  harness no longer spends most decision cycles repeatedly selecting housekeeping actions.
+
+The gameplay report schema is now version 4. It separates causal from ambient domain transitions,
+distinguishes persistent immediate effects from genuinely delayed consequences, probes slow commands
+over command-specific bounded horizons, measures distinct viable command families rather than raw
+candidate variants, excludes notification acknowledgement from substantive scores, tracks mid-campaign
+collapse and recovery, records peak office attainment rather than relying on endpoint incumbency, and
+emits direct findings for severe single-campaign food collapse, labor, contracts, credit, notification
+overload, crisis concentration, and autonomous-but-unresponsive systems.
 
 ## Verification status
 
@@ -192,7 +242,7 @@ The release gate requires all of the following to pass:
 - `bash scripts/verify_cli.sh`
 - CLI create, simulate, summary, inspect, execute, dashboard, validate, playtest, and invalid-input smoke tests
 
-The fast suite compiles and runs only non-ignored library tests. It currently contains 95 passing
+The fast suite compiles and runs only non-ignored library tests. It currently contains 125 passing
 tests, with two ignored long-horizon tests in the soak tier. It uses a shared immutable registry
 fixture and fresh per-test campaign state, with domain filters and exact-name execution for focused
 iteration. Large suites live in dedicated `*_tests.rs` files and are grouped by contracts, loans,

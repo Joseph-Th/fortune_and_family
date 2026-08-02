@@ -194,6 +194,41 @@ mod coverage {
         assert!(acquisition.purchase_price > Money::ZERO);
         assert!(acquisition.minimum_recapitalization > Money::ZERO);
     }
+
+    #[test]
+    fn exposes_business_policy_values_used_by_player_commands() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("player business must exist");
+            business.policy.target_input_days = 7;
+            business.policy.target_output_days = 5;
+            business.policy.minimum_cash_reserve = Money::from_copper(1_234);
+            business.policy.maintenance_basis_points = 2_345;
+            business.policy.quality_target_basis_points = 8_765;
+        }
+
+        let projection = build_campaign_projection(registry, &state);
+        let business = projection
+            .businesses
+            .iter()
+            .find(|business| business.id == business_id)
+            .expect("player business must be projected");
+
+        assert_eq!(business.target_input_days, 7);
+        assert_eq!(business.target_output_days, 5);
+        assert_eq!(business.minimum_cash_reserve, Money::from_copper(1_234));
+        assert_eq!(business.maintenance_basis_points, 2_345);
+        assert_eq!(business.quality_target_basis_points, 8_765);
+    }
 }
 
 mod html {

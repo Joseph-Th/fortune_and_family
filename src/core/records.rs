@@ -301,7 +301,7 @@ impl Default for BusinessPolicy {
             target_input_days: 3,
             target_output_days: 2,
             minimum_cash_reserve: Money::from_copper(500),
-            maintenance_basis_points: 7_500,
+            maintenance_basis_points: 1_200,
             quality_target_basis_points: 7_000,
         }
     }
@@ -546,7 +546,12 @@ pub enum AuditKind {
     DayAdvanced,
     CashTransfer,
     BusinessCapitalization,
+    BusinessPolicyChange,
     BusinessAcquisition,
+    BusinessDividend,
+    CrisisResponse,
+    OfficeNomination,
+    HouseGovernanceChange,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

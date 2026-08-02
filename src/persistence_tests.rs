@@ -511,6 +511,76 @@ mod validation {
     }
 
     #[test]
+    fn rejects_household_labor_overallocation() {
+        let state = make_test_campaign();
+        let agreement = state
+            .employment
+            .values()
+            .next()
+            .expect("campaign must contain employment");
+        let household_id = agreement.household_id;
+        let members = agreement.workers.saturating_sub(1).max(1);
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let household = value["households"]["records"]
+            .as_object_mut()
+            .and_then(|records| {
+                records.values_mut().find(|household| {
+                    household["id"].as_u64() == Some(u64::from(household_id.value()))
+                })
+            })
+            .expect("serialized state must contain the employed household");
+        household["members"] = Value::from(members);
+        let (_directory, path) = write_test_json_fixture("overallocated-labor.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "exceeds household labor capacity",
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_unresolved_legal_cases() {
+        let mut state = make_test_campaign();
+        let mut duplicate = state
+            .legal_cases
+            .values()
+            .next()
+            .expect("campaign must contain a legal case")
+            .clone();
+        let duplicate_id = state.next_ids.legal_case();
+        duplicate.id = duplicate_id;
+        state.legal_cases.insert(duplicate_id, duplicate);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("duplicate-legal-case.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "duplicates an unresolved case",
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_order_audit_history() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        advance_days(registry, &mut state, 2).expect("simulation must advance");
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["audit_log"]
+            .as_array_mut()
+            .expect("audit log must be an array")
+            .reverse();
+        let (_directory, path) = write_test_json_fixture("unordered-audit.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "audit log is not chronologically valid",
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_property_occupants() {
         let state = make_test_campaign();
         let mut value = serde_json::to_value(state).expect("state must serialize");

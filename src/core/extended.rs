@@ -150,6 +150,41 @@ impl EmploymentAgreement {
     pub const fn id(&self) -> EmploymentId {
         self.id
     }
+
+    #[must_use]
+    pub const fn business_id(&self) -> BusinessId {
+        self.business_id
+    }
+
+    #[must_use]
+    pub const fn household_id(&self) -> crate::ids::HouseholdId {
+        self.household_id
+    }
+
+    #[must_use]
+    pub const fn workers(&self) -> u16 {
+        self.workers
+    }
+
+    #[must_use]
+    pub const fn weekly_wage(&self) -> Money {
+        self.weekly_wage
+    }
+
+    #[must_use]
+    pub const fn loyalty_basis_points(&self) -> u16 {
+        self.loyalty_basis_points
+    }
+
+    #[must_use]
+    pub const fn conditions_basis_points(&self) -> u16 {
+        self.conditions_basis_points
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> EmploymentStatus {
+        self.status
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,7 +493,7 @@ impl PublicWork {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum LegalCaseKind {
     Debt,
     ContractBreach,

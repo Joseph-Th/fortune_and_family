@@ -85,8 +85,16 @@ fn validate_market(registry: &Registry, state: &AppState, ids: &RegistryIds) {
             "Lifecycle Validity: market price must remain positive for good {good_id}"
         );
         debug_assert!(
+            quote.previous_price.copper() > 0,
+            "Lifecycle Validity: previous market price must remain positive for good {good_id}"
+        );
+        debug_assert!(
             !quote.stock.is_negative(),
             "Lifecycle Validity: market stock must remain nonnegative for good {good_id}"
+        );
+        debug_assert!(
+            !quote.demand_today.is_negative() && !quote.supply_today.is_negative(),
+            "Lifecycle Validity: market flows must remain nonnegative for good {good_id}"
         );
         debug_assert!(
             quote.target_stock > crate::money::Quantity::ZERO,
@@ -278,6 +286,11 @@ fn validate_business_record(state: &AppState, business: &Business, ids: &Registr
     debug_assert!(
         business.condition_basis_points() <= 10_000,
         "Lifecycle Validity: business {} condition is outside basis-point range",
+        business.id()
+    );
+    debug_assert!(
+        business.operations.quality_basis_points <= 10_000,
+        "Lifecycle Validity: business {} quality is outside basis-point range",
         business.id()
     );
     debug_assert!(
@@ -648,6 +661,7 @@ fn validate_loans(state: &AppState) {
 
 fn validate_employment(state: &AppState) {
     let mut workers_by_business: BTreeMap<BusinessId, u32> = BTreeMap::new();
+    let mut workers_by_household: BTreeMap<HouseholdId, u32> = BTreeMap::new();
     for (employment_id, agreement) in &state.employment {
         debug_assert_eq!(
             *employment_id, agreement.id,
@@ -676,6 +690,12 @@ fn validate_employment(state: &AppState) {
                     *workers = workers.saturating_add(u32::from(agreement.workers));
                 })
                 .or_insert(u32::from(agreement.workers));
+            workers_by_household
+                .entry(agreement.household_id)
+                .and_modify(|workers| {
+                    *workers = workers.saturating_add(u32::from(agreement.workers));
+                })
+                .or_insert(u32::from(agreement.workers));
         }
         if agreement.status == EmploymentStatus::Active {
             debug_assert!(
@@ -696,6 +716,17 @@ fn validate_employment(state: &AppState) {
         debug_assert!(
             workers <= supported_workers,
             "Lifecycle Validity: employment exceeds business operating capacity"
+        );
+    }
+    for (household_id, workers) in workers_by_household {
+        let members = state
+            .households
+            .get(household_id)
+            .expect("validated employment household must exist")
+            .members();
+        debug_assert!(
+            workers <= u32::from(members),
+            "Lifecycle Validity: employment exceeds household labor capacity"
         );
     }
 }
@@ -939,6 +970,7 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
 }
 
 fn validate_legal_cases(state: &AppState) {
+    let mut active_cases = BTreeSet::new();
     for (case_id, case) in &state.legal_cases {
         debug_assert_eq!(
             *case_id, case.id,
@@ -972,6 +1004,19 @@ fn validate_legal_cases(state: &AppState) {
             debug_assert!(
                 case.hearing_day <= state.clock.day(),
                 "Lifecycle Validity: decided legal case hearing is in the future"
+            );
+        }
+        if matches!(
+            case.status,
+            LegalCaseStatus::Filed | LegalCaseStatus::Hearing
+        ) {
+            debug_assert!(
+                active_cases.insert((
+                    case.plaintiff_dynasty_id,
+                    case.defendant_dynasty_id,
+                    case.kind,
+                )),
+                "Ownership Exclusivity: duplicate unresolved legal case exists between the same parties"
             );
         }
     }
@@ -1062,10 +1107,12 @@ fn validate_history(state: &AppState) {
         );
         prior_day = entry.day();
     }
+    let mut prior_audit_day = i64::MIN;
     for record in &state.audit_log {
         debug_assert!(
-            record.day() <= state.clock.day(),
-            "No Lost Runtime State: audit record is dated after current simulation time"
+            record.day() >= prior_audit_day && record.day() <= state.clock.day(),
+            "Deterministic Decision Ordering: audit records are not chronologically valid"
         );
+        prior_audit_day = record.day();
     }
 }

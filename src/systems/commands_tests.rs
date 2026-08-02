@@ -74,6 +74,102 @@ mod validation {
             "a no-op policy command must not increment the business version",
         );
     }
+
+    #[test]
+    fn rejects_repeated_business_policy_changes_during_the_strategy_interval() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let current_input_days = state
+            .businesses
+            .get(business_id)
+            .expect("owned business must exist")
+            .policy
+            .target_input_days;
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetBusinessPolicy {
+                business_id,
+                target_input_days: current_input_days.saturating_add(1).min(30),
+                target_output_days: 4,
+                minimum_cash_reserve: Money::from_copper(700),
+                maintenance_basis_points: 6_000,
+                quality_target_basis_points: 7_500,
+            },
+        )
+        .expect("the first material policy change must be accepted");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetBusinessPolicy {
+                business_id,
+                target_input_days: current_input_days.saturating_add(2).min(30),
+                target_output_days: 6,
+                minimum_cash_reserve: Money::from_copper(900),
+                maintenance_basis_points: 7_000,
+                quality_target_basis_points: 8_000,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::BusinessPolicyCooldown {
+                business_id,
+                next_change_day: BUSINESS_POLICY_CHANGE_INTERVAL_DAYS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "operating strategy must remain stable long enough to generate consequences",
+        );
+    }
+
+    #[test]
+    fn rejects_policy_changes_for_inactive_businesses() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist");
+        business.operations.status = crate::core::BusinessStatus::Insolvent;
+        let command = PlayerCommand::SetBusinessPolicy {
+            business_id,
+            target_input_days: business.policy.target_input_days.saturating_add(1),
+            target_output_days: business.policy.target_output_days,
+            minimum_cash_reserve: business.policy.minimum_cash_reserve,
+            maintenance_basis_points: business.policy.maintenance_basis_points,
+            quality_target_basis_points: business.policy.quality_target_basis_points,
+        };
+        let before = state.clone();
+
+        let result = apply_player_command(registry, &mut state, command);
+
+        assert_eq!(
+            result,
+            Err(CommandError::Strategic(StrategicError::BusinessInactive {
+                business_id,
+            }))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "inactive businesses must not accept operating-policy mutations",
+        );
+    }
 }
 
 mod business_acquisition {
@@ -391,10 +487,124 @@ mod laws {
             "unsupported laws must fail before charging or mutating state",
         );
     }
+
+    #[test]
+    fn rejects_reenacting_identical_active_law_without_spending() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (kind, value) = state
+            .laws
+            .values()
+            .find(|law| law.active && law.kind.is_implemented())
+            .map(|law| (law.kind, law.value))
+            .expect("campaign must contain an active implemented law");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EnactLaw { kind, value },
+        );
+
+        assert_eq!(result, Err(CommandError::UnchangedLaw { kind, value }));
+        assert_state_unchanged(
+            &before,
+            &state,
+            "reenacting an identical active law must not consume treasury or create history",
+        );
+    }
 }
 
 mod politics {
     use super::*;
+    use crate::systems::advance_days;
+
+    #[test]
+    fn nomination_creates_a_funded_campaign_and_can_win_the_scheduled_selection() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let nominee_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        let institution_id = state
+            .institutions
+            .iter()
+            .find(|(_, institution)| !institution.members.contains(&nominee_id))
+            .map(|(institution_id, _)| *institution_id)
+            .expect("campaign must contain an institution open to the nominee");
+        let member_ids: Vec<_> = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist")
+            .members
+            .iter()
+            .copied()
+            .collect();
+        for member_id in member_ids {
+            state
+                .characters
+                .get_mut(member_id)
+                .expect("institution member must exist")
+                .capabilities
+                .social = 0;
+        }
+        state
+            .characters
+            .get_mut(nominee_id)
+            .expect("nominee must exist")
+            .capabilities
+            .social = 100;
+        for dynasty in state.dynasties.values_mut() {
+            dynasty.resources.legitimacy_basis_points = 0;
+        }
+        let treasury_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id,
+                character_id: nominee_id,
+            },
+        )
+        .expect("nomination must succeed");
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            treasury_before.saturating_sub(Money::from_copper(300))
+        );
+        assert!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .next_selection_day
+                <= 60,
+            "nomination must schedule a timely contest"
+        );
+
+        advance_days(registry, &mut state, 60).expect("campaign must reach the selection");
+
+        assert_eq!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .office_holder_id,
+            Some(nominee_id),
+            "a strong funded nomination must be capable of winning office"
+        );
+    }
 
     #[test]
     fn repeated_office_nomination_is_rejected_without_reward() {
@@ -472,6 +682,55 @@ mod politics {
             "reasserting the current governance must not amend the charter or reduce unity",
         );
     }
+
+    #[test]
+    fn governance_cannot_be_rewritten_twice_in_one_year() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let current = state
+            .family_councils
+            .get(&state.player_dynasty_id)
+            .expect("player family council must exist")
+            .governance;
+        let alternatives: Vec<_> = [
+            HouseGovernance::Primogeniture,
+            HouseGovernance::FamilyPartnership,
+            HouseGovernance::BranchFederation,
+        ]
+        .into_iter()
+        .filter(|governance| *governance != current)
+        .collect();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetHouseGovernance {
+                governance: alternatives[0],
+            },
+        )
+        .expect("first charter amendment must succeed");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetHouseGovernance {
+                governance: alternatives[1],
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::HouseGovernanceCooldown {
+                next_change_day: 360,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a premature charter amendment must not mutate family governance",
+        );
+    }
 }
 
 mod crises {
@@ -522,6 +781,285 @@ mod crises {
             &before,
             &state,
             "failed exploitation must not mint treasury or intensify the crisis",
+        );
+    }
+
+    #[test]
+    fn repeated_crisis_response_is_throttled_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: crate::core::CrisisKind::NobleDemand,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 8_000,
+                status: CrisisStatus::Active,
+                cause: "test crisis".to_owned(),
+            },
+        );
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Reform,
+            },
+        )
+        .expect("first response must succeed");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Suppress,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::CrisisResponseCooldown {
+                crisis_id,
+                next_response_day: 30,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "cooldown rejection must not spend funds or change crisis severity",
+        );
+    }
+}
+
+mod notifications {
+    use super::*;
+
+    #[test]
+    fn acknowledgement_clears_the_notification_backlog_through_selected_message() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let message_id = state
+            .outbox
+            .last()
+            .expect("campaign must contain notifications")
+            .id;
+
+        let outcome = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AcknowledgeNotification { message_id },
+        )
+        .expect("acknowledgement must succeed");
+
+        assert!(
+            state
+                .outbox
+                .iter()
+                .filter(|message| message.id <= message_id)
+                .all(|message| message.acknowledged),
+            "acknowledging the latest visible message must clear the older backlog"
+        );
+        assert!(outcome.summary.contains("notifications"));
+    }
+}
+
+mod legal_cases {
+    use super::*;
+
+    #[test]
+    fn rejects_duplicate_unresolved_case_without_charging_filing_cost() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let defendant_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a nonplayer dynasty");
+        let kind = LegalCaseKind::ContractBreach;
+        let id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            id,
+            LegalCase {
+                id,
+                plaintiff_dynasty_id: state.player_dynasty_id,
+                defendant_dynasty_id,
+                kind,
+                evidence_basis_points: 6_000,
+                public_attention_basis_points: 1_500,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: Money::from_copper(2_000),
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FileLegalCase {
+                defendant_dynasty_id,
+                kind,
+                evidence_basis_points: 7_000,
+                damages: Money::from_copper(4_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::DuplicateActiveLegalCase {
+                defendant_dynasty_id,
+                kind,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "duplicate unresolved cases must fail before charging the filing cost",
+        );
+    }
+}
+
+mod labor {
+    use super::*;
+
+    #[test]
+    fn rejects_labor_response_for_inactive_business() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let employment_id = state
+            .employment
+            .values()
+            .find(|agreement| {
+                state
+                    .businesses
+                    .get(agreement.business_id)
+                    .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            })
+            .expect("player business must have employment")
+            .id;
+        let business_id = {
+            let agreement = state
+                .employment
+                .get_mut(&employment_id)
+                .expect("employment must exist");
+            agreement.status = EmploymentStatus::Disputed;
+            agreement.business_id
+        };
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("employment business must exist")
+            .operations
+            .status = BusinessStatus::Insolvent;
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::ResolveLaborDispute {
+                employment_id,
+                response: LaborResponse::Negotiate,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Strategic(StrategicError::BusinessInactive {
+                business_id,
+            }))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "inactive businesses must not spend cash or reactivate employment through labor commands",
+        );
+    }
+
+    #[test]
+    fn replacement_requires_a_household_with_available_workers() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let employment_id = state
+            .employment
+            .values()
+            .find(|agreement| {
+                state
+                    .businesses
+                    .get(agreement.business_id)
+                    .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            })
+            .expect("player business must have an employment agreement")
+            .id;
+        let (business_id, current_household_id, workers) = {
+            let agreement = state
+                .employment
+                .get_mut(&employment_id)
+                .expect("selected employment must exist");
+            agreement.status = EmploymentStatus::Disputed;
+            (
+                agreement.business_id,
+                agreement.household_id,
+                agreement.workers,
+            )
+        };
+        assert!(workers > 1, "fixture must require more than one worker");
+        for (id, agreement) in &mut state.employment {
+            if *id != employment_id {
+                agreement.status = EmploymentStatus::Ended;
+            }
+        }
+        let district_id = state
+            .businesses
+            .get(business_id)
+            .expect("employment business must exist")
+            .district_id();
+        let household_ids: Vec<_> = state
+            .households
+            .ids_for_district(district_id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        for household_id in household_ids {
+            if household_id != current_household_id {
+                state
+                    .households
+                    .get_mut(household_id)
+                    .expect("indexed household must exist")
+                    .members = 1;
+            }
+        }
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::ResolveLaborDispute {
+                employment_id,
+                response: LaborResponse::ReplaceWorkers,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::NoReplacementLaborAvailable {
+                employment_id,
+                district_id,
+                workers,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "failed worker replacement must not reassign labor or increase unrest",
         );
     }
 }

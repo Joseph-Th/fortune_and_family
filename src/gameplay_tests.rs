@@ -145,6 +145,52 @@ fn rendered_report_surfaces_scores_findings_and_traces() {
     serde_json::to_string(&report).expect("report must serialize to JSON");
 }
 
+#[test]
+fn findings_surface_a_single_complete_food_collapse() {
+    let registry = build_rivergate_registry();
+    let mut report = run_gameplay_harness(&registry, focused_config(30))
+        .expect("gameplay harness must complete");
+    let campaign = report
+        .campaigns
+        .first_mut()
+        .expect("focused configuration must produce one campaign");
+    campaign.end.average_food_satisfaction = 0;
+    campaign.minimum_food_satisfaction = 0;
+
+    let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+    assert!(findings.iter().any(|finding| {
+        finding.title == "At least one campaign experiences complete food collapse"
+    }));
+}
+
+#[test]
+fn political_reachability_uses_peak_office_attainment_not_endpoint_incumbency() {
+    let registry = build_rivergate_registry();
+    let mut report = run_gameplay_harness(&registry, focused_config(30))
+        .expect("gameplay harness must complete");
+    report
+        .aggregate
+        .commands
+        .get_mut(&GameplayCommandKind::NominateForOffice)
+        .expect("all command statistics must exist")
+        .executed = 1;
+    let campaign = report
+        .campaigns
+        .first_mut()
+        .expect("focused configuration must produce one campaign");
+    campaign.end.offices_held = 0;
+    campaign.maximum_offices_held = 1;
+
+    let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| { finding.title != "Office nominations never produce political power" })
+    );
+}
+
 fn add_second_player_business(state: &mut AppState) {
     let player_id = state.player_dynasty_id;
     let manager_id = state
