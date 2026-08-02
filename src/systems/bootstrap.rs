@@ -6,8 +6,8 @@ use crate::core::{
     CampaignPhase, Character, CharacterCapabilities, CharacterIdentity, CharacterRole,
     CharacterRuntime, CharacterStatus, CharacterStore, ChronicleEntry, ChronicleKind, Dynasty,
     DynastyIdentity, DynastyRelationships, DynastyResources, DynastyRuntime, Household,
-    HouseholdStore, InstitutionState, MarketCause, MarketQuote, MarketState, NewGameConfig,
-    NextIds, SimulationClock, SocialClass, StartingBackground,
+    HouseholdStore, MarketCause, MarketQuote, MarketState, NewGameConfig, NextIds, SimulationClock,
+    SocialClass, StartingBackground,
 };
 use crate::ids::{CharacterId, DistrictId, DynastyId, RecipeId};
 use crate::money::{Money, Quantity};
@@ -95,7 +95,6 @@ pub fn build_new_game(
     state.player_dynasty_id = player_dynasty_id;
     insert_npc_foundations(&mut state, registry);
     insert_household_groups(&mut state, registry);
-    insert_institutions(&mut state, registry, player_dynasty_id);
     super::strategic::initialize_strategic_state(registry, &mut state);
     record_campaign_foundation(
         &mut state,
@@ -163,7 +162,6 @@ fn empty_state(registry: &Registry, seed: u64) -> AppState {
         households: HouseholdStore::new(),
         businesses: BusinessStore::new(),
         institutions: BTreeMap::new(),
-        institution_runtime: BTreeMap::new(),
         market,
         contracts: BTreeMap::new(),
         loans: BTreeMap::new(),
@@ -270,29 +268,6 @@ fn insert_npc_foundations(state: &mut AppState, registry: &Registry) {
                 },
             );
         }
-    }
-}
-
-fn insert_institutions(state: &mut AppState, registry: &Registry, player_id: DynastyId) {
-    for institution in registry.institutions() {
-        let office_holder_id = if institution.key() == "city_council" {
-            state
-                .dynasties
-                .values()
-                .find(|dynasty| dynasty.id() != player_id)
-                .map(Dynasty::head_id)
-        } else {
-            None
-        };
-        state.institutions.insert(
-            institution.id(),
-            InstitutionState {
-                institution_id: institution.id(),
-                legitimacy_basis_points: 7_000,
-                office_holder_id,
-                policy_version: 0,
-            },
-        );
     }
 }
 
@@ -523,7 +498,6 @@ fn insert_business(state: &mut AppState, registry: &Registry, seed: BusinessSeed
         },
         operations: BusinessOperations {
             manager_id,
-            employees: capacity_batches_per_day.saturating_mul(4),
             capacity_batches_per_day,
             condition_basis_points: 8_500,
             quality_basis_points: 6_500,
@@ -591,115 +565,5 @@ fn insert_household_groups(state: &mut AppState, registry: &Registry) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::rivergate_registry_for_test as test_registry;
-
-    #[test]
-    fn names_reject_empty_dynasty() {
-        let registry = test_registry();
-        let empty_dynasty = NewGameConfig {
-            dynasty_name: "   ".to_owned(),
-            ..NewGameConfig::default()
-        };
-
-        assert_eq!(
-            build_new_game(registry, empty_dynasty),
-            Err(NewGameError::EmptyDynastyName)
-        );
-    }
-
-    #[test]
-    fn names_reject_empty_founder() {
-        let registry = test_registry();
-        let empty_founder = NewGameConfig {
-            founder_name: "\n\t".to_owned(),
-            ..NewGameConfig::default()
-        };
-
-        assert_eq!(
-            build_new_game(registry, empty_founder),
-            Err(NewGameError::EmptyFounderName)
-        );
-    }
-
-    #[test]
-    fn names_normalize_internal_whitespace_at_the_input_boundary() {
-        let registry = test_registry();
-        let config = NewGameConfig {
-            dynasty_name: "  House\tValeri  ".to_owned(),
-            founder_name: "  Elian\n  Valeri  ".to_owned(),
-            ..NewGameConfig::default()
-        };
-
-        let state = build_new_game(registry, config).expect("game must build");
-        let dynasty = state
-            .get_dynasty(state.player_dynasty_id())
-            .expect("player dynasty must exist");
-        let founder = state
-            .characters()
-            .get(dynasty.head_id())
-            .expect("founder must exist");
-
-        assert_eq!(dynasty.name(), "House Valeri");
-        assert_eq!(founder.name(), "Elian Valeri");
-    }
-
-    #[test]
-    fn names_reject_terminal_control_characters() {
-        let registry = test_registry();
-
-        assert_eq!(
-            build_new_game(
-                registry,
-                NewGameConfig {
-                    dynasty_name: "Valeri\u{1b}[31m".to_owned(),
-                    ..NewGameConfig::default()
-                }
-            ),
-            Err(NewGameError::InvalidDynastyNameCharacter {
-                character: '\u{1b}',
-            })
-        );
-    }
-
-    #[test]
-    fn names_reject_overlong_dynasty_by_character_count() {
-        let registry = test_registry();
-        let dynasty_name = "V".repeat(MAX_DYNASTY_NAME_CHARACTERS + 1);
-
-        assert_eq!(
-            build_new_game(
-                registry,
-                NewGameConfig {
-                    dynasty_name,
-                    ..NewGameConfig::default()
-                }
-            ),
-            Err(NewGameError::DynastyNameTooLong {
-                actual: MAX_DYNASTY_NAME_CHARACTERS + 1,
-                maximum: MAX_DYNASTY_NAME_CHARACTERS,
-            })
-        );
-    }
-
-    #[test]
-    fn names_reject_overlong_unicode_founder_by_character_count() {
-        let registry = test_registry();
-        let founder_name = "É".repeat(MAX_FOUNDER_NAME_CHARACTERS + 1);
-
-        assert_eq!(
-            build_new_game(
-                registry,
-                NewGameConfig {
-                    founder_name,
-                    ..NewGameConfig::default()
-                }
-            ),
-            Err(NewGameError::FounderNameTooLong {
-                actual: MAX_FOUNDER_NAME_CHARACTERS + 1,
-                maximum: MAX_FOUNDER_NAME_CHARACTERS,
-            })
-        );
-    }
-}
+#[path = "bootstrap_tests.rs"]
+mod tests;

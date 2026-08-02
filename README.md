@@ -54,9 +54,9 @@ The same seed, state, inputs, and commands produce the same result.
 
 ## Persistence
 
-Campaigns are stored as human-readable JSON. Schema version 2 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation. Saves are serialized to a same-directory temporary file, synchronized, and atomically persisted over the destination so an interrupted write does not truncate the previous campaign.
+Campaigns are stored as human-readable JSON. Schema version 3 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation. Saves are serialized to a same-directory temporary file, synchronized, and atomically persisted over the destination so an interrupted write does not truncate the previous campaign. Explicit migrations retain supported version 0, 1, and 2 campaigns.
 
-Explicit migrations are provided for schema versions 0 and 1. Version 1 Rivergate saves are deterministically hydrated with the strategic records introduced in version 2.
+Explicit migrations are provided for schema versions 0, 1, and 2. Version 1 Rivergate saves are deterministically hydrated with strategic records, while version 2 saves consolidate institution runtime and remove redundant staffing fields.
 
 ## CLI
 
@@ -136,9 +136,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 bash scripts/verify_cli.sh
 ```
 
-`bash scripts/test.sh fast` runs the normal Cargo test graph, including library, binary, integration, and documentation tests. An optional name filter supports focused runs such as `bash scripts/test.sh fast loans_`. Long deterministic simulations are explicitly ignored by ordinary test runs and are collected under `bash scripts/test.sh soak`. `bash scripts/test.sh all` validates shell syntax, then runs fast tests, soak tests, and the CLI smoke suite in sequence.
+`bash scripts/test.sh fast` runs only the non-ignored library tests, avoiding binary and documentation builds during ordinary edit-test cycles. An optional substring filter supports focused runs such as `bash scripts/test.sh fast loans`. `bash scripts/test.sh list laws` lists matching tests, and `bash scripts/test.sh exact <fully-qualified-name>` runs one test even when it belongs to the ignored soak tier. Long deterministic simulations are explicitly ignored by ordinary test runs and are collected under `bash scripts/test.sh soak`. `bash scripts/test.sh all` runs shell syntax checks, library tests, documentation tests, soak tests, and the CLI smoke suite in sequence.
 
-Tests share one immutable Rivergate registry but build a fresh campaign state for every case. The suite includes deterministic replay, transaction rollback, stale-token revalidation, command rollback, bounded input validation, registry validation, schema migration, atomic save replacement, exact save/load equality, projection rendering, a 3,000-day invariant soak, and a 7,200-day strategic soak spanning multiple generations. The CLI smoke script validates campaign creation, simulation, structured summaries, complete projections, commands, dashboard generation, save validation, and rejected input.
+Tests share one immutable Rivergate registry but build a fresh campaign state for every case. Large suites are separated from production modules and grouped by stable domains such as contracts, loans, laws, crises, migrations, and validation. The suite includes deterministic replay, transaction rollback, stale-token revalidation, command rollback, bounded input validation, registry validation, schema migration, atomic save replacement, exact save/load equality, projection rendering, a 3,000-day invariant soak, and a 7,200-day strategic soak spanning multiple generations. The CLI smoke script validates campaign creation, simulation, structured summaries, complete projections, commands, dashboard generation, save validation, and rejected input. See `TESTING.md` for test tiers, naming, layout, and assertion guidance.
 
 ## Repository structure
 
@@ -149,6 +149,8 @@ src/
   systems/       Bootstrap, commands, simulation, strategic systems, transactions, invariants
   projection.rs  Read-only campaign projections and HTML rendering
   persistence.rs Versioned JSON adapter and migrations
+  *_tests.rs    Larger domain-organized unit-test suites
+  test_support.rs Shared deterministic fixtures and diagnostic assertions
   main.rs        CLI adapter
 ```
 

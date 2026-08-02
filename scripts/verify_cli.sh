@@ -22,7 +22,14 @@ require_literal() {
   grep -Fq "$needle" "$path" || fail "$description did not contain '$needle'"
 }
 
-cargo build --quiet --locked --bin civic-dynasty
+run_to_file() {
+  local description=$1
+  local output=$2
+  shift 2
+  "$@" > "$output" || fail "$description command failed"
+}
+
+cargo build --quiet --locked --bin civic-dynasty || fail 'CLI binary build failed'
 
 binary="target/debug/civic-dynasty"
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/civic-dynasty-cli.XXXXXX")
@@ -41,22 +48,23 @@ else
   fail 'Python is required to validate CLI JSON output'
 fi
 
-"$binary" new \
+run_to_file 'campaign creation' "$work_dir/new.txt" "$binary" new \
   --output "$campaign" \
   --seed 42 \
   --dynasty Valeri \
   --founder "Elian Valeri" \
   --background baker \
-  --advance 30 > "$work_dir/new.txt"
+  --advance 30
 
-"$binary" summary "$campaign" --json > "$summary"
-"$binary" inspect "$campaign" > "$projection"
-"$binary" simulate "$campaign" --days 30 > "$work_dir/simulate.txt"
-"$binary" execute "$campaign" \
-  --command '{"EnactLaw":{"kind":"BreadPriceCeiling","value":30}}' \
-  > "$work_dir/execute.txt"
-"$binary" dashboard "$campaign" --output "$dashboard" > "$work_dir/dashboard.txt"
-"$binary" validate "$campaign" > "$work_dir/validate.txt"
+run_to_file 'campaign simulation' "$work_dir/simulate.txt" \
+  "$binary" simulate "$campaign" --days 30
+run_to_file 'player command' "$work_dir/execute.txt" "$binary" execute "$campaign" \
+  --command '{"EnactLaw":{"kind":"BreadPriceCeiling","value":30}}'
+run_to_file 'JSON summary' "$summary" "$binary" summary "$campaign" --json
+run_to_file 'campaign projection' "$projection" "$binary" inspect "$campaign"
+run_to_file 'dashboard rendering' "$work_dir/dashboard.txt" \
+  "$binary" dashboard "$campaign" --output "$dashboard"
+run_to_file 'save validation' "$work_dir/validate.txt" "$binary" validate "$campaign"
 
 require_nonempty_file "$campaign" 'campaign save'
 require_nonempty_file "$dashboard" 'HTML dashboard'
@@ -83,8 +91,8 @@ required_summary = {
 missing_summary = sorted(required_summary - summary.keys())
 if missing_summary:
     raise SystemExit(f"summary JSON missing fields: {', '.join(missing_summary)}")
-if summary["elapsed_days"] != 30:
-    raise SystemExit(f"summary elapsed_days was {summary['elapsed_days']}, expected 30")
+if summary["elapsed_days"] != 60:
+    raise SystemExit(f"summary elapsed_days was {summary['elapsed_days']}, expected 60")
 if summary["businesses"] <= 0 or summary["population_groups"] <= 0:
     raise SystemExit("summary must report businesses and population groups")
 
@@ -103,6 +111,17 @@ if missing_projection:
     raise SystemExit(f"projection JSON missing views: {', '.join(missing_projection)}")
 if not projection["districts"] or not projection["market"]:
     raise SystemExit("projection must contain district and market views")
+if projection["scenario"]["elapsed_days"] != 60:
+    raise SystemExit("projection did not preserve both simulation advances")
+active_ceiling = [
+    law
+    for law in projection.get("laws", [])
+    if law.get("active")
+    and law.get("kind") == "BreadPriceCeiling"
+    and law.get("value") == 30
+]
+if len(active_ceiling) != 1:
+    raise SystemExit("projection must contain the enacted bread price ceiling")
 PY
 
 if "$binary" new \

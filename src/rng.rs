@@ -45,7 +45,7 @@ impl DeterministicRng {
     /// # Panics
     ///
     /// Panics when `basis_points` is greater than 10,000.
-    pub fn chance_basis_points(&mut self, basis_points: u16) -> bool {
+    pub fn is_chance_success(&mut self, basis_points: u16) -> bool {
         assert!(
             basis_points <= 10_000,
             "chance must be at most 10,000 basis points"

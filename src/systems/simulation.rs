@@ -4,9 +4,9 @@ use super::SimulationError;
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
     CharacterCapabilities, CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus,
-    ChronicleEntry, ChronicleKind, FamilyLink, FamilyLinkKind, MarketCause,
+    ChronicleEntry, ChronicleKind, EmploymentStatus, FamilyLink, FamilyLinkKind, MarketCause,
 };
-use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, GoodId};
+use crate::ids::{BusinessId, CharacterId, DynastyId, GoodId};
 use crate::money::{Money, Quantity, affordable_quantity, cost_for};
 use crate::registry::{GoodCategory, Registry};
 use std::collections::BTreeMap;
@@ -27,11 +27,10 @@ struct BusinessPurchasePlan {
 #[derive(Clone, Debug)]
 struct ProductionLine {
     business_id: BusinessId,
-    district_id: DistrictId,
     inputs: Vec<(GoodId, Quantity)>,
     output_good_id: GoodId,
     output_quantity: Quantity,
-    labor_cost: Money,
+    operating_cost: Money,
 }
 
 #[derive(Clone, Debug)]
@@ -347,6 +346,18 @@ fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
                 .expect("effective batches must fit u16")
                 .max(1);
 
+        let active_workers: u32 = state
+            .employment
+            .values()
+            .filter(|agreement| {
+                agreement.business_id == business.id()
+                    && agreement.status == EmploymentStatus::Active
+            })
+            .map(|agreement| u32::from(agreement.workers))
+            .sum();
+        let worker_limited_batches = active_workers / u32::from(super::WORKERS_PER_BATCH);
+        batches = batches.min(u16::try_from(worker_limited_batches).unwrap_or(u16::MAX));
+
         for input in recipe.inputs() {
             let available = business.inventory_quantity(input.good_id()).milliunits();
             let per_batch = input.quantity().milliunits();
@@ -357,8 +368,8 @@ fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
             };
             batches = batches.min(u16::try_from(input_limited.max(0)).unwrap_or(u16::MAX));
         }
-        if recipe.daily_labor_cost().copper() > 0 {
-            let affordable = business.cash().copper() / recipe.daily_labor_cost().copper();
+        if recipe.daily_operating_cost().copper() > 0 {
+            let affordable = business.cash().copper() / recipe.daily_operating_cost().copper();
             batches = batches.min(u16::try_from(affordable.max(0)).unwrap_or(u16::MAX));
         }
         if batches == 0 {
@@ -380,14 +391,15 @@ fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
             .output_quantity()
             .saturating_mul_ratio(i64::from(batches), 1)
             .saturating_mul_ratio(i64::from(quality_efficiency), 10_000);
-        let labor_cost = recipe.daily_labor_cost().saturating_mul(i64::from(batches));
+        let operating_cost = recipe
+            .daily_operating_cost()
+            .saturating_mul(i64::from(batches));
         lines.push(ProductionLine {
             business_id: business.id(),
-            district_id: business.district_id(),
             inputs,
             output_good_id: recipe.output_good_id(),
             output_quantity,
-            labor_cost,
+            operating_cost,
         });
     }
 
@@ -395,18 +407,16 @@ fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
 }
 
 fn apply_production(state: &mut AppState, plan: ProductionPlan) {
-    let mut district_labor: BTreeMap<DistrictId, Money> = BTreeMap::new();
     let mut total_output = Quantity::ZERO;
-    let mut total_labor = Money::ZERO;
+    let mut total_operating_cost = Money::ZERO;
 
     for line in plan.lines {
         let ProductionLine {
             business_id,
-            district_id,
             inputs,
             output_good_id,
             output_quantity,
-            labor_cost,
+            operating_cost,
         } = line;
         let business = state
             .businesses
@@ -416,20 +426,14 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) {
             business.remove_inventory(good_id, quantity);
         }
         business.add_inventory(output_good_id, output_quantity);
-        business.finance.cash = business.finance.cash.saturating_sub(labor_cost);
-        business.finance.lifetime_costs =
-            business.finance.lifetime_costs.saturating_add(labor_cost);
+        business.finance.cash = business.finance.cash.saturating_sub(operating_cost);
+        business.finance.lifetime_costs = business
+            .finance
+            .lifetime_costs
+            .saturating_add(operating_cost);
         business.finance.version = business.finance.version.saturating_add(1);
-        district_labor
-            .entry(district_id)
-            .and_modify(|total| *total = total.saturating_add(labor_cost))
-            .or_insert(labor_cost);
         total_output = total_output.saturating_add(output_quantity);
-        total_labor = total_labor.saturating_add(labor_cost);
-    }
-
-    for (district_id, labor_cost) in district_labor {
-        distribute_income_to_district(state, district_id, labor_cost);
+        total_operating_cost = total_operating_cost.saturating_add(operating_cost);
     }
 
     if !total_output.is_zero() {
@@ -438,39 +442,11 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) {
             kind: AuditKind::Production,
             subject: "businesses".to_owned(),
             detail: format!(
-                "output={}; labor={}",
+                "output={}; operating_cost={}",
                 total_output.milliunits(),
-                total_labor.copper()
+                total_operating_cost.copper()
             ),
         });
-    }
-}
-
-fn distribute_income_to_district(state: &mut AppState, district_id: DistrictId, amount: Money) {
-    let household_ids: Vec<_> = state
-        .households
-        .ids_for_district(district_id)
-        .into_iter()
-        .flatten()
-        .copied()
-        .collect();
-    if household_ids.is_empty() || amount.copper() <= 0 {
-        return;
-    }
-
-    let count = i64::try_from(household_ids.len()).expect("household count fits i64");
-    let base = amount.copper() / count;
-    let mut remainder = amount.copper() % count;
-    for household_id in household_ids {
-        let extra = i64::from(remainder > 0);
-        remainder = remainder.saturating_sub(extra);
-        let household = state
-            .households
-            .get_mut(household_id)
-            .expect("district household index must resolve");
-        household.cash = household
-            .cash
-            .saturating_add(Money::from_copper(base.saturating_add(extra)));
     }
 }
 
@@ -750,7 +726,7 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
             .expect("business recipe reference must be valid");
         let desired_cost = Money::from_copper(
             recipe
-                .daily_labor_cost()
+                .daily_operating_cost()
                 .copper()
                 .saturating_mul(i64::from(maintenance_basis_points))
                 / 20_000,
@@ -758,12 +734,12 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
         let can_maintain = cash.saturating_sub(minimum_cash_reserve) >= desired_cost;
         let random_wear = i16::try_from(state.rng.range_u32(4)).expect("wear fits i16");
         let neglect_penalty = if can_maintain { 0 } else { 5 };
-        let accident_penalty =
-            if condition_basis_points < 4_000 && state.rng.chance_basis_points(40) {
-                120
-            } else {
-                0
-            };
+        let accident_penalty = if condition_basis_points < 4_000 && state.rng.is_chance_success(40)
+        {
+            120
+        } else {
+            0
+        };
         let improvement = if can_maintain && condition_basis_points < 9_500 {
             8
         } else {
@@ -958,7 +934,7 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
             .expect("business recipe reference must be valid");
         let new_status = if cash == Money::ZERO && !has_inventory {
             BusinessStatus::Insolvent
-        } else if cash < recipe.daily_labor_cost().saturating_mul(2) {
+        } else if cash < recipe.daily_operating_cost().saturating_mul(2) {
             BusinessStatus::Distressed
         } else {
             BusinessStatus::Active
@@ -1097,7 +1073,7 @@ fn decide_successions(state: &mut AppState) -> Vec<SuccessionLine> {
         let annual_chance = u16::try_from((age_years - 50).saturating_mul(120))
             .unwrap_or(8_000)
             .min(8_000);
-        if !state.rng.chance_basis_points(annual_chance) {
+        if !state.rng.is_chance_success(annual_chance) {
             continue;
         }
         let next_generation = generation.saturating_add(1);
@@ -1149,8 +1125,7 @@ fn update_institutions_for_succession(
     outgoing_head_id: CharacterId,
     incoming_head_id: CharacterId,
 ) {
-    let mut vacated_institutions = Vec::new();
-    for institution in state.institution_runtime.values_mut() {
+    for institution in state.institutions.values_mut() {
         if institution.members.remove(&outgoing_head_id) {
             institution.members.insert(incoming_head_id);
         }
@@ -1159,16 +1134,7 @@ fn update_institutions_for_succession(
             institution.next_selection_day = institution
                 .next_selection_day
                 .min(state.clock.day().saturating_add(30));
-            vacated_institutions.push(institution.institution_id);
         }
-    }
-    for institution_id in vacated_institutions {
-        let legacy = state
-            .institutions
-            .get_mut(&institution_id)
-            .expect("vacated institution must have legacy state");
-        legacy.office_holder_id = None;
-        legacy.policy_version = legacy.policy_version.saturating_add(1);
     }
 }
 
@@ -1277,64 +1243,5 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::{EnactedLaw, LawKind};
-    use crate::test_support::{assert_state_eq, make_test_campaign, rivergate_registry_for_test};
-
-    #[test]
-    fn missing_market_quote_fails_before_day_mutation() {
-        let registry = rivergate_registry_for_test();
-        let mut state = make_test_campaign();
-        let missing_good_id = registry.goods()[0].id();
-        state.market.quotes.remove(&missing_good_id);
-        let before = state.clone();
-
-        let result = advance_days(registry, &mut state, 1);
-
-        assert_eq!(
-            result,
-            Err(SimulationError::MarketQuoteMissing {
-                good_id: missing_good_id,
-            })
-        );
-        assert_state_eq(
-            &before,
-            &state,
-            "preflight failure must leave the entire campaign unchanged",
-        );
-    }
-
-    #[test]
-    fn bread_price_ceiling_is_enforced_after_price_formation() {
-        let registry = rivergate_registry_for_test();
-        let mut state = make_test_campaign();
-        let law_id = state.next_ids.law();
-        state.laws.insert(
-            law_id,
-            EnactedLaw {
-                id: law_id,
-                kind: LawKind::BreadPriceCeiling,
-                enacted_day: state.clock.day(),
-                sponsor_dynasty_id: Some(state.player_dynasty_id),
-                value: 1,
-                active: true,
-            },
-        );
-
-        advance_days(registry, &mut state, 1).expect("simulation must advance");
-
-        let bread_id = registry
-            .get_good_id("bread")
-            .expect("registry must define bread");
-        assert_eq!(
-            state
-                .market
-                .get_quote(bread_id)
-                .expect("bread quote must exist")
-                .price(),
-            Money::from_copper(1),
-            "the statutory ceiling must be the final daily price constraint"
-        );
-    }
-}
+#[path = "simulation_tests.rs"]
+mod tests;

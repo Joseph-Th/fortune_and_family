@@ -240,7 +240,7 @@ impl LawKind {
     }
 
     #[must_use]
-    pub const fn accepts_value(self, value: i64) -> bool {
+    pub const fn is_value_valid(self, value: i64) -> bool {
         match self {
             Self::BreadPriceCeiling | Self::PublicDebtAuthorization => value > 0,
             Self::ForeignMerchantToll
@@ -534,6 +534,24 @@ pub enum CrisisStatus {
     Active,
     Resolved,
     Escalated,
+}
+
+impl CrisisStatus {
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Emerging | Self::Active | Self::Escalated)
+    }
+
+    #[must_use]
+    pub const fn from_severity(severity_basis_points: u16) -> Self {
+        if severity_basis_points < 500 {
+            Self::Resolved
+        } else if severity_basis_points >= 8_000 {
+            Self::Escalated
+        } else {
+            Self::Active
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

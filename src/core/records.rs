@@ -1,8 +1,7 @@
 //! Concrete runtime records; sibling systems own validation and business logic.
 
 use crate::ids::{
-    BusinessId, CharacterId, ChronicleEntryId, DistrictId, DynastyId, GoodId, InstitutionId,
-    RecipeId,
+    BusinessId, CharacterId, ChronicleEntryId, DistrictId, DynastyId, GoodId, RecipeId,
 };
 use crate::money::{Money, Quantity};
 use serde::{Deserialize, Serialize};
@@ -315,7 +314,6 @@ pub struct BusinessIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BusinessOperations {
     pub(crate) manager_id: CharacterId,
-    pub(crate) employees: u16,
     pub(crate) capacity_batches_per_day: u16,
     pub(crate) condition_basis_points: u16,
     pub(crate) quality_basis_points: u16,
@@ -493,26 +491,6 @@ impl MarketState {
     #[must_use]
     pub const fn clearing_account(&self) -> Money {
         self.clearing_account
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstitutionState {
-    pub(crate) institution_id: InstitutionId,
-    pub(crate) legitimacy_basis_points: u16,
-    pub(crate) office_holder_id: Option<CharacterId>,
-    pub(crate) policy_version: u64,
-}
-
-impl InstitutionState {
-    #[must_use]
-    pub const fn institution_id(&self) -> InstitutionId {
-        self.institution_id
-    }
-
-    #[must_use]
-    pub const fn office_holder_id(&self) -> Option<CharacterId> {
-        self.office_holder_id
     }
 }
 

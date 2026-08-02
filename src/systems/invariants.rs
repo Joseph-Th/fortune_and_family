@@ -251,13 +251,6 @@ fn validate_business_record(state: &AppState, business: &Business, ids: &Registr
         "Lifecycle Validity: business {} condition is outside basis-point range",
         business.id()
     );
-    if business.status() == BusinessStatus::Closed {
-        debug_assert!(
-            business.operations.employees == 0,
-            "Lifecycle Validity: closed business {} still has employees",
-            business.id()
-        );
-    }
     for (good_id, quantity) in business.inventory() {
         debug_assert!(
             ids.goods.contains(good_id),
@@ -354,62 +347,20 @@ fn validate_institutions(state: &AppState, ids: &RegistryIds) {
             "Registry Reference Validity: runtime institution references missing definition"
         );
         debug_assert!(
-            institution.legitimacy_basis_points <= 10_000,
-            "Lifecycle Validity: institution legitimacy is outside basis-point range"
-        );
-        if let Some(holder_id) = institution.office_holder_id {
-            debug_assert!(
-                state
-                    .characters
-                    .get(holder_id)
-                    .is_some_and(|character| { character.status() == CharacterStatus::Active }),
-                "Lifecycle Validity: institution office holder must exist and be active"
-            );
-        }
-    }
-}
-
-fn validate_strategic_state(registry: &Registry, state: &AppState, ids: &RegistryIds) {
-    validate_institution_runtime(state, ids);
-    validate_contracts(registry, state, ids);
-    validate_loans_and_properties(state, ids);
-    validate_employment(state);
-    validate_family_state(state);
-    validate_laws_and_relationships(state);
-    validate_information_and_ai(state);
-    validate_districts_and_public_works(state, ids);
-    validate_legal_cases(state);
-    validate_routes_and_crises(state, ids);
-    validate_outbox(state);
-}
-
-fn validate_institution_runtime(state: &AppState, ids: &RegistryIds) {
-    debug_assert_eq!(
-        state.institution_runtime.len(),
-        ids.institutions.len(),
-        "Registry Reference Validity: strategic institution runtime must match definitions"
-    );
-    for (institution_id, institution) in &state.institution_runtime {
-        debug_assert_eq!(
-            *institution_id, institution.institution_id,
-            "Derived Data Consistency: strategic institution key and ID differ"
-        );
-        debug_assert!(
-            ids.institutions.contains(institution_id),
-            "Registry Reference Validity: strategic institution references missing definition"
-        );
-        debug_assert!(
             !institution.budget.is_negative(),
             "Lifecycle Validity: institution budget is negative"
         );
         debug_assert!(
             institution.legitimacy_basis_points <= 10_000,
-            "Lifecycle Validity: strategic institution legitimacy is outside basis-point range"
+            "Lifecycle Validity: institution legitimacy is outside basis-point range"
         );
         for member_id in &institution.members {
             debug_assert!(
-                state.characters.get(*member_id).is_some(),
-                "Record Reference Validity: institution member {member_id} does not exist"
+                state
+                    .characters
+                    .get(*member_id)
+                    .is_some_and(|character| character.status() == CharacterStatus::Active),
+                "Lifecycle Validity: institution member must exist and be active"
             );
         }
         if let Some(holder_id) = institution.office_holder_id {
@@ -422,18 +373,23 @@ fn validate_institution_runtime(state: &AppState, ids: &RegistryIds) {
                     .characters
                     .get(holder_id)
                     .is_some_and(|character| { character.status() == CharacterStatus::Active }),
-                "Lifecycle Validity: strategic officeholder must be active"
+                "Lifecycle Validity: institution office holder must exist and be active"
             );
         }
-        debug_assert_eq!(
-            state
-                .institutions
-                .get(institution_id)
-                .and_then(|legacy| legacy.office_holder_id),
-            institution.office_holder_id,
-            "Derived Data Consistency: legacy and strategic officeholders differ"
-        );
     }
+}
+
+fn validate_strategic_state(registry: &Registry, state: &AppState, ids: &RegistryIds) {
+    validate_contracts(registry, state, ids);
+    validate_loans_and_properties(state, ids);
+    validate_employment(state);
+    validate_family_state(state);
+    validate_laws_and_relationships(state);
+    validate_information_and_ai(state);
+    validate_districts_and_public_works(state, ids);
+    validate_legal_cases(state);
+    validate_routes_and_crises(state, ids);
+    validate_outbox(state);
 }
 
 fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) {
@@ -640,6 +596,7 @@ fn validate_loans(state: &AppState) {
 }
 
 fn validate_employment(state: &AppState) {
+    let mut workers_by_business: BTreeMap<BusinessId, u32> = BTreeMap::new();
     for (employment_id, agreement) in &state.employment {
         debug_assert_eq!(
             *employment_id, agreement.id,
@@ -661,6 +618,14 @@ fn validate_employment(state: &AppState) {
             agreement.loyalty_basis_points <= 10_000 && agreement.conditions_basis_points <= 10_000,
             "Lifecycle Validity: employment measures are outside basis-point range"
         );
+        if agreement.status != EmploymentStatus::Ended {
+            workers_by_business
+                .entry(agreement.business_id)
+                .and_modify(|workers| {
+                    *workers = workers.saturating_add(u32::from(agreement.workers));
+                })
+                .or_insert(u32::from(agreement.workers));
+        }
         if agreement.status == EmploymentStatus::Active {
             debug_assert!(
                 state
@@ -670,6 +635,17 @@ fn validate_employment(state: &AppState) {
                 "Lifecycle Validity: active employment belongs to a closed business"
             );
         }
+    }
+    for business in state.businesses.iter() {
+        let workers = workers_by_business
+            .get(&business.id())
+            .copied()
+            .unwrap_or(0);
+        let supported_workers = super::supported_worker_capacity(business);
+        debug_assert!(
+            workers <= supported_workers,
+            "Lifecycle Validity: employment exceeds business operating capacity"
+        );
     }
 }
 

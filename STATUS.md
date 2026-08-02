@@ -15,6 +15,7 @@ The repository now implements the full architectural foundation and a broad, int
 - Fixed-point `Money` and `Quantity` values.
 - Serializable state-owned deterministic RNG.
 - Private synchronized character, business, and household stores.
+- One canonical institution runtime record per definition; no parallel officeholder state.
 - Canonical validate / resolve / commit mutation paths.
 - Revalidated commit tokens for cross-record contracts and loans.
 - Dedicated error enums for persistence, simulation, strategic operations, and commands.
@@ -42,6 +43,8 @@ The repository now implements the full architectural foundation and a broad, int
 
 - Scarce market procurement.
 - Deterministic production and output sale.
+- Production capacity constrained by active employment agreements.
+- Daily operating costs kept distinct from weekly household wages.
 - Household demand and food satisfaction.
 - Fixed-point price formation with causal records.
 - Seasonal pressure, spoilage, and regional supply.
@@ -107,10 +110,11 @@ The repository now implements the full architectural foundation and a broad, int
 ### Adapters and presentation
 
 - Human-readable JSON persistence with synchronized same-directory temporary writes and atomic replacement.
-- Schema version 2.
-- Explicit migrations from versions 0 and 1.
-- Deterministic strategic hydration for version 1 Rivergate saves.
-- Release-mode load validation for registry alignment, references, synchronized indexes, numeric ranges, reciprocal collateral, and next-ID allocators.
+- Schema version 3.
+- Explicit migrations from versions 0, 1, and 2.
+- Deterministic strategic hydration for version 1 Rivergate saves, including preservation of legacy officeholders.
+- Version 2 migration consolidates duplicate institution state and removes redundant business staffing data.
+- Release-mode load validation for registry alignment, references, synchronized indexes, numeric ranges, contract compatibility, employment validity, property occupancy, reciprocal collateral, family councils, and next-ID allocators.
 - Durable outbox notifications.
 - Compact state summary.
 - Complete campaign projection.
@@ -130,7 +134,7 @@ Runtime validation covers:
 - Loan, collateral, property, rent, employment, and public-work accounting.
 - Lifecycle and basis-point bounds.
 - Administrative-load derivation.
-- Institution legacy/strategic synchronization.
+- Institution membership, officeholder, budget, and registry consistency.
 - Family councils and relationship pairs.
 - Information, AI objective, court, route, crisis, outbox, chronicle, and audit dates.
 - Deterministic chronological ordering.
@@ -143,13 +147,14 @@ The release gate requires all of the following to pass:
 - `cargo fmt --all -- --check`
 - `cargo check --all-targets --locked`
 - `bash scripts/test.sh fast`
+- `cargo test --quiet --locked --doc`
 - `bash scripts/test.sh soak`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked`
 - `bash scripts/verify_cli.sh`
 - CLI create, simulate, summary, inspect, execute, dashboard, validate, and invalid-input smoke tests
 
-The fast suite uses a shared immutable registry fixture and fresh per-test campaign state. Long-running deterministic checks are co-located in `src/core/state.rs` and explicitly invoked by the soak test mode. The automated suite includes failure-path rollback coverage, atomic save replacement, a 3,000-day core invariant soak, and a 7,200-day strategic soak.
+The fast suite compiles and runs only non-ignored library tests. It uses a shared immutable registry fixture and fresh per-test campaign state, with domain filters and exact-name execution for focused iteration. Large suites live in dedicated `*_tests.rs` files and are grouped by contracts, loans, laws, crises, migrations, validation, determinism, and soak coverage. Long-running deterministic checks are isolated in the ignored soak tier. The automated suite includes failure-path rollback coverage, atomic save replacement, diagnostic first-difference reporting, a 3,000-day core invariant soak, and a 7,200-day strategic soak.
 
 ## Deliberate boundaries
 

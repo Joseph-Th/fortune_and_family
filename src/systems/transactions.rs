@@ -154,10 +154,10 @@ fn validate_business_cash_transfer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{assert_state_eq, make_test_campaign};
+    use crate::test_support::{assert_state_unchanged, make_test_campaign};
 
     #[test]
-    fn transfers_reject_insufficient_cash_without_mutation() {
+    fn rejects_insufficient_cash_without_mutation() {
         let mut state = make_test_campaign();
         let (from_business_id, to_business_id) = {
             let mut businesses = state.businesses().iter().map(crate::core::Business::id);
@@ -184,7 +184,7 @@ mod tests {
                 required,
             })
         );
-        assert_state_eq(
+        assert_state_unchanged(
             &before,
             &state,
             "failed transfers must not mutate balances, versions, or the audit log",

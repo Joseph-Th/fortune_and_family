@@ -1,6 +1,7 @@
 //! JSON persistence adapter with explicit schema migration and contextual errors.
 
 use crate::core::{AppState, CURRENT_SCHEMA_VERSION};
+use crate::ids::BusinessId;
 use crate::money::{Money, Quantity};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -153,6 +154,11 @@ pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> 
             source,
         })?;
     let source_schema_version = read_schema_version(&value, path)?;
+    let legacy_officeholders = if source_schema_version < 2 {
+        Some(read_legacy_officeholders(&value, source_schema_version)?)
+    } else {
+        None
+    };
     let migrated = migrate_to_current(value, path)?;
     let mut state: AppState =
         serde_json::from_value(migrated).map_err(|source| PersistenceError::Parse {
@@ -160,12 +166,74 @@ pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> 
             source,
         })?;
     hydrate_strategic_state(&mut state, source_schema_version < 2);
+    if let Some(officeholders) = legacy_officeholders {
+        restore_legacy_officeholders(&mut state, officeholders);
+    }
     validate_loaded_state(&state).map_err(|error| PersistenceError::InvalidState {
         path: path.to_path_buf(),
         kind: error.kind,
         reason: error.reason,
     })?;
     Ok(state)
+}
+
+fn read_legacy_officeholders(
+    value: &Value,
+    version: u32,
+) -> Result<BTreeMap<crate::ids::InstitutionId, Option<crate::ids::CharacterId>>, PersistenceError>
+{
+    let institutions = value
+        .get("institutions")
+        .and_then(Value::as_object)
+        .ok_or_else(|| PersistenceError::Migration {
+            version,
+            reason: "legacy save institutions must be an object".to_owned(),
+        })?;
+    institutions
+        .values()
+        .map(|institution| {
+            let institution_id = institution
+                .get("institution_id")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .map(crate::ids::InstitutionId::new)
+                .ok_or_else(|| PersistenceError::Migration {
+                    version,
+                    reason: "legacy institution has an invalid institution_id".to_owned(),
+                })?;
+            let office_holder_id = institution
+                .get("office_holder_id")
+                .filter(|value| !value.is_null())
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|value| u32::try_from(value).ok())
+                        .map(crate::ids::CharacterId::new)
+                        .ok_or_else(|| PersistenceError::Migration {
+                            version,
+                            reason: format!(
+                                "legacy institution {institution_id} has an invalid officeholder"
+                            ),
+                        })
+                })
+                .transpose()?;
+            Ok((institution_id, office_holder_id))
+        })
+        .collect()
+}
+
+fn restore_legacy_officeholders(
+    state: &mut AppState,
+    officeholders: BTreeMap<crate::ids::InstitutionId, Option<crate::ids::CharacterId>>,
+) {
+    for (institution_id, office_holder_id) in officeholders {
+        if let Some(institution) = state.institutions.get_mut(&institution_id) {
+            if let Some(character_id) = office_holder_id {
+                institution.members.insert(character_id);
+            }
+            institution.office_holder_id = office_holder_id;
+        }
+    }
 }
 
 fn validate_loaded_state(state: &AppState) -> Result<(), StateValidationError> {
@@ -190,7 +258,7 @@ fn validate_loaded_state(state: &AppState) -> Result<(), StateValidationError> {
     })?;
     validate_primary_records(&registry, state)
         .map_err(|reason| StateValidationError::new(StateValidationKind::PrimaryRecords, reason))?;
-    validate_strategic_records(state).map_err(|reason| {
+    validate_strategic_records(&registry, state).map_err(|reason| {
         StateValidationError::new(StateValidationKind::StrategicRecords, reason)
     })?;
     validate_numeric_ranges(state)
@@ -273,9 +341,9 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
 
 fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
     for loan in state.loans.values() {
-        if loan.principal < Money::ZERO
+        if loan.principal <= Money::ZERO
             || loan.balance < Money::ZERO
-            || loan.weekly_payment < Money::ZERO
+            || loan.weekly_payment <= Money::ZERO
             || loan.interest_basis_points > 10_000
         {
             return Err(format!("loan {} has an invalid financial value", loan.id));
@@ -293,7 +361,8 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         }
     }
     for agreement in state.employment.values() {
-        if agreement.weekly_wage < Money::ZERO
+        if agreement.weekly_wage <= Money::ZERO
+            || agreement.workers == 0
             || agreement.conditions_basis_points > 10_000
             || agreement.loyalty_basis_points > 10_000
         {
@@ -305,7 +374,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
     }
     for contract in state.contracts.values() {
         if contract.quantity_per_week <= Quantity::ZERO
-            || contract.unit_price < Money::ZERO
+            || contract.unit_price <= Money::ZERO
             || contract.penalty < Money::ZERO
         {
             return Err(format!(
@@ -314,7 +383,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
             ));
         }
     }
-    for institution in state.institution_runtime.values() {
+    for institution in state.institutions.values() {
         if institution.budget < Money::ZERO || institution.legitimacy_basis_points > 10_000 {
             return Err(format!(
                 "institution {} has an invalid financial value",
@@ -422,10 +491,8 @@ fn validate_definition_references(
         .iter()
         .map(crate::registry::InstitutionDef::id)
         .collect();
-    let legacy_institutions: BTreeSet<_> = state.institutions.keys().copied().collect();
-    let runtime_institutions: BTreeSet<_> = state.institution_runtime.keys().copied().collect();
-    if legacy_institutions != expected_institutions || runtime_institutions != expected_institutions
-    {
+    let actual_institutions: BTreeSet<_> = state.institutions.keys().copied().collect();
+    if actual_institutions != expected_institutions {
         return Err("institution state IDs do not match the scenario registry".to_owned());
     }
     Ok(())
@@ -549,24 +616,51 @@ fn validate_business_records(
     Ok(())
 }
 
-fn validate_strategic_records(state: &AppState) -> Result<(), String> {
+fn validate_strategic_records(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<(), String> {
     for (contract_id, contract) in &state.contracts {
+        let buyer = state.businesses.get(contract.buyer_business_id);
+        let seller = state.businesses.get(contract.seller_business_id);
         if contract.id != *contract_id
-            || !state
-                .businesses
-                .records()
-                .contains_key(&contract.buyer_business_id)
-            || !state
-                .businesses
-                .records()
-                .contains_key(&contract.seller_business_id)
+            || contract.buyer_business_id == contract.seller_business_id
+            || buyer.is_none()
+            || seller.is_none()
             || !state.market.quotes.contains_key(&contract.good_id)
         {
             return Err(format!(
                 "supply contract {contract_id} has an invalid reference"
             ));
         }
+        let buyer_recipe = registry
+            .get_recipe(
+                buyer
+                    .expect("validated contract buyer must exist")
+                    .recipe_id(),
+            )
+            .expect("validated business recipe must exist");
+        let seller_recipe = registry
+            .get_recipe(
+                seller
+                    .expect("validated contract seller must exist")
+                    .recipe_id(),
+            )
+            .expect("validated business recipe must exist");
+        if seller_recipe.output_good_id() != contract.good_id
+            || !buyer_recipe
+                .inputs()
+                .iter()
+                .any(|input| input.good_id() == contract.good_id)
+            || (contract.status == crate::core::ContractStatus::Active
+                && contract.end_day < contract.next_due_day.saturating_sub(7))
+        {
+            return Err(format!(
+                "supply contract {contract_id} is incompatible with its parties or term"
+            ));
+        }
     }
+    let mut occupied_businesses = BTreeSet::new();
     for (property_id, property) in &state.properties {
         if property.id != *property_id || !state.districts.contains_key(&property.district_id) {
             return Err(format!(
@@ -583,14 +677,32 @@ fn validate_strategic_records(state: &AppState) -> Result<(), String> {
                 ));
             }
         }
+        if let Some(business_id) = property.occupant_business_id {
+            let business = state.businesses.get(business_id).ok_or_else(|| {
+                format!("property {property_id} references a missing occupant business")
+            })?;
+            if !occupied_businesses.insert(business_id)
+                || business.district_id() != property.district_id
+            {
+                return Err(format!(
+                    "property {property_id} has an invalid or duplicate occupant"
+                ));
+            }
+        }
         if let Some(loan_id) = property.collateral_loan_id {
             let loan = state
                 .loans
                 .get(&loan_id)
                 .ok_or_else(|| format!("property {property_id} references a missing loan"))?;
-            if loan.collateral_property_id != Some(*property_id) {
+            if loan.collateral_property_id != Some(*property_id)
+                || matches!(
+                    loan.status,
+                    crate::core::LoanStatus::Defaulted | crate::core::LoanStatus::Repaid
+                )
+                || property.owner_dynasty_id != Some(loan.borrower_dynasty_id)
+            {
                 return Err(format!(
-                    "property {property_id} collateral reference is not reciprocal"
+                    "property {property_id} has an invalid collateral relationship"
                 ));
             }
         }
@@ -599,33 +711,89 @@ fn validate_strategic_records(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_finance_and_organization_records(state: &AppState) -> Result<(), String> {
+    validate_loan_records(state)?;
+    validate_employment_records(state)?;
+    validate_family_records(state)?;
+    validate_institution_and_misc_records(state)
+}
+
+fn validate_loan_records(state: &AppState) -> Result<(), String> {
     for (loan_id, loan) in &state.loans {
         if loan.id != *loan_id
+            || loan.lender_dynasty_id == loan.borrower_dynasty_id
             || !state.dynasties.contains_key(&loan.lender_dynasty_id)
             || !state.dynasties.contains_key(&loan.borrower_dynasty_id)
         {
             return Err(format!("loan {loan_id} has an invalid dynasty reference"));
         }
-        if let Some(property_id) = loan.collateral_property_id
-            && !state.properties.contains_key(&property_id)
-        {
-            return Err(format!(
-                "loan {loan_id} references a missing collateral property"
-            ));
+        if loan.status == crate::core::LoanStatus::Repaid && loan.balance != Money::ZERO {
+            return Err(format!("repaid loan {loan_id} retains a balance"));
+        }
+        if let Some(property_id) = loan.collateral_property_id {
+            let property = state.properties.get(&property_id).ok_or_else(|| {
+                format!("loan {loan_id} references a missing collateral property")
+            })?;
+            if !matches!(
+                loan.status,
+                crate::core::LoanStatus::Defaulted | crate::core::LoanStatus::Repaid
+            ) && (property.collateral_loan_id != Some(*loan_id)
+                || property.owner_dynasty_id != Some(loan.borrower_dynasty_id))
+            {
+                return Err(format!(
+                    "loan {loan_id} has an invalid collateral relationship"
+                ));
+            }
         }
     }
+    Ok(())
+}
+
+fn validate_employment_records(state: &AppState) -> Result<(), String> {
+    let mut workers_by_business = BTreeMap::<BusinessId, u32>::new();
     for (employment_id, agreement) in &state.employment {
+        let business = state.businesses.get(agreement.business_id);
         if agreement.id != *employment_id
-            || state.businesses.get(agreement.business_id).is_none()
+            || agreement.workers == 0
+            || agreement.weekly_wage <= Money::ZERO
+            || business.is_none()
             || state.households.get(agreement.household_id).is_none()
+            || (agreement.status == crate::core::EmploymentStatus::Active
+                && business.is_some_and(|business| {
+                    business.status() == crate::core::BusinessStatus::Closed
+                }))
         {
             return Err(format!(
                 "employment agreement {employment_id} has an invalid reference"
             ));
         }
+        if agreement.status != crate::core::EmploymentStatus::Ended {
+            workers_by_business
+                .entry(agreement.business_id)
+                .and_modify(|workers| {
+                    *workers = workers.saturating_add(u32::from(agreement.workers));
+                })
+                .or_insert(u32::from(agreement.workers));
+        }
     }
+    for (business_id, workers) in workers_by_business {
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("validated employment business must exist");
+        let supported_workers = crate::systems::supported_worker_capacity(business);
+        if workers > supported_workers {
+            return Err(format!(
+                "business {business_id} employment exceeds operating capacity"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_family_records(state: &AppState) -> Result<(), String> {
     for (link_id, link) in &state.family_links {
         if link.id != *link_id
+            || link.first_character_id == link.second_character_id
             || state.characters.get(link.first_character_id).is_none()
             || state.characters.get(link.second_character_id).is_none()
         {
@@ -634,38 +802,55 @@ fn validate_finance_and_organization_records(state: &AppState) -> Result<(), Str
             ));
         }
     }
+    if state.family_councils.len() != state.dynasties.len() {
+        return Err("every dynasty must have exactly one family council".to_owned());
+    }
     for (dynasty_id, council) in &state.family_councils {
+        let dynasty = state.dynasties.get(dynasty_id);
         if council.dynasty_id != *dynasty_id
-            || !state.dynasties.contains_key(dynasty_id)
-            || council
-                .members
-                .iter()
-                .any(|character_id| state.characters.get(*character_id).is_none())
+            || dynasty.is_none()
+            || council.members.iter().any(|character_id| {
+                !state
+                    .characters
+                    .get(*character_id)
+                    .is_some_and(|character| {
+                        character.dynasty_id() == *dynasty_id
+                            && character.status() == crate::core::CharacterStatus::Active
+                    })
+            })
         {
             return Err(format!(
                 "family council {dynasty_id} has an invalid reference"
             ));
         }
+        let dynasty = dynasty.expect("validated council dynasty must exist");
+        if !council.members.contains(&dynasty.head_id())
+            || dynasty
+                .heir_id()
+                .is_some_and(|heir_id| !council.members.contains(&heir_id))
+        {
+            return Err(format!(
+                "family council {dynasty_id} omits the dynasty head or heir"
+            ));
+        }
     }
-    validate_institution_and_misc_records(state)
+    Ok(())
 }
 
 fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String> {
-    for (institution_id, runtime) in &state.institution_runtime {
-        let legacy = state
-            .institutions
-            .get(institution_id)
-            .ok_or_else(|| format!("institution {institution_id} lacks legacy state"))?;
-        if runtime.institution_id != *institution_id
-            || legacy.institution_id() != *institution_id
-            || runtime.office_holder_id != legacy.office_holder_id
-            || runtime
-                .members
-                .iter()
-                .any(|character_id| state.characters.get(*character_id).is_none())
-            || runtime
+    for (institution_id, institution) in &state.institutions {
+        if institution.institution_id != *institution_id
+            || institution.members.iter().any(|character_id| {
+                !state
+                    .characters
+                    .get(*character_id)
+                    .is_some_and(|character| {
+                        character.status() == crate::core::CharacterStatus::Active
+                    })
+            })
+            || institution
                 .office_holder_id
-                .is_some_and(|holder| !runtime.members.contains(&holder))
+                .is_some_and(|holder| !institution.members.contains(&holder))
         {
             return Err(format!(
                 "institution {institution_id} has inconsistent runtime state"
@@ -687,7 +872,7 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
 fn validate_misc_record_ids_and_refs(state: &AppState) -> Result<(), String> {
     for (law_id, law) in &state.laws {
         if law.id != *law_id
-            || !law.kind.accepts_value(law.value)
+            || !law.kind.is_value_valid(law.value)
             || law
                 .sponsor_dynasty_id
                 .is_some_and(|dynasty_id| !state.dynasties.contains_key(&dynasty_id))
@@ -799,6 +984,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
         value = match version {
             0 => migrate_v0_to_v1(value)?,
             1 => migrate_v1_to_v2(value)?,
+            2 => migrate_v2_to_v3(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -895,237 +1081,46 @@ fn migrate_v1_to_v2(mut value: Value) -> Result<Value, PersistenceError> {
     Ok(value)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::systems::advance_days;
-    use crate::test_support::{
-        assert_state_eq, make_test_campaign, rivergate_registry_for_test, write_test_json_fixture,
-    };
+fn migrate_v2_to_v3(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 2,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let institutions =
+        object
+            .remove("institution_runtime")
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 2,
+                reason: "save is missing institution_runtime".to_owned(),
+            })?;
+    object.insert("institutions".to_owned(), institutions);
 
-    fn assert_invalid_state_kind(
-        result: Result<AppState, PersistenceError>,
-        expected: StateValidationKind,
-    ) {
-        match result {
-            Err(PersistenceError::InvalidState { kind, reason, .. }) => {
-                assert_eq!(kind, expected, "unexpected validation category: {reason}");
-            }
-            Err(error) => panic!("expected invalid-state error, got {error:?}"),
-            Ok(_) => panic!("invalid save unexpectedly loaded"),
-        }
-    }
-
-    #[test]
-    fn round_trip_preserves_deterministic_state() {
-        let registry = rivergate_registry_for_test();
-        let mut state = make_test_campaign();
-        advance_days(registry, &mut state, 40).expect("simulation must advance");
-        let directory = tempfile::tempdir().expect("temporary directory must be created");
-        let path = directory.path().join("campaign.json");
-
-        save_state(&path, &state).expect("state must save");
-        let loaded = load_state(&path).expect("state must load");
-
-        assert_state_eq(
-            &state,
-            &loaded,
-            "save/load round-trip must preserve the complete deterministic state",
-        );
-    }
-
-    #[test]
-    fn atomic_save_replaces_the_previous_campaign() {
-        let registry = rivergate_registry_for_test();
-        let mut state = make_test_campaign();
-        let directory = tempfile::tempdir().expect("temporary directory must be created");
-        let path = directory.path().join("campaign.json");
-        save_state(&path, &state).expect("initial state must save");
-        advance_days(registry, &mut state, 7).expect("simulation must advance");
-
-        save_state(&path, &state).expect("updated state must replace the original save");
-        let loaded = load_state(&path).expect("replacement state must load");
-        let files: Vec<_> = fs::read_dir(directory.path())
-            .expect("save directory must be readable")
-            .map(|entry| entry.expect("directory entry must be readable").file_name())
-            .collect();
-
-        assert_state_eq(
-            &state,
-            &loaded,
-            "atomic replacement must persist the updated campaign",
-        );
-        assert_eq!(files, vec![path.file_name().expect("save name must exist")]);
-    }
-
-    #[test]
-    fn migration_v0_adds_audit_log() {
-        let state = make_test_campaign();
-        let mut value = serde_json::to_value(state).expect("state must serialize");
-        let object = value.as_object_mut().expect("state JSON must be an object");
-        object.insert("schema_version".to_owned(), Value::from(0));
-        object.remove("audit_log");
-
-        let migrated =
-            migrate_to_current(value, Path::new("memory.json")).expect("version zero must migrate");
-
-        assert_eq!(
-            migrated["schema_version"],
-            Value::from(CURRENT_SCHEMA_VERSION)
-        );
-        assert!(
-            migrated["audit_log"].is_array(),
-            "version-zero migration must add the audit log collection"
-        );
-    }
-
-    #[test]
-    fn migration_v1_hydrates_strategic_state() {
-        let registry = rivergate_registry_for_test();
-        let state = make_test_campaign();
-        let dynasty_ids: Vec<_> = state.dynasties.keys().copied().collect();
-        let character_ids: Vec<_> = state.characters.records().keys().copied().collect();
-        let business_ids: Vec<_> = state.businesses.records().keys().copied().collect();
-        let mut value = serde_json::to_value(state).expect("state must serialize");
-        let object = value.as_object_mut().expect("state JSON must be an object");
-        object.insert("schema_version".to_owned(), Value::from(1));
-        for field in [
-            "institution_runtime",
-            "contracts",
-            "loans",
-            "properties",
-            "employment",
-            "family_links",
-            "family_councils",
-            "laws",
-            "relationships",
-            "information_reports",
-            "ai_objectives",
-            "districts",
-            "public_works",
-            "legal_cases",
-            "external_routes",
-            "crises",
-            "outbox",
-        ] {
-            object.remove(field);
-        }
-        let next_ids = object
-            .get_mut("next_ids")
-            .and_then(Value::as_object_mut)
-            .expect("next IDs must be an object");
-        for field in [
-            "contract",
-            "property",
-            "loan",
-            "employment",
-            "family_link",
-            "law",
-            "information_report",
-            "objective",
-            "public_work",
-            "legal_case",
-            "external_route",
-            "crisis",
-            "outbox",
-        ] {
-            next_ids.remove(field);
-        }
-        let (_directory, path) = write_test_json_fixture("version-one.json", &value);
-
-        let loaded = load_state(&path).expect("version one save must load");
-
-        assert_eq!(
-            loaded.schema_version(),
-            CURRENT_SCHEMA_VERSION,
-            "migration must advance to the current schema"
-        );
-        assert_eq!(
-            loaded.dynasties.keys().copied().collect::<Vec<_>>(),
-            dynasty_ids,
-            "migration must preserve dynasty identity"
-        );
-        assert_eq!(
-            loaded
-                .characters
-                .records()
-                .keys()
-                .copied()
-                .collect::<Vec<_>>(),
-            character_ids,
-            "migration must preserve character identity"
-        );
-        assert_eq!(
-            loaded
-                .businesses
-                .records()
-                .keys()
-                .copied()
-                .collect::<Vec<_>>(),
-            business_ids,
-            "migration must preserve business identity"
-        );
-        assert_eq!(
-            loaded.districts.len(),
-            registry.districts().len(),
-            "migration must hydrate every district runtime"
-        );
-        assert_eq!(
-            loaded.institution_runtime.len(),
-            registry.institutions().len(),
-            "migration must hydrate every institution runtime"
-        );
-        assert!(
-            !loaded.contracts.is_empty()
-                && !loaded.loans.is_empty()
-                && !loaded.properties.is_empty()
-                && !loaded.employment.is_empty(),
-            "migration must hydrate the connected strategic economy"
-        );
-        crate::systems::validate_invariants(registry, &loaded);
-    }
-
-    #[test]
-    fn validation_rejects_missing_player_dynasty_reference() {
-        let state = make_test_campaign();
-        let mut value = serde_json::to_value(state).expect("state must serialize");
-        value["player_dynasty_id"] = Value::from(u32::MAX);
-        let (_directory, path) = write_test_json_fixture("invalid-player.json", &value);
-
-        assert_invalid_state_kind(load_state(&path), StateValidationKind::PrimaryRecords);
-    }
-
-    #[test]
-    fn validation_rejects_stale_business_indexes() {
-        let state = make_test_campaign();
-        let mut value = serde_json::to_value(state).expect("state must serialize");
-        value["businesses"]["by_owner"] = Value::Object(serde_json::Map::new());
-        let (_directory, path) = write_test_json_fixture("stale-index.json", &value);
-
-        assert_invalid_state_kind(load_state(&path), StateValidationKind::PrimaryRecords);
-    }
-
-    #[test]
-    fn validation_rejects_stale_next_id_allocators() {
-        let state = make_test_campaign();
-        let mut value = serde_json::to_value(state).expect("state must serialize");
-        value["next_ids"]["business"] = Value::from(0);
-        let (_directory, path) = write_test_json_fixture("stale-next-id.json", &value);
-
-        assert_invalid_state_kind(load_state(&path), StateValidationKind::IdentifierAllocation);
-    }
-
-    #[test]
-    fn validation_rejects_negative_business_cash() {
-        let state = make_test_campaign();
-        let mut value = serde_json::to_value(state).expect("state must serialize");
-        let business = value["businesses"]["records"]
+    let business_records = object
+        .get_mut("businesses")
+        .and_then(Value::as_object_mut)
+        .and_then(|businesses| businesses.get_mut("records"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 2,
+            reason: "save businesses.records must be an object".to_owned(),
+        })?;
+    for business in business_records.values_mut() {
+        let operations = business
             .as_object_mut()
-            .and_then(|records| records.values_mut().next())
-            .expect("serialized state must contain a business");
-        business["finance"]["cash"] = Value::from(-1);
-        let (_directory, path) = write_test_json_fixture("negative-business-cash.json", &value);
-
-        assert_invalid_state_kind(load_state(&path), StateValidationKind::NumericRanges);
+            .and_then(|business| business.get_mut("operations"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 2,
+                reason: "save business operations must be an object".to_owned(),
+            })?;
+        operations.remove("employees");
     }
+    object.insert("schema_version".to_owned(), Value::from(3));
+    Ok(value)
 }
+
+#[cfg(test)]
+#[path = "persistence_tests.rs"]
+mod tests;

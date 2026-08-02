@@ -161,7 +161,7 @@ pub struct RecipeDef {
     inputs: Vec<RecipeInput>,
     output_good_id: GoodId,
     output_quantity: Quantity,
-    daily_labor_cost: Money,
+    daily_operating_cost: Money,
     administrative_load: u16,
 }
 
@@ -197,8 +197,8 @@ impl RecipeDef {
     }
 
     #[must_use]
-    pub const fn daily_labor_cost(&self) -> Money {
-        self.daily_labor_cost
+    pub const fn daily_operating_cost(&self) -> Money {
+        self.daily_operating_cost
     }
 
     #[must_use]
@@ -419,7 +419,7 @@ impl RegistryBuilder {
         name: &str,
         inputs: Vec<(GoodId, Quantity)>,
         output: (GoodId, Quantity),
-        daily_labor_cost: Money,
+        daily_operating_cost: Money,
         administrative_load: u16,
     ) -> RecipeId {
         let (output_good_id, output_quantity) = output;
@@ -432,8 +432,8 @@ impl RegistryBuilder {
             "recipe {key} has invalid output quantity"
         );
         assert!(
-            daily_labor_cost.copper() >= 0,
-            "recipe {key} has negative labor cost"
+            daily_operating_cost.copper() >= 0,
+            "recipe {key} has negative operating cost"
         );
         let id = RecipeId::new(u32::try_from(self.recipes.len()).expect("too many recipes"));
         let inputs = inputs
@@ -453,7 +453,7 @@ impl RegistryBuilder {
             inputs,
             output_good_id,
             output_quantity,
-            daily_labor_cost,
+            daily_operating_cost,
             administrative_load,
         });
         self.recipe_by_key.insert(key.to_owned(), id);
