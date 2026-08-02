@@ -1,12 +1,13 @@
 //! Canonical player-command validation and dispatch across simulation subsystems.
 
 use super::{
-    LoanTerms, StrategicError, SupplyContractTerms, buy_unowned_property, issue_loan,
-    sign_supply_contract, transfer_business_cash,
+    LoanTerms, StrategicError, SupplyContractTerms, acquire_business, buy_unowned_property,
+    issue_loan, sign_supply_contract, transfer_business_cash,
 };
 use crate::core::{
-    AppState, CrisisStatus, EmploymentStatus, EnactedLaw, HouseGovernance, LawKind, LegalCase,
-    LegalCaseKind, LegalCaseStatus, OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
+    AppState, AuditKind, AuditRecord, BusinessStatus, CrisisStatus, EmploymentStatus, EnactedLaw,
+    HouseGovernance, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus, OutboxKind, PublicWork,
+    PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, CrisisId, DistrictId, DynastyId, EmploymentId, InstitutionId,
@@ -37,6 +38,15 @@ pub enum PlayerCommand {
     TransferBusinessCash {
         from_business_id: BusinessId,
         to_business_id: BusinessId,
+        amount: Money,
+    },
+    AcquireBusiness {
+        business_id: BusinessId,
+        manager_id: CharacterId,
+        recapitalization: Money,
+    },
+    InvestInBusiness {
+        business_id: BusinessId,
         amount: Money,
     },
     SetBusinessPolicy {
@@ -119,6 +129,10 @@ pub enum CommandError {
     PlayerNotParty,
     #[error("business policy values are outside supported ranges")]
     InvalidBusinessPolicy,
+    #[error("business {business_id} already uses the requested operating policy")]
+    UnchangedBusinessPolicy { business_id: BusinessId },
+    #[error("business investment must be positive")]
+    InvalidBusinessInvestment,
     #[error("law {kind:?} does not support value {value}")]
     InvalidLawValue { kind: LawKind, value: i64 },
     #[error("law {kind:?} is not implemented by the current simulation")]
@@ -129,6 +143,8 @@ pub enum CommandError {
     MissingDynasty { dynasty_id: DynastyId },
     #[error("player treasury has {available}, but command requires {required}")]
     InsufficientPlayerFunds { available: Money, required: Money },
+    #[error("player legitimacy is {available}, but command requires {required}")]
+    InsufficientPlayerLegitimacy { available: u16, required: u16 },
     #[error("business {business_id} has {available}, but command requires {required}")]
     InsufficientBusinessFunds {
         business_id: BusinessId,
@@ -143,8 +159,15 @@ pub enum CommandError {
     InvalidLegalTerms,
     #[error("family council for dynasty {dynasty_id} does not exist")]
     MissingFamilyCouncil { dynasty_id: DynastyId },
+    #[error("house governance is already {governance:?}")]
+    UnchangedHouseGovernance { governance: HouseGovernance },
     #[error("institution {institution_id} does not exist")]
     MissingInstitution { institution_id: InstitutionId },
+    #[error("character {character_id} is already a member of institution {institution_id}")]
+    AlreadyInstitutionMember {
+        institution_id: InstitutionId,
+        character_id: CharacterId,
+    },
     #[error("character {character_id} is not an active member of the player dynasty")]
     InvalidNominee { character_id: CharacterId },
     #[error("crisis {crisis_id} does not exist")]
@@ -176,6 +199,15 @@ pub fn apply_player_command(
             to_business_id,
             amount,
         } => apply_cash_transfer(state, from_business_id, to_business_id, amount),
+        PlayerCommand::AcquireBusiness {
+            business_id,
+            manager_id,
+            recapitalization,
+        } => apply_business_acquisition(registry, state, business_id, manager_id, recapitalization),
+        PlayerCommand::InvestInBusiness {
+            business_id,
+            amount,
+        } => apply_business_investment(state, business_id, amount),
         PlayerCommand::SetBusinessPolicy {
             business_id,
             target_input_days,
@@ -253,6 +285,29 @@ pub fn apply_player_command(
     }
 }
 
+fn apply_business_acquisition(
+    registry: &Registry,
+    state: &mut AppState,
+    business_id: BusinessId,
+    manager_id: CharacterId,
+    recapitalization: Money,
+) -> Result<CommandOutcome, CommandError> {
+    let quote = acquire_business(
+        registry,
+        state,
+        state.player_dynasty_id,
+        business_id,
+        manager_id,
+        recapitalization,
+    )?;
+    Ok(CommandOutcome {
+        summary: format!(
+            "Acquired business {business_id} for {} with {} working capital.",
+            quote.purchase_price, recapitalization
+        ),
+    })
+}
+
 fn apply_cash_transfer(
     state: &mut AppState,
     from_business_id: BusinessId,
@@ -266,6 +321,48 @@ fn apply_cash_transfer(
         summary: format!(
             "Transferred {amount} from business {from_business_id} to business {to_business_id}."
         ),
+    })
+}
+
+fn apply_business_investment(
+    state: &mut AppState,
+    business_id: BusinessId,
+    amount: Money,
+) -> Result<CommandOutcome, CommandError> {
+    ensure_owned_business(state, business_id)?;
+    if amount <= Money::ZERO {
+        return Err(CommandError::InvalidBusinessInvestment);
+    }
+    if state
+        .businesses
+        .get(business_id)
+        .is_some_and(|business| business.status() == BusinessStatus::Closed)
+    {
+        return Err(CommandError::Strategic(StrategicError::BusinessInactive {
+            business_id,
+        }));
+    }
+    spend_player_treasury(state, amount)?;
+    let business = state
+        .businesses
+        .get_mut(business_id)
+        .expect("validated business must exist");
+    business.finance.cash = business.finance.cash.saturating_add(amount);
+    business.finance.version = business.finance.version.saturating_add(1);
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::BusinessCapitalization,
+        subject: format!("business:{business_id}"),
+        detail: format!("amount={}", amount.copper()),
+    });
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Finance,
+        format!("Business {business_id} capitalized"),
+        format!("The dynasty invested {amount} into the enterprise."),
+    );
+    Ok(CommandOutcome {
+        summary: format!("Invested {amount} in business {business_id}."),
     })
 }
 
@@ -289,6 +386,18 @@ fn apply_business_policy(
         || quality_target_basis_points > 10_000
     {
         return Err(CommandError::InvalidBusinessPolicy);
+    }
+    let business = state
+        .businesses
+        .get(business_id)
+        .expect("validated business must exist");
+    if business.policy.target_input_days == target_input_days
+        && business.policy.target_output_days == target_output_days
+        && business.policy.minimum_cash_reserve == minimum_cash_reserve
+        && business.policy.maintenance_basis_points == maintenance_basis_points
+        && business.policy.quality_target_basis_points == quality_target_basis_points
+    {
+        return Err(CommandError::UnchangedBusinessPolicy { business_id });
     }
     let business = state
         .businesses
@@ -493,6 +602,9 @@ fn apply_house_governance(
         .family_councils
         .get_mut(&dynasty_id)
         .ok_or(CommandError::MissingFamilyCouncil { dynasty_id })?;
+    if council.governance == governance {
+        return Err(CommandError::UnchangedHouseGovernance { governance });
+    }
     council.governance = governance;
     council.charter_version = council.charter_version.saturating_add(1);
     council.unity_basis_points = council.unity_basis_points.saturating_sub(250);
@@ -525,7 +637,12 @@ fn apply_office_nomination(
         .institutions
         .get_mut(&institution_id)
         .ok_or(CommandError::MissingInstitution { institution_id })?;
-    institution.members.insert(character_id);
+    if !institution.members.insert(character_id) {
+        return Err(CommandError::AlreadyInstitutionMember {
+            institution_id,
+            character_id,
+        });
+    }
     let dynasty = state
         .dynasties
         .get_mut(&state.player_dynasty_id)
@@ -575,6 +692,19 @@ fn apply_crisis_response(
             adjust_district_unrest(state, district_id, 700, true);
         }
         CrisisResponse::Exploit => {
+            let required_legitimacy = 600;
+            let available_legitimacy = state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .resources
+                .legitimacy_basis_points;
+            if available_legitimacy < required_legitimacy {
+                return Err(CommandError::InsufficientPlayerLegitimacy {
+                    available: available_legitimacy,
+                    required: required_legitimacy,
+                });
+            }
             let gain = Money::from_copper(i64::from(severity));
             let dynasty = state
                 .dynasties

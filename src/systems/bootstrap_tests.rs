@@ -1,3 +1,5 @@
+//! Bootstrap validation and deterministic campaign-construction tests.
+
 use super::*;
 use crate::test_support::rivergate_registry_for_test as test_registry;
 

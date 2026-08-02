@@ -4,7 +4,7 @@
 
 Complete minimum coherent Rivergate game engine.
 
-The repository now implements the full architectural foundation and a broad, integrated version of every major system required by the minimum coherent game in `DESIGN.md`. It is a deterministic headless game with a CLI, command API, projection API, and HTML dashboard rather than a narrow vertical slice.
+The repository now implements the full architectural foundation and a broad, integrated version of every major system required by the minimum coherent game in `DESIGN.md`. It is a deterministic headless game with a CLI, command API, projection API, HTML dashboard, and player-behavior testing harness rather than a narrow vertical slice.
 
 ## Architecture
 
@@ -22,6 +22,7 @@ The repository now implements the full architectural foundation and a broad, int
 - Fallible, bounded, whitespace-normalizing new-campaign input handling.
 - Explicit daily, weekly, monthly, and annual execution order.
 - Debug invariant validation after every simulated day and every CLI command.
+- Deterministic gameplay agents with no-action counterfactual consequence attribution.
 - No business rules in CLI, persistence, projection, or rendering adapters.
 
 ## Rivergate content
@@ -43,19 +44,26 @@ The repository now implements the full architectural foundation and a broad, int
 
 - Scarce market procurement.
 - Deterministic production and output sale.
+- Capacity-adjusted input and output reserve policies with nonnegative sale planning.
 - Production capacity constrained by active employment agreements.
+- Manager craft and commerce capabilities affect production yield and market throughput.
 - Daily operating costs kept distinct from weekly household wages.
 - Household demand and food satisfaction.
 - Fixed-point price formation with causal records.
 - Seasonal pressure, spoilage, and regional supply.
-- Business policies, maintenance, condition, quality, distress, insolvency, and recovery.
+- Business policies, cash reserves, maintenance, condition, quality targets, distress, insolvency, terminal closure, and recorded recovery.
 - Administrative-capacity penalties.
+- Canonical acquisition and recapitalization of distressed, insolvent, or closed businesses with
+  manager replacement, seller payment, ownership-index updates, and administrative-load transfer.
+- Canonical dynasty-to-business capitalization with treasury validation, finance versioning,
+  audit history, and durable notification.
 - Canonical inter-business cash transfers.
 
 ### Contracts, finance, and property
 
 - Explicit supply contracts.
 - Weekly delivery, payment, breach, penalty, fulfillment, and termination.
+- Symmetric nonperformance attribution and dynasty reliability consequences.
 - Explicit loans with interest, weekly payment, delinquency, default, repayment, and restructuring state.
 - Property collateral and deterministic seizure.
 - Residences, workshops, warehouses, occupants, owners, tenants, values, conditions, rents, and purchases.
@@ -71,12 +79,12 @@ The repository now implements the full architectural foundation and a broad, int
 
 ### Dynasty and family
 
-- Heads, heirs, roles, capabilities, health, loyalty, and lifecycle.
+- Heads, heirs, roles, capabilities, annually changing health, loyalty, and lifecycle.
 - Family links and parent-child records.
 - Family councils, unity, charters, and governance models.
 - Education progression.
 - Dynastic marriages and relationship consequences.
-- Annual mortality and succession.
+- Health- and governance-risk-aware annual succession.
 - Multi-generation continuation.
 
 ### Institutions, politics, and law
@@ -92,6 +100,7 @@ The repository now implements the full architectural foundation and a broad, int
 ### Relationships, information, and AI
 
 - Trust, fear, respect, obligation, resentment, memories, and interaction dates.
+- Dynasty quality and reliability reputations derived from operational and financial behavior.
 - Information reports with source, confidence, summary, and expiry.
 - Monthly causal market reports.
 - Traceable AI objectives with priorities and rationale.
@@ -106,21 +115,35 @@ The repository now implements the full architectural foundation and a broad, int
 - External route capacity, tolls, risk, disruption, and recovery.
 - Grain shortage, banking panic, urban fire, guild revolt, noble demand, epidemic, and trade disruption records.
 - Crisis detection, escalation, daily effects, natural recovery, and player responses.
+- Durable crisis-resolution notifications and one-active-instance guards for recurring crisis kinds.
 
 ### Adapters and presentation
 
 - Human-readable JSON persistence with synchronized same-directory temporary writes and atomic replacement.
-- Schema version 3.
-- Explicit migrations from versions 0, 1, and 2.
+- Schema version 4.
+- Explicit migrations from versions 0, 1, 2, and 3.
 - Deterministic strategic hydration for version 1 Rivergate saves, including preservation of legacy officeholders.
 - Version 2 migration consolidates duplicate institution state and removes redundant business staffing data.
-- Release-mode load validation for registry alignment, references, synchronized indexes, numeric ranges, contract compatibility, employment validity, property occupancy, reciprocal collateral, family councils, and next-ID allocators.
+- Version 3 migration removes the unused parallel business-debt aggregate; explicit loan records remain authoritative.
+- Release-mode load validation for registry alignment, references, synchronized indexes, numeric ranges, role and lifecycle consistency, administrative-load derivation, contract compatibility, employment validity, property occupancy, reciprocal collateral, family councils, chronological histories, and next-ID allocators.
 - Durable outbox notifications.
 - Compact state summary.
 - Complete campaign projection.
 - Self-contained HTML dashboard with escaped visible content and script-safe embedded JSON.
-- CLI commands for new, simulate, summary, inspect, dashboard, execute, and validate.
+- CLI commands for new, simulate, summary, inspect, dashboard, execute, validate, and playtest.
 - JSON `PlayerCommand` API for every consequential player mutation currently exposed.
+
+### Gameplay testing
+
+- State-derived command candidates covering every exposed player-command family.
+- Steward, entrepreneur, power-broker, and opportunist decision policies.
+- Canonical candidate validation on cloned state before committing the selected action.
+- Paired action and no-action simulation branches for immediate, delayed, and ambient attribution.
+- Actionability, variety, interconnection, feedback, resilience, and overall experience scores.
+- Command reachability, rejection pressure, action concentration, business distress and survival,
+  and experience-variance findings.
+- Bounded reproducible traces and complete JSON reports for CI and design analysis.
+- Configurable seeds, starts, personas, simulation horizon, decision interval, probe limit, and trace retention.
 
 ## Invariants
 
@@ -140,6 +163,21 @@ Runtime validation covers:
 - Deterministic chronological ordering.
 - Save/load serialization completeness.
 
+## Audit hardening
+
+The August 2026 codebase audit removed or corrected:
+
+- Negative sale quantities caused by treating integer saturation as domain clamping.
+- Repeated office-nomination, governance, policy, crisis-exploitation, and AI legitimacy exploits.
+- Production spending through protected cash reserves.
+- Free positive-value transfers caused by fixed-point truncation.
+- Inert quality targets, manager capabilities, health, loyalty, succession risk, and reputation fields.
+- Arbitrary contract penalties when both parties failed, silent crisis resolution, and inconsistent loan reputation effects.
+- Closed-business reopening, unreported insolvency recovery, and zero-value payroll version churn.
+- Release-save acceptance of invalid roles, dates, policies, indexes, administrative loads, histories, and unsupported active laws.
+- Duplicate business debt authority in favor of explicit loan records.
+- Oversized validation and settlement functions that violated the warning-free structural lint gate.
+
 ## Verification status
 
 The release gate requires all of the following to pass:
@@ -152,9 +190,16 @@ The release gate requires all of the following to pass:
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked`
 - `bash scripts/verify_cli.sh`
-- CLI create, simulate, summary, inspect, execute, dashboard, validate, and invalid-input smoke tests
+- CLI create, simulate, summary, inspect, execute, dashboard, validate, playtest, and invalid-input smoke tests
 
-The fast suite compiles and runs only non-ignored library tests. It uses a shared immutable registry fixture and fresh per-test campaign state, with domain filters and exact-name execution for focused iteration. Large suites live in dedicated `*_tests.rs` files and are grouped by contracts, loans, laws, crises, migrations, validation, determinism, and soak coverage. Long-running deterministic checks are isolated in the ignored soak tier. The automated suite includes failure-path rollback coverage, atomic save replacement, diagnostic first-difference reporting, a 3,000-day core invariant soak, and a 7,200-day strategic soak.
+The fast suite compiles and runs only non-ignored library tests. It currently contains 95 passing
+tests, with two ignored long-horizon tests in the soak tier. It uses a shared immutable registry
+fixture and fresh per-test campaign state, with domain filters and exact-name execution for focused
+iteration. Large suites live in dedicated `*_tests.rs` files and are grouped by contracts, loans,
+laws, crises, migrations, validation, gameplay, determinism, and soak coverage. The automated suite
+includes failure-path rollback coverage, deterministic gameplay-report reproduction, atomic save
+replacement, diagnostic first-difference reporting, a 3,000-day core invariant soak, and a
+7,200-day strategic soak.
 
 ## Deliberate boundaries
 

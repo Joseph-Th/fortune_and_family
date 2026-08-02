@@ -146,7 +146,10 @@ impl fmt::Display for Quantity {
 
 #[must_use]
 pub fn cost_for(quantity: Quantity, unit_price: Money) -> Money {
-    Money::from_copper(quantity.milliunits().saturating_mul(unit_price.copper()) / 1_000)
+    let product = quantity.milliunits().saturating_mul(unit_price.copper());
+    let whole_copper = product / 1_000;
+    let positive_remainder = product > 0 && product % 1_000 != 0;
+    Money::from_copper(whole_copper.saturating_add(i64::from(positive_remainder)))
 }
 
 #[must_use]
@@ -156,4 +159,30 @@ pub fn affordable_quantity(cash: Money, unit_price: Money) -> Quantity {
     }
 
     Quantity::from_milliunits(cash.copper().saturating_mul(1_000) / unit_price.copper())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positive_fractional_cost_rounds_up_to_one_copper() {
+        assert_eq!(
+            cost_for(Quantity::from_milliunits(1), Money::from_copper(1)),
+            Money::from_copper(1),
+            "a positive transfer must never become free through fixed-point truncation"
+        );
+    }
+
+    #[test]
+    fn affordable_quantity_remains_affordable_with_rounded_costs() {
+        let cash = Money::from_copper(1);
+        let price = Money::from_copper(300);
+        let quantity = affordable_quantity(cash, price);
+
+        assert!(
+            cost_for(quantity, price) <= cash,
+            "rounded transaction cost must not exceed the cash used to derive affordability"
+        );
+    }
 }

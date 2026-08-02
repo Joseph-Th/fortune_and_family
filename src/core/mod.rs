@@ -16,7 +16,7 @@ pub use extended::{
 pub use records::{
     AuditKind, AuditRecord, Business, BusinessPolicy, BusinessStatus, CampaignPhase, Character,
     CharacterRole, CharacterStatus, ChronicleEntry, ChronicleKind, Dynasty, Household, MarketCause,
-    MarketQuote, MarketState, SocialClass, StartingBackground,
+    MarketQuote, MarketState, ParseStartingBackgroundError, SocialClass, StartingBackground,
 };
 pub(crate) use records::{
     BusinessFinance, BusinessIdentity, BusinessOperations, CharacterCapabilities,

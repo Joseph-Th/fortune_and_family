@@ -23,8 +23,8 @@ pub use invariants::validate_invariants;
 pub use simulation::advance_days;
 pub(crate) use strategic::initialize_strategic_state;
 pub use strategic::{
-    LoanTerms, StrategicError, SupplyContractTerms, ValidatedLoan, ValidatedSupplyContract,
-    buy_unowned_property, issue_loan, sign_supply_contract, validate_loan,
-    validate_supply_contract,
+    BusinessAcquisitionQuote, LoanTerms, StrategicError, SupplyContractTerms, ValidatedLoan,
+    ValidatedSupplyContract, acquire_business, buy_unowned_property, issue_loan,
+    quote_business_acquisition, sign_supply_contract, validate_loan, validate_supply_contract,
 };
 pub use transactions::{SimulationError, ValidatedCashTransfer, transfer_business_cash};

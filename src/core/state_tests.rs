@@ -1,3 +1,5 @@
+//! Determinism and long-running invariant tests for application state.
+
 use super::*;
 use crate::systems::{advance_days, validate_invariants};
 use crate::test_support::{

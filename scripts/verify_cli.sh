@@ -39,6 +39,7 @@ campaign="$work_dir/campaign.json"
 summary="$work_dir/summary.json"
 projection="$work_dir/projection.json"
 dashboard="$work_dir/campaign.html"
+playtest="$work_dir/playtest.json"
 
 if python3 --version > /dev/null 2>&1; then
   python_command=python3
@@ -65,21 +66,31 @@ run_to_file 'campaign projection' "$projection" "$binary" inspect "$campaign"
 run_to_file 'dashboard rendering' "$work_dir/dashboard.txt" \
   "$binary" dashboard "$campaign" --output "$dashboard"
 run_to_file 'save validation' "$work_dir/validate.txt" "$binary" validate "$campaign"
+"$binary" playtest \
+  --days 30 \
+  --persona steward \
+  --background baker \
+  --trace-limit 3 \
+  --json \
+  --output "$playtest" \
+  > "$work_dir/playtest.txt" || fail 'gameplay harness command failed'
 
 require_nonempty_file "$campaign" 'campaign save'
 require_nonempty_file "$dashboard" 'HTML dashboard'
+require_nonempty_file "$playtest" 'gameplay harness JSON report'
 require_literal 'Enacted law' "$work_dir/execute.txt" 'command result'
 require_literal 'Validated ' "$work_dir/validate.txt" 'validation result'
 grep -Fiq '<!doctype html>' "$dashboard" || fail 'dashboard is not a complete HTML document'
 
-"$python_command" - "$summary" "$projection" <<'PY'
+"$python_command" - "$summary" "$projection" "$playtest" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-summary_path, projection_path = map(Path, sys.argv[1:])
+summary_path, projection_path, playtest_path = map(Path, sys.argv[1:])
 summary = json.loads(summary_path.read_text(encoding="utf-8"))
 projection = json.loads(projection_path.read_text(encoding="utf-8"))
+playtest = json.loads(playtest_path.read_text(encoding="utf-8"))
 
 required_summary = {
     "scenario_name",
@@ -101,6 +112,7 @@ required_projection = {
     "player",
     "dynasties",
     "districts",
+    "businesses",
     "market",
     "contracts",
     "institutions",
@@ -109,8 +121,8 @@ required_projection = {
 missing_projection = sorted(required_projection - projection.keys())
 if missing_projection:
     raise SystemExit(f"projection JSON missing views: {', '.join(missing_projection)}")
-if not projection["districts"] or not projection["market"]:
-    raise SystemExit("projection must contain district and market views")
+if not projection["districts"] or not projection["businesses"] or not projection["market"]:
+    raise SystemExit("projection must contain district, business, and market views")
 if projection["scenario"]["elapsed_days"] != 60:
     raise SystemExit("projection did not preserve both simulation advances")
 active_ceiling = [
@@ -122,7 +134,39 @@ active_ceiling = [
 ]
 if len(active_ceiling) != 1:
     raise SystemExit("projection must contain the enacted bread price ceiling")
+
+required_playtest = {"schema_version", "config", "aggregate", "campaigns", "findings"}
+missing_playtest = sorted(required_playtest - playtest.keys())
+if missing_playtest:
+    raise SystemExit(
+        f"playtest JSON missing fields: {', '.join(missing_playtest)}"
+    )
+if playtest["aggregate"]["campaigns"] != 1:
+    raise SystemExit("focused playtest must run exactly one campaign")
+if playtest["aggregate"]["simulated_days"] != 30:
+    raise SystemExit("focused playtest must simulate 30 days")
+if playtest["aggregate"]["successful_actions"] <= 0:
+    raise SystemExit("focused playtest must execute player actions")
+if not playtest["campaigns"][0]["trace"]:
+    raise SystemExit("focused playtest must contain a reproducible trace")
 PY
+
+if "$binary" playtest \
+  --days 7 \
+  --persona steward \
+  --background baker \
+  --trace-limit 1 \
+  --minimum-overall 100 \
+  --output "$work_dir/gated-playtest.txt" \
+  > "$work_dir/gated-playtest-stdout.txt" \
+  2> "$work_dir/gated-playtest-stderr.txt"
+then
+  fail 'gameplay quality gate unexpectedly succeeded'
+fi
+require_nonempty_file "$work_dir/gated-playtest.txt" 'gated gameplay report'
+require_literal 'gameplay quality gate failed' \
+  "$work_dir/gated-playtest-stderr.txt" \
+  'gameplay quality gate error'
 
 if "$binary" new \
   --output "$work_dir/invalid.json" \

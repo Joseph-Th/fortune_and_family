@@ -1,6 +1,6 @@
 # Civic Dynasty
 
-Civic Dynasty is a deterministic dynasty, economic, political, and social strategy simulation written in Rust. The repository contains a complete headless Rivergate game engine, a command-line client, a read-only projection API, and a self-contained HTML campaign dashboard.
+Civic Dynasty is a deterministic dynasty, economic, political, and social strategy simulation written in Rust. The repository contains a complete headless Rivergate game engine, a command-line client, a read-only projection API, a self-contained HTML campaign dashboard, and a deterministic gameplay-testing harness.
 
 The implementation follows the Registry / AppState / Record / System architecture defined in `AGENTS.md`.
 
@@ -11,7 +11,7 @@ The Rivergate campaign includes:
 - Six persistent urban districts and grouped ordinary households.
 - Eight competing dynasties with heads, heirs, family councils, governance, education, marriage links, succession, reputation, legitimacy, and administrative capacity.
 - Ten goods and connected grain, brewing, textile, timber, fuel, iron, and tool production chains.
-- Businesses with ownership, managers, employees, policies, cash, debt, inventory, condition, quality, maintenance, distress, insolvency, and recovery.
+- Businesses with ownership, managers, employees, policies, cash, inventory, condition, quality, maintenance, distress, insolvency, and recovery.
 - Explicit employment agreements, wages, loyalty, workplace conditions, disputes, and player responses.
 - Property ownership separated from enterprise ownership, including residences, workshops, warehouses, rents, occupancy, value, condition, purchases, and collateral.
 - Supply contracts with quantities, prices, schedules, fulfillment, breach, penalties, and termination.
@@ -54,9 +54,9 @@ The same seed, state, inputs, and commands produce the same result.
 
 ## Persistence
 
-Campaigns are stored as human-readable JSON. Schema version 3 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation. Saves are serialized to a same-directory temporary file, synchronized, and atomically persisted over the destination so an interrupted write does not truncate the previous campaign. Explicit migrations retain supported version 0, 1, and 2 campaigns.
+Campaigns are stored as human-readable JSON. Schema version 4 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation. Saves are serialized to a same-directory temporary file, synchronized, and atomically persisted over the destination so an interrupted write does not truncate the previous campaign.
 
-Explicit migrations are provided for schema versions 0, 1, and 2. Version 1 Rivergate saves are deterministically hydrated with strategic records, while version 2 saves consolidate institution runtime and remove redundant staffing fields.
+Explicit migrations are provided for schema versions 0, 1, 2, and 3. Version 1 Rivergate saves are deterministically hydrated with strategic records, version 2 saves consolidate institution runtime and remove redundant staffing fields, and version 3 saves remove the unused parallel business-debt aggregate in favor of explicit loan records.
 
 ## CLI
 
@@ -105,9 +105,38 @@ cargo run --locked -- execute saves/valeri.json \
   --command '{"EnactLaw":{"kind":"BreadPriceCeiling","value":30}}'
 ```
 
-Other command variants support business policy, cash transfer, contracts, loans, property acquisition, public works, court cases, family governance, office nomination, crisis response, labor disputes, and notification acknowledgement. Run `cargo run --locked -- --help` for command syntax. The complete command schema is represented by `PlayerCommand` in `src/systems/commands.rs`.
+Other command variants support direct dynasty investment in owned businesses, distressed-business
+acquisition and recapitalization, business policy, cash transfer, contracts, loans, property
+acquisition, public works, court cases, family governance, office nomination, crisis response,
+labor disputes, and notification acknowledgement.
+Run `cargo run --locked -- --help` for command syntax. The complete command schema is represented by
+`PlayerCommand` in `src/systems/commands.rs`.
 
 Available starting backgrounds are `baker`, `cloth-trader`, and `blacksmith`.
+
+Run deterministic player agents across the full command surface:
+
+```bash
+cargo run --release --locked -- playtest
+```
+
+Focused and structured reports are also supported:
+
+```bash
+cargo run --release --locked -- playtest \
+  --days 360 \
+  --persona entrepreneur \
+  --background baker
+
+cargo run --release --locked -- playtest \
+  --seeds 10 \
+  --json \
+  --output gameplay-report.json
+```
+
+The harness validates state-derived candidates through the canonical command API, advances both an action branch and a no-action counterfactual branch, and reports immediate, delayed, and ambient system changes separately. See `GAMEPLAY_HARNESS.md` for personas, scores, causal attribution, findings, traces, and performance guidance.
+
+CI runs can use `--minimum-overall <score>` or `--fail-on-critical`; the report is still written before the command returns a failing status.
 
 ## Library API
 
@@ -117,8 +146,10 @@ The crate exposes:
 - `build_new_game`
 - `advance_days`
 - `apply_player_command`
+- `quote_business_acquisition`
 - `build_campaign_projection`
 - `render_campaign_html`
+- `run_gameplay_harness` and `render_gameplay_report`
 - `save_state` and `load_state`
 - `validate_invariants`
 
@@ -138,7 +169,7 @@ bash scripts/verify_cli.sh
 
 `bash scripts/test.sh fast` runs only the non-ignored library tests, avoiding binary and documentation builds during ordinary edit-test cycles. An optional substring filter supports focused runs such as `bash scripts/test.sh fast loans`. `bash scripts/test.sh list laws` lists matching tests, and `bash scripts/test.sh exact <fully-qualified-name>` runs one test even when it belongs to the ignored soak tier. Long deterministic simulations are explicitly ignored by ordinary test runs and are collected under `bash scripts/test.sh soak`. `bash scripts/test.sh all` runs shell syntax checks, library tests, documentation tests, soak tests, and the CLI smoke suite in sequence.
 
-Tests share one immutable Rivergate registry but build a fresh campaign state for every case. Large suites are separated from production modules and grouped by stable domains such as contracts, loans, laws, crises, migrations, and validation. The suite includes deterministic replay, transaction rollback, stale-token revalidation, command rollback, bounded input validation, registry validation, schema migration, atomic save replacement, exact save/load equality, projection rendering, a 3,000-day invariant soak, and a 7,200-day strategic soak spanning multiple generations. The CLI smoke script validates campaign creation, simulation, structured summaries, complete projections, commands, dashboard generation, save validation, and rejected input. See `TESTING.md` for test tiers, naming, layout, and assertion guidance.
+Tests share one immutable Rivergate registry but build a fresh campaign state for every case. Large suites are separated from production modules and grouped by stable domains such as contracts, loans, laws, crises, migrations, validation, and gameplay. The suite includes deterministic replay, transaction rollback, stale-token revalidation, command rollback, bounded input validation, registry validation, schema migration, atomic save replacement, exact save/load equality, projection rendering, deterministic player-agent reports, a 3,000-day invariant soak, and a 7,200-day strategic soak spanning multiple generations. The CLI smoke script validates campaign creation, simulation, structured summaries, complete projections, commands, dashboard generation, save validation, focused gameplay-harness output, and rejected input. See `TESTING.md` for test tiers, naming, layout, and assertion guidance.
 
 ## Repository structure
 
@@ -147,6 +178,7 @@ src/
   core/          Persistent records and AppState ownership
   registry/      Immutable Rivergate definitions
   systems/       Bootstrap, commands, simulation, strategic systems, transactions, invariants
+  gameplay.rs    Player agents, counterfactual analysis, scores, traces, and findings
   projection.rs  Read-only campaign projections and HTML rendering
   persistence.rs Versioned JSON adapter and migrations
   *_tests.rs    Larger domain-organized unit-test suites

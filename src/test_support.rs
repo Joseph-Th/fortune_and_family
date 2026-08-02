@@ -1,3 +1,5 @@
+//! Shared deterministic fixtures and state-difference diagnostics for unit tests.
+
 use crate::core::{AppState, NewGameConfig};
 use crate::registry::{Registry, build_rivergate_registry};
 use crate::systems::build_new_game;

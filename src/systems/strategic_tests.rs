@@ -1,3 +1,5 @@
+//! Strategic economy, civic-system, crisis, and long-horizon behavior tests.
+
 use super::*;
 use crate::systems::{advance_days, validate_invariants};
 use crate::test_support::{
@@ -239,6 +241,26 @@ mod contracts {
             .get(seller_id)
             .expect("seller must exist")
             .cash();
+        let buyer_owner_id = state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .owner_dynasty_id();
+        let seller_owner_id = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
+        assert_ne!(
+            buyer_owner_id, seller_owner_id,
+            "the reputation regression requires an external contract"
+        );
+        let buyer_reliability_before = state
+            .dynasties
+            .get(&buyer_owner_id)
+            .expect("buyer owner must exist")
+            .resources
+            .reputation_reliability_basis_points;
 
         settle_contracts(&mut state);
 
@@ -266,6 +288,306 @@ mod contracts {
                 .missed_deliveries,
             1,
             "buyer nonpayment must count as a missed contract delivery"
+        );
+        assert!(
+            state
+                .dynasties
+                .get(&buyer_owner_id)
+                .expect("buyer owner must exist")
+                .resources
+                .reputation_reliability_basis_points
+                < buyer_reliability_before,
+            "contract nonpayment must reduce the responsible dynasty's reliability reputation"
+        );
+    }
+
+    #[test]
+    fn dual_nonperformance_does_not_arbitrarily_penalize_one_party() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (buyer_id, seller_id, good_id) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.penalty = Money::from_copper(500);
+            contract.next_due_day = state.clock.day();
+            (
+                contract.buyer_business_id,
+                contract.seller_business_id,
+                contract.good_id,
+            )
+        };
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .inventory
+            .insert(good_id, Quantity::ZERO);
+        state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist")
+            .finance
+            .cash = Money::ZERO;
+        let buyer_before = state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .cash();
+        let seller_before = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .cash();
+
+        settle_contracts(&mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(buyer_id)
+                .expect("buyer must exist")
+                .cash(),
+            buyer_before
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(seller_id)
+                .expect("seller must exist")
+                .cash(),
+            seller_before,
+            "when both parties fail, settlement must not choose an arbitrary penalty payer"
+        );
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .missed_deliveries,
+            1
+        );
+    }
+
+    #[test]
+    fn missed_final_delivery_cannot_end_as_fulfilled() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (seller_id, good_id) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.next_due_day = state.clock.day();
+            contract.end_day = state.clock.day();
+            (contract.seller_business_id, contract.good_id)
+        };
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .inventory
+            .insert(good_id, Quantity::ZERO);
+
+        settle_contracts(&mut state);
+
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .status,
+            ContractStatus::Breached,
+            "a missed final obligation must not be recorded as contract fulfillment"
+        );
+    }
+}
+
+mod reputation {
+    use super::*;
+
+    #[test]
+    fn business_quality_moves_dynasty_reputation() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .owner_dynasty_id();
+        for business in state
+            .businesses
+            .iter_mut()
+            .filter(|business| business.owner_dynasty_id() == dynasty_id)
+        {
+            business.operations.quality_basis_points = 9_000;
+        }
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("business owner must exist")
+            .resources
+            .reputation_quality_basis_points = 5_000;
+
+        update_quality_reputations(&mut state);
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("business owner must exist")
+                .resources
+                .reputation_quality_basis_points,
+            5_050,
+            "quality reputation must move gradually toward current portfolio quality"
+        );
+    }
+}
+
+mod family_councils {
+    use super::*;
+
+    #[test]
+    fn member_loyalty_affects_annual_council_unity() {
+        let state = make_test_campaign();
+        let dynasty_id = *state
+            .family_councils
+            .keys()
+            .next()
+            .expect("campaign must contain a family council");
+        let member_ids: Vec<_> = state
+            .family_councils
+            .get(&dynasty_id)
+            .expect("family council must exist")
+            .members
+            .iter()
+            .copied()
+            .collect();
+        let mut disloyal = state.clone();
+        let mut loyal = state;
+        for current in [&mut disloyal, &mut loyal] {
+            let council = current
+                .family_councils
+                .get_mut(&dynasty_id)
+                .expect("family council must exist");
+            council.unity_basis_points = 6_000;
+            council.governance = HouseGovernance::FamilyPartnership;
+        }
+        for character_id in &member_ids {
+            disloyal
+                .characters
+                .get_mut(*character_id)
+                .expect("council member must exist")
+                .runtime
+                .loyalty_basis_points = 1_000;
+            loyal
+                .characters
+                .get_mut(*character_id)
+                .expect("council member must exist")
+                .runtime
+                .loyalty_basis_points = 10_000;
+        }
+
+        update_family_councils(&mut disloyal);
+        update_family_councils(&mut loyal);
+
+        assert!(
+            loyal
+                .family_councils
+                .get(&dynasty_id)
+                .expect("loyal family council must exist")
+                .unity_basis_points
+                > disloyal
+                    .family_councils
+                    .get(&dynasty_id)
+                    .expect("disloyal family council must exist")
+                    .unity_basis_points,
+            "family-member loyalty must influence council cohesion"
+        );
+    }
+}
+
+mod employment {
+    use super::*;
+
+    #[test]
+    fn zero_payment_does_not_invalidate_business_finance_version() {
+        let mut state = make_test_campaign();
+        let employment_id = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment")
+            .id;
+        let (business_id, household_id, loyalty_before) = {
+            let agreement = state
+                .employment
+                .get(&employment_id)
+                .expect("employment must exist");
+            (
+                agreement.business_id,
+                agreement.household_id,
+                agreement.loyalty_basis_points,
+            )
+        };
+        let household_employers: Vec<_> = state
+            .employment
+            .values()
+            .filter(|agreement| {
+                agreement.status == EmploymentStatus::Active
+                    && agreement.household_id == household_id
+            })
+            .map(|agreement| agreement.business_id)
+            .collect();
+        for employer_id in household_employers {
+            state
+                .businesses
+                .get_mut(employer_id)
+                .expect("employment business must exist")
+                .finance
+                .cash = Money::ZERO;
+        }
+        let version_before = state
+            .businesses
+            .get(business_id)
+            .expect("employment business must exist")
+            .finance
+            .version;
+        let household_cash_before = state
+            .households
+            .get(household_id)
+            .expect("employment household must exist")
+            .cash();
+
+        settle_employment(&mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("employment business must exist")
+                .finance
+                .version,
+            version_before,
+            "a zero-value settlement must not invalidate finance tokens"
+        );
+        assert_eq!(
+            state
+                .households
+                .get(household_id)
+                .expect("employment household must exist")
+                .cash(),
+            household_cash_before
+        );
+        assert!(
+            state
+                .employment
+                .get(&employment_id)
+                .expect("employment must exist")
+                .loyalty_basis_points
+                < loyalty_before,
+            "the missed wage must still affect the employment relationship"
         );
     }
 }
@@ -362,6 +684,12 @@ mod loans {
             .expect("borrower must exist")
             .resources
             .treasury = Money::ZERO;
+        let reliability_before = state
+            .dynasties
+            .get(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .reputation_reliability_basis_points;
         {
             let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
             loan.balance = Money::from_copper(52_000);
@@ -382,6 +710,53 @@ mod loans {
             loan.status,
             LoanStatus::Delinquent,
             "a first missed payment must make the loan delinquent"
+        );
+        assert!(
+            state
+                .dynasties
+                .get(&borrower_id)
+                .expect("borrower must exist")
+                .resources
+                .reputation_reliability_basis_points
+                < reliability_before,
+            "a missed loan payment must reduce borrower reliability"
+        );
+    }
+
+    #[test]
+    fn successful_payment_improves_borrower_reliability() {
+        let mut state = make_test_campaign();
+        let loan_id = current_loan_id(&state);
+        let borrower_id = {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.balance = Money::from_copper(1_000);
+            loan.weekly_payment = Money::from_copper(100);
+            loan.next_due_day = state.clock.day();
+            loan.borrower_dynasty_id
+        };
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::from_copper(10_000);
+        let reliability_before = state
+            .dynasties
+            .get(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .reputation_reliability_basis_points;
+
+        settle_loans(&mut state);
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&borrower_id)
+                .expect("borrower must exist")
+                .resources
+                .reputation_reliability_basis_points,
+            reliability_before.saturating_add(10).min(10_000)
         );
     }
 }
@@ -685,6 +1060,41 @@ mod crises {
     }
 
     #[test]
+    fn natural_crisis_resolution_adds_durable_notification() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let crisis_id = insert_crisis(
+            &mut state,
+            CrisisKind::NobleDemand,
+            None,
+            550,
+            "test resolution",
+        );
+        let outbox_before = state.outbox.len();
+
+        detect_and_advance_crises(registry, &mut state);
+
+        assert_eq!(
+            state
+                .crises
+                .get(&crisis_id)
+                .expect("crisis must exist")
+                .status,
+            CrisisStatus::Resolved
+        );
+        assert_eq!(state.outbox.len(), outbox_before + 1);
+        assert!(
+            state
+                .outbox
+                .last()
+                .expect("resolution notification must exist")
+                .subject
+                .contains("resolved"),
+            "natural resolution must be visible to adapters"
+        );
+    }
+
+    #[test]
     fn severe_route_disruption_creates_trade_crisis() {
         let mut state = make_test_campaign();
         for route in state.external_routes.values_mut() {
@@ -888,6 +1298,52 @@ mod ai {
                 .expect("borrower must exist")
                 .treasury(),
             borrower_before.saturating_sub(Money::from_copper(500))
+        );
+    }
+
+    #[test]
+    fn legitimacy_objectives_do_not_progress_without_spending() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a nonplayer dynasty");
+        let legitimacy_before = {
+            let dynasty = state
+                .dynasties
+                .get_mut(&dynasty_id)
+                .expect("AI dynasty must exist");
+            dynasty.resources.treasury = Money::ZERO;
+            dynasty.resources.legitimacy_basis_points
+        };
+
+        assert_eq!(
+            advance_ai_legitimacy_objective(&mut state, dynasty_id),
+            ObjectiveProgress::Pending
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("AI dynasty must exist")
+                .resources
+                .legitimacy_basis_points,
+            legitimacy_before,
+            "bankrupt AI dynasties must not gain legitimacy for free"
+        );
+
+        advance_ai_office_objective(&mut state, dynasty_id);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("AI dynasty must exist")
+                .resources
+                .legitimacy_basis_points,
+            legitimacy_before,
+            "office objectives must also scale progress to actual spending"
         );
     }
 }

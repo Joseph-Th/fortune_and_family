@@ -1,9 +1,9 @@
 //! Read-only causal projections and a self-contained HTML campaign dashboard.
 
 use crate::core::{
-    AppState, CampaignPhase, ContractStatus, CrisisKind, CrisisStatus, InformationConfidence,
-    LawKind, LegalCaseStatus, LoanStatus, MarketCause, ObjectiveKind, ObjectiveStatus, OutboxKind,
-    PublicWorkKind, PublicWorkStatus,
+    AppState, BusinessStatus, CampaignPhase, ContractStatus, CrisisKind, CrisisStatus,
+    InformationConfidence, LawKind, LegalCaseStatus, LoanStatus, MarketCause, ObjectiveKind,
+    ObjectiveStatus, OutboxKind, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, ContractId, CrisisId, DistrictId, DynastyId, InstitutionId, LawId, LegalCaseId,
@@ -11,6 +11,7 @@ use crate::ids::{
 };
 use crate::money::{Money, Quantity};
 use crate::registry::Registry;
+use crate::systems::quote_business_acquisition;
 use serde::Serialize;
 use std::fmt::Write as _;
 
@@ -20,6 +21,7 @@ pub struct CampaignProjection {
     pub player: DynastyProjection,
     pub dynasties: Vec<DynastyProjection>,
     pub districts: Vec<DistrictProjection>,
+    pub businesses: Vec<BusinessProjection>,
     pub market: Vec<MarketProjection>,
     pub contracts: Vec<ContractProjection>,
     pub loans: Vec<LoanProjection>,
@@ -96,6 +98,35 @@ pub struct MarketProjection {
     pub demand_today: Quantity,
     pub supply_today: Quantity,
     pub causes: Vec<MarketCause>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BusinessProjection {
+    pub id: BusinessId,
+    pub name: String,
+    pub owner: String,
+    pub district: String,
+    pub recipe: String,
+    pub manager: String,
+    pub status: BusinessStatus,
+    pub cash: Money,
+    pub capacity_batches_per_day: u16,
+    pub condition_basis_points: u16,
+    pub quality_basis_points: u16,
+    pub inventory: Vec<BusinessInventoryProjection>,
+    pub acquisition: Option<BusinessAcquisitionProjection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BusinessInventoryProjection {
+    pub good: String,
+    pub quantity: Quantity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct BusinessAcquisitionProjection {
+    pub purchase_price: Money,
+    pub minimum_recapitalization: Money,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -245,6 +276,7 @@ pub fn build_campaign_projection(registry: &Registry, state: &AppState) -> Campa
         player,
         dynasties,
         districts: build_district_projections(registry, state),
+        businesses: build_business_projections(registry, state),
         market: build_market_projections(registry, state),
         contracts: build_contract_projections(registry, state),
         loans: build_loan_projections(state),
@@ -425,6 +457,63 @@ fn district_causes(runtime: &crate::core::DistrictRuntime, food: u16) -> Vec<Str
         causes.push("Conditions are broadly stable".to_owned());
     }
     causes
+}
+
+fn build_business_projections(registry: &Registry, state: &AppState) -> Vec<BusinessProjection> {
+    state
+        .businesses
+        .iter()
+        .map(|business| {
+            let owner = state
+                .dynasties
+                .get(&business.owner_dynasty_id())
+                .expect("business owner must exist");
+            let district = registry
+                .get_district(business.district_id())
+                .expect("business district must exist");
+            let recipe = registry
+                .get_recipe(business.recipe_id())
+                .expect("business recipe must exist");
+            let manager = state
+                .characters
+                .get(business.manager_id())
+                .expect("business manager must exist");
+            let inventory = business
+                .inventory()
+                .iter()
+                .map(|(good_id, quantity)| BusinessInventoryProjection {
+                    good: registry
+                        .get_good(*good_id)
+                        .expect("business inventory good must exist")
+                        .name()
+                        .to_owned(),
+                    quantity: *quantity,
+                })
+                .collect();
+            let acquisition =
+                quote_business_acquisition(registry, state, state.player_dynasty_id, business.id())
+                    .ok()
+                    .map(|quote| BusinessAcquisitionProjection {
+                        purchase_price: quote.purchase_price,
+                        minimum_recapitalization: quote.minimum_recapitalization,
+                    });
+            BusinessProjection {
+                id: business.id(),
+                name: business.name().to_owned(),
+                owner: owner.name().to_owned(),
+                district: district.name().to_owned(),
+                recipe: recipe.name().to_owned(),
+                manager: manager.name().to_owned(),
+                status: business.status(),
+                cash: business.cash(),
+                capacity_batches_per_day: business.operations.capacity_batches_per_day,
+                condition_basis_points: business.operations.condition_basis_points,
+                quality_basis_points: business.operations.quality_basis_points,
+                inventory,
+                acquisition,
+            }
+        })
+        .collect()
 }
 
 fn build_market_projections(registry: &Registry, state: &AppState) -> Vec<MarketProjection> {
@@ -692,6 +781,7 @@ pub fn render_campaign_html(
     let data = escape_json_for_html_script(&serde_json::to_string_pretty(&projection)?);
     let player = &projection.player;
     let district_rows = render_district_rows(&projection.districts);
+    let business_rows = render_business_rows(&projection.businesses);
     let market_rows = render_market_rows(&projection.market);
     let alerts = render_notifications(&projection.notifications);
     Ok(format!(
@@ -714,6 +804,7 @@ pub fn render_campaign_html(
 <section><small>Commercial position</small><div class="metric">{businesses} businesses</div><p>{properties} properties · {loans} current borrowing relationships</p></section>
 <section><small>Civic condition</small><div class="metric">{food:.1}% food satisfaction</div><p>{crises} active crises</p></section>
 </div>
+<h2>Businesses</h2><section class="scroll"><table><thead><tr><th>Business</th><th>Owner</th><th>Status</th><th>Cash</th><th>Condition</th><th>Manager</th><th>Acquisition</th></tr></thead><tbody>{business_rows}</tbody></table></section>
 <h2>Districts</h2><section class="scroll"><table><thead><tr><th>District</th><th>Food</th><th>Employment</th><th>Sanitation</th><th>Unrest</th><th>Causes</th></tr></thead><tbody>{district_rows}</tbody></table></section>
 <h2>Market</h2><section class="scroll"><table><thead><tr><th>Good</th><th>Price</th><th>Stock</th><th>Causes</th></tr></thead><tbody>{market_rows}</tbody></table></section>
 <h2>Recent notices</h2><div class="grid">{alerts}</div>
@@ -737,6 +828,36 @@ pub fn render_campaign_html(
         food = f64::from(projection.scenario.average_food_satisfaction_basis_points) / 100.0,
         crises = projection.scenario.active_crises,
     ))
+}
+
+fn render_business_rows(businesses: &[BusinessProjection]) -> String {
+    let mut rows = String::new();
+    for business in businesses {
+        let acquisition = business.acquisition.map_or_else(
+            || "—".to_owned(),
+            |quote| {
+                format!(
+                    "{} + {} working capital",
+                    quote.purchase_price, quote.minimum_recapitalization
+                )
+            },
+        );
+        write!(
+            rows,
+            "<tr><td>{}<br><small>{} · {}</small></td><td>{}</td><td>{:?}</td><td>{}</td><td>{:.1}%</td><td>{}</td><td>{}</td></tr>",
+            escape_html(&business.name),
+            escape_html(&business.district),
+            escape_html(&business.recipe),
+            escape_html(&business.owner),
+            business.status,
+            business.cash,
+            f64::from(business.condition_basis_points) / 100.0,
+            escape_html(&business.manager),
+            escape_html(&acquisition),
+        )
+        .expect("writing HTML into a String cannot fail");
+    }
+    rows
 }
 
 fn render_district_rows(districts: &[DistrictProjection]) -> String {

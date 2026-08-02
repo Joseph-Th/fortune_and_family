@@ -2,12 +2,15 @@
 
 use civic_dynasty::core::StartingBackground;
 use civic_dynasty::{
-    CommandError, NewGameConfig, NewGameError, PersistenceError, PlayerCommand, Registry,
+    CommandError, GameplayFindingSeverity, GameplayHarnessConfig, GameplayHarnessError,
+    GameplayPersona, NewGameConfig, NewGameError, PersistenceError, PlayerCommand, Registry,
     SimulationError, advance_days, apply_player_command, build_campaign_projection, build_new_game,
-    build_rivergate_registry, load_state, render_campaign_html, save_state, validate_invariants,
+    build_rivergate_registry, load_state, render_campaign_html, render_gameplay_report,
+    run_gameplay_harness, save_state, validate_invariants,
 };
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+use std::time::Instant;
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -67,6 +70,8 @@ enum Command {
     },
     /// Load a campaign and run all debug invariant assertions.
     Validate { input: PathBuf },
+    /// Run deterministic player agents and report gameplay reachability and system reactions.
+    Playtest(PlaytestArgs),
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -74,6 +79,25 @@ enum BackgroundArg {
     Baker,
     ClothTrader,
     Blacksmith,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum GameplayPersonaArg {
+    Steward,
+    Entrepreneur,
+    PowerBroker,
+    Opportunist,
+}
+
+impl From<GameplayPersonaArg> for GameplayPersona {
+    fn from(value: GameplayPersonaArg) -> Self {
+        match value {
+            GameplayPersonaArg::Steward => Self::Steward,
+            GameplayPersonaArg::Entrepreneur => Self::Entrepreneur,
+            GameplayPersonaArg::PowerBroker => Self::PowerBroker,
+            GameplayPersonaArg::Opportunist => Self::Opportunist,
+        }
+    }
 }
 
 impl From<BackgroundArg> for StartingBackground {
@@ -117,6 +141,21 @@ enum CliError {
     },
     #[error(transparent)]
     Command(#[from] CommandError),
+    #[error(transparent)]
+    GameplayHarness(#[from] GameplayHarnessError),
+    #[error("failed to serialize gameplay report: {source}")]
+    GameplayReportSerialization {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to write gameplay report {path}: {source}")]
+    GameplayReportWrite {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("gameplay quality gate failed: {reason}")]
+    GameplayQualityGate { reason: String },
 }
 
 fn main() {
@@ -220,6 +259,122 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 state.clock().day(),
                 state.schema_version()
             );
+        }
+        Command::Playtest(args) => run_playtest(&registry, args)?,
+    }
+    Ok(())
+}
+
+#[derive(Args, Debug)]
+struct PlaytestArgs {
+    /// First deterministic campaign seed.
+    #[arg(long, default_value_t = 1)]
+    start_seed: u64,
+    /// Number of consecutive seeds to run.
+    #[arg(long, default_value_t = 1)]
+    seeds: u16,
+    /// Simulated days per campaign.
+    #[arg(long, default_value_t = 1_080)]
+    days: u32,
+    /// Days advanced after each player decision.
+    #[arg(long, default_value_t = 7)]
+    decision_interval: u16,
+    /// Maximum candidate commands validated per decision.
+    #[arg(long, default_value_t = 24)]
+    max_probes: u16,
+    /// Representative decisions retained per campaign.
+    #[arg(long, default_value_t = 40)]
+    trace_limit: u16,
+    /// Player personas to run; repeat to select several. Omit to run all.
+    #[arg(long, value_enum)]
+    persona: Vec<GameplayPersonaArg>,
+    /// Starting backgrounds to run; repeat to select several. Omit to run all.
+    #[arg(long, value_enum)]
+    background: Vec<BackgroundArg>,
+    /// Emit the versioned structured JSON report instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+    /// Write the report to a file instead of standard output.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Return failure after writing the report when any critical finding exists.
+    #[arg(long)]
+    fail_on_critical: bool,
+    /// Return failure after writing the report when its overall score is lower.
+    #[arg(long, value_parser = clap::value_parser!(u16).range(0..=100))]
+    minimum_overall: Option<u16>,
+}
+
+fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError> {
+    let personas = if args.persona.is_empty() {
+        GameplayPersona::all().to_vec()
+    } else {
+        args.persona.into_iter().map(Into::into).collect()
+    };
+    let backgrounds = if args.background.is_empty() {
+        vec![
+            StartingBackground::Baker,
+            StartingBackground::ClothTrader,
+            StartingBackground::Blacksmith,
+        ]
+    } else {
+        args.background.into_iter().map(Into::into).collect()
+    };
+    let config = GameplayHarnessConfig {
+        start_seed: args.start_seed,
+        seed_count: args.seeds,
+        days_per_campaign: args.days,
+        decision_interval_days: args.decision_interval,
+        max_candidate_probes: args.max_probes,
+        trace_limit_per_campaign: args.trace_limit,
+        personas,
+        backgrounds,
+    };
+    let started = Instant::now();
+    let report = run_gameplay_harness(registry, config)?;
+    let rendered = if args.json {
+        serde_json::to_string_pretty(&report)
+            .map_err(|source| CliError::GameplayReportSerialization { source })?
+    } else {
+        render_gameplay_report(&report)
+    };
+    if let Some(path) = args.output {
+        std::fs::write(&path, rendered).map_err(|source| CliError::GameplayReportWrite {
+            path: path.clone(),
+            source,
+        })?;
+        println!("Wrote {}", path.display());
+    } else {
+        println!("{rendered}");
+    }
+    let elapsed = started.elapsed();
+    let elapsed_micros = elapsed.as_micros().max(1);
+    let days_per_second =
+        u128::from(report.aggregate.simulated_days).saturating_mul(1_000_000) / elapsed_micros;
+    eprintln!(
+        "playtest completed in {:.3}s ({days_per_second} simulated days/s)",
+        elapsed.as_secs_f64(),
+    );
+    if let Some(minimum) = args.minimum_overall
+        && report.aggregate.scores.overall < minimum
+    {
+        return Err(CliError::GameplayQualityGate {
+            reason: format!(
+                "overall score {} is below required minimum {minimum}",
+                report.aggregate.scores.overall
+            ),
+        });
+    }
+    if args.fail_on_critical {
+        let critical = report
+            .findings
+            .iter()
+            .filter(|finding| finding.severity == GameplayFindingSeverity::Critical)
+            .count();
+        if critical > 0 {
+            return Err(CliError::GameplayQualityGate {
+                reason: format!("report contains {critical} critical findings"),
+            });
         }
     }
     Ok(())

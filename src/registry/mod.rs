@@ -392,8 +392,8 @@ impl RegistryBuilder {
             "good {key} must have a positive base price"
         );
         assert!(
-            !target_market_stock.is_negative(),
-            "good {key} has negative target stock"
+            target_market_stock > Quantity::ZERO,
+            "good {key} must have positive target stock"
         );
         assert!(
             daily_spoilage_basis_points <= 10_000,

@@ -275,6 +275,12 @@ fn validate_numeric_ranges(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
+    if state.clock.day() < 0 {
+        return Err(format!(
+            "simulation clock has negative elapsed day {}",
+            state.clock.day()
+        ));
+    }
     for dynasty in state.dynasties.values() {
         if dynasty.treasury() < Money::ZERO
             || dynasty.resources.legitimacy_basis_points > 10_000
@@ -289,17 +295,28 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
         }
     }
     for character in state.characters.iter() {
-        if character.runtime.health_basis_points > 10_000
+        if character.birth_day() > state.clock.day()
+            || character.runtime.health_basis_points > 10_000
             || character.runtime.loyalty_basis_points > 10_000
+            || character.capabilities.administration > 100
+            || character.capabilities.commerce > 100
+            || character.capabilities.social > 100
+            || character.capabilities.craft > 100
         {
             return Err(format!(
-                "character {} has an invalid basis-point value",
+                "character {} has an invalid birth date, capability, or basis-point value",
                 character.id()
             ));
         }
     }
     for household in state.households.iter() {
-        if household.cash() < Money::ZERO || household.food_satisfaction_basis_points() > 10_000 {
+        if household.members == 0
+            || household.cash() < Money::ZERO
+            || household.weekly_income < Money::ZERO
+            || household.bread_need_daily < Quantity::ZERO
+            || household.ale_need_daily < Quantity::ZERO
+            || household.food_satisfaction_basis_points() > 10_000
+        {
             return Err(format!(
                 "household {} has an invalid economic value",
                 household.id()
@@ -308,9 +325,14 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
     }
     for business in state.businesses.iter() {
         if business.cash() < Money::ZERO
-            || business.finance.debt < Money::ZERO
+            || business.operations.capacity_batches_per_day == 0
             || business.operations.condition_basis_points > 10_000
             || business.operations.quality_basis_points > 10_000
+            || business.policy.target_input_days > 30
+            || business.policy.target_output_days > 30
+            || business.policy.minimum_cash_reserve < Money::ZERO
+            || business.policy.maintenance_basis_points > 10_000
+            || business.policy.quality_target_basis_points > 10_000
             || business
                 .inventory()
                 .values()
@@ -395,6 +417,22 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
+    for link in state.family_links.values() {
+        if link.property_claim_basis_points > 10_000 {
+            return Err(format!(
+                "family link {} has an invalid property claim",
+                link.id
+            ));
+        }
+    }
+    for council in state.family_councils.values() {
+        if council.unity_basis_points > 10_000 {
+            return Err(format!(
+                "family council {} has invalid unity",
+                council.dynasty_id
+            ));
+        }
+    }
     for district in state.districts.values() {
         if district.employment_basis_points > 10_000
             || district.sanitation_basis_points > 10_000
@@ -416,6 +454,8 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
             || work.spent < Money::ZERO
             || work.spent > work.budget
             || work.progress_basis_points > 10_000
+            || (work.status == crate::core::PublicWorkStatus::Completed
+                && work.progress_basis_points != 10_000)
         {
             return Err(format!(
                 "public work {} has an invalid progress value",
@@ -435,6 +475,17 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
     for crisis in state.crises.values() {
         if crisis.severity_basis_points > 10_000 {
             return Err(format!("crisis {} has an invalid severity", crisis.id));
+        }
+    }
+    for legal_case in state.legal_cases.values() {
+        if legal_case.evidence_basis_points > 10_000
+            || legal_case.public_attention_basis_points > 10_000
+            || legal_case.damages < Money::ZERO
+        {
+            return Err(format!(
+                "legal case {} has an invalid measure or damages value",
+                legal_case.id
+            ));
         }
     }
     for relationship in state.relationships.values() {
@@ -486,6 +537,23 @@ fn validate_definition_references(
     {
         return Err("district runtime map key differs from its record ID".to_owned());
     }
+    for district in state.districts.values() {
+        let mut supported_dynasties = BTreeSet::new();
+        for (dynasty_id, _) in &district.dynasty_support {
+            if !state.dynasties.contains_key(dynasty_id) {
+                return Err(format!(
+                    "district {} support references missing dynasty {dynasty_id}",
+                    district.district_id
+                ));
+            }
+            if !supported_dynasties.insert(*dynasty_id) {
+                return Err(format!(
+                    "district {} contains duplicate support for dynasty {dynasty_id}",
+                    district.district_id
+                ));
+            }
+        }
+    }
     let expected_institutions: BTreeSet<_> = registry
         .institutions()
         .iter()
@@ -511,6 +579,11 @@ fn validate_primary_records(
                 "dynasty map key {dynasty_id} differs from record ID"
             ));
         }
+        if dynasty.heir_id() == Some(dynasty.head_id()) {
+            return Err(format!(
+                "dynasty {dynasty_id} uses the same character as head and heir"
+            ));
+        }
         for character_id in [Some(dynasty.head_id()), dynasty.heir_id()]
             .into_iter()
             .flatten()
@@ -521,6 +594,21 @@ fn validate_primary_records(
             if character.dynasty_id() != *dynasty_id {
                 return Err(format!(
                     "dynasty {dynasty_id} references character {character_id} from another dynasty"
+                ));
+            }
+            if character.status() != crate::core::CharacterStatus::Active {
+                return Err(format!(
+                    "dynasty {dynasty_id} references inactive head or heir {character_id}"
+                ));
+            }
+            let expected_role = if character_id == dynasty.head_id() {
+                crate::core::CharacterRole::HeadOfHouse
+            } else {
+                crate::core::CharacterRole::Heir
+            };
+            if character.role() != expected_role {
+                return Err(format!(
+                    "dynasty {dynasty_id} head or heir {character_id} has the wrong role"
                 ));
             }
         }
@@ -570,6 +658,7 @@ fn validate_business_records(
 ) -> Result<(), String> {
     let mut owner_index: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
     let mut district_index: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+    let mut administrative_load = BTreeMap::<_, u16>::new();
     for (business_id, business) in state.businesses.records() {
         let owner_id = business.owner_dynasty_id();
         if business.id() != *business_id
@@ -590,6 +679,11 @@ fn validate_business_records(
                 "business {business_id} manager belongs to another dynasty"
             ));
         }
+        if manager.status() != crate::core::CharacterStatus::Active {
+            return Err(format!(
+                "business {business_id} references an inactive manager"
+            ));
+        }
         if business
             .inventory()
             .keys()
@@ -607,11 +701,28 @@ fn validate_business_records(
             .entry(business.district_id())
             .or_default()
             .insert(*business_id);
+        let recipe = registry
+            .get_recipe(business.recipe_id())
+            .expect("validated business recipe must exist");
+        administrative_load
+            .entry(owner_id)
+            .and_modify(|load| *load = load.saturating_add(recipe.administrative_load()))
+            .or_insert(recipe.administrative_load());
     }
     if &owner_index != state.businesses.owner_index()
         || &district_index != state.businesses.district_index()
     {
         return Err("business ownership or district index is stale or incomplete".to_owned());
+    }
+    for dynasty in state.dynasties.values() {
+        let expected = administrative_load.get(&dynasty.id()).copied().unwrap_or(0);
+        if dynasty.administrative_load() != expected {
+            return Err(format!(
+                "dynasty {} administrative load {} does not match derived load {expected}",
+                dynasty.id(),
+                dynasty.administrative_load()
+            ));
+        }
     }
     Ok(())
 }
@@ -862,6 +973,7 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
             || pair.first == pair.second
             || !state.dynasties.contains_key(&pair.first)
             || !state.dynasties.contains_key(&pair.second)
+            || relationship.last_interaction_day > state.clock.day()
         {
             return Err("relationship map contains an invalid dynasty pair".to_owned());
         }
@@ -870,9 +982,16 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
 }
 
 fn validate_misc_record_ids_and_refs(state: &AppState) -> Result<(), String> {
+    validate_law_report_and_objective_records(state)?;
+    validate_civic_event_records(state)?;
+    validate_persisted_history(state)
+}
+
+fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), String> {
     for (law_id, law) in &state.laws {
         if law.id != *law_id
             || !law.kind.is_value_valid(law.value)
+            || law.enacted_day > state.clock.day()
             || law
                 .sponsor_dynasty_id
                 .is_some_and(|dynasty_id| !state.dynasties.contains_key(&dynasty_id))
@@ -890,9 +1009,16 @@ fn validate_misc_record_ids_and_refs(state: &AppState) -> Result<(), String> {
                 law.kind
             ));
         }
+        if law.active && !law.kind.is_implemented() {
+            return Err(format!("active law kind {:?} is not implemented", law.kind));
+        }
     }
     for (report_id, report) in &state.information_reports {
-        if report.id != *report_id || !state.dynasties.contains_key(&report.owner_dynasty_id) {
+        if report.id != *report_id
+            || !state.dynasties.contains_key(&report.owner_dynasty_id)
+            || report.created_day > state.clock.day()
+            || report.expires_day < report.created_day
+        {
             return Err(format!(
                 "information report {report_id} has an invalid reference"
             ));
@@ -901,6 +1027,7 @@ fn validate_misc_record_ids_and_refs(state: &AppState) -> Result<(), String> {
     for (objective_id, objective) in &state.ai_objectives {
         if objective.id != *objective_id
             || !state.dynasties.contains_key(&objective.dynasty_id)
+            || objective.created_day > state.clock.day()
             || objective
                 .target_dynasty_id
                 .is_some_and(|dynasty_id| !state.dynasties.contains_key(&dynasty_id))
@@ -909,7 +1036,18 @@ fn validate_misc_record_ids_and_refs(state: &AppState) -> Result<(), String> {
                 "AI objective {objective_id} has an invalid reference"
             ));
         }
+        if objective.status == crate::core::ObjectiveStatus::Achieved
+            && objective.rationale.is_empty()
+        {
+            return Err(format!(
+                "achieved AI objective {objective_id} has no rationale"
+            ));
+        }
     }
+    Ok(())
+}
+
+fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
     for (work_id, work) in &state.public_works {
         if work.id != *work_id
             || !state.districts.contains_key(&work.district_id)
@@ -922,12 +1060,20 @@ fn validate_misc_record_ids_and_refs(state: &AppState) -> Result<(), String> {
     }
     for (case_id, legal_case) in &state.legal_cases {
         if legal_case.id != *case_id
+            || legal_case.plaintiff_dynasty_id == legal_case.defendant_dynasty_id
             || !state
                 .dynasties
                 .contains_key(&legal_case.plaintiff_dynasty_id)
             || !state
                 .dynasties
                 .contains_key(&legal_case.defendant_dynasty_id)
+            || legal_case.filed_day > state.clock.day()
+            || legal_case.hearing_day < legal_case.filed_day
+            || (matches!(
+                legal_case.status,
+                crate::core::LegalCaseStatus::DecidedForPlaintiff
+                    | crate::core::LegalCaseStatus::DecidedForDefendant
+            ) && legal_case.hearing_day > state.clock.day())
         {
             return Err(format!("legal case {case_id} has an invalid reference"));
         }
@@ -941,24 +1087,52 @@ fn validate_misc_record_ids_and_refs(state: &AppState) -> Result<(), String> {
     }
     for (crisis_id, crisis) in &state.crises {
         if crisis.id != *crisis_id
+            || crisis.started_day > state.clock.day()
             || crisis
                 .district_id
                 .is_some_and(|district_id| !state.districts.contains_key(&district_id))
+            || (crisis.status == crate::core::CrisisStatus::Resolved
+                && crisis.severity_basis_points >= 500)
         {
             return Err(format!("crisis {crisis_id} has an invalid reference"));
         }
     }
-    let outbox_ids: BTreeSet<_> = state.outbox.iter().map(|message| message.id).collect();
-    if outbox_ids.len() != state.outbox.len() {
-        return Err("outbox contains duplicate message IDs".to_owned());
+    Ok(())
+}
+
+fn validate_persisted_history(state: &AppState) -> Result<(), String> {
+    let mut outbox_ids = BTreeSet::new();
+    let mut prior_outbox_day = i64::MIN;
+    for message in &state.outbox {
+        if !outbox_ids.insert(message.id) {
+            return Err("outbox contains duplicate message IDs".to_owned());
+        }
+        if message.day < prior_outbox_day || message.day > state.clock.day() {
+            return Err("outbox messages are not chronologically valid".to_owned());
+        }
+        if message.subject.is_empty() || message.body.is_empty() {
+            return Err("outbox message lacks user-facing content".to_owned());
+        }
+        prior_outbox_day = message.day;
     }
-    let chronicle_ids: BTreeSet<_> = state
-        .chronicle
+
+    let mut chronicle_ids = BTreeSet::new();
+    let mut prior_chronicle_day = i64::MIN;
+    for entry in &state.chronicle {
+        if !chronicle_ids.insert(entry.id()) {
+            return Err("chronicle contains duplicate entry IDs".to_owned());
+        }
+        if entry.day() < prior_chronicle_day || entry.day() > state.clock.day() {
+            return Err("chronicle entries are not chronologically valid".to_owned());
+        }
+        prior_chronicle_day = entry.day();
+    }
+    if state
+        .audit_log
         .iter()
-        .map(crate::core::ChronicleEntry::id)
-        .collect();
-    if chronicle_ids.len() != state.chronicle.len() {
-        return Err("chronicle contains duplicate entry IDs".to_owned());
+        .any(|record| record.day() > state.clock.day())
+    {
+        return Err("audit log contains a future-dated record".to_owned());
     }
     Ok(())
 }
@@ -985,6 +1159,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             0 => migrate_v0_to_v1(value)?,
             1 => migrate_v1_to_v2(value)?,
             2 => migrate_v2_to_v3(value)?,
+            3 => migrate_v3_to_v4(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -1118,6 +1293,37 @@ fn migrate_v2_to_v3(mut value: Value) -> Result<Value, PersistenceError> {
         operations.remove("employees");
     }
     object.insert("schema_version".to_owned(), Value::from(3));
+    Ok(value)
+}
+
+fn migrate_v3_to_v4(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 3,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let business_records = object
+        .get_mut("businesses")
+        .and_then(Value::as_object_mut)
+        .and_then(|businesses| businesses.get_mut("records"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 3,
+            reason: "save businesses.records must be an object".to_owned(),
+        })?;
+    for business in business_records.values_mut() {
+        let finance = business
+            .as_object_mut()
+            .and_then(|business| business.get_mut("finance"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 3,
+                reason: "save business finance must be an object".to_owned(),
+            })?;
+        finance.remove("debt");
+    }
+    object.insert("schema_version".to_owned(), Value::from(4));
     Ok(value)
 }
 

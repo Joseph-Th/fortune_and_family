@@ -505,7 +505,6 @@ fn insert_business(state: &mut AppState, registry: &Registry, seed: BusinessSeed
         },
         finance: BusinessFinance {
             cash,
-            debt: Money::ZERO,
             version: 0,
             lifetime_revenue: Money::ZERO,
             lifetime_costs: Money::ZERO,

@@ -1,3 +1,5 @@
+//! Persistence round-trip, migration, and release-mode validation tests.
+
 use super::*;
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
 use crate::registry::Registry;
@@ -190,6 +192,39 @@ mod migrations {
     }
 
     #[test]
+    fn v3_removes_the_unused_business_debt_aggregate() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let object = value.as_object_mut().expect("state JSON must be an object");
+        object.insert("schema_version".to_owned(), Value::from(3));
+        let business_records = object
+            .get_mut("businesses")
+            .and_then(Value::as_object_mut)
+            .and_then(|businesses| businesses.get_mut("records"))
+            .and_then(Value::as_object_mut)
+            .expect("business records must be an object");
+        for business in business_records.values_mut() {
+            business["finance"]["debt"] = Value::from(12_345);
+        }
+
+        let migrated = migrate_to_current(value, Path::new("memory.json"))
+            .expect("version three must migrate");
+
+        assert_eq!(
+            migrated["schema_version"],
+            Value::from(CURRENT_SCHEMA_VERSION)
+        );
+        assert!(
+            migrated["businesses"]["records"]
+                .as_object()
+                .expect("business records must remain an object")
+                .values()
+                .all(|business| business["finance"].get("debt").is_none()),
+            "version-three migration must remove the unused debt aggregate"
+        );
+    }
+
+    #[test]
     fn v1_hydrates_strategic_state() {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
@@ -321,6 +356,157 @@ mod validation {
             load_state(&path),
             StateValidationKind::NumericRanges,
             "invalid economic value",
+        );
+    }
+
+    #[test]
+    fn rejects_business_policy_outside_command_ranges() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let business = value["businesses"]["records"]
+            .as_object_mut()
+            .and_then(|records| records.values_mut().next())
+            .expect("serialized state must contain a business");
+        business["policy"]["target_output_days"] = Value::from(31);
+        let (_directory, path) = write_test_json_fixture("invalid-business-policy.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid economic value",
+        );
+    }
+
+    #[test]
+    fn rejects_inactive_dynasty_head() {
+        let state = make_test_campaign();
+        let head_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let character = value["characters"]["records"]
+            .as_object_mut()
+            .and_then(|records| {
+                records.values_mut().find(|character| {
+                    character["identity"]["id"].as_u64() == Some(u64::from(head_id.value()))
+                })
+            })
+            .expect("serialized state must contain the player head");
+        character["runtime"]["status"] = Value::String("Deceased".to_owned());
+        let (_directory, path) = write_test_json_fixture("inactive-head.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::PrimaryRecords,
+            "inactive head or heir",
+        );
+    }
+
+    #[test]
+    fn rejects_same_character_as_dynasty_head_and_heir() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let dynasty = value["dynasties"]
+            .as_object_mut()
+            .and_then(|dynasties| dynasties.values_mut().next())
+            .expect("serialized state must contain a dynasty");
+        let head_id = dynasty["relationships"]["head_id"].clone();
+        dynasty["relationships"]["heir_id"] = head_id;
+        let (_directory, path) = write_test_json_fixture("same-head-and-heir.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::PrimaryRecords,
+            "same character as head and heir",
+        );
+    }
+
+    #[test]
+    fn rejects_dynasty_head_with_wrong_role() {
+        let state = make_test_campaign();
+        let head_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let character = value["characters"]["records"]
+            .as_object_mut()
+            .and_then(|records| {
+                records.values_mut().find(|character| {
+                    character["identity"]["id"].as_u64() == Some(u64::from(head_id.value()))
+                })
+            })
+            .expect("serialized state must contain the player head");
+        character["runtime"]["role"] = Value::String("Heir".to_owned());
+        let (_directory, path) = write_test_json_fixture("wrong-head-role.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::PrimaryRecords,
+            "wrong role",
+        );
+    }
+
+    #[test]
+    fn rejects_stale_administrative_load() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let dynasty = value["dynasties"]
+            .as_object_mut()
+            .and_then(|dynasties| dynasties.values_mut().next())
+            .expect("serialized state must contain a dynasty");
+        let current = dynasty["resources"]["administrative_load"]
+            .as_u64()
+            .expect("administrative load must be numeric");
+        dynasty["resources"]["administrative_load"] = Value::from(current + 1);
+        let (_directory, path) = write_test_json_fixture("stale-administrative-load.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::PrimaryRecords,
+            "does not match derived load",
+        );
+    }
+
+    #[test]
+    fn rejects_active_unimplemented_law() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let law = value["laws"]
+            .as_object_mut()
+            .and_then(|laws| laws.values_mut().next())
+            .expect("serialized state must contain a law");
+        law["kind"] = Value::String("PublicDebtAuthorization".to_owned());
+        law["value"] = Value::from(1);
+        law["active"] = Value::Bool(true);
+        let (_directory, path) = write_test_json_fixture("unsupported-active-law.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "is not implemented",
+        );
+    }
+
+    #[test]
+    fn rejects_future_dated_outbox_message() {
+        let state = make_test_campaign();
+        let future_day = state.clock.day().saturating_add(1);
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let message = value["outbox"]
+            .as_array_mut()
+            .and_then(|messages| messages.first_mut())
+            .expect("serialized state must contain an outbox message");
+        message["day"] = Value::from(future_day);
+        let (_directory, path) = write_test_json_fixture("future-outbox.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "not chronologically valid",
         );
     }
 

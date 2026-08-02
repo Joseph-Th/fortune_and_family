@@ -41,6 +41,10 @@ impl RegistryIds {
 /// combinations, negative constrained values, or inconsistent derived data.
 pub fn validate_invariants(registry: &Registry, state: &AppState) {
     let ids = RegistryIds::new(registry);
+    debug_assert!(
+        state.clock.day() >= 0,
+        "Lifecycle Validity: simulation clock cannot be negative"
+    );
     debug_assert_eq!(
         state.scenario_key,
         registry.scenario().key(),
@@ -95,6 +99,11 @@ fn validate_characters(state: &AppState) {
     let mut expected_index: BTreeMap<DynastyId, BTreeSet<CharacterId>> = BTreeMap::new();
     for character in state.characters.records().values() {
         debug_assert!(
+            character.birth_day() <= state.clock.day(),
+            "Lifecycle Validity: character {} is born after the current day",
+            character.id()
+        );
+        debug_assert!(
             state.dynasties.contains_key(&character.dynasty_id()),
             "Record Reference Validity: character {} references missing dynasty {}",
             character.id(),
@@ -108,6 +117,14 @@ fn validate_characters(state: &AppState) {
         debug_assert!(
             character.runtime.loyalty_basis_points <= 10_000,
             "Lifecycle Validity: character {} loyalty is outside basis-point range",
+            character.id()
+        );
+        debug_assert!(
+            character.capabilities.administration <= 100
+                && character.capabilities.commerce <= 100
+                && character.capabilities.social <= 100
+                && character.capabilities.craft <= 100,
+            "Lifecycle Validity: character {} capability is outside the 0..=100 range",
             character.id()
         );
         expected_index
@@ -124,6 +141,11 @@ fn validate_characters(state: &AppState) {
 
 fn validate_dynasties(state: &AppState) {
     for dynasty in state.dynasties.values() {
+        debug_assert_ne!(
+            Some(dynasty.head_id()),
+            dynasty.heir_id(),
+            "Ownership Exclusivity: dynasty head and heir must differ"
+        );
         let head = state.characters.get(dynasty.head_id());
         debug_assert!(
             head.is_some(),
@@ -141,6 +163,11 @@ fn validate_dynasties(state: &AppState) {
                 head.status(),
                 CharacterStatus::Active,
                 "Lifecycle Validity: dynasty head must be active"
+            );
+            debug_assert_eq!(
+                head.role(),
+                crate::core::CharacterRole::HeadOfHouse,
+                "Lifecycle Validity: dynasty head must have the head-of-house role"
             );
         }
         validate_heir(state, dynasty.id(), dynasty.heir_id());
@@ -175,6 +202,11 @@ fn validate_heir(state: &AppState, dynasty_id: DynastyId, heir_id: Option<Charac
             heir.status(),
             CharacterStatus::Active,
             "Lifecycle Validity: dynasty heir must be active"
+        );
+        debug_assert_eq!(
+            heir.role(),
+            crate::core::CharacterRole::Heir,
+            "Lifecycle Validity: dynasty heir must have the heir role"
         );
     }
 }
@@ -238,17 +270,28 @@ fn validate_business_record(state: &AppState, business: &Business, ids: &Registr
     validate_manager(state, business);
     debug_assert!(
         !business.cash().is_negative(),
-        "Lifecycle Validity: business {} cash is negative",
-        business.id()
-    );
-    debug_assert!(
-        !business.debt().is_negative(),
-        "Lifecycle Validity: business {} debt is negative",
-        business.id()
+        "Lifecycle Validity: business {} cash {} is negative on day {}",
+        business.id(),
+        business.cash(),
+        state.clock.day()
     );
     debug_assert!(
         business.condition_basis_points() <= 10_000,
         "Lifecycle Validity: business {} condition is outside basis-point range",
+        business.id()
+    );
+    debug_assert!(
+        business.operations.capacity_batches_per_day > 0,
+        "Lifecycle Validity: business {} has zero production capacity",
+        business.id()
+    );
+    debug_assert!(
+        business.policy.target_input_days <= 30
+            && business.policy.target_output_days <= 30
+            && !business.policy.minimum_cash_reserve.is_negative()
+            && business.policy.maintenance_basis_points <= 10_000
+            && business.policy.quality_target_basis_points <= 10_000,
+        "Lifecycle Validity: business {} policy is outside supported ranges",
         business.id()
     );
     for (good_id, quantity) in business.inventory() {
@@ -318,6 +361,14 @@ fn validate_households(state: &AppState, ids: &RegistryIds) {
         debug_assert!(
             household.food_satisfaction_basis_points() <= 10_000,
             "Lifecycle Validity: household satisfaction is outside basis-point range"
+        );
+        debug_assert!(
+            household.members > 0
+                && !household.weekly_income.is_negative()
+                && !household.bread_need_daily.is_negative()
+                && !household.ale_need_daily.is_negative(),
+            "Lifecycle Validity: household {} has invalid membership, income, or needs",
+            household.id()
         );
         expected_index
             .entry(household.district_id())
@@ -717,6 +768,7 @@ fn validate_family_state(state: &AppState) {
 }
 
 fn validate_laws_and_relationships(state: &AppState) {
+    let mut active_law_kinds = Vec::new();
     for (law_id, law) in &state.laws {
         debug_assert_eq!(
             *law_id, law.id,
@@ -726,6 +778,21 @@ fn validate_laws_and_relationships(state: &AppState) {
             law.enacted_day <= state.clock.day(),
             "No Lost Runtime State: law is enacted after current simulation time"
         );
+        debug_assert!(
+            !law.active || law.kind.is_implemented(),
+            "Lifecycle Validity: active law kind is not implemented"
+        );
+        debug_assert!(
+            law.kind.is_value_valid(law.value),
+            "Lifecycle Validity: law value is invalid for its kind"
+        );
+        if law.active {
+            debug_assert!(
+                !active_law_kinds.contains(&law.kind),
+                "Ownership Exclusivity: more than one active law exists for the same kind"
+            );
+            active_law_kinds.push(law.kind);
+        }
         if let Some(sponsor_id) = law.sponsor_dynasty_id {
             debug_assert!(
                 state.dynasties.contains_key(&sponsor_id),
@@ -847,7 +914,9 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
             "Registry Reference Validity: public work district does not exist"
         );
         debug_assert!(
-            !work.budget.is_negative() && !work.spent.is_negative() && work.spent <= work.budget,
+            work.budget > crate::money::Money::ZERO
+                && !work.spent.is_negative()
+                && work.spent <= work.budget,
             "Lifecycle Validity: public work budget accounting is invalid"
         );
         debug_assert!(

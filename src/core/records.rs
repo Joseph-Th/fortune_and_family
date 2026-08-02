@@ -7,6 +7,7 @@ use crate::money::{Money, Quantity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StartingBackground {
@@ -14,6 +15,10 @@ pub enum StartingBackground {
     ClothTrader,
     Blacksmith,
 }
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error("expected baker, cloth-trader, or blacksmith")]
+pub struct ParseStartingBackgroundError;
 
 impl StartingBackground {
     #[must_use]
@@ -36,14 +41,14 @@ impl StartingBackground {
 }
 
 impl FromStr for StartingBackground {
-    type Err = &'static str;
+    type Err = ParseStartingBackgroundError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "baker" => Ok(Self::Baker),
             "cloth-trader" | "cloth_trader" | "weaver" => Ok(Self::ClothTrader),
             "blacksmith" | "smith" => Ok(Self::Blacksmith),
-            _ => Err("expected baker, cloth-trader, or blacksmith"),
+            _ => Err(ParseStartingBackgroundError),
         }
     }
 }
@@ -323,7 +328,6 @@ pub struct BusinessOperations {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BusinessFinance {
     pub(crate) cash: Money,
-    pub(crate) debt: Money,
     pub(crate) version: u64,
     pub(crate) lifetime_revenue: Money,
     pub(crate) lifetime_costs: Money,
@@ -377,11 +381,6 @@ impl Business {
     #[must_use]
     pub const fn cash(&self) -> Money {
         self.finance.cash
-    }
-
-    #[must_use]
-    pub const fn debt(&self) -> Money {
-        self.finance.debt
     }
 
     #[must_use]
@@ -500,6 +499,7 @@ pub enum ChronicleKind {
     PriceShock,
     BusinessDistress,
     BusinessRecovered,
+    BusinessAcquired,
     NewYear,
     Succession,
 }
@@ -545,6 +545,8 @@ pub enum AuditKind {
     Maintenance,
     DayAdvanced,
     CashTransfer,
+    BusinessCapitalization,
+    BusinessAcquisition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

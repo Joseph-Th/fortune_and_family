@@ -1,3 +1,5 @@
+//! Projection completeness and HTML escaping tests for presentation adapters.
+
 use super::*;
 use crate::core::NewGameConfig;
 use crate::test_support::{
@@ -70,6 +72,19 @@ mod coverage {
                 .map(|contract| contract.id)
                 .collect::<BTreeSet<_>>(),
             state.contracts.keys().copied().collect()
+        );
+        assert_eq!(
+            projection
+                .businesses
+                .iter()
+                .map(|business| business.id)
+                .collect::<BTreeSet<_>>(),
+            state
+                .businesses
+                .iter()
+                .map(crate::core::Business::id)
+                .collect(),
+            "business projection IDs must match runtime state"
         );
         assert_eq!(
             projection
@@ -147,6 +162,37 @@ mod coverage {
         assert_registry_views(registry, &projection);
         assert_runtime_views(&state, &projection);
         assert_filtered_views(&state, &projection);
+    }
+
+    #[test]
+    fn exposes_acquisition_terms_for_troubled_nonplayer_businesses() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a nonplayer business")
+            .id();
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("selected business must exist");
+        business.operations.status = crate::core::BusinessStatus::Distressed;
+        business.finance.cash = Money::ZERO;
+
+        let projection = build_campaign_projection(registry, &state);
+        let projected = projection
+            .businesses
+            .iter()
+            .find(|business| business.id == business_id)
+            .expect("troubled business must be projected");
+
+        let acquisition = projected
+            .acquisition
+            .expect("troubled nonplayer business must expose acquisition terms");
+        assert!(acquisition.purchase_price > Money::ZERO);
+        assert!(acquisition.minimum_recapitalization > Money::ZERO);
     }
 }
 

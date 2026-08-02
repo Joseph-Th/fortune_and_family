@@ -18,7 +18,7 @@ use crate::rng::DeterministicRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGameConfig {
@@ -212,6 +212,44 @@ impl BusinessStore {
 
     pub(crate) fn get_mut(&mut self, id: BusinessId) -> Option<&mut Business> {
         self.records.get_mut(&id)
+    }
+
+    pub(crate) fn transfer_ownership(
+        &mut self,
+        business_id: BusinessId,
+        new_owner_id: DynastyId,
+        new_manager_id: CharacterId,
+    ) -> Option<DynastyId> {
+        let business = self.records.get_mut(&business_id)?;
+        let prior_owner_id = business.identity.owner_dynasty_id;
+        if prior_owner_id == new_owner_id {
+            business.operations.manager_id = new_manager_id;
+            return Some(prior_owner_id);
+        }
+
+        let remove_prior_owner = self
+            .by_owner
+            .get_mut(&prior_owner_id)
+            .is_some_and(|businesses| {
+                assert!(
+                    businesses.remove(&business_id),
+                    "missing owner index entry {business_id}"
+                );
+                businesses.is_empty()
+            });
+        if remove_prior_owner {
+            self.by_owner.remove(&prior_owner_id);
+        }
+        assert!(
+            self.by_owner
+                .entry(new_owner_id)
+                .or_default()
+                .insert(business_id),
+            "duplicate owner index entry {business_id}"
+        );
+        business.identity.owner_dynasty_id = new_owner_id;
+        business.operations.manager_id = new_manager_id;
+        Some(prior_owner_id)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Business> {

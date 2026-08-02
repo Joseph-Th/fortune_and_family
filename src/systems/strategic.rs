@@ -1,7 +1,8 @@
 //! Strategic initialization, periodic systems, and validated cross-record operations.
 
 use crate::core::{
-    AiObjective, AppState, CharacterRole, ContractStatus, Crisis, CrisisKind, CrisisStatus,
+    AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
+    ChronicleEntry, ChronicleKind, ContractStatus, Crisis, CrisisKind, CrisisStatus,
     DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw, ExternalRoute,
     FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance, InformationConfidence,
     InformationReport, InstitutionRuntime, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus,
@@ -9,7 +10,7 @@ use crate::core::{
     Property, PropertyKind, PublicWork, PublicWorkKind, PublicWorkStatus, RelationshipState,
     SupplyContract,
 };
-use crate::ids::{BusinessId, DistrictId, DynastyId, GoodId, PropertyId};
+use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, GoodId, PropertyId};
 use crate::money::{Money, Quantity, cost_for};
 use crate::registry::{InstitutionKind, Registry};
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,29 @@ pub enum StrategicError {
     },
     #[error("property {property_id} is already owned")]
     PropertyAlreadyOwned { property_id: PropertyId },
+    #[error("business {business_id} is already owned by dynasty {buyer_dynasty_id}")]
+    BusinessAlreadyOwned {
+        business_id: BusinessId,
+        buyer_dynasty_id: DynastyId,
+    },
+    #[error("business {business_id} with status {status:?} is not available for acquisition")]
+    BusinessNotAcquirable {
+        business_id: BusinessId,
+        status: BusinessStatus,
+    },
+    #[error("character {manager_id} is not an active member of buyer dynasty {buyer_dynasty_id}")]
+    InvalidAcquisitionManager {
+        manager_id: CharacterId,
+        buyer_dynasty_id: DynastyId,
+    },
+    #[error(
+        "business {business_id} requires at least {required} recapitalization, but {provided} was provided"
+    )]
+    InsufficientBusinessRecapitalization {
+        business_id: BusinessId,
+        provided: Money,
+        required: Money,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +113,14 @@ pub struct LoanTerms {
     pub collateral_property_id: Option<PropertyId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BusinessAcquisitionQuote {
+    pub business_id: BusinessId,
+    pub seller_dynasty_id: DynastyId,
+    pub purchase_price: Money,
+    pub minimum_recapitalization: Money,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ObjectiveProgress {
     Pending,
@@ -103,6 +135,26 @@ impl ObjectiveProgress {
             Self::Pending
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DueContract {
+    id: crate::ids::ContractId,
+    buyer_id: BusinessId,
+    seller_id: BusinessId,
+    good_id: GoodId,
+    quantity: Quantity,
+    unit_price: Money,
+    penalty: Money,
+    end_day: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ContractSettlementState {
+    buyer_owner_id: DynastyId,
+    seller_owner_id: DynastyId,
+    seller_can_deliver: bool,
+    buyer_can_pay: bool,
 }
 
 #[derive(Debug)]
@@ -463,6 +515,300 @@ pub fn buy_unowned_property(
         format!("Dynasty {buyer_dynasty_id} acquired the property for {price}."),
     );
     Ok(())
+}
+
+/// Returns the canonical price and minimum working-capital requirement for acquiring a troubled
+/// business.
+///
+/// # Errors
+///
+/// Returns an error when the business or buyer is missing, the buyer already owns the business,
+/// or the business is still active and therefore not available for acquisition.
+///
+/// # Panics
+///
+/// Panics when previously validated business recipe or market references are missing.
+pub fn quote_business_acquisition(
+    registry: &Registry,
+    state: &AppState,
+    buyer_dynasty_id: DynastyId,
+    business_id: BusinessId,
+) -> Result<BusinessAcquisitionQuote, StrategicError> {
+    if !state.dynasties.contains_key(&buyer_dynasty_id) {
+        return Err(StrategicError::MissingDynasty {
+            dynasty_id: buyer_dynasty_id,
+        });
+    }
+    let business = state
+        .businesses
+        .get(business_id)
+        .ok_or(StrategicError::MissingBusiness { business_id })?;
+    let seller_dynasty_id = business.owner_dynasty_id();
+    if seller_dynasty_id == buyer_dynasty_id {
+        return Err(StrategicError::BusinessAlreadyOwned {
+            business_id,
+            buyer_dynasty_id,
+        });
+    }
+    let discount_basis_points = match business.status() {
+        BusinessStatus::Distressed => 7_000_i64,
+        BusinessStatus::Insolvent => 4_000,
+        BusinessStatus::Closed => 2_500,
+        BusinessStatus::Active => {
+            return Err(StrategicError::BusinessNotAcquirable {
+                business_id,
+                status: business.status(),
+            });
+        }
+    };
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("business recipe references must be validated");
+    let inventory_value =
+        business
+            .inventory()
+            .iter()
+            .fold(Money::ZERO, |total, (good_id, quantity)| {
+                let unit_price = state
+                    .market
+                    .quotes
+                    .get(good_id)
+                    .expect("business inventory good must have a market quote")
+                    .price;
+                total.saturating_add(cost_for(*quantity, unit_price))
+            });
+    let capacity = i64::from(business.operations.capacity_batches_per_day);
+    let equipment_value = recipe
+        .daily_operating_cost()
+        .saturating_mul(capacity)
+        .saturating_mul(60)
+        .saturating_mul(i64::from(
+            business.operations.condition_basis_points.max(1_000),
+        ));
+    let equipment_value = Money::from_copper(equipment_value.copper() / 10_000);
+    let goodwill_value = recipe
+        .daily_operating_cost()
+        .saturating_mul(capacity)
+        .saturating_mul(30)
+        .saturating_mul(i64::from(business.operations.quality_basis_points));
+    let goodwill_value = Money::from_copper(goodwill_value.copper() / 10_000);
+    let gross_value = business
+        .cash()
+        .saturating_add(inventory_value)
+        .saturating_add(equipment_value)
+        .saturating_add(goodwill_value);
+    let discounted_value = gross_value.saturating_mul(discount_basis_points);
+    let purchase_price = Money::from_copper((discounted_value.copper() / 10_000).max(500));
+    let operating_floor = recipe.daily_operating_cost().saturating_mul(2);
+    let minimum_recapitalization = Money::from_copper(
+        operating_floor
+            .copper()
+            .saturating_sub(business.cash().copper())
+            .max(0),
+    );
+    Ok(BusinessAcquisitionQuote {
+        business_id,
+        seller_dynasty_id,
+        purchase_price,
+        minimum_recapitalization,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ValidatedBusinessAcquisition {
+    quote: BusinessAcquisitionQuote,
+    buyer_treasury: Money,
+    administrative_load: u16,
+}
+
+/// Acquires a troubled business, installs an eligible manager, and supplies enough working
+/// capital for it to resume active operation.
+///
+/// # Errors
+///
+/// Returns an error for an unavailable business, invalid manager, insufficient recapitalization,
+/// or insufficient buyer treasury funds. Failed acquisitions leave state unchanged.
+///
+/// # Panics
+///
+/// Panics only if validated records are removed or altered between validation and commit within
+/// this call.
+pub fn acquire_business(
+    registry: &Registry,
+    state: &mut AppState,
+    buyer_dynasty_id: DynastyId,
+    business_id: BusinessId,
+    manager_id: CharacterId,
+    recapitalization: Money,
+) -> Result<BusinessAcquisitionQuote, StrategicError> {
+    let validated = validate_business_acquisition(
+        registry,
+        state,
+        buyer_dynasty_id,
+        business_id,
+        manager_id,
+        recapitalization,
+    )?;
+    commit_business_acquisition(
+        state,
+        buyer_dynasty_id,
+        manager_id,
+        recapitalization,
+        validated,
+    );
+    Ok(validated.quote)
+}
+
+fn validate_business_acquisition(
+    registry: &Registry,
+    state: &AppState,
+    buyer_dynasty_id: DynastyId,
+    business_id: BusinessId,
+    manager_id: CharacterId,
+    recapitalization: Money,
+) -> Result<ValidatedBusinessAcquisition, StrategicError> {
+    let quote = quote_business_acquisition(registry, state, buyer_dynasty_id, business_id)?;
+    let manager =
+        state
+            .characters
+            .get(manager_id)
+            .ok_or(StrategicError::InvalidAcquisitionManager {
+                manager_id,
+                buyer_dynasty_id,
+            })?;
+    if manager.dynasty_id() != buyer_dynasty_id || manager.status() != CharacterStatus::Active {
+        return Err(StrategicError::InvalidAcquisitionManager {
+            manager_id,
+            buyer_dynasty_id,
+        });
+    }
+    if recapitalization < quote.minimum_recapitalization {
+        return Err(StrategicError::InsufficientBusinessRecapitalization {
+            business_id,
+            provided: recapitalization,
+            required: quote.minimum_recapitalization,
+        });
+    }
+    let total_required = quote.purchase_price.saturating_add(recapitalization);
+    let buyer_treasury = state
+        .dynasties
+        .get(&buyer_dynasty_id)
+        .expect("quoted buyer dynasty must exist")
+        .treasury();
+    if buyer_treasury < total_required {
+        return Err(StrategicError::InsufficientDynastyFunds {
+            dynasty_id: buyer_dynasty_id,
+            available: buyer_treasury,
+            required: total_required,
+        });
+    }
+    let recipe_id = state
+        .businesses
+        .get(business_id)
+        .expect("quoted business must exist")
+        .recipe_id();
+    let administrative_load = registry
+        .get_recipe(recipe_id)
+        .expect("business recipe references must be validated")
+        .administrative_load();
+    Ok(ValidatedBusinessAcquisition {
+        quote,
+        buyer_treasury,
+        administrative_load,
+    })
+}
+
+fn commit_business_acquisition(
+    state: &mut AppState,
+    buyer_dynasty_id: DynastyId,
+    manager_id: CharacterId,
+    recapitalization: Money,
+    validated: ValidatedBusinessAcquisition,
+) {
+    let quote = validated.quote;
+    let business_id = quote.business_id;
+    let total_required = quote.purchase_price.saturating_add(recapitalization);
+    state
+        .dynasties
+        .get_mut(&buyer_dynasty_id)
+        .expect("validated buyer must exist")
+        .resources
+        .treasury = validated.buyer_treasury.saturating_sub(total_required);
+    let seller = state
+        .dynasties
+        .get_mut(&quote.seller_dynasty_id)
+        .expect("business owner dynasty must exist");
+    seller.resources.treasury = seller
+        .resources
+        .treasury
+        .saturating_add(quote.purchase_price);
+    seller.resources.administrative_load = seller
+        .resources
+        .administrative_load
+        .saturating_sub(validated.administrative_load);
+    let buyer = state
+        .dynasties
+        .get_mut(&buyer_dynasty_id)
+        .expect("validated buyer must exist");
+    buyer.resources.administrative_load = buyer
+        .resources
+        .administrative_load
+        .saturating_add(validated.administrative_load);
+
+    let prior_owner = state
+        .businesses
+        .transfer_ownership(business_id, buyer_dynasty_id, manager_id)
+        .expect("validated business must exist");
+    debug_assert_eq!(prior_owner, quote.seller_dynasty_id);
+    let business = state
+        .businesses
+        .get_mut(business_id)
+        .expect("transferred business must exist");
+    business.finance.cash = business.finance.cash.saturating_add(recapitalization);
+    business.finance.version = business.finance.version.saturating_add(1);
+    business.operations.status = BusinessStatus::Active;
+
+    record_business_acquisition(state, buyer_dynasty_id, manager_id, recapitalization, quote);
+}
+
+fn record_business_acquisition(
+    state: &mut AppState,
+    buyer_dynasty_id: DynastyId,
+    manager_id: CharacterId,
+    recapitalization: Money,
+    quote: BusinessAcquisitionQuote,
+) {
+    let business_id = quote.business_id;
+    let chronicle_id = state.next_ids.chronicle();
+    state.chronicle.push(ChronicleEntry {
+        id: chronicle_id,
+        day: state.clock.day(),
+        kind: ChronicleKind::BusinessAcquired,
+        summary: format!(
+            "Dynasty {buyer_dynasty_id} acquired business {business_id} from dynasty {} for {} and supplied {} working capital.",
+            quote.seller_dynasty_id, quote.purchase_price, recapitalization
+        ),
+    });
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::BusinessAcquisition,
+        subject: format!("business:{business_id}"),
+        detail: format!(
+            "buyer={buyer_dynasty_id}; seller={}; price={}; recapitalization={}; manager={manager_id}",
+            quote.seller_dynasty_id,
+            quote.purchase_price.copper(),
+            recapitalization.copper()
+        ),
+    });
+    push_outbox(
+        state,
+        OutboxKind::Finance,
+        format!("Business {business_id} acquired"),
+        format!(
+            "The dynasty paid {} and supplied {} working capital. Character {manager_id} now manages the enterprise.",
+            quote.purchase_price, recapitalization
+        ),
+    );
 }
 
 pub(crate) fn initialize_strategic_state(registry: &Registry, state: &mut AppState) {
@@ -1162,6 +1508,7 @@ pub(crate) fn run_weekly_strategic_systems(registry: &Registry, state: &mut AppS
     settle_employment(state);
     progress_public_works(registry, state);
     update_relationships_from_obligations(state);
+    update_quality_reputations(state);
     apply_law_economic_effects(registry, state);
 }
 
@@ -1173,81 +1520,146 @@ fn settle_contracts(state: &mut AppState) {
         .filter(|contract| {
             contract.status == ContractStatus::Active && contract.next_due_day <= day
         })
-        .map(|contract| {
-            (
-                contract.id,
-                contract.buyer_business_id,
-                contract.seller_business_id,
-                contract.good_id,
-                contract.quantity_per_week,
-                contract.unit_price,
-                contract.penalty,
-                contract.end_day,
-            )
+        .map(|contract| DueContract {
+            id: contract.id,
+            buyer_id: contract.buyer_business_id,
+            seller_id: contract.seller_business_id,
+            good_id: contract.good_id,
+            quantity: contract.quantity_per_week,
+            unit_price: contract.unit_price,
+            penalty: contract.penalty,
+            end_day: contract.end_day,
         })
         .collect();
-    for (id, buyer_id, seller_id, good_id, quantity, unit_price, penalty, end_day) in due {
-        let payment = cost_for(quantity, unit_price);
-        let seller_inventory = state
-            .businesses
-            .get(seller_id)
-            .expect("contract seller must exist")
-            .inventory_quantity(good_id);
-        let buyer_cash = state
-            .businesses
-            .get(buyer_id)
-            .expect("contract buyer must exist")
-            .cash();
-        let seller_can_deliver = seller_inventory >= quantity;
-        let buyer_can_pay = buyer_cash >= payment;
-        if seller_can_deliver && buyer_can_pay {
-            {
-                let seller = state
-                    .businesses
-                    .get_mut(seller_id)
-                    .expect("contract seller must exist");
-                seller.remove_inventory(good_id, quantity);
-            }
-            {
-                let buyer = state
-                    .businesses
-                    .get_mut(buyer_id)
-                    .expect("contract buyer must exist");
-                buyer.add_inventory(good_id, quantity);
-            }
-            transfer_contract_money(state, buyer_id, seller_id, payment);
-            let contract = state.contracts.get_mut(&id).expect("contract must exist");
-            contract.fulfilled_deliveries = contract.fulfilled_deliveries.saturating_add(1);
-            contract.next_due_day = contract.next_due_day.saturating_add(7);
+    for due_contract in due {
+        settle_due_contract(state, due_contract);
+    }
+}
+
+fn settle_due_contract(state: &mut AppState, due: DueContract) {
+    let payment = cost_for(due.quantity, due.unit_price);
+    let seller = state
+        .businesses
+        .get(due.seller_id)
+        .expect("contract seller must exist");
+    let buyer = state
+        .businesses
+        .get(due.buyer_id)
+        .expect("contract buyer must exist");
+    let settlement = ContractSettlementState {
+        buyer_owner_id: buyer.owner_dynasty_id(),
+        seller_owner_id: seller.owner_dynasty_id(),
+        seller_can_deliver: seller.inventory_quantity(due.good_id) >= due.quantity,
+        buyer_can_pay: buyer.cash() >= payment,
+    };
+    let fulfilled = settlement.seller_can_deliver && settlement.buyer_can_pay;
+    if fulfilled {
+        settle_fulfilled_contract(state, due, payment, settlement);
+    } else {
+        settle_failed_contract(state, due, settlement);
+    }
+    let expired_active = state.contracts.get(&due.id).is_some_and(|contract| {
+        contract.status == ContractStatus::Active && contract.next_due_day > due.end_day
+    });
+    if expired_active {
+        state
+            .contracts
+            .get_mut(&due.id)
+            .expect("contract must exist")
+            .status = if fulfilled {
+            ContractStatus::Fulfilled
         } else {
-            let (penalty_payer_id, penalty_recipient_id) = if seller_can_deliver {
-                (buyer_id, seller_id)
-            } else {
-                (seller_id, buyer_id)
-            };
-            let available = state
-                .businesses
-                .get(penalty_payer_id)
-                .expect("contract penalty payer must exist")
-                .cash();
-            let paid_penalty = penalty.min(available);
-            transfer_contract_money(state, penalty_payer_id, penalty_recipient_id, paid_penalty);
-            let contract = state.contracts.get_mut(&id).expect("contract must exist");
-            contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
-            contract.next_due_day = contract.next_due_day.saturating_add(7);
-            if contract.missed_deliveries >= 3 {
-                contract.status = ContractStatus::Breached;
-                push_outbox(
-                    state,
-                    OutboxKind::Contract,
-                    format!("Contract {id} breached"),
-                    format!("Repeated nonperformance caused supply contract {id} to terminate."),
-                );
-            }
+            ContractStatus::Breached
+        };
+        if !fulfilled {
+            push_outbox(
+                state,
+                OutboxKind::Contract,
+                format!("Contract {} expired in breach", due.id),
+                "The final scheduled delivery was not completed before the contract ended."
+                    .to_owned(),
+            );
         }
-        let contract = state.contracts.get_mut(&id).expect("contract must exist");
-        if contract.status == ContractStatus::Active && contract.next_due_day > end_day {
-            contract.status = ContractStatus::Fulfilled;
+    }
+}
+
+fn settle_fulfilled_contract(
+    state: &mut AppState,
+    due: DueContract,
+    payment: Money,
+    settlement: ContractSettlementState,
+) {
+    state
+        .businesses
+        .get_mut(due.seller_id)
+        .expect("contract seller must exist")
+        .remove_inventory(due.good_id, due.quantity);
+    state
+        .businesses
+        .get_mut(due.buyer_id)
+        .expect("contract buyer must exist")
+        .add_inventory(due.good_id, due.quantity);
+    transfer_contract_money(state, due.buyer_id, due.seller_id, payment);
+    let contract = state
+        .contracts
+        .get_mut(&due.id)
+        .expect("contract must exist");
+    contract.fulfilled_deliveries = contract.fulfilled_deliveries.saturating_add(1);
+    contract.next_due_day = contract.next_due_day.saturating_add(7);
+    if settlement.buyer_owner_id != settlement.seller_owner_id {
+        adjust_reliability_reputation(state, settlement.buyer_owner_id, 20);
+        adjust_reliability_reputation(state, settlement.seller_owner_id, 20);
+    }
+}
+
+fn settle_failed_contract(
+    state: &mut AppState,
+    due: DueContract,
+    settlement: ContractSettlementState,
+) {
+    let penalty_parties = match (settlement.seller_can_deliver, settlement.buyer_can_pay) {
+        (true, false) => Some((due.buyer_id, due.seller_id)),
+        (false, true) => Some((due.seller_id, due.buyer_id)),
+        (false, false) => None,
+        (true, true) => unreachable!("fulfilled contracts do not enter failure settlement"),
+    };
+    if let Some((payer_id, recipient_id)) = penalty_parties {
+        let available = state
+            .businesses
+            .get(payer_id)
+            .expect("contract penalty payer must exist")
+            .cash();
+        transfer_contract_money(state, payer_id, recipient_id, due.penalty.min(available));
+    }
+    let breached = {
+        let contract = state
+            .contracts
+            .get_mut(&due.id)
+            .expect("contract must exist");
+        contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
+        contract.next_due_day = contract.next_due_day.saturating_add(7);
+        if contract.missed_deliveries >= 3 {
+            contract.status = ContractStatus::Breached;
+        }
+        contract.status == ContractStatus::Breached
+    };
+    if breached {
+        push_outbox(
+            state,
+            OutboxKind::Contract,
+            format!("Contract {} breached", due.id),
+            format!(
+                "Repeated nonperformance caused supply contract {} to terminate.",
+                due.id
+            ),
+        );
+    }
+    if settlement.buyer_owner_id != settlement.seller_owner_id {
+        if !settlement.seller_can_deliver {
+            adjust_reliability_reputation(state, settlement.seller_owner_id, -120);
+        }
+        if !settlement.buyer_can_pay {
+            adjust_reliability_reputation(state, settlement.buyer_owner_id, -120);
         }
     }
 }
@@ -1325,22 +1737,28 @@ fn settle_loans(state: &mut AppState) {
         state.loans.get_mut(&id).expect("loan must exist").balance = accrued_balance;
         if borrower_treasury >= amount_due {
             apply_loan_payment(state, id, amount_due);
-            let loan = state.loans.get_mut(&id).expect("loan must exist");
-            loan.next_due_day = loan.next_due_day.saturating_add(7);
-            loan.missed_payments = 0;
-            if loan.status != LoanStatus::Repaid {
-                loan.status = LoanStatus::Current;
+            {
+                let loan = state.loans.get_mut(&id).expect("loan must exist");
+                loan.next_due_day = loan.next_due_day.saturating_add(7);
+                loan.missed_payments = 0;
+                if loan.status != LoanStatus::Repaid {
+                    loan.status = LoanStatus::Current;
+                }
             }
+            adjust_reliability_reputation(state, borrower_id, 10);
         } else {
-            let loan = state.loans.get_mut(&id).expect("loan must exist");
-            loan.missed_payments = loan.missed_payments.saturating_add(1);
-            loan.next_due_day = loan.next_due_day.saturating_add(7);
-            loan.status = if loan.missed_payments >= 3 {
-                LoanStatus::Defaulted
-            } else {
-                LoanStatus::Delinquent
+            let defaulted = {
+                let loan = state.loans.get_mut(&id).expect("loan must exist");
+                loan.missed_payments = loan.missed_payments.saturating_add(1);
+                loan.next_due_day = loan.next_due_day.saturating_add(7);
+                loan.status = if loan.missed_payments >= 3 {
+                    LoanStatus::Defaulted
+                } else {
+                    LoanStatus::Delinquent
+                };
+                loan.status == LoanStatus::Defaulted
             };
-            if loan.status == LoanStatus::Defaulted {
+            if defaulted {
                 if let Some(property_id) = collateral {
                     let property = state
                         .properties
@@ -1358,6 +1776,7 @@ fn settle_loans(state: &mut AppState) {
                     ),
                 );
             }
+            adjust_reliability_reputation(state, borrower_id, if defaulted { -400 } else { -60 });
         }
     }
 }
@@ -1484,18 +1903,20 @@ fn settle_employment(state: &mut AppState) {
             .expect("employment business must exist")
             .cash();
         let paid = wage.min(business_cash);
-        let business = state
-            .businesses
-            .get_mut(business_id)
-            .expect("employment business must exist");
-        business.finance.cash = business_cash.saturating_sub(paid);
-        business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(paid);
-        business.finance.version = business.finance.version.saturating_add(1);
-        let household = state
-            .households
-            .get_mut(household_id)
-            .expect("employment household must exist");
-        household.cash = household.cash.saturating_add(paid);
+        if paid > Money::ZERO {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("employment business must exist");
+            business.finance.cash = business_cash.saturating_sub(paid);
+            business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(paid);
+            business.finance.version = business.finance.version.saturating_add(1);
+            let household = state
+                .households
+                .get_mut(household_id)
+                .expect("employment household must exist");
+            household.cash = household.cash.saturating_add(paid);
+        }
         let agreement = state
             .employment
             .get_mut(&id)
@@ -1657,6 +2078,55 @@ fn update_relationships_from_obligations(state: &mut AppState) {
                 .min(10_000);
         }
     }
+}
+
+fn update_quality_reputations(state: &mut AppState) {
+    let dynasty_ids: Vec<_> = state.dynasties.keys().copied().collect();
+    for dynasty_id in dynasty_ids {
+        let mut total_quality = 0_u64;
+        let mut business_count = 0_u64;
+        for business in state.businesses.iter().filter(|business| {
+            business.owner_dynasty_id() == dynasty_id
+                && business.status() != crate::core::BusinessStatus::Closed
+        }) {
+            total_quality =
+                total_quality.saturating_add(u64::from(business.operations.quality_basis_points));
+            business_count = business_count.saturating_add(1);
+        }
+        if business_count == 0 {
+            continue;
+        }
+        let target = u16::try_from(total_quality / business_count).unwrap_or(10_000);
+        let dynasty = state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("reputation dynasty must exist");
+        dynasty.resources.reputation_quality_basis_points = move_basis_points_toward(
+            dynasty.resources.reputation_quality_basis_points,
+            target,
+            50,
+        );
+    }
+}
+
+fn move_basis_points_toward(current: u16, target: u16, maximum_step: u16) -> u16 {
+    if current < target {
+        current.saturating_add(target.saturating_sub(current).min(maximum_step))
+    } else {
+        current.saturating_sub(current.saturating_sub(target).min(maximum_step))
+    }
+}
+
+fn adjust_reliability_reputation(state: &mut AppState, dynasty_id: DynastyId, delta: i16) {
+    let dynasty = state
+        .dynasties
+        .get_mut(&dynasty_id)
+        .expect("reputation dynasty must exist");
+    let adjusted = i32::from(dynasty.resources.reputation_reliability_basis_points)
+        .saturating_add(i32::from(delta))
+        .clamp(0, 10_000);
+    dynasty.resources.reputation_reliability_basis_points =
+        u16::try_from(adjusted).expect("clamped reputation must fit u16");
 }
 
 fn apply_law_economic_effects(registry: &Registry, state: &mut AppState) {
@@ -1886,10 +2356,13 @@ fn advance_ai_office_objective(state: &mut AppState, dynasty_id: DynastyId) -> O
     if let Some(dynasty) = state.dynasties.get_mut(&dynasty_id) {
         let spend = Money::from_copper(500).min(dynasty.resources.treasury);
         dynasty.resources.treasury = dynasty.resources.treasury.saturating_sub(spend);
+        let legitimacy_gain = u16::try_from(spend.copper().saturating_mul(80) / 500)
+            .unwrap_or(80)
+            .min(80);
         dynasty.resources.legitimacy_basis_points = dynasty
             .resources
             .legitimacy_basis_points
-            .saturating_add(80)
+            .saturating_add(legitimacy_gain)
             .min(10_000);
     }
     ObjectiveProgress::Pending
@@ -2008,10 +2481,13 @@ fn advance_ai_legitimacy_objective(
     }
     let spend = Money::from_copper(750).min(dynasty.resources.treasury);
     dynasty.resources.treasury = dynasty.resources.treasury.saturating_sub(spend);
+    let legitimacy_gain = u16::try_from(spend.copper().saturating_mul(120) / 750)
+        .unwrap_or(120)
+        .min(120);
     dynasty.resources.legitimacy_basis_points = dynasty
         .resources
         .legitimacy_basis_points
-        .saturating_add(120)
+        .saturating_add(legitimacy_gain)
         .min(10_000);
     ObjectiveProgress::Pending
 }
@@ -2174,12 +2650,24 @@ fn update_external_route_risk(state: &mut AppState) {
 
 fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
     let day = state.clock.day();
+    let mut resolved = Vec::new();
     for crisis in state.crises.values_mut() {
         if !crisis.status.is_active() {
             continue;
         }
         crisis.severity_basis_points = crisis.severity_basis_points.saturating_sub(120);
         crisis.status = CrisisStatus::from_severity(crisis.severity_basis_points);
+        if crisis.status == CrisisStatus::Resolved {
+            resolved.push((crisis.id, crisis.kind));
+        }
+    }
+    for (crisis_id, kind) in resolved {
+        push_outbox(
+            state,
+            OutboxKind::Crisis,
+            format!("Crisis {crisis_id} resolved"),
+            format!("The {kind:?} crisis has subsided below an active threat level."),
+        );
     }
     let has_grain_crisis = state
         .crises
@@ -2228,7 +2716,11 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
             "Multiple defaults damaged confidence in city credit.",
         );
     }
-    if day > 0 && day % 720 == 0 && state.rng.is_chance_success(2_500) {
+    if day > 0
+        && day % 720 == 0
+        && !has_active_crisis(state, CrisisKind::NobleDemand)
+        && state.rng.is_chance_success(2_500)
+    {
         let district_id = state.districts.keys().copied().next();
         insert_crisis(
             state,
@@ -2345,7 +2837,7 @@ fn detect_trade_disruption(state: &mut AppState) {
             CrisisKind::TradeDisruption,
             None,
             disruption,
-            "Multiple external routes became too disrupted to sustain normal trade.",
+            "External trade routes became too disrupted to sustain normal commerce.",
         );
     }
 }
@@ -2531,14 +3023,46 @@ fn form_dynastic_marriage(state: &mut AppState) {
 }
 
 fn update_family_councils(state: &mut AppState) {
-    for council in state.family_councils.values_mut() {
+    let loyalty_adjustments: Vec<_> = state
+        .family_councils
+        .values()
+        .map(|council| {
+            let mut total_loyalty = 0_u64;
+            let mut active_members = 0_u64;
+            for character_id in &council.members {
+                let character = state
+                    .characters
+                    .get(*character_id)
+                    .expect("family council member must exist");
+                if character.status() == crate::core::CharacterStatus::Active {
+                    total_loyalty = total_loyalty
+                        .saturating_add(u64::from(character.runtime.loyalty_basis_points));
+                    active_members = active_members.saturating_add(1);
+                }
+            }
+            let average_loyalty = total_loyalty
+                .checked_div(active_members)
+                .and_then(|average| u16::try_from(average).ok())
+                .unwrap_or(5_000);
+            let adjustment = (i32::from(average_loyalty) - 5_000) / 50;
+            (council.dynasty_id, adjustment)
+        })
+        .collect();
+
+    for (dynasty_id, loyalty_adjustment) in loyalty_adjustments {
+        let council = state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("family council must exist");
         let members = u16::try_from(council.members.len()).unwrap_or(u16::MAX);
-        let branch_pressure = members.saturating_sub(2).saturating_mul(80);
-        council.unity_basis_points = council
-            .unity_basis_points
+        let branch_pressure = i32::from(members.saturating_sub(2).saturating_mul(80));
+        council.unity_basis_points = i32::from(council.unity_basis_points)
             .saturating_sub(branch_pressure)
             .saturating_add(50)
-            .min(10_000);
+            .saturating_add(loyalty_adjustment)
+            .clamp(0, 10_000)
+            .try_into()
+            .expect("clamped family unity must fit u16");
         if council.unity_basis_points < 3_000
             && council.governance == HouseGovernance::Primogeniture
         {

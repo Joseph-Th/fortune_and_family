@@ -12,6 +12,7 @@ bash scripts/test.sh exact systems::strategic::tests::contracts::rejects_zero_we
 bash scripts/test.sh soak
 bash scripts/test.sh cli
 bash scripts/test.sh all
+cargo run --release --locked -- playtest --days 360
 ```
 
 `fast` runs only non-ignored library tests. It intentionally excludes documentation tests, the CLI binary, and long simulations so ordinary edit-test cycles remain short. A substring filter can select a subsystem or behavior.
@@ -19,6 +20,8 @@ bash scripts/test.sh all
 `exact` runs one fully qualified test name, including an ignored soak test when selected explicitly. Use `list` to discover names. Test modules are grouped by domain, so filters such as `contracts`, `loans`, `laws`, `crises`, `migrations`, and `validation` are stable and meaningful.
 
 `soak` runs the ignored 3,000-day and 7,200-day deterministic simulations serially. `cli` runs the command-line smoke suite. `all` runs shell syntax checks, library tests, documentation tests, soak tests, and CLI smoke tests.
+
+The gameplay harness complements assertion-based tests by making state-derived player decisions through the canonical command API. It measures command reachability, blocked choices, causal command-to-system edges, durable feedback, action concentration, and campaign survival. Use a focused one-persona run while iterating and broader release-mode runs for design review. See `GAMEPLAY_HARNESS.md` for its counterfactual attribution model and report fields.
 
 ## Layout
 
@@ -28,6 +31,7 @@ Large suites live beside, but not inside, their production modules:
 - `src/systems/commands_tests.rs`
 - `src/systems/simulation_tests.rs`
 - `src/systems/strategic_tests.rs`
+- `src/gameplay_tests.rs`
 - `src/persistence_tests.rs`
 - `src/projection_tests.rs`
 - `src/core/state_tests.rs`
