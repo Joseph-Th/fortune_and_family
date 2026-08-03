@@ -1341,13 +1341,15 @@ mod politics {
             .map(|institution| institution.institution_id)
             .take(2)
             .collect();
-        assert_eq!(institution_ids.len(), 2);
+        let [first_institution_id, second_institution_id] = institution_ids.as_slice() else {
+            panic!("fixture must contain at least two eligible institutions: {institution_ids:?}");
+        };
 
         apply_player_command(
             registry,
             &mut state,
             PlayerCommand::NominateForOffice {
-                institution_id: institution_ids[0],
+                institution_id: *first_institution_id,
                 character_id,
             },
         )
@@ -1358,7 +1360,7 @@ mod politics {
             registry,
             &mut state,
             PlayerCommand::NominateForOffice {
-                institution_id: institution_ids[1],
+                institution_id: *second_institution_id,
                 character_id,
             },
         );
@@ -1530,12 +1532,15 @@ mod politics {
         .into_iter()
         .filter(|governance| *governance != current)
         .collect();
+        let [first_alternative, second_alternative] = alternatives.as_slice() else {
+            panic!("fixture must expose two governance alternatives: {alternatives:?}");
+        };
 
         apply_player_command(
             registry,
             &mut state,
             PlayerCommand::SetHouseGovernance {
-                governance: alternatives[0],
+                governance: *first_alternative,
             },
         )
         .expect("first charter amendment must succeed");
@@ -1545,7 +1550,7 @@ mod politics {
             registry,
             &mut state,
             PlayerCommand::SetHouseGovernance {
-                governance: alternatives[1],
+                governance: *second_alternative,
             },
         );
 
@@ -1852,6 +1857,103 @@ mod legal_cases {
 
 mod labor {
     use super::*;
+
+    fn disputed_player_employment(state: &mut AppState) -> (EmploymentId, BusinessId) {
+        let employment_id = state
+            .employment
+            .values()
+            .find(|agreement| {
+                state
+                    .businesses
+                    .get(agreement.business_id)
+                    .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            })
+            .expect("player business must have an employment agreement")
+            .id;
+        let agreement = state
+            .employment
+            .get_mut(&employment_id)
+            .expect("selected employment must exist");
+        agreement.status = EmploymentStatus::Disputed;
+        agreement.loyalty_basis_points = 0;
+        agreement.conditions_basis_points = 0;
+        (employment_id, agreement.business_id)
+    }
+
+    #[test]
+    fn condition_investment_restores_both_recovery_requirements() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (employment_id, business_id) = disputed_player_employment(&mut state);
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("employment business must exist")
+            .finance
+            .cash = Money::from_copper(2_000);
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::ResolveLaborDispute {
+                employment_id,
+                response: LaborResponse::ImproveConditions,
+            },
+        )
+        .expect("condition investment must resolve the dispute");
+
+        let agreement = state
+            .employment
+            .get(&employment_id)
+            .expect("employment must remain present");
+        assert_eq!(agreement.status, EmploymentStatus::Active);
+        assert!(agreement.loyalty_basis_points >= crate::systems::EMPLOYMENT_RECOVERY_BASIS_POINTS);
+        assert!(
+            agreement.conditions_basis_points >= crate::systems::EMPLOYMENT_RECOVERY_BASIS_POINTS
+        );
+    }
+
+    #[test]
+    fn negotiation_restores_conditions_before_reactivating_employment() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (employment_id, business_id) = disputed_player_employment(&mut state);
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("employment business must exist")
+            .finance
+            .cash = Money::from_copper(2_000);
+        let wage_before = state
+            .employment
+            .get(&employment_id)
+            .expect("employment must exist")
+            .weekly_wage;
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::ResolveLaborDispute {
+                employment_id,
+                response: LaborResponse::Negotiate,
+            },
+        )
+        .expect("negotiation must resolve the dispute");
+
+        let agreement = state
+            .employment
+            .get(&employment_id)
+            .expect("employment must remain present");
+        assert_eq!(agreement.status, EmploymentStatus::Active);
+        assert_eq!(
+            agreement.weekly_wage,
+            wage_before.saturating_mul_ratio(11, 10)
+        );
+        assert!(agreement.loyalty_basis_points >= 4_500);
+        assert!(
+            agreement.conditions_basis_points >= crate::systems::EMPLOYMENT_RECOVERY_BASIS_POINTS
+        );
+    }
 
     #[test]
     fn rejects_labor_response_for_inactive_business() {

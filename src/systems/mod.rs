@@ -8,6 +8,7 @@ mod strategic;
 mod transactions;
 
 pub(crate) const WORKERS_PER_BATCH: u16 = 4;
+pub(crate) const EMPLOYMENT_RECOVERY_BASIS_POINTS: u16 = 3_000;
 
 pub(crate) fn supported_worker_capacity(business: &crate::core::Business) -> u32 {
     u32::from(business.operations.capacity_batches_per_day)

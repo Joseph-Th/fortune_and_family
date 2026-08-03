@@ -464,11 +464,25 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
             || work.spent < Money::ZERO
             || work.spent > work.budget
             || work.progress_basis_points > 10_000
-            || (work.status == crate::core::PublicWorkStatus::Completed
-                && work.progress_basis_points != 10_000)
         {
             return Err(format!(
                 "public work {} has an invalid progress value",
+                work.id
+            ));
+        }
+        let expected_progress = u16::try_from(
+            work.spent
+                .saturating_mul_ratio(10_000, work.budget.copper())
+                .copper()
+                .clamp(0, 10_000),
+        )
+        .expect("clamped public-work progress must fit u16");
+        if work.progress_basis_points != expected_progress
+            || (work.status == crate::core::PublicWorkStatus::Completed
+                && work.spent != work.budget)
+        {
+            return Err(format!(
+                "public work {} progress does not match its spending or lifecycle",
                 work.id
             ));
         }

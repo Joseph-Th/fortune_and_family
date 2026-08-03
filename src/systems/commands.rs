@@ -754,10 +754,13 @@ fn apply_public_work(
     }
     let contribution = Money::from_copper((budget.copper() / 10).max(1)).min(budget);
     spend_player_treasury(state, contribution)?;
-    let progress_basis_points =
-        u16::try_from(contribution.copper().saturating_mul(10_000) / budget.copper())
-            .unwrap_or(10_000)
-            .min(10_000);
+    let progress_basis_points = u16::try_from(
+        contribution
+            .saturating_mul_ratio(10_000, budget.copper())
+            .copper(),
+    )
+    .unwrap_or(10_000)
+    .min(10_000);
     let id = state.next_ids.public_work();
     state.public_works.insert(
         id,
@@ -1235,11 +1238,11 @@ fn apply_labor_response(
             agreement.conditions_basis_points = agreement
                 .conditions_basis_points
                 .saturating_add(2_000)
-                .min(10_000);
+                .clamp(super::EMPLOYMENT_RECOVERY_BASIS_POINTS, 10_000);
             agreement.loyalty_basis_points = agreement
                 .loyalty_basis_points
                 .saturating_add(1_000)
-                .min(10_000);
+                .clamp(super::EMPLOYMENT_RECOVERY_BASIS_POINTS, 10_000);
             agreement.status = EmploymentStatus::Active;
         }
         LaborResponse::Negotiate => {
@@ -1248,9 +1251,11 @@ fn apply_labor_response(
                 .employment
                 .get_mut(&employment_id)
                 .expect("validated employment must exist");
-            agreement.weekly_wage =
-                Money::from_copper(agreement.weekly_wage.copper().saturating_mul(11) / 10);
+            agreement.weekly_wage = agreement.weekly_wage.saturating_mul_ratio(11, 10);
             agreement.loyalty_basis_points = agreement.loyalty_basis_points.max(4_500);
+            agreement.conditions_basis_points = agreement
+                .conditions_basis_points
+                .max(super::EMPLOYMENT_RECOVERY_BASIS_POINTS);
             agreement.status = EmploymentStatus::Active;
         }
         LaborResponse::ReplaceWorkers => {

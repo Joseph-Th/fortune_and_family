@@ -1,16 +1,20 @@
-# Gameplay Testing Harness
+# Gameplay Harness
 
-The gameplay harness runs deterministic player agents through the same public command and simulation pipelines used by the CLI. It is intended for design review, regression testing, balance investigation, and measuring whether systems produce understandable consequences.
+The gameplay harness runs deterministic player agents through the same command and simulation APIs used by the CLI. It is a design and regression instrument for command reachability, delayed consequences, strategic variety, resilience, and multi-generation progression.
 
-## Running it
+It does not replace behavior tests or human playtesting.
 
-A broad default run covers every starting background and all four player personas for three simulated years:
+## Run modes
+
+Default matrix:
 
 ```bash
 cargo run --release --locked -- playtest
 ```
 
-A focused iteration run:
+The default runs all four personas across all three starting backgrounds for 1,080 days per campaign.
+
+Focused iteration:
 
 ```bash
 cargo run --release --locked -- playtest \
@@ -20,7 +24,7 @@ cargo run --release --locked -- playtest \
   --trace-limit 20
 ```
 
-A multi-seed machine-readable report:
+Multi-seed JSON report:
 
 ```bash
 cargo run --release --locked -- playtest \
@@ -31,190 +35,188 @@ cargo run --release --locked -- playtest \
   --output gameplay-report.json
 ```
 
-Useful controls:
+CI quality gate:
 
-- `--days`: simulated days per campaign.
-- `--decision-interval`: days advanced after each player decision. The default is seven.
-- `--max-probes`: maximum candidate commands validated per decision cycle.
-- `--consequence-horizon`: maximum days used by command-specific counterfactual consequence probes.
-- `--trace-limit`: retained representative decisions per campaign.
-- `--persona`: repeatable filter for steward, entrepreneur, power-broker, or opportunist.
-- `--background`: repeatable filter for baker, cloth-trader, or blacksmith.
-- `--seeds`: number of consecutive deterministic seeds.
-- `--json`: emit the complete structured report.
-- `--minimum-overall`: fail after writing the report when the overall score is below a CI threshold.
-- `--fail-on-critical`: fail after writing the report when any critical finding is present.
+```bash
+cargo run --release --locked -- playtest \
+  --minimum-overall 75 \
+  --fail-on-critical \
+  --json \
+  --output gameplay-report.json
+```
 
-## How agents play
+The report is written before a quality-gate failure is returned.
 
-At each decision cycle, the harness reads current campaign state and derives concrete player commands. It does not mutate internal records directly during play. Every candidate is tested through `apply_player_command` against a cloned state. The highest-ranked viable command is then committed through that same canonical API, followed by `advance_days` through the normal simulation pipeline.
+## Configuration
 
-Candidate generation covers all exposed player command families:
+| Option | Meaning | Default |
+|---|---|---|
+| `--start-seed` | First deterministic seed. | `1` |
+| `--seeds` | Number of consecutive seeds. | `1` |
+| `--days` | Simulated days per campaign. | `1080` |
+| `--decision-interval` | Days advanced after each player decision. | `7` |
+| `--max-probes` | Maximum candidate commands validated per decision cycle. | `24` |
+| `--consequence-horizon` | Maximum days used for delayed consequence attribution. | `360` |
+| `--trace-limit` | Representative trace steps retained per campaign. | `40` |
+| `--persona` | Repeatable persona filter. Omit for all. | All |
+| `--background` | Repeatable starting-background filter. Omit for all. | All |
+| `--json` | Emit the structured versioned report. | Human text |
+| `--output` | Write the report to a file. | Standard output |
+| `--minimum-overall` | Fail when overall score is lower. | Disabled |
+| `--fail-on-critical` | Fail when any critical finding exists. | Disabled |
 
-- Direct dynasty capitalization for proactive modernization or stressed-business recovery,
-  distressed-business acquisition and recapitalization, business cash transfers, and operating
-  policies.
-- Input-supply security, output sales, borrowing, lending, and property purchases. These directional
-  categories remain distinct in reports even though contracts and loans share canonical commands.
-- Laws, public works, legal cases, governance, and office nominations.
-- Crisis responses, labor-dispute responses, and notification acknowledgement.
+Use release mode for broad matrices. Candidate probing and counterfactual simulation clone campaign state and are intentionally more expensive than ordinary tests.
 
-Agents choose based on urgency, persona preferences, unexplored command coverage, current resources, and repetition penalties. The policy is deterministic. The same configuration and code produce the same report.
+## Personas
 
-The probe budget first reserves the highest-ranked candidate from each offered command family, then uses any remaining slots on additional targets or templates. A large set of office, law, property, or public-work variants therefore cannot hide an otherwise viable command family merely by exhausting the global probe limit.
+The harness uses four deterministic priority models:
 
-## Player personas
+- `steward`: continuity, worker conditions, relief, reform, and public works.
+- `entrepreneur`: operating policy, contracts, property, credit, and expansion.
+- `power-broker`: offices, laws, courts, public works, and governance.
+- `opportunist`: leverage, crisis exploitation, acquisition, legal pressure, and replacement labor.
 
-The harness uses deliberately different priorities rather than one allegedly optimal agent.
+Personas are diagnostic policies, not claims about optimal play. Differences between them help detect whether the command surface supports distinct strategies.
 
-- Steward: business continuity, worker conditions, relief, reform, and public works.
-- Entrepreneur: inventory policy, contracts, property, finance, and market expansion.
-- Power broker: laws, offices, public works, courts, and house governance.
-- Opportunist: crisis exploitation, leverage, property acquisition, legal pressure, and replacement labor.
+## Decision cycle
 
-Personas are diagnostic instruments. A command reachable only by one persona is weaker evidence of broad player accessibility than a command used across several personas.
+Each cycle follows this path:
 
-## Counterfactual consequence attribution
+1. Read the current campaign state.
+2. Generate concrete `PlayerCommand` candidates from visible state.
+3. Rank candidates by urgency, persona priorities, coverage, resources, and repetition penalties.
+4. Reserve probe capacity across offered command families.
+5. Validate candidates through `apply_player_command` on cloned state.
+6. Select the highest-ranked viable command.
+7. Commit through the same canonical command API.
+8. Advance time through `advance_days`.
+9. Compare action and baseline branches.
+10. Record scores, findings, and bounded trace data.
 
-Ordinary simulation activity changes many records every week. Crediting all of those changes to the preceding command would make every action appear highly interconnected. The harness therefore advances two deterministic branches from each decision point:
+The harness does not directly mutate domain records during play.
 
-1. The action branch applies the selected player command and advances time.
-2. The baseline branch applies no command and advances the same number of days.
+## Candidate coverage
 
-The consequence horizon is command-specific. Reactive actions use the normal decision interval,
-while policies, contracts, finance, property, law, public works, legal cases, governance, and office
-nominations are probed over longer bounded horizons. This avoids declaring a slow system inert
-merely because it cannot resolve inside one week.
+Candidate generation covers the exposed player command surface:
 
-The report classifies changes as:
+- Dynasty capitalization, business acquisition, cash transfer, and operating policy
+- Input supply, output sale, borrowing, lending, and property acquisition
+- Laws, public works, legal cases, governance, and office nomination
+- Crisis response, labor-dispute response, and notification acknowledgement
 
-- Immediate: state changed at command commit time.
-- Persistent: an immediate change still differs from baseline at the consequence horizon.
-- Delayed: a new action-attributable domain change appears after commit time.
-- Ambient: the no-action branch changed from the initial state.
+When a new command is added, it is not considered harness-integrated until generation, classification, snapshots, attribution, findings, traces, and coverage tests are updated.
 
-Only immediate and delayed changes create command-to-domain interaction edges. Ambient changes still count toward general system activity and appear in traces.
+## Counterfactual attribution
 
-This is a deterministic intervention test. It does not prove philosophical causation, but it prevents routine weekly settlements, market movement, and AI activity from being misattributed to unrelated player choices.
+Routine simulation changes many domains without player action. The harness separates those changes from command consequences by advancing two deterministic branches from the same decision point:
 
-## Report measures
+- Action branch: apply the selected command, then advance time.
+- Baseline branch: apply no command, then advance the same time.
 
-The human report is compact enough for CI logs. The JSON report retains all campaign statistics and representative traces. It includes a top-level `schema_version` so automated consumers can reject incompatible report contracts explicitly. Schema version 13 records how many decision cycles offered each strategic direction, distinguishes securing inputs from selling outputs and borrowing from extending credit, records which event-dependent routes became relevant, preserves the top ranked candidates with scores and descriptions at every retained trace step, and measures recent same-direction command streaks. It also records the core-fantasy milestones for commercial standing, office campaigning, officeholding, city-shaping action, player labor conflict, and succession. This lets the harness test whether systems merely coexist or actually form the intended commercial-to-political-to-dynastic sequence. It separates persistent consequences from newly delayed consequences, tracks building and peak unfinished public works, separates player-involved contract outcomes from ambient city contracts, records available offices and the identities of offices, laws, governance, and sponsored works, and measures minimum food satisfaction only after simulation begins so the authored starting value cannot mask trajectory changes. It also separates city-wide labor activity from employment at player-owned businesses, inter-dynasty relationships, earned intelligence reports, and notification feedback. Activation-aware reachability prevents short horizons from classifying a conditional route as broken before its prerequisites exist, while still making an offered but unusable route a release-gate failure.
+The report classifies differences as:
 
-### Actionability
+| Class | Meaning |
+|---|---|
+| Immediate | The command changed state at commit time. |
+| Persistent | An immediate difference still exists at the attribution horizon. |
+| Delayed | A new action-attributable difference appears after time advances. |
+| Ambient | The baseline changed from the initial state without the command. |
 
-The share of cycles with at least one substantive candidate in which a substantive command passes
-canonical validation. Cycles where no substantive route is offered because systems are on deliberate
-cooldowns are recorded as quiet rather than inaccessible. Cycles with substantive candidates but no
-viable action are recorded as blocked. Notification acknowledgement is excluded from this measure.
+Only immediate and delayed action-attributable differences create command-to-domain interaction edges. Ambient changes describe system activity but are not credited to the command.
 
-### Variety
+The consequence horizon is bounded and command-sensitive. Slow civic, legal, financial, and institutional actions can be observed beyond the normal decision interval without allowing unbounded simulation cost.
 
-Combines strategic-direction coverage, action distribution, viable alternatives, and distinct viable
-directions per decision. The report presents both concrete choice depth and cross-direction breadth.
-Several materially different policies, properties, projects, or counterparties therefore remain
-visible even during a focused strategic window, while genuinely one-option cycles still produce a
-warning.
+## Scores
 
-### Interconnection
+Scores range from 0 to 100.
 
-Measures distinct causal command-to-domain edges and average causal consequence breadth. The target
-is several meaningful system links per command family, not an unrealistic expectation that every
-command alter every domain. It uses the counterfactual action branch comparison, not ambient
-simulation changes.
+| Score | Measures |
+|---|---|
+| Actionability | Whether offered substantive commands pass canonical validation. |
+| Variety | Strategic-direction coverage, action distribution, and viable alternatives. |
+| Interconnection | Distinct command-to-domain edges and consequence breadth. |
+| Feedback | Whether actions produce observable immediate or durable delayed results. |
+| Resilience | Business continuity, food access, treasury, labor pressure, and crisis load. |
+| Overall | Weighted summary of the five component scores. |
 
-Commercial contracts, credit, repayment, default, and legal conflict are also measured as relationship changes. These links matter because the central game loop requires productive and commercial power to become social or institutional leverage rather than remaining isolated financial activity.
-
-### Feedback
-
-The share of substantive executed actions that produce a direct state/projection change or genuinely
-delayed durable feedback through the outbox or chronicle. Persistent immediate messages are not
-counted twice.
-
-### Resilience
-
-A coarse outcome and trajectory signal based on operating businesses, food satisfaction, player
-treasury, escalated crises, minimum operating businesses, minimum food access, peak labor disputes,
-and peak crisis load. Distressed businesses remain operational but receive a lower score than
-healthy ones. This is not a win score; it exists to identify play styles or starts that collapse or
-recover only after a prolonged dead period.
-
-### Overall
-
-A weighted summary of actionability, variety, interconnection, feedback, and resilience. The component scores and findings are more informative than the single number.
+Use component scores and findings for diagnosis. The overall score is suitable for a coarse CI threshold, not as a complete design verdict.
 
 ## Findings
 
-The harness emits explicit findings for conditions such as:
+Findings are emitted with informational, warning, or critical severity. They cover conditions such as:
 
-- A command family is never offered during the configured horizon, is offered but never probed, is always rejected, or is viable but never selected.
-- Candidates exist but canonical validation always rejects them.
-- A viable command is never selected by any configured persona.
-- A command executes without an observed domain consequence.
-- One action dominates the decision distribution.
-- One substantive command repeats for a long consecutive streak, indicating routine micromanagement.
-- A domain remains static, or changes autonomously without attributable player influence.
-- Entire player portfolios frequently end distressed, insolvent, or non-operational.
-- Any campaign falls below 10% food satisfaction, food access collapses broadly, contracts breach more often than they complete, credit defaults outnumber
-  repayments, or labor disputes dominate the player workforce.
-- Notification volume becomes unusable or crisis responses crowd out strategic play.
-- Public works accumulate faster than the civic treasury can complete them.
-- Actionable cycles offer fewer than two viable alternatives on average.
-- Concrete alternatives are healthy but concentrate within one strategic direction; this is retained
-  as informational evidence rather than misclassified as missing agency.
-- Experience scores vary sharply by background, persona, or seed.
-- Distinct personas converge on the same most-used action families.
-- Commercial standing, office campaigning, officeholding, and city-shaping action occur at nearly identical times across starts and personas.
-- Civic outcomes converge on the same law mix, sponsored works, offices, and governance despite different strategies.
-- Commercial actions do not create relationship or institutional leverage, or institutional actions do not reshape material conditions.
-- Labor changes throughout the city but never become an issue inside a player-owned workplace.
-- Intelligence changes only through autonomous reports rather than player-directed commercial activity.
-- Long campaigns do not exercise succession, or funded businesses suffer long-run condition collapse.
+- A command family is never offered, probed, viable, selected, or consequential.
+- Substantive choices are repeatedly blocked by canonical validation.
+- One command or direction dominates the action distribution.
+- Repeated command streaks indicate routine micromanagement.
+- Player businesses become persistently distressed, insolvent, or non-operational.
+- Food access, contracts, credit, labor, crises, or notifications become structurally unhealthy.
+- Public works exceed execution capacity.
+- Political or commercial milestones are unreachable, misordered, or overly synchronized.
+- Personas and starts converge despite different priorities.
+- Commercial power fails to produce relationships, information, office, or civic effects.
+- Long campaigns fail to reach succession or stable second-generation play.
 
-Command and domain absence is evaluated against days per campaign, not total days across the matrix.
-Event-dependent systems remain informational until their normal activation horizon has elapsed.
-
-The command table separates cycles in which a family was offered, generated variants, probed variants, viable variants, selected actions, persistent consequences, and newly delayed consequences. Campaign and aggregate records also separate quiet cycles from blocked cycles. This distinguishes a command that simply did not become relevant in a short run, or a deliberate waiting period, from a probe-budget, validation, ranking, or consequence-attribution problem.
-
-Rejection counts are retained because blocked choices are part of the player experience. Repeated insufficient-funds failures, unchanged-policy requests, or inaccessible targets can indicate pacing, discoverability, or candidate-quality problems.
+Absence is interpreted against the configured campaign horizon and whether the route was offered. Event-dependent commands are not treated as broken before their prerequisites exist.
 
 ## Traces
 
-Each campaign retains a bounded deterministic trace. It includes:
+Each campaign retains a bounded deterministic trace containing:
 
-- Simulation day.
-- Candidate and viable-choice counts.
-- Distinct viable command families.
-- The top ranked command-family candidates with scores and descriptions.
-- Core-fantasy milestone timing for the campaign.
-- Selected command and canonical command outcome.
-- Representative rejection categories.
-- Immediate, persistent, delayed, and ambient changed domains.
-- Immediate, delayed, and ambient durable feedback flags.
+- Simulation day
+- Offered, probed, and viable candidate counts
+- Distinct viable command families
+- Top ranked candidates with scores and descriptions
+- Selected command and canonical outcome
+- Representative rejection categories
+- Immediate, persistent, delayed, and ambient changed domains
+- Durable feedback flags
+- Core campaign milestone timing
 
-The trace sampler keeps opening and closing decisions plus the highest-consequence decisions. Increasing `--trace-limit` preserves more detail without changing simulation behavior.
+The sampler retains opening, closing, and high-consequence decisions. Increasing `--trace-limit` changes retained diagnostics, not simulation behavior.
 
-## Performance characteristics
+## Structured report contract
 
-The main costs are candidate probing and consequence attribution because both clone campaign state.
-`--max-probes` bounds validation work and `--consequence-horizon` bounds long-term intervention
-simulation. Long-horizon governance and office analysis is intentionally more expensive than a
-weekly smoke test.
+The JSON report has a top-level `schema_version`. The current version is listed in `STATUS.md`.
 
-Use a release build for broad or multi-seed analysis. Focused debug runs remain useful while editing candidate policies and assertions.
+Consumers should reject unknown schema versions rather than infer compatibility. Increment the schema when fields or semantics change in a way that affects automated readers.
 
-## Interpreting failures
+The report contains:
 
-A harness finding is evidence, not an automatic design verdict.
+- Harness configuration
+- Aggregate scores and counters
+- Per-command statistics
+- Command-to-domain interaction edges
+- Per-campaign snapshots and milestone data
+- Representative traces
+- Findings and limitations
 
-- A command not exercised in a short run is informational when it was never offered. Event-dependent actions should become warnings or critical findings only after the world exposes their prerequisites or generated candidates fail validation or selection.
-- High rejection rates may reveal meaningful constraints, poor pacing, or low-quality candidate generation.
-- Business distress may be intended pressure, but insolvency across most personas and starts usually
-  indicates weak recovery tools or a harsh opening economy.
-- Low interconnection may mean consequences are absent, delayed beyond the run horizon, or not represented in the snapshot model.
+## Integration checklist
 
-When adding a new player command or major system, update command generation, domain snapshots, causal comparisons, findings, and coverage tests together.
+When changing a player command or major system, review:
 
-## What the harness cannot establish
+- Candidate generation and affordability filtering
+- Persona ranking
+- Command-family and strategic-direction labels
+- Activation tracking for event-dependent routes
+- Snapshot coverage for affected records
+- Immediate and delayed comparison logic
+- Interaction-domain classification
+- Score inputs and findings
+- Trace rendering
+- JSON schema version
+- Deterministic reproduction tests
 
-The report includes these limitations explicitly. Automated agents measure command reachability, deterministic consequences, and simulated outcomes. They do not establish whether a human understands the interface, finds the choices enjoyable, becomes emotionally invested in the family, or can compare options without excessive cognitive burden. Counterfactual attribution is also limited to fields represented in the snapshot and to the configured consequence horizon. Human playtesting remains necessary for those questions.
+## Interpretation limits
+
+The harness measures deterministic reachability and represented state consequences. It cannot establish:
+
+- Interface comprehension
+- Enjoyment or emotional investment
+- Cognitive load
+- Narrative quality
+- Whether a human recognizes the best option
+- Consequences outside the configured horizon
+- Consequences not represented in snapshots
+
+Use human playtesting for those questions.

@@ -54,6 +54,10 @@ pub fn validate_invariants(registry: &Registry, state: &AppState) {
         state.dynasties.contains_key(&state.player_dynasty_id),
         "Record Reference Validity: player dynasty does not exist"
     );
+    debug_assert!(
+        state.validate_next_ids().is_ok(),
+        "Identifier Allocation: next-ID state is stale or exhausted"
+    );
 
     validate_market(registry, state, &ids);
     validate_characters(state);
@@ -992,10 +996,21 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
             work.progress_basis_points <= 10_000,
             "Lifecycle Validity: public work progress is outside basis-point range"
         );
+        let expected_progress = u16::try_from(
+            work.spent
+                .saturating_mul_ratio(10_000, work.budget.copper())
+                .copper()
+                .clamp(0, 10_000),
+        )
+        .expect("clamped public-work progress must fit u16");
+        debug_assert_eq!(
+            work.progress_basis_points, expected_progress,
+            "Derived Data Consistency: public work progress does not match spending"
+        );
         if work.status == PublicWorkStatus::Completed {
             debug_assert_eq!(
-                work.progress_basis_points, 10_000,
-                "Lifecycle Validity: completed public work lacks full progress"
+                work.spent, work.budget,
+                "Lifecycle Validity: completed public work is not fully funded"
             );
         }
         if let Some(sponsor_id) = work.sponsor_dynasty_id {

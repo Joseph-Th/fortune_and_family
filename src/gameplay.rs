@@ -4140,6 +4140,7 @@ const fn strategic_error_category(error: &StrategicError) -> &'static str {
 const fn simulation_error_category(error: &SimulationError) -> &'static str {
     match error {
         SimulationError::InvalidDayCount { .. } => "simulation: invalid day count",
+        SimulationError::DayRangeExhausted { .. } => "simulation: day range exhausted",
         SimulationError::RegistryMismatch { .. } => "simulation: registry mismatch",
         SimulationError::BusinessNotFound { .. } => "simulation: business not found",
         SimulationError::BusinessInactive { .. } => "simulation: inactive business",
@@ -4798,7 +4799,11 @@ fn add_action_concentration_finding(
     if aggregate.substantive_actions == 0 {
         return;
     }
-    let share = u64::from(stats.executed).saturating_mul(100) / aggregate.substantive_actions;
+    let share = scaled_ratio_u64(
+        u64::from(stats.executed),
+        aggregate.substantive_actions,
+        100,
+    );
     if share < 35 {
         return;
     }
@@ -4834,7 +4839,7 @@ fn add_business_survival_finding(
         })
         .count();
     if non_operational > 0 {
-        let share = non_operational.saturating_mul(100) / campaigns.len();
+        let share = scaled_ratio_usize(non_operational, campaigns.len(), 100);
         findings.push(GameplayFinding {
             severity: if share >= 50 {
                 GameplayFindingSeverity::Critical
@@ -4859,7 +4864,7 @@ fn add_business_survival_finding(
                     > 0
         })
         .count();
-    let stressed_share = fully_stressed.saturating_mul(100) / campaigns.len();
+    let stressed_share = scaled_ratio_usize(fully_stressed, campaigns.len(), 100);
     if stressed_share >= 50 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
@@ -4880,12 +4885,13 @@ fn add_choice_quality_finding(aggregate: &GameplayAggregate, findings: &mut Vec<
         return;
     }
     let average_kinds_tenths =
-        aggregate.viable_command_kinds.saturating_mul(10) / opportunity_cycles;
-    let average_choices_tenths = aggregate.viable_choices.saturating_mul(10) / opportunity_cycles;
-    let multiple_share = aggregate
-        .cycles_with_multiple_viable_command_kinds
-        .saturating_mul(100)
-        / opportunity_cycles;
+        scaled_ratio_u64(aggregate.viable_command_kinds, opportunity_cycles, 10);
+    let average_choices_tenths = scaled_ratio_u64(aggregate.viable_choices, opportunity_cycles, 10);
+    let multiple_share = scaled_ratio_u64(
+        aggregate.cycles_with_multiple_viable_command_kinds,
+        opportunity_cycles,
+        100,
+    );
     if average_choices_tenths < 20 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
@@ -4907,7 +4913,7 @@ fn add_choice_quality_finding(aggregate: &GameplayAggregate, findings: &mut Vec<
             ),
         });
     }
-    let blocked_share = aggregate.blocked_cycles.saturating_mul(100) / opportunity_cycles;
+    let blocked_share = scaled_ratio_u64(aggregate.blocked_cycles, opportunity_cycles, 100);
     if blocked_share >= 10 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
@@ -4952,7 +4958,7 @@ fn add_food_health_findings(
         })
         .count();
     if collapsed_food > 0 {
-        let share = collapsed_food.saturating_mul(100) / campaigns.len();
+        let share = scaled_ratio_usize(collapsed_food, campaigns.len(), 100);
         findings.push(GameplayFinding {
             severity: if share >= 25 {
                 GameplayFindingSeverity::Critical
@@ -4970,7 +4976,7 @@ fn add_food_health_findings(
         .iter()
         .filter(|campaign| campaign.end.average_food_satisfaction < 3_000)
         .count();
-    if low_food.saturating_mul(100) / campaigns.len() >= 25 && low_food > collapsed_food {
+    if scaled_ratio_usize(low_food, campaigns.len(), 100) >= 25 && low_food > collapsed_food {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Critical,
             title: "Household food access collapses in many campaigns".to_owned(),
@@ -5067,7 +5073,7 @@ fn add_business_condition_finding(
     if collapsed == 0 {
         return;
     }
-    let share = collapsed.saturating_mul(100) / campaigns.len();
+    let share = scaled_ratio_usize(collapsed, campaigns.len(), 100);
     findings.push(GameplayFinding {
         severity: if share >= 50 {
             GameplayFindingSeverity::Critical
@@ -5098,7 +5104,7 @@ fn add_public_work_health_finding(
         .iter()
         .filter(|campaign| campaign.maximum_unfinished_public_works > 4)
         .count();
-    if overloaded.saturating_mul(100) / campaigns.len() < 25 {
+    if scaled_ratio_usize(overloaded, campaigns.len(), 100) < 25 {
         return;
     }
     let completed: u64 = campaigns
@@ -5155,7 +5161,7 @@ fn add_political_health_finding(
                 && campaign.maximum_offices_held >= campaign.end.available_offices
         })
         .count();
-    if complete_capture.saturating_mul(100) / campaigns.len() >= 25 {
+    if scaled_ratio_usize(complete_capture, campaigns.len(), 100) >= 25 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Player captures every political office".to_owned(),
@@ -5176,7 +5182,7 @@ fn add_feed_health_findings(
         .iter()
         .filter(|campaign| campaign.maximum_unread_notifications > 100)
         .count();
-    if overloaded.saturating_mul(100) / campaigns.len() >= 25 {
+    if scaled_ratio_usize(overloaded, campaigns.len(), 100) >= 25 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Notification volume exceeds a usable decision feed".to_owned(),
@@ -5207,15 +5213,13 @@ fn add_feed_health_findings(
         .commands
         .get(&GameplayCommandKind::RespondToCrisis)
         .map_or(0_u64, |stats| u64::from(stats.executed));
-    if aggregate.substantive_actions > 0
-        && crisis_actions.saturating_mul(100) / aggregate.substantive_actions >= 35
-    {
+    let crisis_share = scaled_ratio_u64(crisis_actions, aggregate.substantive_actions, 100);
+    if aggregate.substantive_actions > 0 && crisis_share >= 35 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Crisis response crowds out strategic play".to_owned(),
             evidence: format!(
-                "Crisis responses accounted for {}% of executed actions.",
-                crisis_actions.saturating_mul(100) / aggregate.substantive_actions
+                "Crisis responses accounted for {crisis_share}% of executed actions."
             ),
         });
     }
@@ -6318,13 +6322,30 @@ fn average_scores(values: &[u16]) -> u16 {
     average_u16(values.iter().copied())
 }
 
-fn ratio_score(numerator: u32, denominator: u32) -> u16 {
+fn scaled_ratio_u64(numerator: u64, denominator: u64, scale: u64) -> u64 {
     if denominator == 0 {
         return 0;
     }
-    u16::try_from(numerator.saturating_mul(100) / denominator)
-        .unwrap_or(100)
-        .min(100)
+    let result = u128::from(numerator).saturating_mul(u128::from(scale)) / u128::from(denominator);
+    u64::try_from(result).unwrap_or(u64::MAX)
+}
+
+fn scaled_ratio_usize(numerator: usize, denominator: usize, scale: u64) -> u64 {
+    scaled_ratio_u64(
+        u64::try_from(numerator).unwrap_or(u64::MAX),
+        u64::try_from(denominator).unwrap_or(u64::MAX),
+        scale,
+    )
+}
+
+fn ratio_score(numerator: u32, denominator: u32) -> u16 {
+    u16::try_from(scaled_ratio_u64(
+        u64::from(numerator),
+        u64::from(denominator),
+        100,
+    ))
+    .unwrap_or(100)
+    .min(100)
 }
 
 fn usize_to_u16(value: usize) -> u16 {

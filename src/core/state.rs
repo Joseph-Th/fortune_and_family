@@ -571,6 +571,12 @@ impl AppState {
     pub(crate) fn validate_next_ids(&self) -> Result<(), String> {
         macro_rules! require_next_id {
             ($field:ident, $label:literal, $ids:expr) => {
+                if self.next_ids.$field == u32::MAX {
+                    return Err(format!(
+                        "next {} ID has exhausted the supported identifier space",
+                        $label
+                    ));
+                }
                 if let Some(maximum) = ($ids).map(|id| id.value()).max()
                     && self.next_ids.$field <= maximum
                 {

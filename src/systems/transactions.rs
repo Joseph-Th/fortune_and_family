@@ -9,6 +9,13 @@ use thiserror::Error;
 pub enum SimulationError {
     #[error("day count must be positive, received {days}")]
     InvalidDayCount { days: u32 },
+    #[error(
+        "advancing {requested_days} days from day {current_day} exceeds the supported simulation range"
+    )]
+    DayRangeExhausted {
+        current_day: i64,
+        requested_days: u32,
+    },
     #[error("state scenario {state_scenario} does not match registry scenario {registry_scenario}")]
     RegistryMismatch {
         state_scenario: String,
@@ -103,7 +110,7 @@ impl ValidatedCashTransfer {
 /// # Errors
 ///
 /// Returns a dedicated error for invalid amounts, missing or inactive businesses, identical
-/// endpoints, or insufficient source cash.
+/// endpoints, insufficient source cash, or target cash overflow.
 pub fn transfer_business_cash(
     state: &mut AppState,
     from_business_id: BusinessId,
@@ -118,7 +125,7 @@ pub fn transfer_business_cash(
 /// # Errors
 ///
 /// Returns a dedicated error for invalid amounts, missing or inactive businesses, identical
-/// endpoints, or insufficient source cash.
+/// endpoints, insufficient source cash, or target cash overflow.
 pub fn validate_business_cash_transfer(
     state: &AppState,
     from_business_id: BusinessId,

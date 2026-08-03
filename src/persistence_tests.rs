@@ -8,6 +8,7 @@ use crate::test_support::{
     assert_state_eq, make_test_campaign, rivergate_registry_for_test, write_test_json_fixture,
 };
 
+#[track_caller]
 fn assert_invalid_state(
     result: Result<AppState, PersistenceError>,
     expected_kind: StateValidationKind,
@@ -29,6 +30,7 @@ fn assert_invalid_state(
     }
 }
 
+#[track_caller]
 fn assert_v1_migration(
     registry: &Registry,
     loaded: &AppState,
@@ -251,7 +253,9 @@ mod migrations {
             })
             .collect();
         ordered.sort_unstable();
-        let selected = &ordered[..2];
+        let selected = ordered
+            .get(..2)
+            .expect("fixture must contain at least two institutions");
         for (_, key) in selected {
             let institution = institutions
                 .get_mut(key)
@@ -286,8 +290,14 @@ mod migrations {
                 (institution.office_holder_id == Some(holder_id)).then_some(*institution_id)
             })
             .collect();
-        assert_eq!(retained.len(), 1);
-        assert_eq!(u64::from(retained[0].value()), selected[0].0);
+        let [retained_id] = retained.as_slice() else {
+            panic!("migration must retain exactly one office: {retained:?}");
+        };
+        let expected_id = selected
+            .first()
+            .expect("selected institutions must not be empty")
+            .0;
+        assert_eq!(u64::from(retained_id.value()), expected_id);
         validate_state(&loaded).expect("migrated office ownership must be valid");
     }
 
@@ -439,6 +449,38 @@ mod migrations {
 
 mod validation {
     use super::*;
+
+    #[test]
+    fn rejects_exhausted_identifier_allocator() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["next_ids"]["business"] = Value::from(u32::MAX);
+        let (_directory, path) = write_test_json_fixture("exhausted-business-id.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::IdentifierAllocation,
+            "exhausted the supported identifier space",
+        );
+    }
+
+    #[test]
+    fn rejects_public_work_progress_inconsistent_with_spending() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let work = value["public_works"]
+            .as_object_mut()
+            .and_then(|works| works.values_mut().next())
+            .expect("serialized state must contain a public work");
+        work["progress_basis_points"] = Value::from(9_999);
+        let (_directory, path) = write_test_json_fixture("invalid-work-progress.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "progress does not match its spending or lifecycle",
+        );
+    }
 
     #[test]
     fn save_rejects_invalid_state_before_creating_files() {

@@ -11,13 +11,16 @@ use std::sync::OnceLock;
 use tempfile::TempDir;
 
 static RIVERGATE_REGISTRY: OnceLock<Registry> = OnceLock::new();
+static DEFAULT_CAMPAIGN: OnceLock<AppState> = OnceLock::new();
 
 pub(crate) fn rivergate_registry_for_test() -> &'static Registry {
     RIVERGATE_REGISTRY.get_or_init(build_rivergate_registry)
 }
 
 pub(crate) fn make_test_campaign() -> AppState {
-    make_test_campaign_with(NewGameConfig::default())
+    DEFAULT_CAMPAIGN
+        .get_or_init(|| make_test_campaign_with(NewGameConfig::default()))
+        .clone()
 }
 
 pub(crate) fn make_test_campaign_with(config: NewGameConfig) -> AppState {
@@ -116,6 +119,28 @@ fn first_json_difference(
 
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_campaign_fixture_returns_isolated_clones() {
+        let mut first = make_test_campaign();
+        let second = make_test_campaign();
+        first
+            .dynasties
+            .get_mut(&first.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = crate::money::Money::ZERO;
+
+        assert_ne!(
+            first, second,
+            "mutating one fixture must not affect another"
+        );
+        assert_state_eq(
+            &second,
+            &make_test_campaign(),
+            "cached fixture clones must remain deterministic and isolated",
+        );
+    }
 
     #[test]
     fn state_diff_reports_the_first_nested_value() {

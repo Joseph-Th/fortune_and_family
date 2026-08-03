@@ -1,182 +1,262 @@
-# AGENTS.md -- Coding Design Law and Architecture
+# Agent Guide
 
-Read before changing code. Current work is in STATUS.md.
+This file defines how to work in the repository. Product intent is in `DESIGN.md`; implementation structure is in `ARCHITECTURE.md`; current coverage is in `STATUS.md`.
 
-## Coding Design Law
+## Cold-start sequence
 
-A deterministic, explicit, maintainable codebase in Rust.
+Before editing:
 
-| Constraint | Rule |
-|---|---|
-| Systems first | Behavior emerges from system functions operating on explicit state, not scripts, callbacks, or special cases. |
-| Explicit records | Core records are concrete structs with clear ownership. Avoid hidden framework behavior and hidden mutation paths. |
-| Domain-neutral rules | Architecture rules apply across subsystems. Do not encode one feature's assumptions as global design law. |
+1. Run `git status --short` and preserve unrelated working-tree changes.
+2. Read `README.md`, `ARCHITECTURE.md`, and the relevant section of `STATUS.md`.
+3. Locate the owning module and its sibling `*_tests.rs` file.
+4. Run a focused test before changing behavior.
+5. Trace the canonical path from public entry point to mutation and invariant validation.
 
-### Program Model
+For cross-domain work, start from these entry points:
 
-Registry / AppState / Record / System split:
+- New campaign: `build_new_game` in `src/systems/bootstrap.rs`
+- Player mutation: `apply_player_command` in `src/systems/commands.rs`
+- Time advancement: `advance_days` in `src/systems/simulation.rs`
+- Strategic cadence: `src/systems/strategic.rs`
+- Save/load: `src/persistence.rs`
+- Read-only output: `src/projection.rs`
+- Gameplay evaluation: `src/gameplay.rs`
 
-- **Registries** hold immutable definitions and lookup tables loaded once at startup.
-- **AppState** holds generated mutable runtime state that must survive execution and restart boundaries.
-- **Records** hold identity, local data, and lifecycle state. They do not own business logic.
-- **Systems** perform validation, derive outcomes, mutate state, and enforce invariants through canonical paths.
+## Non-negotiable rules
 
-### Data Ownership
+### Explicit ownership
 
-- **Registry** -- immutable static definitions loaded once: schemas, templates, policies, capabilities, operation definitions, validation rules, type metadata, lookup tables, and registry-owned defaults. Defined in Rust builders under `src/content/`, `src/registry/`, or the owning subsystem -- never TOML/JSON/YAML unless the file is explicitly external operator configuration.
-- **AppState** -- generated mutable application state: runtime records, indexes, relationships, scheduled work, derived summaries, transaction history, generated IDs, cacheable projections, and persistent runtime configuration.
-- **Records** -- individual runtime state: identity, ownership, lifecycle, references, local properties, timestamps, version counters, status, and subsystem-owned payloads.
-- **Indexes** -- derived lookup structures owned by the module responsible for keeping them synchronized. Indexes are never independent sources of truth.
-- **External resources** -- files, network handles, database connections, processes, and service clients live behind adapter boundaries. Core systems receive explicit data and return explicit outcomes.
+- `Registry` owns immutable definitions.
+- `AppState` owns mutable, serializable campaign state.
+- Records own identity and local lifecycle data.
+- Systems own validation, decisions, mutation, and invariant preservation.
+- Adapters own input/output translation only.
 
-### System Rules
+Do not place mutable runtime values in registry definitions. Do not place business rules in CLI, persistence, projection, rendering, or tests.
 
-**State mutation.** Mutate consequential state only through system functions. A caller may request an operation, but the owning system validates, resolves, commits, logs, and preserves indexes. Do not let callers directly patch fields that affect invariants.
+### One mutation path
 
-**Canonical pipelines.** Every operation class has one path: input -> validation -> resolution -> plan/outcome -> atomic commit -> side effects at explicit boundaries -> invariant validation. Do not add parallel shortcuts for tests, UI, migrations, importers, or administrative tools.
+Each operation has one canonical path:
 
-**Validation.** Validate every cross-reference, permission, lifecycle state, range, ownership claim, and capacity constraint before mutation. Fallible multi-resource operations use validated tokens and commit exactly once.
+```text
+input -> validation -> resolution -> atomic commit -> durable feedback -> invariant check
+```
 
-**Determinism.** Same seed, state, inputs, and external snapshots produce the same result. All randomness comes from `state.rng` or an explicitly injected RNG owned by the state. Sort order-dependent inputs before making choices. Stable tie-breaking is mandatory.
+Tests, migrations, AI, CLI commands, and administrative code must not create parallel mutation semantics.
 
-**Definitions versus runtime state.** Static definitions describe what can exist. Runtime state records what does exist. Do not store mutable runtime values in registry definitions. Any generated value that must survive restart is serializable and owned by `AppState` or a record.
+### Validate before mutation
 
-**Identity.** Use typed IDs for persistent references. Raw strings are allowed only for genuinely authored external identifiers or user-facing text. Internal IDs use newtypes with the narrowest sufficient backing type.
+Validate all references, lifecycle states, permissions, ownership, capacities, ranges, and arithmetic results before changing state.
 
-**References.** Validate all registry and record references at load, import, migration, or operation-validation time. Missing required IDs fail immediately with the offending ID. Optional references are explicit in the type.
+A failed operation leaves state unchanged. For multi-record operations, calculate every resulting value first and then commit all changes together.
 
-**Derived data.** Derived values are either recomputed on demand or owned by one synchronizing module. If two collections must agree, they are private fields of one owner and updated by one atomic method.
+Use a consumed `Validated*` token when validation and commit can be separated. The token must revalidate state at commit time.
 
-**Side effects.** Core systems do not perform implicit IO. They return outcomes or commands that adapters execute at explicit boundaries. Side effects that must be durable are represented in state before external execution.
+### Determinism
 
-**UI and adapters.** UI, CLI, API, storage, and network layers translate input and output. They do not own business rules, invariants, or mutation semantics.
+The same registry, state, seed, input sequence, and day count must produce identical state.
 
-**Persistence.** Save/load preserves IDs, relationships, lifecycle state, version counters, generated definitions, and all runtime data needed to resume without recomputation changing behavior. Migrations are explicit and tested.
+- Use only the state-owned RNG for simulation randomness.
+- Use `BTreeMap`, `BTreeSet`, explicit sorting, or another stable order for result-affecting iteration.
+- Use typed IDs as stable tie-breakers.
+- Do not use wall-clock time, unordered filesystem enumeration, environment-dependent values, sleeps, or external services in core systems.
 
-**Errors.** New fallible operations return dedicated error enums. Do not add `Result<_, String>` or `Result<_, &'static str>`. Error variants include enough context to identify the failed precondition without parsing text.
+### Fixed-point arithmetic
 
-### Runtime Invariants
+Economic values use `Money` and `Quantity` from `src/money.rs`.
 
-1. **Registry Reference Validity** -- every required registry reference resolves before runtime use.
-2. **Record Reference Validity** -- every stored record ID resolves to an existing record unless the field is explicitly optional.
-3. **Index Completeness** -- every record that should appear in an index appears in that index.
-4. **Index Uniqueness** -- every indexed record appears at most once per index key unless the index explicitly supports duplicates.
-5. **Ownership Exclusivity** -- a record with exclusive ownership belongs to exactly one owner, container, parent, or root collection.
-6. **Lifecycle Validity** -- inactive, removed, failed, or completed records cannot be scheduled, mutated, or exposed as active unless reactivation is an explicit operation.
-7. **Transaction Atomicity** -- multi-record operations either commit all intended changes or commit none.
-8. **No Lost Runtime State** -- no generated record, command, event, ID, external handle, or durable outcome is created without an owner, location, registry reference, or persistence path.
-9. **Deterministic Decision Ordering** -- selection among valid choices uses deterministic scoring and stable tie-breaking.
-10. **Definition/Runtime Separation** -- static definitions contain no mutable runtime state, and runtime records do not duplicate immutable definitions except as validated references.
-11. **Serialization Completeness** -- save/load round-trips preserve all state required for deterministic continuation.
-12. **Derived Data Consistency** -- cached projections, summaries, counters, and indexes match their source records.
-13. **External Boundary Explicitness** -- IO effects are represented as explicit adapter calls, commands, or durable outcomes. Core systems do not hide external mutation.
-14. **Error State Consistency** -- failed operations leave state unchanged except for explicitly documented diagnostics or audit records.
+- Do not introduce floating-point economic state.
+- Use the shared cost, affordability, and ratio helpers.
+- For multiply-then-divide calculations, use a wide intermediate and saturate only the final result.
+- Reject overflow before player-initiated or cross-record transfers.
+- Saturation is not a substitute for a domain bound check.
 
-Enforce via `validate_invariants(state)` (see Invariant Enforcement) plus the soak test. New invariant -> add its assertion in the same change.
+### References and IDs
 
-### Core Constraints
+- Persistent references use typed IDs from `src/ids.rs`.
+- New generated records use `NextIds` owned by `AppState`.
+- Load and save validation must reject missing references, stale indexes, and exhausted allocators.
+- Optional references are represented with `Option`.
+- Raw strings are for authored keys or user-facing text, not internal record identity.
 
-| Constraint | Rule |
-|---|---|
-| Explicit state flow | Mutable runtime state flows through `AppState` or the owning state type. No global mutable state. |
-| Determinism | Same seed + state + inputs produce the same result. All randomness comes from state-owned RNG. |
-| Synchronous execution | Consequences resolve in the same call stack. No deferred queues unless the queue is an explicit state record with defined processing semantics. |
-| Data-driven definitions | Static definitions live in code-owned registries/builders, not runtime logic. Runtime state never lives in a registry def; generated state that must survive restart is serializable. |
-| Unified pipelines | One canonical path per operation type. No parallel special cases. Callers never bypass it to mutate consequential state directly. |
-| Logic in systems | Business logic in system functions, not record methods. |
-| Compiler-enforced invariants | Make invalid states unrepresentable or fail at compile time. |
+### Derived data
 
-### Architecture Rules
+Derived indexes and counters have one owner. Update source records and all owned derived structures atomically.
 
-- Use explicit data structures with clear ownership. Avoid dynamic dispatch on core domain records without a measured need.
-- Fields driving consequential behavior are private, exposed via read-only getters, mutated only through system functions.
-- No `_ =>` arms on project-owned enums. Match every variant. Exception: third-party/primitive types.
-- When mapping struct to struct, destructure explicitly (`let MyStruct { a, b, c } = source;`). No `..` unless ignored fields are named in a comment explaining why.
-- Group structs past ~10 fields into nested profiles (`identity`, `configuration`, `relationships`, `runtime`, `transient`). Top-level destructuring names every profile; no `..`.
-- Collections that must stay synchronized are private fields of one struct, in their own module. Expose only atomic methods (`insert`, `remove`, `move_to`, `reassign`) that update every backing collection in one call. A `pub` backing collection does not satisfy this.
-- Prefer `match` over `HashMap<String, Box<dyn Trait>>` for project-owned behavior.
-- Validate all cross-references at load time. Missing IDs panic immediately with the offending ID.
-- Pass the narrowest context a phase needs. Read-only phases take immutable refs; mutation phases take only the mutable access they need.
-- Static registries own immutable definitions; application state owns generated mutable state; records own their own runtime state (see Data Ownership).
+If a value is persisted, either make it authoritative or validate that it exactly matches its source data. Do not allow two independent sources of truth.
 
-### Naming Conventions
+### Lifecycle consistency
 
-One vocabulary project-wide, so agents can predict a name without reading the file first.
+Related records must agree about active, disputed, suspended, insolvent, closed, completed, defaulted, or resolved state.
 
-- **Lookups.** `get_*` for a direct/keyed lookup (map, registry, slot). `find_*` for a search that scans or applies a condition. `resolve_*` for deriving a final value from a template or set of inputs (e.g. `resolve_template`, `resolve_policy`). A plain field accessor with no search or derivation is a bare noun method (`fn status(&self)`), never `get_status`.
-- **Construction.** `new()` for a plain struct constructor. `build_*` for procedural or aggregate assembly that is not a single record (`build_registry`, `build_projection`). `insert_*` for adding an already-constructed value to an owned collection. `register_*` for adding a definition, handler, or capability to a registry. Do not add new `create_*`/`make_*` functions outside `#[cfg(test)]` fixtures unless an external API contract requires that exact name.
-- **Removal.** `remove_*` is canonical for taking something out of a collection or state owner. `destroy_*` only when destruction fires consequential effects. Do not use `delete_*` except for literal file/save deletion or external APIs that use that term.
-- **Booleans.** Predicates are always prefixed `is_`, `has_`, or `can_`. A function returning `bool` with a bare noun name is a naming bug, not a style choice.
-- **Calculate Then Apply pairs.** The decision half is `decide_*`, returning a `*Plan`/`*Outcome`/`*Delta`. The mutation half is `apply_*`. Do not introduce `execute_*`/`perform_*`/`attempt_*` for this role in new code; where they already exist, migrate to `decide_*`/`apply_*` opportunistically when touching that code for other reasons.
-- **Check Then Mutate pairs.** `validate_*` returns a `Validated*` token; `token.commit(...)` is the only mutation path (see below). New fallible multi-step operations return a dedicated error enum. Existing stringly-typed `Result`s are legacy debt (see STATUS.md); do not add more of them.
-- **ID newtypes.** Wrap the narrowest sufficient type: `u32` for small generated-state registries, a slotmap key for dense runtime records, `String` only when the ID is genuinely content-authored or external. Every ID newtype derives at minimum `Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize`, plus `Copy, PartialOrd, Ord` whenever the backing type supports them.
-- **Multi-file subsystems.** Shared suffix vocabulary: `_execution` (mutates through the canonical pipeline), `_integration` (wires the subsystem into other systems), `_loader` (builds the registry from Rust builders at startup), `_ui` (user-facing rendering/dispatch), `_adapter` (external IO boundary). A subsystem may add extra suffixes for its own concerns, but must explain the split in that subsystem's `//!` module doc.
-- **Module docs.** Every file under `src/` has a `//!` header: one sentence on the file's purpose, and for multi-file subsystems, one clause on how it relates to its sibling files.
+A lifecycle change must update every dependent record in the same canonical operation. Examples include employment after business closure, collateral after repayment or default, occupancy after ownership transfer, and officeholding after elections.
 
-### Calculate Then Apply
+### External boundaries
 
-Separate decision from mutation. A system reading broad state to decide takes immutable refs and returns a plain `Outcome`/`Delta`/`Plan`. A second function consumes it with `&mut AppState` or the owning mutable state and applies it in the same call stack. This is not a queue. Use for any new system whose decision reads more state than it writes.
+Core systems perform no implicit IO. Persistence, CLI, and rendering are adapters. Durable external work must be represented in state before an adapter acts on it.
 
-### Check Then Mutate
+## Change recipes
 
-All validation before any mutation. Fallible functions return `Result` or a `#[must_use]` bool; validate with early-return `?`. Never partially mutate before all checks pass.
+### Add persistent state
 
-Multi-resource transactions use a validated token:
+1. Define or extend a record in `src/core/records.rs` or `src/core/extended.rs`.
+2. Add ownership to `AppState` or an existing synchronized store.
+3. Add typed IDs and allocation when needed.
+4. Add getters required by public read paths.
+5. Update bootstrap or migration construction.
+6. Update persistence validation.
+7. Add debug invariants.
+8. Add projection fields when the player or adapter must observe it.
+9. Add round-trip, invalid-state, and behavioral tests.
+10. Increment the save schema when serialized compatibility changes.
 
-1. `validate_*` checks preconditions, returns a `Validated*` token holding resolved targets.
-2. The only mutation path is `token.commit(self, state: &mut AppState)`, consuming `self`.
+### Add a player command
 
-No loose `execute_*_with_token(...)` functions. Single-resource paths may use early-return `?`.
+1. Add an exhaustive `PlayerCommand` variant.
+2. Add dedicated input fields and a dedicated error variant for each new precondition class.
+3. Validate the full operation before mutation.
+4. Commit through `apply_player_command` or a canonical owned subsystem function.
+5. Add audit and player-facing feedback when the action is consequential.
+6. Add rollback, success, serialization, and boundary tests.
+7. Expose required state in projections.
+8. Add gameplay-harness candidates, snapshots, attribution, and coverage.
+9. Extend CLI smoke coverage when syntax or output changes.
 
-### System Design Rules
+### Add simulation behavior
 
-- Any create/move/transfer/link/remove/reassign operation preserves all indexes and ownership atomically.
-- Order-dependent results sort first or use a stable ordering. Selection among valid choices uses deterministic scoring with stable tie-breaking.
-- Keep top-level system execution order in one visible sequence. Comment load-bearing ordering.
-- External side effects occur only after internal state is valid or through an explicit durable command/outbox record.
-- Importers, migrations, tests, and administrative tools use the same canonical mutation paths as production code.
+1. Decide whether the behavior is daily, weekly, monthly, or annual.
+2. Put it in `simulation.rs` for the daily economic pipeline or `strategic.rs` for scheduled cross-domain systems.
+3. Separate broad read-only calculation from narrow mutation when useful.
+4. Preserve the documented execution order or update it explicitly with causal tests.
+5. Add durable feedback for player-relevant delayed outcomes.
+6. Add invariants for every new cross-record requirement.
+7. Add focused tests plus soak coverage when the behavior accumulates over time.
 
-### Invariant Enforcement
+### Change persistence
 
-Maintain a debug-only `validate_invariants(state)` asserting every cheap invariant with `debug_assert!`. Call it at the end of the top-level pipeline. Messages name the broken invariant. Add the assertion in the same change that adds the invariant.
+1. Increment `CURRENT_SCHEMA_VERSION` for a serialized contract change.
+2. Add a deterministic migration from the previous version.
+3. Keep migrations explicit and version-by-version.
+4. Add migration fixtures and exact post-migration assertions.
+5. Validate loaded and saved state in release mode.
+6. Preserve atomic same-directory replacement.
+7. Update `STATUS.md` and public documentation.
 
-Keep one deterministic headless soak test: seed the RNG, build a mixed scenario, run the pipeline for thousands of ticks with `validate_invariants` active.
+### Add a projection or adapter field
 
-### Comments
+Read from immutable registry/state data. Do not infer new business rules in the projection. Add coverage proving each primary record appears once and rendered output remains escaped and script-safe.
 
-Explain non-obvious intent: hidden constraints, ordering, safety reasoning, workarounds. Do not restate code, add banners, or leave commented-out code.
+### Extend the gameplay harness
 
-### Warnings and Dead Code
+Update all relevant parts together:
 
-`cargo check` is silent. Prefix intentionally unused params with `_`. No broad `#[allow(...)]` on structs/functions. Delete dead code and replaced paths. No back-compat shims unless required.
+- Candidate generation and ranking
+- Command-family and strategic-direction classification
+- Snapshot fields
+- Immediate and delayed comparison
+- Findings and scores
+- Trace rendering
+- Schema version
+- Harness tests and `GAMEPLAY_HARNESS.md`
 
-A `dead_code` warning is not by itself proof that code should be deleted. First classify the item. Production-shaped logic that is only called from `#[cfg(test)]` code is orphaned behavior:
+## Naming
 
-- If the behavior is intended to happen in the application, wire it into the canonical production pipeline.
-- If the code is only a test helper, fixture builder, assertion helper, or test-only adapter, move it under `#[cfg(test)]`.
-- If the behavior is obsolete, delete the code and delete or rewrite the tests that describe it.
-- Do not add fake production call sites, broad `#[allow(dead_code)]`, public shims, or test-only production APIs to satisfy the compiler.
+- Direct keyed lookup: `get_*`
+- Conditional scan: `find_*`
+- Derive a final value: `resolve_*`
+- Plain accessor: noun form such as `status()`
+- Plain constructor: `new()`
+- Aggregate construction: `build_*`
+- Collection insertion: `insert_*`
+- Registry definition insertion: `register_*`
+- Removal from state: `remove_*`
+- Boolean predicate: `is_*`, `has_*`, or `can_*`
+- Read-only decision: `decide_*`, returning a `Plan`, `Outcome`, or `Delta`
+- Mutation of a decided value: `apply_*`
+- Preconditions for a deferred commit: `validate_*`, returning `Validated*`
 
-A test proves logic is meaningful, not that it is reachable in the application. When a tested function is reported as unused, ask: what user/system behavior should call it, and is the test covering that canonical path or only a private helper?
+Do not add new `create_*`, `make_*`, `execute_*`, `perform_*`, or `attempt_*` names unless an external API requires the term. Test fixtures use `make_test_*`.
 
-### Tests
+## Structural rules
 
-Keep tests of real logic: calculations, state transitions, transactions, invariants, serialization boundaries, failure paths. Delete tests that only prove code can be called: content-count asserts, CRUD round-trips, and broad generator integration tests with no behavioral assertion. Prefer testing through the canonical system path; helper-only coverage must not hide disconnected production behavior.
+- Project-owned enum matches are exhaustive. Do not use wildcard arms.
+- Consequential fields stay private and are changed through systems.
+- Prefer concrete records and functions over dynamic dispatch in core domains.
+- Large structs should group related fields into explicit profiles.
+- Struct-to-struct mappings name every field or profile intentionally.
+- Pass the narrowest mutable context a phase needs.
+- Keep top-level execution order visible in one place.
+- Delete replaced paths rather than preserving unused compatibility shims.
+- Every source file has a concise `//!` module description.
 
-Co-locate small suites as `#[cfg(test)] mod tests` at the bottom of the file under test. Large domain-organized suites may live in a sibling `*_tests.rs` file loaded by that module with `#[path]`; do not create a separate top-level `tests/` tree. Name test functions descriptively without a redundant `test_` prefix (`transaction_rolls_back_on_invalid_target`, not `test_transaction...`). The `#[test]` attribute and `tests::` module path already say it is a test. Reserve the `test_` prefix for canonical soak/stress scenarios in `src/core/state.rs`.
+Internal `expect` and assertions are acceptable only after the code has already established the invariant. External or persisted input must return a typed error rather than panic.
 
-Fixture helpers that touch a shared production registry and would panic on duplicate registration are named `*_for_test` and are idempotent register-or-update calls, matching `register_or_update_policy_for_test`. Fixtures that build a throwaway local `AppState` or record are named `make_test_*`. Do not invent a third naming scheme for the same job.
+## Errors
 
-## Before Committing
+New fallible operations use dedicated error enums with contextual variants. Do not add stringly typed `Result` errors. Callers should not need to parse error text to identify a failed precondition.
 
-- [ ] `cargo check` silent; `cargo test` passes.
-- [ ] Every consequential mutation resolves before the function returns; no mutation bypasses the canonical system path.
-- [ ] All randomness comes from state-owned RNG; result-affecting iteration is deterministic.
-- [ ] Runtime state is not stored in static definitions; new generated state is serializable.
-- [ ] New cross-references are validated at load time or operation-validation time.
-- [ ] Project-owned enum matches are exhaustive; struct mappings are explicitly destructured.
-- [ ] New Runtime Invariant has a matching `debug_assert!` in `validate_invariants`.
-- [ ] Related collections are updated atomically by one owner.
-- [ ] External side effects cross explicit adapter boundaries.
-- [ ] Old replaced paths are deleted; one implementation per concern.
-- [ ] STATUS.md updated, plain ASCII.
+Error variants should include relevant IDs, available values, required values, or lifecycle states.
+
+## Tests
+
+Use sibling test modules for large suites:
+
+- `src/systems/bootstrap_tests.rs`
+- `src/systems/commands_tests.rs`
+- `src/systems/simulation_tests.rs`
+- `src/systems/strategic_tests.rs`
+- `src/persistence_tests.rs`
+- `src/projection_tests.rs`
+- `src/gameplay_tests.rs`
+- `src/core/state_tests.rs`
+
+Test through canonical public or subsystem paths. Helper-only tests must not make unreachable production behavior appear integrated.
+
+Required coverage for consequential mutations:
+
+- Successful state transition
+- Rejected precondition with unchanged state
+- Arithmetic and capacity boundaries
+- Stale validated token when applicable
+- Serialization or migration when persistent
+- Deterministic replay when ordering or randomness is involved
+
+See `TESTING.md` for commands and tier selection.
+
+## Documentation
+
+Update documentation in the same change when behavior, architecture, commands, save schema, public API, test workflow, or deliberate scope changes.
+
+Keep documents forward-facing:
+
+- Describe the current contract and intended extension points.
+- Do not maintain audit diaries, repair histories, or chronological implementation narratives.
+- Put product intent in `DESIGN.md`.
+- Put implementation structure in `ARCHITECTURE.md`.
+- Put current coverage and known boundaries in `STATUS.md`.
+- Put operational commands in `README.md`, `TESTING.md`, or `GAMEPLAY_HARNESS.md`.
+
+## Completion gate
+
+Run the narrowest relevant tests during development. Before finishing a cross-cutting change, run:
+
+```bash
+cargo fmt --all -- --check
+cargo check --all-targets --all-features --locked
+bash scripts/test.sh all
+cargo clippy --all-targets --all-features --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+cargo test --release --quiet --locked --lib
+cargo audit
+git diff --check
+```
+
+Confirm that:
+
+- No unrelated working-tree changes were reverted.
+- Failed operations remain atomic.
+- Deterministic ordering is explicit.
+- Persistent state is complete and migratable.
+- New invariants are enforced in debug and persistence validation where applicable.
+- Public behavior is observable through projections or durable feedback.
+- Documentation matches the resulting code.

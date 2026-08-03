@@ -46,6 +46,40 @@ run_step() {
   return "$status"
 }
 
+run_test_step() {
+  local label=$1
+  local match_description=$2
+  shift 2
+  local started=$SECONDS
+  local output_file
+  local status
+
+  output_file=$(mktemp)
+  printf '\n==> %s\n' "$label"
+
+  set +e
+  "$@" 2>&1 | tee "$output_file"
+  status=${PIPESTATUS[0]}
+  set -e
+
+  if ((status != 0)); then
+    rm -f "$output_file"
+    printf '<== %s FAILED in %s\n' "$label" "$(format_duration "$((SECONDS - started))")" >&2
+    return "$status"
+  fi
+
+  if [[ -n "$match_description" ]] \
+    && grep -Eq 'test result: ok\. 0 passed; 0 failed;' "$output_file"; then
+    rm -f "$output_file"
+    printf 'no executable library tests matched %q\n' "$match_description" >&2
+    printf '<== %s FAILED in %s\n' "$label" "$(format_duration "$((SECONDS - started))")" >&2
+    return 2
+  fi
+
+  rm -f "$output_file"
+  printf '<== %s passed in %s\n' "$label" "$(format_duration "$((SECONDS - started))")"
+}
+
 matching_tests() {
   local filter=$1
   shift
@@ -54,45 +88,22 @@ matching_tests() {
   printf '%s\n' "$output" | grep ': test$' || true
 }
 
-require_matching_test() {
-  local filter=$1
-  shift
-  local matches
-  matches=$(matching_tests "$filter" "$@") || return
-  if [[ -z "$matches" ]]; then
-    printf 'no library tests matched %q\n' "$filter" >&2
-    return 2
-  fi
-}
-
-require_matching_fast_test() {
-  local filter=$1
-  local listed
-  local matches
-  listed=$(matching_tests "$filter") || return
-  matches=$(printf '%s\n' "$listed" | grep -v '::soak::' || true)
-  if [[ -z "$matches" ]]; then
-    printf 'no non-ignored library tests matched %q\n' "$filter" >&2
-    return 2
-  fi
-}
-
 run_fast() {
   local filter=${1:-}
   local command=(cargo test --quiet --locked --lib)
   local label='Library tests'
+  local match_description=''
   if [[ -n "$filter" ]]; then
-    require_matching_fast_test "$filter"
     command+=("$filter")
     label="Library tests matching '$filter'"
+    match_description=$filter
   fi
-  run_step "$label" "${command[@]}"
+  run_test_step "$label" "$match_description" "${command[@]}"
 }
 
 run_exact() {
   local test_name=$1
-  require_matching_test "$test_name" --exact
-  run_step "Library test '$test_name'" \
+  run_test_step "Library test '$test_name'" "$test_name" \
     cargo test --quiet --locked --lib "$test_name" -- --exact --include-ignored
 }
 

@@ -13,10 +13,40 @@ mod preflight {
     use super::*;
 
     #[test]
+    fn exhausted_day_range_fails_before_day_mutation() {
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("campaign must serialize");
+        value["clock"]["day"] = serde_json::Value::from(i64::MAX);
+        let mut state: AppState =
+            serde_json::from_value(value).expect("modified campaign must deserialize");
+        let before = state.clone();
+
+        let result = advance_days(registry, &mut state, 1);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::DayRangeExhausted {
+                current_day: i64::MAX,
+                requested_days: 1,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "day-range exhaustion must leave the entire campaign unchanged",
+        );
+    }
+
+    #[test]
     fn missing_market_quote_fails_before_day_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
-        let missing_good_id = registry.goods()[0].id();
+        let missing_good_id = registry
+            .goods()
+            .first()
+            .expect("registry must contain a market good")
+            .id();
         state.market.quotes.remove(&missing_good_id);
         let before = state.clone();
 

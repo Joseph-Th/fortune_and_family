@@ -72,6 +72,46 @@ fn current_loan_id(state: &AppState) -> crate::ids::LoanId {
         .id
 }
 
+mod arithmetic_boundaries {
+    use super::*;
+
+    #[test]
+    fn weekly_interest_uses_the_full_supported_balance_range() {
+        let balance = Money::from_copper(i64::MAX);
+        let expected = Money::from_copper(i64::MAX / 52 + i64::from(i64::MAX % 52 != 0));
+
+        assert_eq!(weekly_interest_due(balance, 10_000), expected);
+    }
+
+    #[test]
+    fn acquisition_discount_uses_the_full_supported_business_value_range() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("selected business must exist");
+        business.operations.status = BusinessStatus::Distressed;
+        business.finance.cash = Money::from_copper(i64::MAX);
+        let expected = Money::from_copper(
+            i64::try_from(i128::from(i64::MAX) * 7_000 / 10_000)
+                .expect("discounted maximum business value must fit money"),
+        );
+
+        let quote =
+            quote_business_acquisition(registry, &state, state.player_dynasty_id, business_id)
+                .expect("distressed business must be acquirable");
+
+        assert_eq!(quote.purchase_price, expected);
+    }
+}
+
 mod integration {
     use super::*;
 
@@ -1329,13 +1369,16 @@ mod loans {
     fn relationship_memory_is_bounded_and_keeps_recent_history() {
         let mut state = make_test_campaign();
         let dynasty_ids: Vec<_> = state.dynasties.keys().copied().take(2).collect();
-        let pair = DynastyPair::new(dynasty_ids[0], dynasty_ids[1]);
+        let [first_dynasty_id, second_dynasty_id] = dynasty_ids.as_slice() else {
+            panic!("fixture must contain at least two dynasties: {dynasty_ids:?}");
+        };
+        let pair = DynastyPair::new(*first_dynasty_id, *second_dynasty_id);
 
         for index in 0..20 {
             remember_dynasty_interaction(
                 &mut state,
-                dynasty_ids[0],
-                dynasty_ids[1],
+                *first_dynasty_id,
+                *second_dynasty_id,
                 &format!("interaction {index}"),
             );
         }
@@ -2022,8 +2065,10 @@ mod crises {
         let registry = test_registry();
         let mut state = make_test_campaign();
         let loan_ids: Vec<_> = state.loans.keys().copied().take(2).collect();
-        assert_eq!(loan_ids.len(), 2, "fixture must contain two loans");
-        for loan_id in loan_ids {
+        let [first_loan_id, second_loan_id] = loan_ids.as_slice() else {
+            panic!("fixture must contain at least two loans: {loan_ids:?}");
+        };
+        for loan_id in [*first_loan_id, *second_loan_id] {
             state
                 .loans
                 .get_mut(&loan_id)
@@ -2511,8 +2556,11 @@ mod ai {
             .copied()
             .take(2)
             .collect();
-        let inactive_id = business_ids[0];
-        let viable_id = business_ids[1];
+        let [inactive_id, viable_id] = business_ids.as_slice() else {
+            panic!("selected dynasty must own at least two businesses: {business_ids:?}");
+        };
+        let inactive_id = *inactive_id;
+        let viable_id = *viable_id;
         state
             .businesses
             .get_mut(inactive_id)

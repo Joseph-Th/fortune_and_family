@@ -93,7 +93,8 @@ struct SuccessionLine {
 ///
 /// # Errors
 ///
-/// Returns an error for a zero day count, a registry mismatch, or missing market definitions.
+/// Returns an error for a zero day count, an exhausted day range, a registry mismatch, or missing
+/// market definitions.
 pub fn advance_days(
     registry: &Registry,
     state: &mut AppState,
@@ -101,6 +102,12 @@ pub fn advance_days(
 ) -> Result<(), SimulationError> {
     if days == 0 {
         return Err(SimulationError::InvalidDayCount { days });
+    }
+    if state.clock.day().checked_add(i64::from(days)).is_none() {
+        return Err(SimulationError::DayRangeExhausted {
+            current_day: state.clock.day(),
+            requested_days: days,
+        });
     }
     if state.scenario_key != registry.scenario().key() {
         return Err(SimulationError::RegistryMismatch {
@@ -771,8 +778,9 @@ fn decide_household_consumption(
             10_000
         } else {
             u16::try_from(
-                food_acquired.milliunits().saturating_mul(10_000)
-                    / household.bread_need_daily.milliunits(),
+                food_acquired
+                    .saturating_mul_ratio(10_000, household.bread_need_daily.milliunits())
+                    .milliunits(),
             )
             .unwrap_or(10_000)
             .min(10_000)
@@ -979,10 +987,8 @@ fn maintenance_cost(daily_operating_cost: Money, maintenance_basis_points: u16) 
     if maintenance_basis_points == 0 || daily_operating_cost <= Money::ZERO {
         return Money::ZERO;
     }
-    let numerator = daily_operating_cost
-        .copper()
-        .saturating_mul(i64::from(maintenance_basis_points));
-    Money::from_copper(ceil_div_nonnegative(numerator, 20_000))
+    daily_operating_cost
+        .saturating_mul_ratio_ceil_nonnegative(i64::from(maintenance_basis_points), 20_000)
 }
 
 fn maintenance_effect(maintenance_basis_points: u16, condition_basis_points: u16) -> i16 {
@@ -1059,22 +1065,29 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) {
             .get_mut(&good.id())
             .expect("every registry good must have a market quote");
         let target = quote.target_stock.milliunits().max(1);
-        let stock_pressure = (target - quote.stock.milliunits()).saturating_mul(1_000) / target;
+        let stock_pressure =
+            Quantity::from_milliunits(target.saturating_sub(quote.stock.milliunits()))
+                .saturating_mul_ratio(1_000, target)
+                .milliunits();
         let total_flow = quote
             .demand_today
             .milliunits()
             .saturating_add(quote.supply_today.milliunits())
             .max(1);
-        let flow_pressure = (quote.demand_today.milliunits() - quote.supply_today.milliunits())
-            .saturating_mul(500)
-            / total_flow;
+        let flow_pressure = Quantity::from_milliunits(
+            quote
+                .demand_today
+                .milliunits()
+                .saturating_sub(quote.supply_today.milliunits()),
+        )
+        .saturating_mul_ratio(500, total_flow)
+        .milliunits();
         let seasonal_pressure = seasonal_pressure_basis_points(good.category(), day_of_year);
         let total_pressure = (stock_pressure + flow_pressure + seasonal_pressure).clamp(-800, 800);
         let previous_price = quote.price;
         let raw_price = previous_price
-            .copper()
-            .saturating_mul(10_000 + total_pressure)
-            / 10_000;
+            .saturating_mul_ratio(10_000 + total_pressure, 10_000)
+            .copper();
         let minimum_price = production_floors
             .get(&good.id())
             .copied()
@@ -1089,8 +1102,9 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) {
         let change_basis_points = if previous_price.copper() == 0 {
             0
         } else {
-            (quote.price.copper() - previous_price.copper()).saturating_mul(10_000)
-                / previous_price.copper()
+            Money::from_copper(quote.price.copper().saturating_sub(previous_price.copper()))
+                .saturating_mul_ratio(10_000, previous_price.copper())
+                .copper()
         };
         if change_basis_points.unsigned_abs() >= 700 {
             price_shocks.push((good.name().to_owned(), quote.price, change_basis_points));
@@ -1160,10 +1174,8 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
                 total.saturating_add(cost_for(input.quantity(), price))
             },
         );
-        let numerator = batch_cost.copper().saturating_mul(1_000);
-        let break_even = ceil_div_nonnegative(numerator, output_milliunits);
-        let sustainable =
-            Money::from_copper(ceil_div_nonnegative(break_even.saturating_mul(11), 10));
+        let break_even = batch_cost.saturating_mul_ratio_ceil_nonnegative(1_000, output_milliunits);
+        let sustainable = break_even.saturating_mul_ratio_ceil_nonnegative(11, 10);
         floors
             .entry(recipe.output_good_id())
             .and_modify(|floor: &mut Money| *floor = (*floor).min(sustainable))

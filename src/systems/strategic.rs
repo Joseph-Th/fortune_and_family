@@ -695,27 +695,25 @@ pub fn quote_business_acquisition(
                 total.saturating_add(cost_for(*quantity, unit_price))
             });
     let capacity = i64::from(business.operations.capacity_batches_per_day);
+    let equipment_scale = capacity.saturating_mul(60).saturating_mul(i64::from(
+        business.operations.condition_basis_points.max(1_000),
+    ));
     let equipment_value = recipe
         .daily_operating_cost()
-        .saturating_mul(capacity)
-        .saturating_mul(60)
-        .saturating_mul(i64::from(
-            business.operations.condition_basis_points.max(1_000),
-        ));
-    let equipment_value = Money::from_copper(equipment_value.copper() / 10_000);
-    let goodwill_value = recipe
-        .daily_operating_cost()
-        .saturating_mul(capacity)
+        .saturating_mul_ratio(equipment_scale, 10_000);
+    let goodwill_scale = capacity
         .saturating_mul(30)
         .saturating_mul(i64::from(business.operations.quality_basis_points));
-    let goodwill_value = Money::from_copper(goodwill_value.copper() / 10_000);
+    let goodwill_value = recipe
+        .daily_operating_cost()
+        .saturating_mul_ratio(goodwill_scale, 10_000);
     let gross_value = business
         .cash()
         .saturating_add(inventory_value)
         .saturating_add(equipment_value)
         .saturating_add(goodwill_value);
-    let discounted_value = gross_value.saturating_mul(discount_basis_points);
-    let purchase_price = Money::from_copper((discounted_value.copper() / 10_000).max(500));
+    let discounted_value = gross_value.saturating_mul_ratio(discount_basis_points, 10_000);
+    let purchase_price = Money::from_copper(discounted_value.copper().max(500));
     let operating_floor = recipe.daily_operating_cost().saturating_mul(2);
     let minimum_recapitalization = Money::from_copper(
         operating_floor
@@ -1677,14 +1675,10 @@ fn apply_crisis_daily_effects(registry: &Registry, state: &mut AppState) {
 
 fn apply_banking_panic_losses(state: &mut AppState, severity: u16) {
     for business in state.businesses.iter_mut() {
-        let loss = Money::from_copper(
-            business
-                .finance
-                .cash
-                .copper()
-                .saturating_mul(i64::from(severity))
-                / 1_000_000,
-        );
+        let loss = business
+            .finance
+            .cash
+            .saturating_mul_ratio(i64::from(severity), 1_000_000);
         if loss > Money::ZERO {
             business.finance.cash = business.finance.cash.saturating_sub(loss);
             business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(loss);
@@ -2176,15 +2170,15 @@ fn weekly_interest_due(balance: Money, annual_interest_basis_points: u16) -> Mon
     if balance <= Money::ZERO || annual_interest_basis_points == 0 {
         return Money::ZERO;
     }
-    let annual_interest = balance
-        .copper()
-        .saturating_mul(i64::from(annual_interest_basis_points))
-        / 10_000;
-    if annual_interest <= 0 {
+    let annual_interest =
+        balance.saturating_mul_ratio(i64::from(annual_interest_basis_points), 10_000);
+    if annual_interest <= Money::ZERO {
         return Money::ZERO;
     }
-    let weekly_interest = annual_interest / 52;
-    Money::from_copper(weekly_interest.saturating_add(i64::from(annual_interest % 52 != 0)))
+    let weekly_interest = annual_interest.copper() / 52;
+    Money::from_copper(
+        weekly_interest.saturating_add(i64::from(annual_interest.copper() % 52 != 0)),
+    )
 }
 
 fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount: Money) -> Money {
@@ -2288,12 +2282,7 @@ fn settle_property_rents(state: &mut AppState) {
         .collect();
     for (owner_id, tenant_id, occupant_business_id, contractual_rent, property_value) in rents {
         let rent = annual_rent_limit.map_or(contractual_rent, |limit| {
-            let annual_cap = Money::from_copper(
-                property_value
-                    .copper()
-                    .saturating_mul(limit)
-                    .saturating_div(10_000),
-            );
+            let annual_cap = property_value.saturating_mul_ratio(limit, 10_000);
             contractual_rent.min(Money::from_copper(annual_cap.copper() / 52))
         });
         if rent <= Money::ZERO {
@@ -2446,8 +2435,7 @@ fn settle_employment_agreement(
             maintenance: business.policy.maintenance_basis_points,
         }
     };
-    let scaled_wage = wage.saturating_mul(i64::from(utilization_basis_points));
-    let wage_due = Money::from_copper(scaled_wage.copper() / 10_000);
+    let wage_due = wage.saturating_mul_ratio(i64::from(utilization_basis_points), 10_000);
     let paid = pay_employment_wage(registry, state, business_id, household_id, wage_due);
     let (recovered, became_disputed) = update_employment_after_payment(
         state,
@@ -2577,8 +2565,8 @@ fn update_fully_paid_employment(
         .conditions_basis_points
         .saturating_add(60)
         .min(10_000);
-    let recovered =
-        agreement.loyalty_basis_points >= 3_000 && agreement.conditions_basis_points >= 3_000;
+    let recovered = agreement.loyalty_basis_points >= super::EMPLOYMENT_RECOVERY_BASIS_POINTS
+        && agreement.conditions_basis_points >= super::EMPLOYMENT_RECOVERY_BASIS_POINTS;
     if recovered {
         agreement.status = EmploymentStatus::Active;
     }
@@ -2775,7 +2763,10 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) {
             } else {
                 work.status = PublicWorkStatus::Building;
                 work.spent = work.spent.saturating_add(weekly_spend);
-                let progress = work.spent.copper().saturating_mul(10_000) / work.budget.copper();
+                let progress = work
+                    .spent
+                    .saturating_mul_ratio(10_000, work.budget.copper())
+                    .copper();
                 work.progress_basis_points =
                     u16::try_from(progress.clamp(0, 10_000)).unwrap_or(10_000);
                 (work.progress_basis_points >= 10_000).then_some((work.district_id, work.kind))
@@ -3500,7 +3491,7 @@ fn advance_ai_office_objective(state: &mut AppState, dynasty_id: DynastyId) -> O
     if let Some(dynasty) = state.dynasties.get_mut(&dynasty_id) {
         let spend = Money::from_copper(500).min(dynasty.resources.treasury);
         dynasty.resources.treasury = dynasty.resources.treasury.saturating_sub(spend);
-        let legitimacy_gain = u16::try_from(spend.copper().saturating_mul(80) / 500)
+        let legitimacy_gain = u16::try_from(spend.saturating_mul_ratio(80, 500).copper())
             .unwrap_or(80)
             .min(80);
         dynasty.resources.legitimacy_basis_points = dynasty
@@ -3636,7 +3627,7 @@ fn advance_ai_legitimacy_objective(
     }
     let spend = Money::from_copper(750).min(dynasty.resources.treasury);
     dynasty.resources.treasury = dynasty.resources.treasury.saturating_sub(spend);
-    let legitimacy_gain = u16::try_from(spend.copper().saturating_mul(120) / 750)
+    let legitimacy_gain = u16::try_from(spend.saturating_mul_ratio(120, 750).copper())
         .unwrap_or(120)
         .min(120);
     dynasty.resources.legitimacy_basis_points = dynasty

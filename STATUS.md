@@ -1,388 +1,159 @@
-# STATUS.md
+# Project Status
+
+This document describes the current implementation. Product targets are in `DESIGN.md`; implementation structure is in `ARCHITECTURE.md`.
 
 ## Current milestone
 
-Complete minimum coherent Rivergate game engine.
+The repository implements the minimum coherent Rivergate game as a deterministic headless engine with:
 
-The repository now implements the full architectural foundation and a broad, integrated version of every major system required by the minimum coherent game in `DESIGN.md`. It is a deterministic headless game with a CLI, command API, projection API, HTML dashboard, and player-behavior testing harness rather than a narrow vertical slice.
+- A Rust library API
+- A command-line client
+- Versioned JSON persistence
+- Read-only JSON projections
+- A self-contained HTML dashboard
+- A deterministic player-agent gameplay harness
 
-## Architecture
+The engine supports multi-generation campaigns and preserves all consequential state required for deterministic continuation.
 
-- Rust 2024 library and CLI binary.
-- Registry / AppState / Record / System ownership model.
-- Code-owned immutable scenario definitions.
-- Typed IDs for registry and runtime references.
-- Fixed-point `Money` and `Quantity` values.
-- Serializable state-owned deterministic RNG.
-- Private synchronized character, business, and household stores.
-- One canonical institution runtime record per definition; no parallel officeholder state.
-- Canonical validate / resolve / commit mutation paths.
-- Revalidated commit tokens for cross-record contracts and loans.
-- Checked arithmetic and atomic rejection for player-initiated cross-record money movement.
-- Shared employment/business lifecycle compatibility across mutation, debug invariants, and save validation.
-- Collateral seizure preserves occupancy by establishing or retaining the correct tenancy.
-- Dedicated error enums for persistence, simulation, strategic operations, and commands.
-- Fallible, bounded, whitespace-normalizing new-campaign input handling.
-- Explicit daily, weekly, monthly, and annual execution order.
-- Debug invariant validation after every simulated day and every CLI command.
-- Deterministic gameplay agents with no-action counterfactual consequence attribution.
-- No business rules in CLI, persistence, projection, or rendering adapters.
+## Platform and contracts
 
-## Rivergate content
+| Item | Current value |
+|---|---|
+| Crate version | `0.2.0` |
+| Rust edition | 2024 |
+| Minimum Rust version | 1.97 |
+| Save schema | 6 |
+| Supported save migrations | Versions 0 through 5 |
+| Gameplay report schema | 13 |
+| Runtime services | None |
+| Core randomness | Serializable state-owned deterministic RNG |
+| Economic representation | Fixed-point `Money` and `Quantity` |
 
-- Six districts.
-- Ten goods.
-- Ten production and regional-trade recipes.
-- Eleven institutions.
-- Eight major dynasties.
-- Thirty-six grouped household records.
-- Grain, brewing, textile, timber, fuel, iron, and tool chains.
-- Baker, cloth trader, and blacksmith starts.
-- Four regional trade routes.
-- Persistent opening laws, public works, information, contracts, loans, employment, property, relationships, objectives, and a court case.
+## Implemented domains
 
-## Integrated systems
+### World and population
+
+- One detailed Rivergate city with six districts and abstract regional trade links.
+- Eight major dynasties and grouped ordinary households.
+- Typed persistent IDs and generated ID allocation.
+- Characters, family links, heads, heirs, councils, governance, education, marriage, health, loyalty, succession, and multi-generation continuity.
 
 ### Economy and business
 
-- Scarce market procurement.
-- Deterministic production and output sale.
-- Capacity-adjusted input and output reserve policies with nonnegative sale planning.
-- Production capacity constrained by active employment agreements.
-- Manager craft and commerce capabilities affect production yield and market throughput.
-- Daily operating costs kept distinct from weekly household wages.
-- Household demand and food satisfaction.
-- Fixed-point price formation with causal records.
-- Seasonal pressure, spoilage, and regional supply.
-- Business policies, cash reserves, maintenance, condition, quality targets, distress, insolvency, terminal closure, and recorded recovery.
-- Administrative-capacity penalties.
-- Canonical acquisition and recapitalization of distressed, insolvent, or closed businesses with
-  manager replacement, seller payment, ownership-index updates, and administrative-load transfer.
-- Canonical dynasty-to-business capitalization with treasury validation, finance versioning,
-  audit history, and durable notification.
-- Canonical inter-business cash transfers.
+- Ten goods and connected food, drink, textile, timber, fuel, metal, and tool chains.
+- Businesses with ownership, management, capacity, policy, cash, inventory, condition, quality, distress, insolvency, closure, recovery, acquisition, and recapitalization.
+- Scarce procurement, production, sales, household consumption, spoilage, maintenance, and causal price formation.
+- Manager capabilities, administrative capacity, regional supply, and seasonal pressure.
 
-### Contracts, finance, and property
+### Contracts, finance, property, and labor
 
-- Explicit supply contracts.
-- Weekly delivery, payment, breach, penalty, fulfillment, and termination.
-- Symmetric nonperformance attribution and dynasty reliability consequences.
-- Explicit loans with interest, weekly payment, delinquency, default, repayment, and restructuring state.
-- Property collateral and deterministic seizure.
-- Residences, workshops, warehouses, occupants, owners, tenants, values, conditions, rents, and purchases.
-- Weekly rent settlement.
+- Supply contracts with scheduled delivery, payment, penalties, fulfillment, breach, and termination.
+- Loans with interest, repayment, delinquency, default, collateral, seizure, and repayment.
+- Property ownership, tenancy, occupancy, rent, value, purchase, and collateral relationships.
+- Employment agreements with worker capacity, wages, loyalty, conditions, disputes, suspension, recovery, and player responses.
 
-### Labor and households
+### Institutions and civic systems
 
-- Employment agreements connecting household labor pools to businesses.
-- Worker counts, wages, loyalty, conditions, disputes, and replacement.
-- Weekly wage settlement.
-- Player responses through investment, negotiation, or replacement.
-- District-level employment and material-condition effects.
+- Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions.
+- Membership, officeholders, budgets, legitimacy, powers, terms, and deterministic elections.
+- Laws affecting prices, imports, interest, tolls, fire safety, rents, and guild conditions.
+- District employment, sanitation, safety, rent pressure, food satisfaction, unrest, and political support.
+- Public works with budgets, spending, progress, completion, and persistent district effects.
+- Legal cases with evidence, hearings, judgments, and damages.
 
-### Dynasty and family
+### Relationships, information, AI, and crises
 
-- Heads, heirs, roles, capabilities, annually changing health, loyalty, and lifecycle.
-- Family links and parent-child records.
-- Family councils, unity, charters, and governance models.
-- Education progression.
-- Dynastic marriages and relationship consequences.
-- Health- and governance-risk-aware annual succession.
-- Multi-generation continuation.
+- Multidimensional dynasty relationships with trust, fear, respect, obligation, resentment, memories, and interaction dates.
+- Quality and reliability reputation derived from economic behavior.
+- Information reports with source, confidence, summary, creation, and expiry.
+- Deterministic AI objectives for property, supply, office, debt, legitimacy, cash, and rival pressure.
+- Regional routes with capacity, tolls, risk, disruption, and recovery.
+- Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, effects, response, and resolution.
 
-### Institutions, politics, and law
+### Adapters and observability
 
-- Guild, merchant, council, court, watch, treasury, charity, and market institutions.
-- Membership, powers, budgets, legitimacy, terms, and officeholders.
-- Deterministic elections using capability, legitimacy, and stable tie-breaking.
-- Persistent laws and supersession.
-- Bread ceilings, emergency imports, interest limits, tolls, fire codes, rent rules, and guild rules.
-- Public-debt authorization remains a reserved law kind and is rejected before cost or mutation until a civic debt ledger exists.
-- Player law sponsorship and office nominations.
+- CLI commands for `new`, `simulate`, `summary`, `inspect`, `dashboard`, `execute`, `validate`, and `playtest`.
+- Complete read-only campaign projections for core and strategic records.
+- Self-contained HTML rendering with escaped visible content and script-safe embedded JSON.
+- Durable outbox notifications, chronicle entries, and audit records.
+- Deterministic gameplay analysis with state-derived candidates, counterfactual branches, scores, findings, and bounded traces.
 
-### Relationships, information, and AI
+## Public integration surface
 
-- Trust, fear, respect, obligation, resentment, memories, and interaction dates.
-- Dynasty quality and reliability reputations derived from operational and financial behavior.
-- Information reports with source, confidence, summary, and expiry.
-- Monthly causal market reports.
-- Traceable AI objectives with priorities and rationale.
-- AI actions for property acquisition, office pursuit, supply security, debt reduction, legitimacy, cash accumulation, and rival containment.
-- Objective completion and deterministic objective replacement.
+The supported library facade is exported from `src/lib.rs`:
 
-### Districts, public works, courts, and crises
+- `build_rivergate_registry`
+- `build_new_game`
+- `advance_days`
+- `apply_player_command`
+- `quote_business_acquisition`
+- `build_campaign_projection`
+- `render_campaign_html`
+- `save_state` and `load_state`
+- `run_gameplay_harness` and `render_gameplay_report`
+- `validate_invariants`
 
-- District rent, employment, sanitation, safety, unrest, support, and food conditions.
-- Public works with budgets, spending, progress, completion, and permanent district effects.
-- Legal cases with parties, evidence, attention, hearings, damages, and judgments.
-- External route capacity, tolls, risk, disruption, and recovery.
-- Grain shortage, banking panic, urban fire, guild revolt, noble demand, epidemic, and trade disruption records.
-- Crisis detection, escalation, daily effects, natural recovery, and player responses.
-- Durable crisis-resolution notifications and one-active-instance guards for recurring crisis kinds.
+The authoritative player command schema is `PlayerCommand` in `src/systems/commands.rs`.
 
-### Adapters and presentation
+## Persistence guarantees
 
-- Human-readable JSON persistence with synchronized same-directory temporary writes and atomic replacement.
-- Schema version 6, including deterministic migration of legacy duplicate officeholders and stale occupied-property tenancy.
-- Explicit migrations from versions 0 through 5.
-- Deterministic strategic hydration for version 1 Rivergate saves, including preservation of legacy officeholders.
-- Version 2 migration consolidates duplicate institution state and removes redundant business staffing data.
-- Version 3 migration removes the unused parallel business-debt aggregate; explicit loan records remain authoritative.
-- Release-mode load validation for registry alignment, references, synchronized indexes, numeric ranges, role and lifecycle consistency, administrative-load derivation, contract compatibility, employment validity, property occupancy, reciprocal collateral, family councils, chronological histories, and next-ID allocators.
-- Durable outbox notifications.
-- Compact state summary.
-- Complete campaign projection.
-- Self-contained HTML dashboard with escaped visible content and script-safe embedded JSON.
-- CLI commands for new, simulate, summary, inspect, dashboard, execute, validate, and playtest.
-- JSON `PlayerCommand` API for every consequential player mutation currently exposed.
+Save and load support:
 
-### Gameplay testing
+- Exact state round trips for the current schema.
+- Deterministic migrations from schema versions 0 through 5.
+- Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, and ID allocation.
+- Preservation of RNG state and all generated records required for deterministic continuation.
+- Same-directory temporary writes, synchronization, and atomic replacement.
 
-- State-derived command candidates covering every exposed player-command family.
-- Steward, entrepreneur, power-broker, and opportunist decision policies.
-- Canonical candidate validation on cloned state before committing the selected action.
-- Paired action and no-action simulation branches for immediate, delayed, and ambient attribution.
-- Probe budgeting that preserves one candidate per offered command family before spending remaining
-  slots on alternate targets or templates.
-- Actionability, variety, interconnection, feedback, resilience, and overall experience scores.
-- Command reachability, rejection pressure, action concentration, business distress and survival,
-  experience variance, persona convergence, civic convergence, power conversion, information
-  agency, succession, and long-run condition findings.
-- Separate relationship, earned-information, and notification-feedback domains, including
-  identity-sensitive law, office, governance, and sponsored-work comparisons.
-- Bounded reproducible traces and complete JSON reports for CI and design analysis.
-- Explicit report limitations for interface comprehension, enjoyment, narrative investment,
-  cognitive burden, and snapshot-horizon coverage.
-- Configurable seeds, starts, personas, simulation horizon, decision interval, probe limit, and trace retention.
+A serialized contract change requires a schema increment and a migration from the previous version.
 
-## Invariants
+## Runtime guarantees
 
-Runtime validation covers:
+The current architecture enforces:
 
-- Registry and record reference validity.
-- Store index completeness and uniqueness.
-- Ownership and occupancy exclusivity.
-- Character, manager, head, heir, officeholder, family-member, and contract-party consistency.
-- Contract production-chain compatibility.
-- Loan, collateral, property, rent, employment, and public-work accounting.
-- Lifecycle and basis-point bounds.
-- Administrative-load derivation.
-- Institution membership, officeholder, budget, and registry consistency.
-- Family councils and relationship pairs.
-- Information, AI objective, court, route, crisis, outbox, chronicle, and audit dates.
-- Deterministic chronological ordering.
-- Save/load serialization completeness.
+- One canonical mutation path per operation class.
+- Validation before mutation and unchanged state on failure.
+- Revalidated consumed tokens for deferred cross-record commits.
+- Stable result ordering and typed-ID tie-breaking.
+- Fixed-point economic arithmetic with wide ratio intermediates.
+- Synchronized record indexes and ownership relationships.
+- Debug invariant checks after each simulated day.
+- Release-mode state validation at persistence boundaries.
+- Explicit daily, weekly, monthly, and annual execution order.
 
-## Audit hardening
+## Deliberate current limits
 
-The August 2026 codebase audit removed or corrected:
+The following areas are outside the implemented contract or remain reserved for later expansion:
 
-- Negative sale quantities caused by treating integer saturation as domain clamping.
-- Repeated office-nomination, governance, policy, crisis-exploitation, and AI legitimacy exploits.
-- Simultaneous multi-office holding, which allowed one character to capture every institution and
-  made political competition collapse into a deterministic sweep.
-- Production spending through protected cash reserves.
-- Free positive-value transfers caused by fixed-point truncation.
-- Inert quality targets, manager capabilities, health, loyalty, succession risk, and reputation fields.
-- Arbitrary contract penalties when both parties failed, silent crisis resolution, and inconsistent loan reputation effects.
-- Closed-business reopening, unreported insolvency recovery, and zero-value payroll version churn.
-- Release-save acceptance of invalid roles, dates, policies, indexes, administrative loads, histories, and unsupported active laws.
-- Duplicate business debt authority in favor of explicit loan records.
-- Oversized validation and settlement functions that violated the warning-free structural lint gate.
-- Operating-policy and labor mutations on inactive businesses, plus contract settlement that could
-  still move cash or inventory through closed and insolvent parties.
-- Household labor overallocation by enforcing finite worker pools in bootstrap, commands, debug
-  invariants, and release-save validation.
-- Duplicate unresolved lawsuits and identical law reenactments that could charge costs or create
-  redundant history without a new strategic decision.
-- Trade crises detected after route recovery, delayed trade effects, and guild revolts generated
-  without any labor dispute or restrictive guild pressure.
-- Missing audit-log ordering checks and incomplete market-flow and business-quality assertions.
-- Silent omission of authored bootstrap contracts or loans when an immediately committed validated
-  token failed.
-- Negative and zero inventory deltas at the record mutation boundary, stale reusable cash-transfer
-  tokens, and invalid in-memory campaigns reaching the filesystem before save validation.
-- Inactive employers retaining operational labor agreements, stalled AI objectives remaining
-  permanent, and zero-health house heads evading succession below the ordinary retirement age.
-- Household starvation when finished bread was unavailable despite market flour or grain, duplicate
-  recipe inputs that could overconsume inventory, and automatic governance changes without audit or
-  notification records.
-- Project-enum wildcard matches in gameplay policy code and the missing documentation-test step in
-  the continuous-integration workflow.
-- Free maintenance benefits from a zero budget, maintenance effects disconnected from policy
-  strength, and zero-value maintenance settlements invalidating finance tokens.
-- Negative payroll settlements when protected reserves exceeded business cash, fractional weekly
-  interest disappearing through integer truncation, and negative internal loan or contract payments.
-- Repeated banking panics generated from unchanged historical defaults and AI supply objectives that
-  stopped after the first inactive or invalid business candidate.
-- Enterprise acquisitions leaving separately owned premises without a tenant, creating indefinite
-  rent-free occupancy; schema version 6 repairs affected version 5 saves deterministically.
-- Insolvent enterprises that could never reach terminal closure and filed court cases that skipped
-  the authored hearing lifecycle stage.
-- Release saves containing negative lifetime accounting totals, active contracts beyond their term,
-  zero-balance unsettled loans, settled loans still pledged to their own collateral, or occupied
-  properties without a legal owner.
-- Commercial and credit actions that failed to create relationship history, counterparty
-  intelligence, or political support, leaving the core economic-to-institutional power conversion
-  largely implicit.
-- Gameplay agents that cycled operating templates, equalized business cash without a real liquidity
-  need, borrowed as a default activity, and allowed target-rich command families to exhaust the
-  harness probe budget.
-- Civic checklist progression caused by cheap, rapid laws and public works, plus a resilience score
-  that allowed a fully distressed portfolio to be masked by otherwise stable city conditions.
-- Funded enterprises trapped at near-zero condition because flat maintenance and cash-only
-  capitalization could not restore production quickly enough to escape payroll and labor pressure.
-- Quarterly litigation without a simulated grievance and candidate lists containing actions that
-  were already known to be unaffordable at the player-information boundary.
-
-## Gameplay harness tuning
-
-The August 2026 gameplay review ran short, three-year, and six-year campaigns across every start,
-persona, and multiple deterministic seeds. The initial report exposed a collapse loop that the old
-headline score understated: most player portfolios lacked a healthy business, food access approached
-zero outside favorable starts, labor disputes became permanent, contract breaches and credit defaults
-outnumbered successful outcomes, crisis responses crowded out strategic play, and notification volume
-became unusable.
-
-The review corrected the underlying systems rather than only retuning agent priorities:
-
-- Production recipes, quality yield, payroll, maintenance, batch rounding, and cost-aware price
-  floors now support viable operating margins even at one-batch recovery utilization.
-- Production throttles against output reserves, active contract obligations, and actual market
-  capacity instead of spending indefinitely on saturated inventory.
-- Households create sustained demand for fuel, cloth, and tools in addition to bread and ale.
-- Contract sellers reserve inventory for delivery, and disputed workforces retain reduced capacity
-  with a systemic payroll-based recovery path.
-- Distressed firms liquidate discretionary reserves, preserve a one-batch operating float through
-  payroll, and are classified from usable operating cash rather than gross reserved cash.
-- Profitable businesses distribute bounded dividends, unoccupied commercial property earns external
-  rent, and office powers now affect contracts, budgets, reputation, imports, safety, and employment.
-- Office nominations require earned commercial reputation, use a dynasty-wide 180-day campaign
-  interval, schedule a timely election, and can win political power; office powers then produce
-  monthly economic and civic effects. Quality reputation rises at full speed only after a portfolio
-  demonstrates non-loss-making trade, so different industries and strategies earn standing at
-  different rates.
-- Governance models affect administrative throughput, annual family cohesion, and succession risk,
-  with a five-year charter-amendment interval that makes constitutional changes durable.
-- Business operating policies have a 180-day strategy interval, preventing routine template churn
-  while preserving deliberate operational pivots.
-- Player-filed legal cases have a 90-day strategy interval, keeping litigation consequential rather
-  than a routine every-hearing action.
-- Player-involved bootstrap contracts are provisional six-month arrangements while ambient city
-  contracts retain one-year stability. Gameplay agents renew with one weekly batch while a business
-  is unproven, scale to the standard two-batch obligation after non-loss-making trade, and propose
-  two-year agreements only when aggregate production, input capacity, buyer working cash, and seller
-  delivery finance support them.
-- Each crisis accepts one committed player response, notification acknowledgement clears a backlog,
-  and the harness only offers acknowledgement after a meaningful batch accumulates instead of
-  repeatedly selecting housekeeping actions for isolated messages.
-- Public-work sponsorship requires a held office, has a one-year strategic interval, and rejects
-  duplicate unfinished projects, with at most two unfinished dynasty-sponsored projects. This makes
-  civic construction a consequence of political attainment and prevents queue starvation.
-- Laws require a held office and political legitimacy, consume legitimacy as well as treasury, and
-  have a one-year sponsorship interval, making civic intervention a strategic commitment instead of
-  an opening checklist.
-- Supply contracts, credit, repayment, default, and litigation now alter trust, respect, fear,
-  resentment, obligation, and bounded relationship memories; those relationships contribute to
-  institutional elections and generate player-visible counterparty intelligence.
-- Gameplay agents choose context- and persona-specific operating policies, rebalance internal
-  business cash against operating-cost and payroll buffers before asking the dynasty to recapitalize
-  a firm, and borrow or lend only within persona-specific need, reserve, and exposure limits. Internal
-  portfolio transfers use a 28-day review interval so emergency liquidity remains available without
-  becoming weekly cash-shuffling micromanagement.
-- Healthy businesses can receive a bounded annual modernization investment that moves condition and
-  quality toward strategic targets while preserving persona-specific dynasty reserves. Capitalization
-  therefore supports proactive development as well as emergency recovery.
-- Funded maintenance accelerates bounded catch-up repair on degraded enterprises, while dynasty
-  capitalization now combines working cash with bounded condition and quality rehabilitation.
-- Existential rehabilitation may use treasury above a protected household emergency reserve; normal
-  persona reserves remain intact outside severe physical deterioration.
-- Legal candidates require an actual default, breached player contract, or highly resentful rival,
-  and affordability filtering removes known-invalid acquisitions, civic actions, crisis responses,
-  and labor responses before they consume a decision cycle.
-- Standard supply obligations now cover two production batches per week instead of speculative
-  five-batch stockpiling. Weekly payroll scales with reserve shortfall, contract commitments, actual
-  market demand, and capacity while retaining a 25% standby retainer.
-- Agent credit amortizes over roughly two years, unresolved debt blocks duplicate same-pair lending,
-  and a defaulted borrower may seek a different counterparty instead of entering a permanent credit
-  deadlock.
-- Worker replacement has a recruitment cost and resets the agreement to stable conditions; agents
-  must improve unsafe conditions rather than repeatedly replacing workers to conceal the cause of a
-  dispute.
-- Sustained high utilization under low maintenance or deteriorated facilities now reduces workplace
-  conditions and loyalty even when wages are paid. Well-maintained workplaces recover instead, so
-  operating policy can create or prevent player-facing labor conflict.
-- Acquisition recapitalization rehabilitates physical condition and quality. Automated expansion
-  requires a healthy, funded, dispute-free, cumulatively profitable portfolio and preserves a
-  post-acquisition reserve, preventing rapid purchases of several distressed firms from creating a
-  cross-business bailout treadmill.
-
-
-The gameplay report schema is version 13. Contract activity is separated into input security and
-output sales, credit into borrowing and lending, and choice quality into concrete alternatives versus
-cross-direction breadth. Reports retain core-fantasy milestones, candidate rankings, recent command
-streaks, player-specific labor state, causal and ambient transitions, persistent and delayed effects,
-and explicit human-playtest limitations.
-
-The current gameplay-fantasy audit uses three complementary matrices. The foundation matrix ran 36
-one-year campaigns across every persona, start, and three deterministic seeds: 12,960 simulated days.
-It scored 100 actionability, 65 variety, 86 interconnection, 100 feedback, 92 resilience, and 87
-overall, with 465 substantive actions and zero blocked cycles. Commercial standing varied from day 77
-to day 140, officeholding from day 154 to day 360, and 28 campaigns converted office into a law or
-public work within the first year. Actionable cycles averaged 4.77 concrete choices across 1.84
-strategic directions; 45.1% offered multiple directions. All portfolios ended healthy, with minimum
-business condition 94.96%. The report contains only informational findings for horizon-dependent
-routes and focused within-family choice.
-
-The six-year matrix ran 36 campaigns and 77,760 simulated days. It scored 100 actionability, 66
-variety, 91 interconnection, 100 feedback, 95 resilience, and 89 overall, with 1,598 substantive
-actions and zero blocked cycles. All 17 directional action families executed, including supply
-security, output sales, borrowing, lending, acquisition, labor response, and litigation. Every one of
-2,034 executed actions produced durable feedback. Actionable cycles averaged 3.59 choices, no endpoint
-business was distressed or insolvent, and minimum business condition was 94.37%. Commercial standing
-and office timing remained varied across backgrounds, personas, and seeds.
-
-The generation matrix ran all persona and background combinations for twenty years: 12 campaigns and
-86,400 simulated days. It scored 100 actionability, 61 variety, 92 interconnection, 100 feedback, 94
-resilience, and 89 overall, with 1,271 substantive actions and zero blocked cycles. Every campaign
-reached commercial standing, office, city-shaping action, and a second generation. Succession occurred
-between days 3,962 and 5,404. All 1,797 executed actions produced feedback, no endpoint business was
-distressed or insolvent, and minimum condition was 94.96%. Persona priorities remained distinct and
-the only finding was informational: actionable cycles averaged 2.8 concrete alternatives but often
-concentrated within one strategic direction.
+- `PublicDebtAuthorization` has no civic debt ledger and is rejected as an active law.
+- External powers are represented through routes, demands, and crises rather than a full diplomatic simulation.
+- Religion and charity are institutionally represented but do not yet implement the full doctrinal and faction scope described in `DESIGN.md`.
+- The repository has no interactive graphical client. Current clients are the CLI, JSON projection, and HTML dashboard.
+- Rivergate is the only detailed scenario. Additional settings require new registry content and bootstrap integration.
+- Tactical combat, manual character movement, equal-detail multi-city simulation, routine crafting, and repetitive dialogue are not planned for the core engine.
 
 ## Verification status
 
-The release gate requires all of the following to pass:
+Verified on August 3, 2026:
 
-- `cargo fmt --all -- --check`
-- `cargo check --all-targets --locked`
-- `bash scripts/test.sh fast`
-- `cargo test --quiet --locked --doc`
-- `bash scripts/test.sh soak`
-- `cargo clippy --all-targets --all-features --locked -- -D warnings`
-- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked`
-- `bash scripts/verify_cli.sh`
-- CLI create, simulate, summary, inspect, execute, dashboard, validate, playtest, and invalid-input smoke tests
+- 232 non-ignored library tests pass.
+- 2 deterministic long-horizon soak tests pass.
+- Documentation tests pass.
+- Release-mode library tests pass.
+- CLI creation, simulation, command execution, summary, inspection, dashboard, validation, playtest, and invalid-input smoke checks pass.
+- Strict Clippy and rustdoc warning gates pass.
+- The locked dependency graph contains 42 packages, no duplicate versions, and no RustSec advisories.
 
-The fast suite compiles and runs only non-ignored library tests. It currently contains 218 passing
-tests, with two ignored long-horizon tests in the soak tier. It uses a shared immutable registry
-fixture and fresh per-test campaign state, with domain filters and exact-name execution for focused
-iteration. Large suites live in dedicated `*_tests.rs` files and are grouped by contracts, loans,
-laws, crises, migrations, validation, gameplay, determinism, and soak coverage. The automated suite
-includes failure-path rollback coverage, deterministic gameplay-report reproduction, atomic save
-replacement, diagnostic first-difference reporting, a 3,000-day core invariant soak, and a
-7,200-day strategic soak.
+The authoritative release gate is documented in `TESTING.md`.
 
-## Deliberate boundaries
+## Forward expansion areas
 
-The implementation follows the exclusions in `DESIGN.md`:
+Expansion should add new institutional interactions rather than parallel systems. Suitable areas include:
 
-- No tactical battlefield mode.
-- No manual movement of every character.
-- No several-city simulation at Rivergate's detail level.
-- No crafting minigames.
-- No repetitive routine dialogue trees.
-- No decorative interiors without systemic effects.
-
-Future content expansion can add more authored industries, constitutions, cultures, scenarios, religious structures, external powers, and presentation clients without replacing the current state model or canonical pipelines.
+- Additional Rivergate content and authored strategic variation
+- New constitutions and office structures
+- Deeper religion, charity, and legitimacy conflicts
+- Municipal debt with a single explicit ledger
+- Additional regional trade and external-power behavior
+- New read-only or interactive clients built on the existing command and projection APIs
+- New scenarios using the same Registry / AppState / System architecture
