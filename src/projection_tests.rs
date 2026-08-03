@@ -138,6 +138,20 @@ mod coverage {
 
     fn assert_filtered_views(state: &AppState, projection: &CampaignProjection) {
         assert_eq!(
+            projection.relationships.len(),
+            state.dynasties.len().saturating_sub(1),
+            "relationship projection must expose every other dynasty's relationship to the player"
+        );
+        assert!(projection.relationships.iter().all(|relationship| {
+            relationship.dynasty_id != state.player_dynasty_id
+                && state.relationships.values().any(|runtime| {
+                    runtime.pair.first == state.player_dynasty_id
+                        && runtime.pair.second == relationship.dynasty_id
+                        || runtime.pair.second == state.player_dynasty_id
+                            && runtime.pair.first == relationship.dynasty_id
+                })
+        }));
+        assert_eq!(
             projection.information.len(),
             state
                 .information_reports
@@ -256,6 +270,10 @@ mod html {
         assert!(
             html.contains(registry.scenario().name()),
             "dashboard must identify the current scenario"
+        );
+        assert!(
+            html.contains("Dynasty relationships"),
+            "dashboard must expose the social network that influences institutional outcomes"
         );
         assert!(
             html.contains(player_name),

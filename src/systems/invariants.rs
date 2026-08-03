@@ -498,8 +498,7 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             "Lifecycle Validity: contract penalty must not be negative"
         );
         debug_assert!(
-            contract.end_day >= contract.next_due_day.saturating_sub(7)
-                || contract.status != ContractStatus::Active,
+            contract.next_due_day <= contract.end_day || contract.status != ContractStatus::Active,
             "Lifecycle Validity: active contract due date exceeds its term"
         );
         if let Some(seller) = seller {
@@ -565,6 +564,10 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
         }
         if let Some(business_id) = property.occupant_business_id {
             debug_assert!(
+                property.owner_dynasty_id.is_some(),
+                "Ownership Exclusivity: occupied property has no owner"
+            );
+            debug_assert!(
                 occupied_businesses.insert(business_id),
                 "Ownership Exclusivity: business occupies more than one property"
             );
@@ -578,6 +581,14 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
                     business.district_id(),
                     property.district_id,
                     "Ownership Exclusivity: business and occupied property districts differ"
+                );
+                let expected_tenant = property
+                    .owner_dynasty_id
+                    .filter(|owner_id| *owner_id != business.owner_dynasty_id())
+                    .map(|_| business.owner_dynasty_id());
+                debug_assert_eq!(
+                    property.tenant_dynasty_id, expected_tenant,
+                    "Derived Data Consistency: occupied property tenancy differs from business ownership"
                 );
             }
         }
@@ -635,12 +646,19 @@ fn validate_loans(state: &AppState) {
             loan.interest_basis_points <= 10_000,
             "Lifecycle Validity: loan interest is outside basis-point range"
         );
-        if loan.status == LoanStatus::Repaid {
-            debug_assert_eq!(
+        match loan.status {
+            LoanStatus::Current
+            | LoanStatus::Delinquent
+            | LoanStatus::Restructured
+            | LoanStatus::Defaulted => debug_assert!(
+                loan.balance > crate::money::Money::ZERO,
+                "Lifecycle Validity: unsettled loan has no remaining balance"
+            ),
+            LoanStatus::Repaid => debug_assert_eq!(
                 loan.balance,
                 crate::money::Money::ZERO,
                 "Lifecycle Validity: repaid loan retains a balance"
-            );
+            ),
         }
         if let Some(property_id) = loan.collateral_property_id {
             let property = state.properties.get(&property_id);
@@ -648,17 +666,35 @@ fn validate_loans(state: &AppState) {
                 property.is_some(),
                 "Record Reference Validity: loan collateral is missing"
             );
-            if !matches!(loan.status, LoanStatus::Defaulted | LoanStatus::Repaid) {
-                debug_assert_eq!(
-                    property.and_then(|property| property.collateral_loan_id),
-                    Some(*loan_id),
-                    "Derived Data Consistency: active collateral does not reference its loan"
-                );
-                debug_assert_eq!(
-                    property.and_then(|property| property.owner_dynasty_id),
-                    Some(loan.borrower_dynasty_id),
-                    "Ownership Exclusivity: active collateral is not owned by the borrower"
-                );
+            match loan.status {
+                LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured => {
+                    debug_assert_eq!(
+                        property.and_then(|property| property.collateral_loan_id),
+                        Some(*loan_id),
+                        "Derived Data Consistency: active collateral does not reference its loan"
+                    );
+                    debug_assert_eq!(
+                        property.and_then(|property| property.owner_dynasty_id),
+                        Some(loan.borrower_dynasty_id),
+                        "Ownership Exclusivity: active collateral is not owned by the borrower"
+                    );
+                }
+                LoanStatus::Defaulted => {
+                    debug_assert!(
+                        property.is_some_and(|property| {
+                            property.collateral_loan_id != Some(*loan_id)
+                        }),
+                        "Derived Data Consistency: defaulted collateral remains pledged to its settled loan"
+                    );
+                }
+                LoanStatus::Repaid => {
+                    debug_assert!(
+                        property.is_some_and(|property| {
+                            property.collateral_loan_id != Some(*loan_id)
+                        }),
+                        "Derived Data Consistency: repaid collateral remains pledged to its settled loan"
+                    );
+                }
             }
         }
     }

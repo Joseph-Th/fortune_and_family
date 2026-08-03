@@ -68,7 +68,8 @@ pub(crate) fn synchronize_employment_for_business_status(
 
 pub use bootstrap::{NewGameError, build_new_game};
 pub(crate) use commands::{
-    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, LEGAL_CASE_FILING_INTERVAL_DAYS,
+    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
+    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_INTERVAL_DAYS,
     MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS,
 };
 pub use commands::{
@@ -77,12 +78,12 @@ pub use commands::{
 };
 pub use invariants::validate_invariants;
 pub use simulation::advance_days;
-pub(crate) use strategic::initialize_strategic_state;
 pub use strategic::{
     BusinessAcquisitionQuote, LoanTerms, StrategicError, SupplyContractTerms, ValidatedLoan,
     ValidatedSupplyContract, acquire_business, buy_unowned_property, issue_loan,
     quote_business_acquisition, sign_supply_contract, validate_loan, validate_supply_contract,
 };
+pub(crate) use strategic::{STANDARD_CONTRACT_BATCHES_PER_WEEK, initialize_strategic_state};
 pub use transactions::{
     SimulationError, ValidatedCashTransfer, transfer_business_cash, validate_business_cash_transfer,
 };

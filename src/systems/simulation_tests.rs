@@ -1,7 +1,10 @@
 //! Behavioral tests for daily simulation planning, ordering, and preflight validation.
 
 use super::*;
-use crate::core::{ContractStatus, EnactedLaw, LawKind};
+use crate::core::{
+    BusinessStatus, ContractStatus, EnactedLaw, LawKind, NewGameConfig, StartingBackground,
+};
+use crate::systems::build_new_game;
 use crate::test_support::{
     assert_state_unchanged, make_test_campaign, rivergate_registry_for_test,
 };
@@ -29,6 +32,43 @@ mod preflight {
             &before,
             &state,
             "preflight failure must leave the entire campaign unchanged",
+        );
+    }
+}
+
+mod starting_economies {
+    use super::*;
+
+    #[test]
+    fn blacksmith_start_remains_operational_with_demand_scaled_contracts_and_payroll() {
+        let registry = rivergate_registry_for_test();
+        let mut state = build_new_game(
+            registry,
+            NewGameConfig {
+                seed: 1,
+                dynasty_name: "Audit".to_owned(),
+                founder_name: "Audit Founder".to_owned(),
+                background: StartingBackground::Blacksmith,
+            },
+        )
+        .expect("blacksmith campaign must build");
+
+        advance_days(registry, &mut state, 1_080).expect("campaign must simulate");
+
+        let business = state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .and_then(|business_id| state.businesses.get(*business_id))
+            .expect("player blacksmith business must exist");
+        assert_eq!(business.status(), BusinessStatus::Active);
+        assert!(
+            business.operations.condition_basis_points >= 9_000,
+            "demand-scaled contracts and payroll must preserve the smithy's physical condition"
+        );
+        assert!(
+            business.cash() > Money::ZERO,
+            "the smithy must retain working cash after three years without player intervention"
         );
     }
 }
@@ -774,6 +814,48 @@ mod business_lifecycle {
     }
 
     #[test]
+    fn unresolved_insolvency_progresses_to_terminal_closure() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.operations.status = BusinessStatus::Insolvent;
+            business.finance.cash = Money::ZERO;
+            business.inventory.clear();
+        }
+        let chronicle_before = state.chronicle.len();
+
+        update_business_lifecycle(registry, &mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .status(),
+            BusinessStatus::Closed
+        );
+        assert_eq!(state.chronicle.len(), chronicle_before + 1);
+        assert!(
+            state
+                .employment
+                .values()
+                .filter(|agreement| agreement.business_id == business_id)
+                .all(|agreement| agreement.status == EmploymentStatus::Suspended),
+            "closure must suspend labor agreements so an explicit acquisition can renegotiate them"
+        );
+    }
+
+    #[test]
     fn insolvent_recovery_is_recorded() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -868,6 +950,169 @@ mod maintenance_policy {
                 .quality_basis_points
                 > quality_before,
             "funded maintenance must make the configured quality target operational"
+        );
+    }
+
+    #[test]
+    fn zero_maintenance_budget_cannot_create_free_improvements_or_finance_churn() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let condition_before = 5_000;
+        let quality_before = 5_000;
+        let version_before = {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.finance.cash = Money::from_copper(100_000);
+            business.policy.minimum_cash_reserve = Money::ZERO;
+            business.policy.maintenance_basis_points = 0;
+            business.policy.quality_target_basis_points = 7_000;
+            business.operations.condition_basis_points = condition_before;
+            business.operations.quality_basis_points = quality_before;
+            business.finance.version
+        };
+
+        let plan = decide_maintenance(registry, &mut state);
+        apply_maintenance(&mut state, plan);
+
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist");
+        assert!(
+            business.operations.condition_basis_points < condition_before,
+            "an unfunded maintenance policy must not improve condition"
+        );
+        assert!(
+            business.operations.quality_basis_points < quality_before,
+            "an unfunded maintenance policy must not improve quality"
+        );
+        assert_eq!(
+            business.finance.version, version_before,
+            "a zero-value maintenance settlement must not invalidate finance tokens"
+        );
+    }
+
+    #[test]
+    fn positive_maintenance_budget_never_rounds_down_to_free() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.finance.cash = Money::from_copper(100_000);
+            business.policy.minimum_cash_reserve = Money::ZERO;
+            business.policy.maintenance_basis_points = 1;
+        }
+
+        let plan = decide_maintenance(registry, &mut state);
+        let line = plan
+            .lines
+            .iter()
+            .find(|line| line.business_id == business_id)
+            .expect("active business must receive a maintenance decision");
+
+        assert!(
+            line.cost > Money::ZERO,
+            "any positive maintenance allocation must have a positive economic cost"
+        );
+    }
+
+    #[test]
+    fn default_maintenance_prevents_long_horizon_condition_collapse_when_funded() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let condition_before = 8_000;
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.finance.cash = Money::from_copper(1_000_000);
+            business.policy.minimum_cash_reserve = Money::ZERO;
+            business.policy.maintenance_basis_points = 1_200;
+            business.operations.condition_basis_points = condition_before;
+        }
+
+        for _ in 0..360 {
+            let plan = decide_maintenance(registry, &mut state);
+            apply_maintenance(&mut state, plan);
+        }
+
+        assert!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .operations
+                .condition_basis_points
+                >= condition_before,
+            "the default funded policy must sustain rather than inevitably destroy a business"
+        );
+    }
+
+    #[test]
+    fn funded_maintenance_can_recover_a_severely_degraded_business() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.finance.cash = Money::from_copper(1_000_000);
+            business.policy.minimum_cash_reserve = Money::ZERO;
+            business.policy.maintenance_basis_points = 1_000;
+            business.policy.quality_target_basis_points = 7_800;
+            business.operations.condition_basis_points = 500;
+            business.operations.quality_basis_points = 500;
+        }
+
+        for _ in 0..360 {
+            let plan = decide_maintenance(registry, &mut state);
+            apply_maintenance(&mut state, plan);
+        }
+
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist");
+        assert!(
+            business.operations.condition_basis_points >= 6_000,
+            "funded catch-up maintenance must provide a credible route out of the low-condition trap; condition={}",
+            business.operations.condition_basis_points
+        );
+        assert!(
+            business.operations.quality_basis_points >= 7_000,
+            "funded repair work must restore quality as well as physical condition; quality={}",
+            business.operations.quality_basis_points
         );
     }
 }

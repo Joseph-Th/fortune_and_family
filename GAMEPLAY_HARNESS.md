@@ -59,6 +59,8 @@ Candidate generation covers all exposed player command families:
 
 Agents choose based on urgency, persona preferences, unexplored command coverage, current resources, and repetition penalties. The policy is deterministic. The same configuration and code produce the same report.
 
+The probe budget first reserves the highest-ranked candidate from each offered command family, then uses any remaining slots on additional targets or templates. A large set of office, law, property, or public-work variants therefore cannot hide an otherwise viable command family merely by exhausting the global probe limit.
+
 ## Player personas
 
 The harness uses deliberately different priorities rather than one allegedly optimal agent.
@@ -95,7 +97,7 @@ This is a deterministic intervention test. It does not prove philosophical causa
 
 ## Report measures
 
-The human report is compact enough for CI logs. The JSON report retains all campaign statistics and representative traces. It includes a top-level `schema_version` so automated consumers can reject incompatible report contracts explicitly. Schema version 7 records how many decision cycles offered each command family, separates persistent consequences from newly delayed consequences, tracks building and peak unfinished public works, separates player-involved contract outcomes from ambient city contracts, records available offices so universal political capture can be detected explicitly, and measures minimum food satisfaction only after simulation begins so the authored starting value cannot mask trajectory changes. This prevents short horizons from misclassifying event-dependent commands as broken, makes slow durable actions visible, and keeps economic, political, and household findings tied to the player-facing loop.
+The human report is compact enough for CI logs. The JSON report retains all campaign statistics and representative traces. It includes a top-level `schema_version` so automated consumers can reject incompatible report contracts explicitly. Schema version 9 records how many decision cycles offered each command family and how many cycles actually contained the external trigger required by legal, crisis, or labor responses. It separates persistent consequences from newly delayed consequences, tracks building and peak unfinished public works, separates player-involved contract outcomes from ambient city contracts, records available offices and the identities of offices, laws, governance, and sponsored works, and measures minimum food satisfaction only after simulation begins so the authored starting value cannot mask trajectory changes. It also separates inter-dynasty relationships, earned intelligence reports, and notification feedback into distinct domains. Trigger-aware reachability prevents long horizons from classifying a reactive route as broken when no grievance, crisis, or dispute occurred, while still making an unhandled trigger a release-gate failure.
 
 ### Actionability
 
@@ -116,6 +118,8 @@ Measures distinct causal command-to-domain edges and average causal consequence 
 is several meaningful system links per command family, not an unrealistic expectation that every
 command alter every domain. It uses the counterfactual action branch comparison, not ambient
 simulation changes.
+
+Commercial contracts, credit, repayment, default, and legal conflict are also measured as relationship changes. These links matter because the central game loop requires productive and commercial power to become social or institutional leverage rather than remaining isolated financial activity.
 
 ### Feedback
 
@@ -152,6 +156,11 @@ The harness emits explicit findings for conditions such as:
 - Public works accumulate faster than the civic treasury can complete them.
 - Raw choice counts hide a low number of distinct viable command families.
 - Experience scores vary sharply by background, persona, or seed.
+- Distinct personas converge on the same most-used action families.
+- Civic outcomes converge on the same law mix, sponsored works, offices, and governance despite different strategies.
+- Commercial actions do not create relationship or institutional leverage, or institutional actions do not reshape material conditions.
+- Intelligence changes only through autonomous reports rather than player-directed commercial activity.
+- Long campaigns do not exercise succession, or funded businesses suffer long-run condition collapse.
 
 Command and domain absence is evaluated against days per campaign, not total days across the matrix.
 Event-dependent systems remain informational until their normal activation horizon has elapsed.
@@ -194,3 +203,7 @@ A harness finding is evidence, not an automatic design verdict.
 - Low interconnection may mean consequences are absent, delayed beyond the run horizon, or not represented in the snapshot model.
 
 When adding a new player command or major system, update command generation, domain snapshots, causal comparisons, findings, and coverage tests together.
+
+## What the harness cannot establish
+
+The report includes these limitations explicitly. Automated agents measure command reachability, deterministic consequences, and simulated outcomes. They do not establish whether a human understands the interface, finds the choices enjoyable, becomes emotionally invested in the family, or can compare options without excessive cognitive burden. Counterfactual attribution is also limited to fields represented in the snapshot and to the configured consequence horizon. Human playtesting remains necessary for those questions.

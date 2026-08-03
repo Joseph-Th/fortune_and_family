@@ -3,7 +3,7 @@
 use super::*;
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
 use crate::registry::Registry;
-use crate::systems::advance_days;
+use crate::systems::{acquire_business, advance_days, quote_business_acquisition};
 use crate::test_support::{
     assert_state_eq, make_test_campaign, rivergate_registry_for_test, write_test_json_fixture,
 };
@@ -292,6 +292,80 @@ mod migrations {
     }
 
     #[test]
+    fn v5_restores_tenancy_for_separately_owned_business_premises() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = crate::core::BusinessStatus::Distressed;
+            business.finance.cash = Money::ZERO;
+        }
+        let buyer_id = state.player_dynasty_id;
+        let manager_id = state
+            .dynasties
+            .get(&buyer_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an eligible heir");
+        let quote = quote_business_acquisition(registry, &state, buyer_id, business_id)
+            .expect("distressed business must be acquirable");
+        state
+            .dynasties
+            .get_mut(&buyer_id)
+            .expect("buyer dynasty must exist")
+            .resources
+            .treasury = quote
+            .purchase_price
+            .saturating_add(quote.minimum_recapitalization);
+        acquire_business(
+            registry,
+            &mut state,
+            buyer_id,
+            business_id,
+            manager_id,
+            quote.minimum_recapitalization,
+        )
+        .expect("funded acquisition must succeed");
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| property.occupant_business_id == Some(business_id))
+            .expect("acquired business must occupy premises")
+            .id;
+        state
+            .properties
+            .get_mut(&property_id)
+            .expect("business premises must exist")
+            .tenant_dynasty_id = None;
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(5);
+
+        let migrated =
+            migrate_to_current(value, Path::new("memory.json")).expect("version five must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            loaded
+                .properties
+                .get(&property_id)
+                .expect("business premises must remain present")
+                .tenant_dynasty_id,
+            Some(buyer_id)
+        );
+        validate_state(&loaded).expect("migrated tenancy must satisfy release validation");
+    }
+
+    #[test]
     fn v1_hydrates_strategic_state() {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
@@ -457,6 +531,24 @@ mod validation {
     }
 
     #[test]
+    fn rejects_negative_business_lifetime_totals() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let business = value["businesses"]["records"]
+            .as_object_mut()
+            .and_then(|records| records.values_mut().next())
+            .expect("serialized state must contain a business");
+        business["finance"]["lifetime_revenue"] = Value::from(-1);
+        let (_directory, path) = write_test_json_fixture("negative-business-lifetime.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid economic value",
+        );
+    }
+
+    #[test]
     fn rejects_business_policy_outside_command_ranges() {
         let state = make_test_campaign();
         let mut value = serde_json::to_value(state).expect("state must serialize");
@@ -565,6 +657,64 @@ mod validation {
             load_state(&path),
             StateValidationKind::PrimaryRecords,
             "does not match derived load",
+        );
+    }
+
+    #[test]
+    fn rejects_unsettled_zero_balance_loan() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let loan = value["loans"]
+            .as_object_mut()
+            .and_then(|loans| loans.values_mut().next())
+            .expect("serialized state must contain a loan");
+        loan["balance"] = Value::from(0);
+        loan["status"] = Value::String("Current".to_owned());
+        let (_directory, path) = write_test_json_fixture("zero-balance-current-loan.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "unsettled loan",
+        );
+    }
+
+    #[test]
+    fn rejects_defaulted_loan_with_unseized_collateral() {
+        let mut state = make_test_campaign();
+        let loan = state
+            .loans
+            .values_mut()
+            .find(|loan| loan.collateral_property_id.is_some())
+            .expect("campaign must contain a collateralized loan");
+        loan.status = crate::core::LoanStatus::Defaulted;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("unseized-default-collateral.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "invalid collateral relationship",
+        );
+    }
+
+    #[test]
+    fn rejects_active_contract_due_after_its_term() {
+        let mut state = make_test_campaign();
+        let contract = state
+            .contracts
+            .values_mut()
+            .find(|contract| contract.status == crate::core::ContractStatus::Active)
+            .expect("campaign must contain an active contract");
+        contract.next_due_day = contract.end_day.saturating_add(1);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("late-active-contract.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "incompatible with its parties or term",
         );
     }
 
@@ -695,6 +845,29 @@ mod validation {
             .expect("bootstrap must create an unoccupied property");
         unoccupied["occupant_business_id"] = occupant;
         let (_directory, path) = write_test_json_fixture("duplicate-occupant.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "invalid or duplicate occupant",
+        );
+    }
+
+    #[test]
+    fn rejects_unowned_occupied_property() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let property = value["properties"]
+            .as_object_mut()
+            .and_then(|properties| {
+                properties
+                    .values_mut()
+                    .find(|property| !property["occupant_business_id"].is_null())
+            })
+            .expect("bootstrap must create an occupied property");
+        property["owner_dynasty_id"] = Value::Null;
+        property["tenant_dynasty_id"] = Value::Null;
+        let (_directory, path) = write_test_json_fixture("unowned-occupied-property.json", &value);
 
         assert_invalid_state(
             load_state(&path),

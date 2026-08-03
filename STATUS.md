@@ -120,8 +120,8 @@ The repository now implements the full architectural foundation and a broad, int
 ### Adapters and presentation
 
 - Human-readable JSON persistence with synchronized same-directory temporary writes and atomic replacement.
-- Schema version 5, including deterministic migration of legacy duplicate officeholders.
-- Explicit migrations from versions 0 through 4.
+- Schema version 6, including deterministic migration of legacy duplicate officeholders and stale occupied-property tenancy.
+- Explicit migrations from versions 0 through 5.
 - Deterministic strategic hydration for version 1 Rivergate saves, including preservation of legacy officeholders.
 - Version 2 migration consolidates duplicate institution state and removes redundant business staffing data.
 - Version 3 migration removes the unused parallel business-debt aggregate; explicit loan records remain authoritative.
@@ -139,10 +139,17 @@ The repository now implements the full architectural foundation and a broad, int
 - Steward, entrepreneur, power-broker, and opportunist decision policies.
 - Canonical candidate validation on cloned state before committing the selected action.
 - Paired action and no-action simulation branches for immediate, delayed, and ambient attribution.
+- Probe budgeting that preserves one candidate per offered command family before spending remaining
+  slots on alternate targets or templates.
 - Actionability, variety, interconnection, feedback, resilience, and overall experience scores.
 - Command reachability, rejection pressure, action concentration, business distress and survival,
-  and experience-variance findings.
+  experience variance, persona convergence, civic convergence, power conversion, information
+  agency, succession, and long-run condition findings.
+- Separate relationship, earned-information, and notification-feedback domains, including
+  identity-sensitive law, office, governance, and sponsored-work comparisons.
 - Bounded reproducible traces and complete JSON reports for CI and design analysis.
+- Explicit report limitations for interface comprehension, enjoyment, narrative investment,
+  cognitive burden, and snapshot-horizon coverage.
 - Configurable seeds, starts, personas, simulation horizon, decision interval, probe limit, and trace retention.
 
 ## Invariants
@@ -199,6 +206,31 @@ The August 2026 codebase audit removed or corrected:
   notification records.
 - Project-enum wildcard matches in gameplay policy code and the missing documentation-test step in
   the continuous-integration workflow.
+- Free maintenance benefits from a zero budget, maintenance effects disconnected from policy
+  strength, and zero-value maintenance settlements invalidating finance tokens.
+- Negative payroll settlements when protected reserves exceeded business cash, fractional weekly
+  interest disappearing through integer truncation, and negative internal loan or contract payments.
+- Repeated banking panics generated from unchanged historical defaults and AI supply objectives that
+  stopped after the first inactive or invalid business candidate.
+- Enterprise acquisitions leaving separately owned premises without a tenant, creating indefinite
+  rent-free occupancy; schema version 6 repairs affected version 5 saves deterministically.
+- Insolvent enterprises that could never reach terminal closure and filed court cases that skipped
+  the authored hearing lifecycle stage.
+- Release saves containing negative lifetime accounting totals, active contracts beyond their term,
+  zero-balance unsettled loans, settled loans still pledged to their own collateral, or occupied
+  properties without a legal owner.
+- Commercial and credit actions that failed to create relationship history, counterparty
+  intelligence, or political support, leaving the core economic-to-institutional power conversion
+  largely implicit.
+- Gameplay agents that cycled operating templates, equalized business cash without a real liquidity
+  need, borrowed as a default activity, and allowed target-rich command families to exhaust the
+  harness probe budget.
+- Civic checklist progression caused by cheap, rapid laws and public works, plus a resilience score
+  that allowed a fully distressed portfolio to be masked by otherwise stable city conditions.
+- Funded enterprises trapped at near-zero condition because flat maintenance and cash-only
+  capitalization could not restore production quickly enough to escape payroll and labor pressure.
+- Quarterly litigation without a simulated grievance and candidate lists containing actions that
+  were already known to be unaffordable at the player-information boundary.
 
 ## Gameplay harness tuning
 
@@ -226,44 +258,81 @@ The review corrected the underlying systems rather than only retuning agent prio
   then produce monthly economic and civic effects.
 - Governance models affect administrative throughput, annual family cohesion, and succession risk,
   with an annual charter-amendment interval that prevents constitutional churn.
-- Business operating policies have a 90-day strategy interval, preventing weekly template churn
+- Business operating policies have a 180-day strategy interval, preventing routine template churn
   while preserving deliberate operational pivots.
 - Player-filed legal cases have a 90-day strategy interval, keeping litigation consequential rather
   than a routine every-hearing action.
 - Gameplay agents only propose supply contracts that fit aggregate weekly production and input
   capacity, maintain four weeks of buyer working cash, and leave sellers able to finance the first
   delivery cycle. This prevents reports from being dominated by obviously underfunded obligations.
-- Crisis responses have a response interval, notification acknowledgement clears a backlog, and the
-  harness only offers acknowledgement after a meaningful batch accumulates instead of repeatedly
-  selecting housekeeping actions for isolated messages.
-- Public-work sponsorship has a 90-day strategic interval and duplicate unfinished projects are
+- Each crisis accepts one committed player response, notification acknowledgement clears a backlog,
+  and the harness only offers acknowledgement after a meaningful batch accumulates instead of
+  repeatedly selecting housekeeping actions for isolated messages.
+- Public-work sponsorship has a one-year strategic interval and duplicate unfinished projects are
   rejected, with at most two unfinished dynasty-sponsored projects, preventing weekly project spam
   and civic-treasury queue starvation.
+- Laws require political legitimacy, consume legitimacy as well as treasury, and have a one-year
+  sponsorship interval, making civic intervention a strategic commitment instead of a checklist.
+- Supply contracts, credit, repayment, default, and litigation now alter trust, respect, fear,
+  resentment, obligation, and bounded relationship memories; those relationships contribute to
+  institutional elections and generate player-visible counterparty intelligence.
+- Gameplay agents choose context- and persona-specific operating policies, move business cash only
+  to cover real liquidity shortfalls, and borrow or lend only within persona-specific need, reserve,
+  and exposure limits.
+- Funded maintenance accelerates bounded catch-up repair on degraded enterprises, while dynasty
+  capitalization now combines working cash with bounded condition and quality rehabilitation.
+- Existential rehabilitation may use treasury above a protected household emergency reserve; normal
+  persona reserves remain intact outside severe physical deterioration.
+- Legal candidates require an actual default, breached player contract, or highly resentful rival,
+  and affordability filtering removes known-invalid acquisitions, civic actions, crisis responses,
+  and labor responses before they consume a decision cycle.
+- Standard supply obligations now cover two production batches per week instead of speculative
+  five-batch stockpiling. Weekly payroll scales with reserve shortfall, contract commitments, actual
+  market demand, and capacity while retaining a 25% standby retainer.
+- Agent credit amortizes over roughly two years, unresolved debt blocks duplicate same-pair lending,
+  and a defaulted borrower may seek a different counterparty instead of entering a permanent credit
+  deadlock.
+- Worker replacement has a recruitment cost and resets the agreement to stable conditions; agents
+  must improve unsafe conditions rather than repeatedly replacing workers to conceal the cause of a
+  dispute.
+- Acquisition recapitalization rehabilitates physical condition and quality. Automated expansion
+  requires a healthy, funded, dispute-free, cumulatively profitable portfolio and preserves a
+  post-acquisition reserve, preventing rapid purchases of several distressed firms from creating a
+  cross-business bailout treadmill.
 
-The gameplay report schema is now version 7. It separates causal from ambient domain transitions,
-counts the decision cycles that actually offer each command family, distinguishes persistent effects
+The gameplay report schema is now version 9. It separates causal from ambient domain transitions,
+counts the decision cycles that actually offer each command family and the cycles containing a real
+external trigger for legal, crisis, and labor responses, distinguishes persistent effects
 from newly delayed consequences, probes slow commands over command-specific bounded horizons, measures
 distinct viable command families rather than raw candidate variants, excludes notification
 acknowledgement from substantive scores, separates quiet cooldown cycles from blocked choices, tracks
 mid-campaign collapse and recovery, records peak office attainment against the number of available
-offices and unfinished public-work load, measures food minima after the first simulation advance,
-and emits direct findings for severe food collapse, labor, contracts, credit, single-campaign or
-broad notification overload, crisis concentration, public-work backlog, and
-autonomous-but-unresponsive systems. Contract findings distinguish player-involved agreements from
-ambient city contracts.
+offices and unfinished public-work load, compares the identities of active laws, held offices,
+governance, and sponsored works, measures food minima after the first simulation advance, and emits
+direct findings for severe food collapse, labor, contracts, credit, notification overload, crisis
+concentration, public-work backlog, autonomous-but-unresponsive systems, incomplete power conversion,
+persona convergence, civic convergence, missing succession, and long-run business deterioration.
+Contract findings distinguish player-involved agreements from ambient city contracts. Reports also
+state what automated agents cannot establish and therefore still requires human playtesting.
 
-The final economic audit repeated the same 12-seed, six-year matrix across all four personas and
-three starting backgrounds: 144 campaigns and 311,040 simulated days. The earlier run found 10
-campaigns below 10% food satisfaction; the corrected run found none and retained an overall score of
-89 with full command and domain coverage.
+The final gameplay-fantasy audit used two complementary matrices. The short matrix ran four seeds
+across all four personas and three starting backgrounds: 48 three-year campaigns and 51,840 simulated
+days. It scored 100 actionability, 70 variety, 88 interconnection, 100 feedback, 96 resilience, and 90
+overall. All 1,811 substantive actions passed canonical validation, with zero blocked cycles and zero
+rejected probes. Minimum endpoint business condition was 94.27% and average condition was 95.50%.
+Reactive commands were judged against recorded activation opportunities rather than elapsed time
+alone. The retained design signals are that actionable cycles averaged 1.9 viable command families,
+35% presented at least two substantive families, and short campaigns commonly emphasized supply
+contracts plus office nominations across personas.
 
-The subsequent interaction audit ran 72 three-year campaigns and 48 six-year campaigns after the
-political exclusivity, notification batching, and report-observability changes. Both matrices retained
-full command and causal-domain coverage and emitted no material concerns. The three-year matrix scored
-87 overall and the six-year matrix scored 86. Post-start food satisfaction never fell below 90.42%,
-player contract fulfillment substantially exceeded breaches, no endpoint business was insolvent,
-peak political control remained two of eleven offices, and peak unread notifications remained 44 in
-the three-year matrix and 73 in the six-year matrix.
+The long matrix ran all persona and background combinations for twenty years: 12 campaigns and 86,400
+simulated days. It scored 100 actionability, 65 variety, 92 interconnection, 100 feedback, 94
+resilience, and 89 overall, with no critical findings, no blocked cycles, and no rejected probes. All
+12 campaigns advanced to a second generation. Minimum endpoint business condition was 93.56%, average
+condition was 95.89%, and no endpoint business was insolvent. The retained design signals are that
+supply-contract management accounted for 36% of substantive actions and actionable cycles averaged
+1.4 viable command families, with 21% presenting multiple families. These are content-density and
+pacing signals for future human playtesting rather than hidden by threshold changes.
 
 ## Verification status
 
@@ -279,7 +348,7 @@ The release gate requires all of the following to pass:
 - `bash scripts/verify_cli.sh`
 - CLI create, simulate, summary, inspect, execute, dashboard, validate, playtest, and invalid-input smoke tests
 
-The fast suite compiles and runs only non-ignored library tests. It currently contains 151 passing
+The fast suite compiles and runs only non-ignored library tests. It currently contains 188 passing
 tests, with two ignored long-horizon tests in the soak tier. It uses a shared immutable registry
 fixture and fresh per-test campaign state, with domain filters and exact-name execution for focused
 iteration. Large suites live in dedicated `*_tests.rs` files and are grouped by contracts, loans,

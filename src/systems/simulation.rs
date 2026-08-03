@@ -930,14 +930,11 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
         let recipe = registry
             .get_recipe(recipe_id)
             .expect("business recipe reference must be valid");
-        let desired_cost = Money::from_copper(
-            recipe
-                .daily_operating_cost()
-                .copper()
-                .saturating_mul(i64::from(maintenance_basis_points))
-                / 20_000,
-        );
-        let can_maintain = cash.saturating_sub(minimum_cash_reserve) >= desired_cost;
+        let desired_cost =
+            maintenance_cost(recipe.daily_operating_cost(), maintenance_basis_points);
+        let effect_points = maintenance_effect(maintenance_basis_points, condition_basis_points);
+        let can_maintain =
+            desired_cost > Money::ZERO && cash.saturating_sub(minimum_cash_reserve) >= desired_cost;
         let random_wear = i16::try_from(state.rng.range_u32(4)).expect("wear fits i16");
         let neglect_penalty = if can_maintain { 0 } else { 5 };
         let accident_penalty = if condition_basis_points < 4_000 && state.rng.is_chance_success(40)
@@ -947,17 +944,21 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
             0
         };
         let improvement = if can_maintain && condition_basis_points < 9_500 {
-            8
+            effect_points
         } else {
             0
         };
-        let quality_improvement =
-            if can_maintain && quality_basis_points < quality_target_basis_points {
-                i16::try_from((quality_target_basis_points - quality_basis_points).min(8))
-                    .expect("bounded quality improvement must fit i16")
-            } else {
-                0
-            };
+        let quality_improvement = if can_maintain
+            && quality_basis_points < quality_target_basis_points
+        {
+            i16::try_from(
+                (quality_target_basis_points - quality_basis_points)
+                    .min(u16::try_from(effect_points).expect("maintenance effect is nonnegative")),
+            )
+            .expect("bounded quality improvement must fit i16")
+        } else {
+            0
+        };
         let quality_decline = if can_maintain { 0 } else { 3 };
         lines.push(MaintenanceLine {
             business_id,
@@ -974,6 +975,24 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
     MaintenancePlan { lines }
 }
 
+fn maintenance_cost(daily_operating_cost: Money, maintenance_basis_points: u16) -> Money {
+    if maintenance_basis_points == 0 || daily_operating_cost <= Money::ZERO {
+        return Money::ZERO;
+    }
+    let numerator = daily_operating_cost
+        .copper()
+        .saturating_mul(i64::from(maintenance_basis_points));
+    Money::from_copper(ceil_div_nonnegative(numerator, 20_000))
+}
+
+fn maintenance_effect(maintenance_basis_points: u16, condition_basis_points: u16) -> i16 {
+    let scaled = u32::from(maintenance_basis_points)
+        .saturating_mul(32)
+        .div_ceil(10_000);
+    let catch_up = u32::from(9_500_u16.saturating_sub(condition_basis_points)).div_ceil(400);
+    i16::try_from(scaled.saturating_add(catch_up)).expect("bounded maintenance effect must fit i16")
+}
+
 fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) {
     let mut total_cost = Money::ZERO;
     for line in plan.lines {
@@ -987,9 +1006,11 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) {
             .businesses
             .get_mut(business_id)
             .expect("planned maintenance business must exist");
-        business.finance.cash = business.finance.cash.saturating_sub(cost);
-        business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(cost);
-        business.finance.version = business.finance.version.saturating_add(1);
+        if cost > Money::ZERO {
+            business.finance.cash = business.finance.cash.saturating_sub(cost);
+            business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(cost);
+            business.finance.version = business.finance.version.saturating_add(1);
+        }
         let condition = i32::from(business.operations.condition_basis_points)
             .saturating_add(i32::from(condition_delta))
             .clamp(0, 10_000);
@@ -1120,12 +1141,9 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
                 total.saturating_add(agreement.weekly_wage)
             });
         let daily_labor = Money::from_copper(ceil_div_nonnegative(weekly_labor.copper(), 7));
-        let daily_maintenance = Money::from_copper(
-            recipe
-                .daily_operating_cost()
-                .copper()
-                .saturating_mul(i64::from(business.policy.maintenance_basis_points))
-                / 20_000,
+        let daily_maintenance = maintenance_cost(
+            recipe.daily_operating_cost(),
+            business.policy.maintenance_basis_points,
         );
         let overhead_per_batch = daily_labor.saturating_add(daily_maintenance);
         let batch_cost = recipe.inputs().iter().fold(
@@ -1243,15 +1261,19 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
         let recipe = registry
             .get_recipe(recipe_id)
             .expect("business recipe reference must be valid");
-        let new_status = if cash == Money::ZERO && !has_inventory {
-            BusinessStatus::Insolvent
-        } else if cash
-            < minimum_cash_reserve.saturating_add(recipe.daily_operating_cost().saturating_mul(2))
-        {
-            BusinessStatus::Distressed
-        } else {
-            BusinessStatus::Active
-        };
+        let new_status =
+            if prior_status == BusinessStatus::Insolvent && cash == Money::ZERO && !has_inventory {
+                BusinessStatus::Closed
+            } else if cash == Money::ZERO && !has_inventory {
+                BusinessStatus::Insolvent
+            } else if cash
+                < minimum_cash_reserve
+                    .saturating_add(recipe.daily_operating_cost().saturating_mul(2))
+            {
+                BusinessStatus::Distressed
+            } else {
+                BusinessStatus::Active
+            };
         if new_status != prior_status {
             state
                 .businesses
@@ -1277,12 +1299,10 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
                 ),
                 BusinessStatus::Active | BusinessStatus::Closed => continue,
             },
-            BusinessStatus::Closed => match prior_status {
-                BusinessStatus::Active
-                | BusinessStatus::Distressed
-                | BusinessStatus::Insolvent
-                | BusinessStatus::Closed => continue,
-            },
+            BusinessStatus::Closed => (
+                ChronicleKind::BusinessDistress,
+                format!("Business {business_id} closed after unresolved insolvency."),
+            ),
         };
         let id = state.next_ids.chronicle();
         state.chronicle.push(ChronicleEntry {

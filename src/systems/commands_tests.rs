@@ -366,9 +366,88 @@ mod business_acquisition {
         (registry, state, business_id, manager_id, quote)
     }
 
+    fn assert_acquired_business_state(
+        state: &AppState,
+        business_id: BusinessId,
+        manager_id: CharacterId,
+        premises_id: PropertyId,
+        quote: crate::systems::BusinessAcquisitionQuote,
+        buyer_id: DynastyId,
+        condition_before: u16,
+    ) {
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("acquired business must remain present");
+        assert_eq!(business.owner_dynasty_id(), buyer_id);
+        assert_eq!(business.manager_id(), manager_id);
+        assert_eq!(business.status(), crate::core::BusinessStatus::Active);
+        assert_eq!(business.cash(), quote.minimum_recapitalization);
+        let rehabilitation =
+            u16::try_from((quote.minimum_recapitalization.copper() / 2).clamp(0, 3_000))
+                .expect("bounded rehabilitation must fit u16");
+        assert_eq!(
+            business.operations.condition_basis_points,
+            condition_before.saturating_add(rehabilitation).min(10_000),
+            "acquisition recapitalization must rehabilitate physical condition as well as cash"
+        );
+        let premises = state
+            .properties
+            .get(&premises_id)
+            .expect("business premises must remain present");
+        assert_eq!(premises.owner_dynasty_id, Some(quote.seller_dynasty_id));
+        assert_eq!(premises.tenant_dynasty_id, Some(buyer_id));
+        assert!(
+            state
+                .employment
+                .values()
+                .filter(|agreement| agreement.business_id == business_id)
+                .all(|agreement| agreement.status == crate::core::EmploymentStatus::Disputed)
+        );
+        assert!(
+            state
+                .businesses
+                .ids_for_owner(buyer_id)
+                .is_some_and(|ids| ids.contains(&business_id))
+        );
+    }
+
+    fn assert_acquisition_finances(
+        state: &AppState,
+        buyer_id: DynastyId,
+        buyer_treasury_before: Money,
+        seller_treasury_before: Money,
+        quote: crate::systems::BusinessAcquisitionQuote,
+    ) {
+        assert_eq!(
+            state
+                .dynasties
+                .get(&buyer_id)
+                .expect("buyer must exist")
+                .treasury(),
+            buyer_treasury_before
+                .saturating_sub(quote.purchase_price)
+                .saturating_sub(quote.minimum_recapitalization)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&quote.seller_dynasty_id)
+                .expect("seller must exist")
+                .treasury(),
+            seller_treasury_before.saturating_add(quote.purchase_price)
+        );
+    }
+
     #[test]
     fn acquires_and_recapitalizes_distressed_business() {
         let (registry, mut state, business_id, manager_id, quote) = acquisition_fixture();
+        let premises_id = state
+            .properties
+            .values()
+            .find(|property| property.occupant_business_id == Some(business_id))
+            .expect("business must occupy premises")
+            .id;
         for agreement in state
             .employment
             .values_mut()
@@ -377,16 +456,22 @@ mod business_acquisition {
             agreement.status = crate::core::EmploymentStatus::Suspended;
         }
         let buyer_id = state.player_dynasty_id;
-        let buyer_before = state
+        let buyer_treasury_before = state
             .dynasties
             .get(&buyer_id)
             .expect("buyer must exist")
-            .clone();
-        let seller_before = state
+            .treasury();
+        let seller_treasury_before = state
             .dynasties
             .get(&quote.seller_dynasty_id)
             .expect("seller must exist")
-            .clone();
+            .treasury();
+        let condition_before = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .operations
+            .condition_basis_points;
 
         let outcome = apply_player_command(
             registry,
@@ -400,49 +485,21 @@ mod business_acquisition {
         .expect("funded acquisition must succeed");
         validate_invariants(registry, &state);
 
-        let business = state
-            .businesses
-            .get(business_id)
-            .expect("acquired business must remain present");
-        assert_eq!(business.owner_dynasty_id(), buyer_id);
-        assert_eq!(business.manager_id(), manager_id);
-        assert_eq!(business.status(), crate::core::BusinessStatus::Active);
-        assert_eq!(business.cash(), quote.minimum_recapitalization);
-        assert!(
-            state
-                .employment
-                .values()
-                .filter(|agreement| agreement.business_id == business_id)
-                .all(|agreement| agreement.status == crate::core::EmploymentStatus::Disputed),
-            "acquisition must reactivate suspended workers through the dispute lifecycle"
+        assert_acquired_business_state(
+            &state,
+            business_id,
+            manager_id,
+            premises_id,
+            quote,
+            buyer_id,
+            condition_before,
         );
-        assert!(
-            state
-                .businesses
-                .ids_for_owner(buyer_id)
-                .is_some_and(|ids| ids.contains(&business_id)),
-            "owner index must move the acquired business to the buyer"
-        );
-        assert_eq!(
-            state
-                .dynasties
-                .get(&buyer_id)
-                .expect("buyer must exist")
-                .treasury(),
-            buyer_before
-                .treasury()
-                .saturating_sub(quote.purchase_price)
-                .saturating_sub(quote.minimum_recapitalization)
-        );
-        assert_eq!(
-            state
-                .dynasties
-                .get(&quote.seller_dynasty_id)
-                .expect("seller must exist")
-                .treasury(),
-            seller_before
-                .treasury()
-                .saturating_add(quote.purchase_price)
+        assert_acquisition_finances(
+            &state,
+            buyer_id,
+            buyer_treasury_before,
+            seller_treasury_before,
+            quote,
         );
         assert!(outcome.summary.contains("Acquired business"));
         assert_eq!(
@@ -505,6 +562,18 @@ mod business_acquisition {
             .get(business_id)
             .expect("owned business must exist")
             .cash();
+        let condition_before = state
+            .businesses
+            .get(business_id)
+            .expect("owned business must exist")
+            .operations
+            .condition_basis_points;
+        let quality_before = state
+            .businesses
+            .get(business_id)
+            .expect("owned business must exist")
+            .operations
+            .quality_basis_points;
 
         apply_player_command(
             registry,
@@ -532,6 +601,20 @@ mod business_acquisition {
                 .expect("owned business must exist")
                 .cash(),
             cash_before.saturating_add(amount)
+        );
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("owned business must exist");
+        assert_eq!(
+            business.operations.condition_basis_points,
+            condition_before.saturating_add(500).min(10_000),
+            "capitalization must include bounded physical rehabilitation"
+        );
+        assert_eq!(
+            business.operations.quality_basis_points,
+            quality_before.saturating_add(250).min(10_000),
+            "capitalization must restore some operating quality"
         );
         assert_eq!(
             state.audit_log.last().map(crate::core::AuditRecord::kind),
@@ -580,6 +663,12 @@ mod laws {
             .get(&state.player_dynasty_id)
             .expect("player dynasty must exist")
             .treasury();
+        let legitimacy_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
 
         apply_player_command(
             registry,
@@ -617,6 +706,16 @@ mod laws {
                 .treasury(),
             treasury_before.saturating_sub(Money::from_copper(2_000)),
             "law sponsorship must charge the documented treasury cost"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .resources
+                .legitimacy_basis_points,
+            legitimacy_before.saturating_sub(LAW_LEGITIMACY_COST),
+            "law sponsorship must consume political legitimacy as well as money"
         );
     }
 
@@ -671,6 +770,73 @@ mod laws {
             &before,
             &state,
             "reenacting an identical active law must not consume treasury or create history",
+        );
+    }
+
+    #[test]
+    fn law_sponsorship_has_a_yearly_strategic_interval() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EnactLaw {
+                kind: LawKind::BreadPriceCeiling,
+                value: 30,
+            },
+        )
+        .expect("first law must succeed");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EnactLaw {
+                kind: LawKind::FireCode,
+                value: 7_000,
+            },
+        );
+
+        assert!(matches!(result, Err(CommandError::LawCooldown { .. })));
+        assert_state_unchanged(
+            &before,
+            &state,
+            "the law interval must prevent rapid checklist enactment without partial spending",
+        );
+    }
+
+    #[test]
+    fn law_sponsorship_requires_political_legitimacy() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points = LAW_LEGITIMACY_REQUIREMENT.saturating_sub(1);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EnactLaw {
+                kind: LawKind::BreadPriceCeiling,
+                value: 30,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InsufficientPlayerLegitimacy {
+                available: LAW_LEGITIMACY_REQUIREMENT.saturating_sub(1),
+                required: LAW_LEGITIMACY_REQUIREMENT,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an illegitimate law proposal must fail before consuming treasury or history",
         );
     }
 }
@@ -999,7 +1165,7 @@ mod crises {
     }
 
     #[test]
-    fn repeated_crisis_response_is_throttled_without_mutation() {
+    fn crisis_accepts_only_one_strategic_player_response() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let crisis_id = state.next_ids.crisis();
@@ -1038,15 +1204,12 @@ mod crises {
 
         assert_eq!(
             result,
-            Err(CommandError::CrisisResponseCooldown {
-                crisis_id,
-                next_response_day: 30,
-            })
+            Err(CommandError::CrisisAlreadyAddressed { crisis_id })
         );
         assert_state_unchanged(
             &before,
             &state,
-            "cooldown rejection must not spend funds or change crisis severity",
+            "a second response must not spend funds or change crisis severity",
         );
     }
 }
@@ -1318,6 +1481,65 @@ mod labor {
             &before,
             &state,
             "failed worker replacement must not reassign labor or increase unrest",
+        );
+    }
+
+    #[test]
+    fn replacement_pays_recruitment_cost_and_resets_the_agreement() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let employment_id = state
+            .employment
+            .values()
+            .find(|agreement| {
+                state
+                    .businesses
+                    .get(agreement.business_id)
+                    .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            })
+            .expect("player business must have an employment agreement")
+            .id;
+        let (business_id, original_household_id) = {
+            let agreement = state
+                .employment
+                .get_mut(&employment_id)
+                .expect("employment must exist");
+            agreement.status = EmploymentStatus::Disputed;
+            (agreement.business_id, agreement.household_id)
+        };
+        let cash_before = Money::from_copper(2_000);
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("business must exist")
+            .finance
+            .cash = cash_before;
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::ResolveLaborDispute {
+                employment_id,
+                response: LaborResponse::ReplaceWorkers,
+            },
+        )
+        .expect("replacement must succeed");
+
+        let agreement = state
+            .employment
+            .get(&employment_id)
+            .expect("employment must exist");
+        assert_ne!(agreement.household_id, original_household_id);
+        assert_eq!(agreement.status, EmploymentStatus::Active);
+        assert_eq!(agreement.loyalty_basis_points, 6_000);
+        assert_eq!(agreement.conditions_basis_points, 6_000);
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .cash(),
+            cash_before.saturating_sub(LABOR_REPLACEMENT_COST)
         );
     }
 }

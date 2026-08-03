@@ -33,6 +33,14 @@ pub enum StrategicError {
     SameContractParty,
     #[error("loan parties must be different dynasties")]
     SameLoanParty,
+    #[error(
+        "loan {loan_id} already represents unsettled credit from dynasty {lender_dynasty_id} to dynasty {borrower_dynasty_id}"
+    )]
+    ExistingUnsettledLoan {
+        lender_dynasty_id: DynastyId,
+        borrower_dynasty_id: DynastyId,
+        loan_id: crate::ids::LoanId,
+    },
     #[error("amount must be positive")]
     NonPositiveAmount,
     #[error("quantity must be positive")]
@@ -130,6 +138,7 @@ enum ObjectiveProgress {
 }
 
 const AI_OBJECTIVE_REVIEW_DAYS: i64 = 720;
+pub(crate) const STANDARD_CONTRACT_BATCHES_PER_WEEK: i64 = 2;
 
 impl ObjectiveProgress {
     const fn from_achieved(achieved: bool) -> Self {
@@ -159,6 +168,17 @@ struct ContractSettlementState {
     seller_owner_id: DynastyId,
     seller_can_deliver: bool,
     buyer_can_pay: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DueLoan {
+    id: crate::ids::LoanId,
+    lender_id: DynastyId,
+    borrower_id: DynastyId,
+    weekly_payment: Money,
+    balance: Money,
+    interest_basis_points: u16,
+    collateral_property_id: Option<PropertyId>,
 }
 
 #[derive(Debug)]
@@ -195,6 +215,16 @@ fn commit_supply_contract(
         penalty,
         duration_weeks,
     } = terms;
+    let buyer_owner_id = state
+        .businesses
+        .get(buyer_business_id)
+        .expect("validated contract buyer must exist")
+        .owner_dynasty_id();
+    let seller_owner_id = state
+        .businesses
+        .get(seller_business_id)
+        .expect("validated contract seller must exist")
+        .owner_dynasty_id();
     let id = state.next_ids.contract();
     let day = state.clock.day();
     let end_day = day.saturating_add(i64::from(duration_weeks).saturating_mul(7));
@@ -222,6 +252,24 @@ fn commit_supply_contract(
         format!(
             "Business {seller_business_id} will deliver {quantity_per_week} of good {good_id} to business {buyer_business_id} each week."
         ),
+    );
+    adjust_dynasty_relationship(
+        state,
+        buyer_owner_id,
+        seller_owner_id,
+        RelationshipDelta::new(40, 20, 0, -10, 1),
+    );
+    remember_dynasty_interaction(
+        state,
+        buyer_owner_id,
+        seller_owner_id,
+        &format!("Supply contract {id} was signed."),
+    );
+    record_counterparty_information(
+        state,
+        buyer_owner_id,
+        seller_owner_id,
+        "Contract negotiation and delivery records",
     );
     id
 }
@@ -291,6 +339,24 @@ fn commit_loan(state: &mut AppState, terms: &LoanTerms) -> crate::ids::LoanId {
         OutboxKind::Finance,
         format!("Loan {id} issued"),
         format!("Dynasty {lender_dynasty_id} lent {principal} to dynasty {borrower_dynasty_id}."),
+    );
+    adjust_dynasty_relationship(
+        state,
+        lender_dynasty_id,
+        borrower_dynasty_id,
+        RelationshipDelta::new(60, 40, 0, -10, 1),
+    );
+    remember_dynasty_interaction(
+        state,
+        lender_dynasty_id,
+        borrower_dynasty_id,
+        &format!("Loan {id} was issued for {principal}."),
+    );
+    record_counterparty_information(
+        state,
+        lender_dynasty_id,
+        borrower_dynasty_id,
+        "Credit underwriting and repayment records",
     );
     id
 }
@@ -424,6 +490,17 @@ fn validate_loan_terms(state: &AppState, terms: &LoanTerms) -> Result<(), Strate
     if !state.dynasties.contains_key(&terms.borrower_dynasty_id) {
         return Err(StrategicError::MissingDynasty {
             dynasty_id: terms.borrower_dynasty_id,
+        });
+    }
+    if let Some(existing) = state.loans.values().find(|loan| {
+        loan.lender_dynasty_id == terms.lender_dynasty_id
+            && loan.borrower_dynasty_id == terms.borrower_dynasty_id
+            && loan.status != LoanStatus::Repaid
+    }) {
+        return Err(StrategicError::ExistingUnsettledLoan {
+            lender_dynasty_id: terms.lender_dynasty_id,
+            borrower_dynasty_id: terms.borrower_dynasty_id,
+            loan_id: existing.id,
         });
     }
     if lender.treasury() < terms.principal {
@@ -770,10 +847,40 @@ fn commit_business_acquisition(
         .expect("transferred business must exist");
     business.finance.cash = business.finance.cash.saturating_add(recapitalization);
     business.finance.version = business.finance.version.saturating_add(1);
+    let rehabilitation = u16::try_from((recapitalization.copper() / 2).clamp(0, 3_000))
+        .expect("bounded acquisition rehabilitation must fit u16");
+    business.operations.condition_basis_points = business
+        .operations
+        .condition_basis_points
+        .saturating_add(rehabilitation)
+        .min(10_000);
+    business.operations.quality_basis_points = business
+        .operations
+        .quality_basis_points
+        .saturating_add(rehabilitation / 2)
+        .min(10_000);
     business.operations.status = BusinessStatus::Active;
+    synchronize_business_property_tenancy(state, business_id, buyer_dynasty_id);
     super::synchronize_employment_for_business_status(state, business_id, BusinessStatus::Active);
 
     record_business_acquisition(state, buyer_dynasty_id, manager_id, recapitalization, quote);
+}
+
+fn synchronize_business_property_tenancy(
+    state: &mut AppState,
+    business_id: BusinessId,
+    business_owner_id: DynastyId,
+) {
+    for property in state
+        .properties
+        .values_mut()
+        .filter(|property| property.occupant_business_id == Some(business_id))
+    {
+        property.tenant_dynasty_id = property
+            .owner_dynasty_id
+            .filter(|property_owner_id| *property_owner_id != business_owner_id)
+            .map(|_| business_owner_id);
+    }
 }
 
 fn record_business_acquisition(
@@ -1193,7 +1300,9 @@ fn initialize_contracts(registry: &Registry, state: &mut AppState) {
                 buyer_business_id: *buyer_id,
                 seller_business_id: *seller_id,
                 good_id: input.good_id(),
-                quantity_per_week: input.quantity().saturating_mul_ratio(5, 1),
+                quantity_per_week: input
+                    .quantity()
+                    .saturating_mul_ratio(STANDARD_CONTRACT_BATCHES_PER_WEEK, 1),
                 unit_price: price,
                 penalty: cost_for(input.quantity(), price).saturating_mul(2),
                 duration_weeks: 52,
@@ -1552,53 +1661,50 @@ fn settle_contracts(state: &mut AppState) {
 
 fn settle_due_contract(state: &mut AppState, due: DueContract) {
     let payment = cost_for(due.quantity, due.unit_price);
-    let seller = state
-        .businesses
-        .get(due.seller_id)
-        .expect("contract seller must exist");
-    let buyer = state
-        .businesses
-        .get(due.buyer_id)
-        .expect("contract buyer must exist");
-    let seller_active = !matches!(
-        seller.status(),
-        BusinessStatus::Insolvent | BusinessStatus::Closed
-    );
-    let buyer_active = !matches!(
-        buyer.status(),
-        BusinessStatus::Insolvent | BusinessStatus::Closed
-    );
+    let (seller_active, seller_owner_id, seller_can_deliver) = {
+        let seller = state
+            .businesses
+            .get(due.seller_id)
+            .expect("contract seller must exist");
+        (
+            !matches!(
+                seller.status(),
+                BusinessStatus::Insolvent | BusinessStatus::Closed
+            ),
+            seller.owner_dynasty_id(),
+            seller.inventory_quantity(due.good_id) >= due.quantity,
+        )
+    };
+    let (buyer_active, buyer_owner_id, buyer_can_pay) = {
+        let buyer = state
+            .businesses
+            .get(due.buyer_id)
+            .expect("contract buyer must exist");
+        (
+            !matches!(
+                buyer.status(),
+                BusinessStatus::Insolvent | BusinessStatus::Closed
+            ),
+            buyer.owner_dynasty_id(),
+            buyer.cash() >= payment,
+        )
+    };
     if !seller_active || !buyer_active {
-        let buyer_owner_id = buyer.owner_dynasty_id();
-        let seller_owner_id = seller.owner_dynasty_id();
-        let contract = state
-            .contracts
-            .get_mut(&due.id)
-            .expect("contract must exist");
-        contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
-        contract.status = ContractStatus::Breached;
-        if buyer_owner_id != seller_owner_id {
-            if !seller_active {
-                adjust_reliability_reputation(state, seller_owner_id, -120);
-            }
-            if !buyer_active {
-                adjust_reliability_reputation(state, buyer_owner_id, -120);
-            }
-        }
-        push_outbox(
+        terminate_inactive_contract(
             state,
-            OutboxKind::Contract,
-            format!("Contract {} terminated", due.id),
-            "An inactive contract party could no longer perform the scheduled obligation."
-                .to_owned(),
+            due.id,
+            buyer_owner_id,
+            seller_owner_id,
+            buyer_active,
+            seller_active,
         );
         return;
     }
     let settlement = ContractSettlementState {
-        buyer_owner_id: buyer.owner_dynasty_id(),
-        seller_owner_id: seller.owner_dynasty_id(),
-        seller_can_deliver: seller.inventory_quantity(due.good_id) >= due.quantity,
-        buyer_can_pay: buyer.cash() >= payment,
+        buyer_owner_id,
+        seller_owner_id,
+        seller_can_deliver,
+        buyer_can_pay,
     };
     let fulfilled = settlement.seller_can_deliver && settlement.buyer_can_pay;
     if fulfilled {
@@ -1606,28 +1712,104 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) {
     } else {
         settle_failed_contract(state, due, settlement);
     }
+    finalize_expired_contract(state, due, settlement, fulfilled);
+}
+
+fn terminate_inactive_contract(
+    state: &mut AppState,
+    contract_id: crate::ids::ContractId,
+    buyer_owner_id: DynastyId,
+    seller_owner_id: DynastyId,
+    buyer_active: bool,
+    seller_active: bool,
+) {
+    let contract = state
+        .contracts
+        .get_mut(&contract_id)
+        .expect("contract must exist");
+    contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
+    contract.status = ContractStatus::Breached;
+    if buyer_owner_id != seller_owner_id {
+        if !seller_active {
+            adjust_reliability_reputation(state, seller_owner_id, -120);
+        }
+        if !buyer_active {
+            adjust_reliability_reputation(state, buyer_owner_id, -120);
+        }
+        adjust_dynasty_relationship(
+            state,
+            buyer_owner_id,
+            seller_owner_id,
+            RelationshipDelta::new(-100, -40, 0, 120, 0),
+        );
+        remember_dynasty_interaction(
+            state,
+            buyer_owner_id,
+            seller_owner_id,
+            &format!("Supply contract {contract_id} ended because a party became inactive."),
+        );
+        record_counterparty_information(
+            state,
+            buyer_owner_id,
+            seller_owner_id,
+            "Contract termination and business-status records",
+        );
+    }
+    push_outbox(
+        state,
+        OutboxKind::Contract,
+        format!("Contract {contract_id} terminated"),
+        "An inactive contract party could no longer perform the scheduled obligation.".to_owned(),
+    );
+}
+
+fn finalize_expired_contract(
+    state: &mut AppState,
+    due: DueContract,
+    settlement: ContractSettlementState,
+    fulfilled: bool,
+) {
     let expired_active = state.contracts.get(&due.id).is_some_and(|contract| {
         contract.status == ContractStatus::Active && contract.next_due_day > due.end_day
     });
-    if expired_active {
-        state
-            .contracts
-            .get_mut(&due.id)
-            .expect("contract must exist")
-            .status = if fulfilled {
-            ContractStatus::Fulfilled
+    if !expired_active {
+        return;
+    }
+    state
+        .contracts
+        .get_mut(&due.id)
+        .expect("contract must exist")
+        .status = if fulfilled {
+        ContractStatus::Fulfilled
+    } else {
+        ContractStatus::Breached
+    };
+    if settlement.buyer_owner_id != settlement.seller_owner_id {
+        let memory = if fulfilled {
+            format!("Supply contract {} completed successfully.", due.id)
         } else {
-            ContractStatus::Breached
+            format!("Supply contract {} expired in breach.", due.id)
         };
-        if !fulfilled {
-            push_outbox(
-                state,
-                OutboxKind::Contract,
-                format!("Contract {} expired in breach", due.id),
-                "The final scheduled delivery was not completed before the contract ended."
-                    .to_owned(),
-            );
-        }
+        remember_dynasty_interaction(
+            state,
+            settlement.buyer_owner_id,
+            settlement.seller_owner_id,
+            &memory,
+        );
+        record_counterparty_information(
+            state,
+            settlement.buyer_owner_id,
+            settlement.seller_owner_id,
+            "Completed contract performance records",
+        );
+    }
+    if !fulfilled {
+        push_outbox(
+            state,
+            OutboxKind::Contract,
+            format!("Contract {} expired in breach", due.id),
+            "The final scheduled delivery was not completed before the contract ended.".to_owned(),
+        );
     }
 }
 
@@ -1657,6 +1839,12 @@ fn settle_fulfilled_contract(
     if settlement.buyer_owner_id != settlement.seller_owner_id {
         adjust_reliability_reputation(state, settlement.buyer_owner_id, 20);
         adjust_reliability_reputation(state, settlement.seller_owner_id, 20);
+        adjust_dynasty_relationship(
+            state,
+            settlement.buyer_owner_id,
+            settlement.seller_owner_id,
+            RelationshipDelta::new(5, 3, 0, -2, 0),
+        );
     }
 }
 
@@ -1709,6 +1897,29 @@ fn settle_failed_contract(
         if !settlement.buyer_can_pay {
             adjust_reliability_reputation(state, settlement.buyer_owner_id, -120);
         }
+        adjust_dynasty_relationship(
+            state,
+            settlement.buyer_owner_id,
+            settlement.seller_owner_id,
+            RelationshipDelta::new(-30, -10, 0, 40, 0),
+        );
+        if breached {
+            remember_dynasty_interaction(
+                state,
+                settlement.buyer_owner_id,
+                settlement.seller_owner_id,
+                &format!(
+                    "Supply contract {} was terminated for repeated nonperformance.",
+                    due.id
+                ),
+            );
+            record_counterparty_information(
+                state,
+                settlement.buyer_owner_id,
+                settlement.seller_owner_id,
+                "Contract breach and penalty records",
+            );
+        }
     }
 }
 
@@ -1718,7 +1929,7 @@ fn transfer_contract_money(
     recipient_id: BusinessId,
     amount: Money,
 ) {
-    if amount == Money::ZERO {
+    if amount <= Money::ZERO {
         return;
     }
     {
@@ -1754,78 +1965,118 @@ fn settle_loans(state: &mut AppState) {
                 LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
             ) && loan.next_due_day <= day
         })
-        .map(|loan| {
-            (
-                loan.id,
-                loan.lender_dynasty_id,
-                loan.borrower_dynasty_id,
-                loan.weekly_payment,
-                loan.balance,
-                loan.interest_basis_points,
-                loan.collateral_property_id,
-            )
+        .map(|loan| DueLoan {
+            id: loan.id,
+            lender_id: loan.lender_dynasty_id,
+            borrower_id: loan.borrower_dynasty_id,
+            weekly_payment: loan.weekly_payment,
+            balance: loan.balance,
+            interest_basis_points: loan.interest_basis_points,
+            collateral_property_id: loan.collateral_property_id,
         })
         .collect();
-    for (id, lender_id, borrower_id, weekly_payment, balance, interest, collateral) in due {
-        let effective_interest = interest_limit.map_or(interest, |limit| interest.min(limit));
-        let interest_due = Money::from_copper(
-            balance
-                .copper()
-                .saturating_mul(i64::from(effective_interest))
-                / 10_000
-                / 52,
-        );
-        let accrued_balance = balance.saturating_add(interest_due);
-        let amount_due = weekly_payment.min(accrued_balance);
-        let borrower_treasury = state
-            .dynasties
-            .get(&borrower_id)
-            .expect("loan borrower must exist")
-            .treasury();
-        state.loans.get_mut(&id).expect("loan must exist").balance = accrued_balance;
-        if borrower_treasury >= amount_due {
-            apply_loan_payment(state, id, amount_due);
-            {
-                let loan = state.loans.get_mut(&id).expect("loan must exist");
-                loan.next_due_day = loan.next_due_day.saturating_add(7);
-                loan.missed_payments = 0;
-                if loan.status != LoanStatus::Repaid {
-                    loan.status = LoanStatus::Current;
-                }
-            }
-            adjust_reliability_reputation(state, borrower_id, 10);
+    for due_loan in due {
+        settle_due_loan(state, due_loan, interest_limit);
+    }
+}
+
+fn settle_due_loan(state: &mut AppState, due: DueLoan, interest_limit: Option<u16>) {
+    let effective_interest = interest_limit.map_or(due.interest_basis_points, |limit| {
+        due.interest_basis_points.min(limit)
+    });
+    let accrued_balance = due
+        .balance
+        .saturating_add(weekly_interest_due(due.balance, effective_interest));
+    let amount_due = due.weekly_payment.min(accrued_balance);
+    let borrower_treasury = state
+        .dynasties
+        .get(&due.borrower_id)
+        .expect("loan borrower must exist")
+        .treasury();
+    state
+        .loans
+        .get_mut(&due.id)
+        .expect("loan must exist")
+        .balance = accrued_balance;
+    if borrower_treasury >= amount_due {
+        settle_successful_loan_payment(state, due, amount_due);
+    } else {
+        settle_missed_loan_payment(state, due);
+    }
+}
+
+fn settle_successful_loan_payment(state: &mut AppState, due: DueLoan, amount_due: Money) {
+    apply_loan_payment(state, due.id, amount_due);
+    let loan = state.loans.get_mut(&due.id).expect("loan must exist");
+    loan.next_due_day = loan.next_due_day.saturating_add(7);
+    loan.missed_payments = 0;
+    if loan.status != LoanStatus::Repaid {
+        loan.status = LoanStatus::Current;
+    }
+    adjust_reliability_reputation(state, due.borrower_id, 10);
+}
+
+fn settle_missed_loan_payment(state: &mut AppState, due: DueLoan) {
+    let defaulted = {
+        let loan = state.loans.get_mut(&due.id).expect("loan must exist");
+        loan.missed_payments = loan.missed_payments.saturating_add(1);
+        loan.next_due_day = loan.next_due_day.saturating_add(7);
+        loan.status = if loan.missed_payments >= 3 {
+            LoanStatus::Defaulted
         } else {
-            let defaulted = {
-                let loan = state.loans.get_mut(&id).expect("loan must exist");
-                loan.missed_payments = loan.missed_payments.saturating_add(1);
-                loan.next_due_day = loan.next_due_day.saturating_add(7);
-                loan.status = if loan.missed_payments >= 3 {
-                    LoanStatus::Defaulted
-                } else {
-                    LoanStatus::Delinquent
-                };
-                loan.status == LoanStatus::Defaulted
-            };
-            if defaulted {
-                if let Some(property_id) = collateral {
-                    let property = state
-                        .properties
-                        .get_mut(&property_id)
-                        .expect("loan collateral must exist");
-                    property.owner_dynasty_id = Some(lender_id);
-                    property.collateral_loan_id = None;
-                }
-                push_outbox(
-                    state,
-                    OutboxKind::Finance,
-                    format!("Loan {id} defaulted"),
-                    format!(
-                        "Dynasty {borrower_id} defaulted on its obligation to dynasty {lender_id}."
-                    ),
-                );
-            }
-            adjust_reliability_reputation(state, borrower_id, if defaulted { -400 } else { -60 });
-        }
+            LoanStatus::Delinquent
+        };
+        loan.status == LoanStatus::Defaulted
+    };
+    if defaulted {
+        seize_defaulted_collateral(state, due);
+        push_outbox(
+            state,
+            OutboxKind::Finance,
+            format!("Loan {} defaulted", due.id),
+            format!(
+                "Dynasty {} defaulted on its obligation to dynasty {}.",
+                due.borrower_id, due.lender_id
+            ),
+        );
+    }
+    adjust_reliability_reputation(state, due.borrower_id, if defaulted { -400 } else { -60 });
+    adjust_dynasty_relationship(
+        state,
+        due.lender_id,
+        due.borrower_id,
+        RelationshipDelta::new(
+            if defaulted { -180 } else { -40 },
+            if defaulted { -80 } else { -10 },
+            if defaulted { 50 } else { 0 },
+            if defaulted { 250 } else { 50 },
+            if defaulted { -1 } else { 0 },
+        ),
+    );
+    if defaulted {
+        remember_dynasty_interaction(
+            state,
+            due.lender_id,
+            due.borrower_id,
+            &format!("Loan {} defaulted.", due.id),
+        );
+        record_counterparty_information(
+            state,
+            due.lender_id,
+            due.borrower_id,
+            "Loan default and collateral records",
+        );
+    }
+}
+
+fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) {
+    if let Some(property_id) = due.collateral_property_id {
+        let property = state
+            .properties
+            .get_mut(&property_id)
+            .expect("loan collateral must exist");
+        property.owner_dynasty_id = Some(due.lender_id);
+        property.collateral_loan_id = None;
     }
 }
 
@@ -1834,7 +2085,25 @@ fn active_interest_limit(state: &AppState) -> Option<u16> {
         .map(|value| u16::try_from(value.clamp(0, 10_000)).unwrap_or(10_000))
 }
 
+fn weekly_interest_due(balance: Money, annual_interest_basis_points: u16) -> Money {
+    if balance <= Money::ZERO || annual_interest_basis_points == 0 {
+        return Money::ZERO;
+    }
+    let annual_interest = balance
+        .copper()
+        .saturating_mul(i64::from(annual_interest_basis_points))
+        / 10_000;
+    if annual_interest <= 0 {
+        return Money::ZERO;
+    }
+    let weekly_interest = annual_interest / 52;
+    Money::from_copper(weekly_interest.saturating_add(i64::from(annual_interest % 52 != 0)))
+}
+
 fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount: Money) -> Money {
+    if amount <= Money::ZERO {
+        return Money::ZERO;
+    }
     let (lender_id, borrower_id, balance, collateral) = {
         let loan = state.loans.get(&loan_id).expect("loan must exist");
         (
@@ -1845,7 +2114,7 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
         )
     };
     let payment = amount.min(balance);
-    if payment == Money::ZERO {
+    if payment <= Money::ZERO {
         return Money::ZERO;
     }
     let borrower_treasury = state
@@ -1868,16 +2137,48 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
         .get_mut(&lender_id)
         .expect("loan lender must exist");
     lender.resources.treasury = lender.resources.treasury.saturating_add(payment);
-    let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
-    loan.balance = loan.balance.saturating_sub(payment);
-    if loan.balance == Money::ZERO {
-        loan.status = LoanStatus::Repaid;
-        loan.missed_payments = 0;
-        if let Some(property_id) = collateral
-            && let Some(property) = state.properties.get_mut(&property_id)
-        {
-            property.collateral_loan_id = None;
+    let repaid = {
+        let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+        loan.balance = loan.balance.saturating_sub(payment);
+        if loan.balance == Money::ZERO {
+            loan.status = LoanStatus::Repaid;
+            loan.missed_payments = 0;
+            true
+        } else {
+            false
         }
+    };
+    if repaid
+        && let Some(property_id) = collateral
+        && let Some(property) = state.properties.get_mut(&property_id)
+    {
+        property.collateral_loan_id = None;
+    }
+    adjust_dynasty_relationship(
+        state,
+        lender_id,
+        borrower_id,
+        RelationshipDelta::new(
+            if repaid { 30 } else { 4 },
+            if repaid { 20 } else { 2 },
+            0,
+            if repaid { -25 } else { -1 },
+            if repaid { -1 } else { 0 },
+        ),
+    );
+    if repaid {
+        remember_dynasty_interaction(
+            state,
+            lender_id,
+            borrower_id,
+            &format!("Loan {loan_id} was repaid in full."),
+        );
+        record_counterparty_information(
+            state,
+            lender_id,
+            borrower_id,
+            "Completed loan repayment records",
+        );
     }
     payment
 }
@@ -2074,10 +2375,11 @@ fn pay_employment_wage(
     } else {
         business.policy.minimum_cash_reserve
     };
-    let paid = wage_due.min(business_cash.saturating_sub(payroll_reserve));
-    if paid <= Money::ZERO {
-        return paid;
+    let spendable = business_cash.saturating_sub(payroll_reserve);
+    if wage_due <= Money::ZERO || spendable <= Money::ZERO {
+        return Money::ZERO;
     }
+    let paid = wage_due.min(spendable);
     let business = state
         .businesses
         .get_mut(business_id)
@@ -2135,7 +2437,7 @@ fn update_fully_paid_employment(
     prior_status: EmploymentStatus,
     utilization_basis_points: u16,
 ) -> (bool, bool) {
-    if utilization_basis_points != 10_000 {
+    if prior_status != EmploymentStatus::Disputed && utilization_basis_points != 10_000 {
         return (false, false);
     }
     agreement.loyalty_basis_points = agreement
@@ -2190,6 +2492,7 @@ fn business_labor_utilization_basis_points(
     state: &AppState,
     business_id: BusinessId,
 ) -> u16 {
+    const RETAINER_BASIS_POINTS: i64 = 2_500;
     let business = state
         .businesses
         .get(business_id)
@@ -2204,6 +2507,10 @@ fn business_labor_utilization_basis_points(
         .get_recipe(business.recipe_id())
         .expect("employment business recipe must exist");
     let output_good_id = recipe.output_good_id();
+    let output_per_batch = recipe.output_quantity().milliunits();
+    if output_per_batch <= 0 {
+        return 0;
+    }
     let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
         .saturating_mul(i64::from(business.policy.target_output_days));
     let policy_reserve = recipe
@@ -2220,26 +2527,35 @@ fn business_labor_utilization_basis_points(
         .fold(Quantity::ZERO, |total, contract| {
             total.saturating_add(contract.quantity_per_week)
         });
-    let market_capacity =
-        state
-            .market
-            .quotes
-            .get(&output_good_id)
-            .map_or(Quantity::ZERO, |quote| {
-                quote
-                    .target_stock
-                    .saturating_mul_ratio(3, 2)
-                    .saturating_sub(quote.stock)
-                    .max(Quantity::ZERO)
-            });
-    let required_inventory = policy_reserve
+    let reserve_shortfall = policy_reserve
+        .saturating_sub(business.inventory_quantity(output_good_id))
+        .max(Quantity::ZERO);
+    let weekly_market_demand = state
+        .market
+        .quotes
+        .get(&output_good_id)
+        .map_or(Quantity::ZERO, |quote| {
+            quote.demand_today.saturating_mul_ratio(7, 1)
+        });
+    let required_output = reserve_shortfall
         .saturating_add(contract_reserve)
-        .saturating_add(market_capacity);
-    if business.inventory_quantity(output_good_id) < required_inventory {
-        10_000
-    } else {
-        2_500
+        .saturating_add(weekly_market_demand);
+    let required_batches = ceil_div_nonnegative_i64(required_output.milliunits(), output_per_batch);
+    let weekly_capacity_batches =
+        i64::from(business.operations.capacity_batches_per_day).saturating_mul(7);
+    if weekly_capacity_batches <= 0 {
+        return 0;
     }
+    let utilization_numerator = required_batches.saturating_mul(10_000);
+    let utilization = ceil_div_nonnegative_i64(utilization_numerator, weekly_capacity_batches)
+        .clamp(RETAINER_BASIS_POINTS, 10_000);
+    u16::try_from(utilization).expect("clamped utilization must fit u16")
+}
+
+fn ceil_div_nonnegative_i64(numerator: i64, denominator: i64) -> i64 {
+    debug_assert!(numerator >= 0 && denominator > 0);
+    let quotient = numerator / denominator;
+    quotient.saturating_add(i64::from(numerator % denominator != 0))
 }
 
 fn apply_public_work_completion(
@@ -2427,6 +2743,146 @@ fn adjust_reliability_reputation(state: &mut AppState, dynasty_id: DynastyId, de
         u16::try_from(adjusted).expect("clamped reputation must fit u16");
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RelationshipDelta {
+    trust: i16,
+    respect: i16,
+    fear: i16,
+    resentment: i16,
+    obligation: i32,
+}
+
+impl RelationshipDelta {
+    pub(crate) const fn new(
+        trust: i16,
+        respect: i16,
+        fear: i16,
+        resentment: i16,
+        obligation: i32,
+    ) -> Self {
+        Self {
+            trust,
+            respect,
+            fear,
+            resentment,
+            obligation,
+        }
+    }
+}
+
+pub(crate) fn adjust_dynasty_relationship(
+    state: &mut AppState,
+    left_dynasty_id: DynastyId,
+    right_dynasty_id: DynastyId,
+    delta: RelationshipDelta,
+) {
+    if left_dynasty_id == right_dynasty_id {
+        return;
+    }
+    let pair = DynastyPair::new(left_dynasty_id, right_dynasty_id);
+    let day = state.clock.day();
+    let relationship = state
+        .relationships
+        .get_mut(&pair)
+        .expect("every dynasty pair must have a relationship record");
+    relationship.trust_basis_points =
+        adjust_basis_points(relationship.trust_basis_points, delta.trust);
+    relationship.respect_basis_points =
+        adjust_basis_points(relationship.respect_basis_points, delta.respect);
+    relationship.fear_basis_points =
+        adjust_basis_points(relationship.fear_basis_points, delta.fear);
+    relationship.resentment_basis_points =
+        adjust_basis_points(relationship.resentment_basis_points, delta.resentment);
+    relationship.obligation = relationship.obligation.saturating_add(delta.obligation);
+    relationship.last_interaction_day = day;
+}
+
+const MAX_RELATIONSHIP_MEMORIES: usize = 12;
+
+pub(crate) fn remember_dynasty_interaction(
+    state: &mut AppState,
+    left_dynasty_id: DynastyId,
+    right_dynasty_id: DynastyId,
+    memory: &str,
+) {
+    if left_dynasty_id == right_dynasty_id {
+        return;
+    }
+    let pair = DynastyPair::new(left_dynasty_id, right_dynasty_id);
+    let day = state.clock.day();
+    let relationship = state
+        .relationships
+        .get_mut(&pair)
+        .expect("every dynasty pair must have a relationship record");
+    if relationship.memories.len() >= MAX_RELATIONSHIP_MEMORIES {
+        relationship.memories.remove(0);
+    }
+    relationship.memories.push(format!("Day {day}: {memory}"));
+    relationship.last_interaction_day = day;
+}
+
+fn record_counterparty_information(
+    state: &mut AppState,
+    first_dynasty_id: DynastyId,
+    second_dynasty_id: DynastyId,
+    source: &str,
+) {
+    let player_dynasty_id = state.player_dynasty_id;
+    let counterparty_id =
+        if first_dynasty_id == player_dynasty_id && second_dynasty_id != player_dynasty_id {
+            second_dynasty_id
+        } else if second_dynasty_id == player_dynasty_id && first_dynasty_id != player_dynasty_id {
+            first_dynasty_id
+        } else {
+            return;
+        };
+    let counterparty = state
+        .dynasties
+        .get(&counterparty_id)
+        .expect("counterparty dynasty must exist");
+    let subject = format!("Counterparty report: House {}", counterparty.name());
+    let reliability = counterparty.resources.reputation_reliability_basis_points;
+    let pair = DynastyPair::new(player_dynasty_id, counterparty_id);
+    let relationship = state
+        .relationships
+        .get(&pair)
+        .expect("counterparty relationship must exist");
+    let summary = format!(
+        "Reliability {reliability} bp; trust {} bp; respect {} bp; resentment {} bp; obligation {}.",
+        relationship.trust_basis_points,
+        relationship.respect_basis_points,
+        relationship.resentment_basis_points,
+        relationship.obligation
+    );
+    state.information_reports.retain(|_, report| {
+        report.owner_dynasty_id != player_dynasty_id || report.subject != subject
+    });
+    let id = state.next_ids.information_report();
+    let day = state.clock.day();
+    state.information_reports.insert(
+        id,
+        InformationReport {
+            id,
+            owner_dynasty_id: player_dynasty_id,
+            subject,
+            confidence: InformationConfidence::Probable,
+            created_day: day,
+            expires_day: day.saturating_add(180),
+            source: source.to_owned(),
+            summary,
+        },
+    );
+}
+
+fn adjust_basis_points(current: u16, delta: i16) -> u16 {
+    u16::try_from(
+        i32::from(current)
+            .saturating_add(i32::from(delta))
+            .clamp(0, 10_000),
+    )
+    .expect("clamped basis-point value must fit u16")
+}
+
 fn apply_law_economic_effects(registry: &Registry, state: &mut AppState) {
     let emergency_imports = active_law_value(state, LawKind::EmergencyImports)
         .map_or(Quantity::ZERO, |value| Quantity::from_units(value.max(0)));
@@ -2449,6 +2905,7 @@ pub(crate) fn run_monthly_strategic_systems(registry: &Registry, state: &mut App
     apply_office_power_effects(registry, state);
     advance_ai_objectives(registry, state);
     update_information_reports(registry, state);
+    advance_legal_case_hearings(state);
     resolve_legal_cases(state);
     update_external_route_risk(state);
     detect_and_advance_crises(registry, state);
@@ -2693,10 +3150,13 @@ fn resolve_institution_selections(state: &mut AppState) {
                             && day.saturating_sub(record.day()) <= 180
                     })
                     .map_or(0_u32, |_| 4_000);
+                let relationship_support =
+                    institution_relationship_support(state, institution_id, character.dynasty_id());
                 let score = u32::from(character.capabilities.social)
                     .saturating_mul(100)
                     .saturating_add(u32::from(dynasty.resources.legitimacy_basis_points))
-                    .saturating_add(campaign_bonus);
+                    .saturating_add(campaign_bonus)
+                    .saturating_add(relationship_support);
                 (score, character.id())
             })
             .collect();
@@ -2723,6 +3183,41 @@ fn resolve_institution_selections(state: &mut AppState) {
             );
         }
     }
+}
+
+fn institution_relationship_support(
+    state: &AppState,
+    institution_id: crate::ids::InstitutionId,
+    candidate_dynasty_id: DynastyId,
+) -> u32 {
+    let member_dynasties: BTreeSet<_> = state
+        .institutions
+        .get(&institution_id)
+        .expect("institution runtime must exist")
+        .members
+        .iter()
+        .filter_map(|character_id| state.characters.get(*character_id))
+        .map(crate::core::Character::dynasty_id)
+        .filter(|dynasty_id| *dynasty_id != candidate_dynasty_id)
+        .collect();
+    let mut total = 0_u32;
+    let mut count = 0_u32;
+    for dynasty_id in member_dynasties {
+        let relationship = state
+            .relationships
+            .get(&DynastyPair::new(candidate_dynasty_id, dynasty_id))
+            .expect("every dynasty pair must have a relationship record");
+        let positive = u32::from(relationship.trust_basis_points)
+            .saturating_add(u32::from(relationship.respect_basis_points))
+            .saturating_add(u32::from(relationship.fear_basis_points) / 2);
+        total = total.saturating_add(
+            positive.saturating_sub(u32::from(relationship.resentment_basis_points)),
+        );
+        count = count.saturating_add(1);
+    }
+    total
+        .checked_div(count)
+        .map_or(0, |average| (average / 4).min(3_000))
 }
 
 fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
@@ -2864,7 +3359,18 @@ fn advance_ai_supply_objective(
         .ids_for_owner(dynasty_id)
         .into_iter()
         .flatten()
-        .copied()
+        .filter_map(|business_id| {
+            state
+                .businesses
+                .get(*business_id)
+                .filter(|business| {
+                    !matches!(
+                        business.status(),
+                        BusinessStatus::Insolvent | BusinessStatus::Closed
+                    )
+                })
+                .map(crate::core::Business::id)
+        })
         .collect();
     for buyer_id in owner_businesses {
         let buyer = state
@@ -2911,9 +3417,9 @@ fn advance_ai_supply_objective(
                 penalty: Money::from_copper(500),
                 duration_weeks: 26,
             };
-            return ObjectiveProgress::from_achieved(
-                sign_supply_contract(registry, state, terms).is_ok(),
-            );
+            if sign_supply_contract(registry, state, terms).is_ok() {
+                return ObjectiveProgress::Achieved;
+            }
         }
     }
     ObjectiveProgress::Pending
@@ -3032,6 +3538,33 @@ fn update_information_reports(registry: &Registry, state: &mut AppState) {
     );
 }
 
+fn advance_legal_case_hearings(state: &mut AppState) {
+    let day = state.clock.day();
+    let entering_hearing: Vec<_> = state
+        .legal_cases
+        .values()
+        .filter(|legal_case| {
+            legal_case.status == LegalCaseStatus::Filed
+                && legal_case.hearing_day > day
+                && legal_case.hearing_day.saturating_sub(day) <= 30
+        })
+        .map(|legal_case| legal_case.id)
+        .collect();
+    for legal_case_id in entering_hearing {
+        state
+            .legal_cases
+            .get_mut(&legal_case_id)
+            .expect("legal case must exist")
+            .status = LegalCaseStatus::Hearing;
+        push_outbox(
+            state,
+            OutboxKind::Legal,
+            format!("Legal case {legal_case_id} entered hearing"),
+            "The court began formal proceedings ahead of judgment.".to_owned(),
+        );
+    }
+}
+
 fn resolve_legal_cases(state: &mut AppState) {
     let day = state.clock.day();
     let due: Vec<_> = state
@@ -3104,6 +3637,12 @@ fn resolve_legal_cases(state: &mut AppState) {
         } else {
             LegalCaseStatus::DecidedForDefendant
         };
+        adjust_dynasty_relationship(
+            state,
+            plaintiff_id,
+            defendant_id,
+            RelationshipDelta::new(-60, 20, 50, 120, 0),
+        );
         push_outbox(
             state,
             OutboxKind::Legal,
@@ -3189,11 +3728,17 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
         .values()
         .filter(|loan| loan.status == LoanStatus::Defaulted)
         .count();
-    let has_panic = state
+    let active_panic = state
         .crises
         .values()
         .any(|crisis| crisis.kind == CrisisKind::BankingPanic && crisis.status.is_active());
-    if defaulted_loans >= 2 && !has_panic {
+    let prior_panics = state
+        .crises
+        .values()
+        .filter(|crisis| crisis.kind == CrisisKind::BankingPanic)
+        .count();
+    let next_panic_threshold = prior_panics.saturating_add(1).saturating_mul(2);
+    if defaulted_loans >= next_panic_threshold && !active_panic {
         insert_crisis(
             state,
             CrisisKind::BankingPanic,

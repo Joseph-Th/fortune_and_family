@@ -31,6 +31,7 @@ pub struct CampaignProjection {
     pub public_works: Vec<PublicWorkProjection>,
     pub legal_cases: Vec<LegalCaseProjection>,
     pub crises: Vec<CrisisProjection>,
+    pub relationships: Vec<RelationshipProjection>,
     pub information: Vec<InformationProjection>,
     pub notifications: Vec<NotificationProjection>,
 }
@@ -232,6 +233,19 @@ pub struct CrisisProjection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RelationshipProjection {
+    pub dynasty_id: DynastyId,
+    pub dynasty_name: String,
+    pub trust_basis_points: u16,
+    pub respect_basis_points: u16,
+    pub fear_basis_points: u16,
+    pub resentment_basis_points: u16,
+    pub obligation: i32,
+    pub last_interaction_day: i64,
+    pub memories: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct InformationProjection {
     pub subject: String,
     pub confidence: InformationConfidence,
@@ -291,6 +305,7 @@ pub fn build_campaign_projection(registry: &Registry, state: &AppState) -> Campa
         public_works: build_public_work_projections(registry, state),
         legal_cases: build_legal_case_projections(state),
         crises: build_crisis_projections(registry, state),
+        relationships: build_relationship_projections(state),
         information: state
             .information_reports
             .values()
@@ -319,6 +334,37 @@ pub fn build_campaign_projection(registry: &Registry, state: &AppState) -> Campa
             })
             .collect(),
     }
+}
+
+fn build_relationship_projections(state: &AppState) -> Vec<RelationshipProjection> {
+    state
+        .relationships
+        .values()
+        .filter_map(|relationship| {
+            let other_dynasty_id = if relationship.pair.first == state.player_dynasty_id {
+                relationship.pair.second
+            } else if relationship.pair.second == state.player_dynasty_id {
+                relationship.pair.first
+            } else {
+                return None;
+            };
+            let dynasty = state
+                .dynasties
+                .get(&other_dynasty_id)
+                .expect("relationship dynasty must exist");
+            Some(RelationshipProjection {
+                dynasty_id: other_dynasty_id,
+                dynasty_name: dynasty.name().to_owned(),
+                trust_basis_points: relationship.trust_basis_points,
+                respect_basis_points: relationship.respect_basis_points,
+                fear_basis_points: relationship.fear_basis_points,
+                resentment_basis_points: relationship.resentment_basis_points,
+                obligation: relationship.obligation,
+                last_interaction_day: relationship.last_interaction_day,
+                memories: relationship.memories.clone(),
+            })
+        })
+        .collect()
 }
 
 fn build_dynasty_projection(
@@ -793,6 +839,7 @@ pub fn render_campaign_html(
     let district_rows = render_district_rows(&projection.districts);
     let business_rows = render_business_rows(&projection.businesses);
     let market_rows = render_market_rows(&projection.market);
+    let relationship_rows = render_relationship_rows(&projection.relationships);
     let alerts = render_notifications(&projection.notifications);
     Ok(format!(
         r#"<!doctype html>
@@ -817,6 +864,7 @@ pub fn render_campaign_html(
 <h2>Businesses</h2><section class="scroll"><table><thead><tr><th>Business</th><th>Owner</th><th>Status</th><th>Cash</th><th>Condition</th><th>Policy</th><th>Manager</th><th>Acquisition</th></tr></thead><tbody>{business_rows}</tbody></table></section>
 <h2>Districts</h2><section class="scroll"><table><thead><tr><th>District</th><th>Food</th><th>Employment</th><th>Sanitation</th><th>Unrest</th><th>Causes</th></tr></thead><tbody>{district_rows}</tbody></table></section>
 <h2>Market</h2><section class="scroll"><table><thead><tr><th>Good</th><th>Price</th><th>Stock</th><th>Causes</th></tr></thead><tbody>{market_rows}</tbody></table></section>
+<h2>Dynasty relationships</h2><section class="scroll"><table><thead><tr><th>House</th><th>Trust</th><th>Respect</th><th>Fear</th><th>Resentment</th><th>Obligation</th><th>Last interaction</th></tr></thead><tbody>{relationship_rows}</tbody></table></section>
 <h2>Recent notices</h2><div class="grid">{alerts}</div>
 <h2>Embedded projection</h2><section><pre id="data"></pre></section>
 </main>
@@ -838,6 +886,25 @@ pub fn render_campaign_html(
         food = f64::from(projection.scenario.average_food_satisfaction_basis_points) / 100.0,
         crises = projection.scenario.active_crises,
     ))
+}
+
+fn render_relationship_rows(relationships: &[RelationshipProjection]) -> String {
+    let mut rows = String::new();
+    for relationship in relationships {
+        write!(
+            rows,
+            "<tr><td>{}</td><td>{:.1}%</td><td>{:.1}%</td><td>{:.1}%</td><td>{:.1}%</td><td>{}</td><td>day {}</td></tr>",
+            escape_html(&relationship.dynasty_name),
+            f64::from(relationship.trust_basis_points) / 100.0,
+            f64::from(relationship.respect_basis_points) / 100.0,
+            f64::from(relationship.fear_basis_points) / 100.0,
+            f64::from(relationship.resentment_basis_points) / 100.0,
+            relationship.obligation,
+            relationship.last_interaction_day,
+        )
+        .expect("writing HTML into a String cannot fail");
+    }
+    rows
 }
 
 fn render_business_rows(businesses: &[BusinessProjection]) -> String {

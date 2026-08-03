@@ -333,6 +333,8 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
     }
     for business in state.businesses.iter() {
         if business.cash() < Money::ZERO
+            || business.finance.lifetime_revenue < Money::ZERO
+            || business.finance.lifetime_costs < Money::ZERO
             || business.operations.capacity_batches_per_day == 0
             || business.operations.condition_basis_points > 10_000
             || business.operations.quality_basis_points > 10_000
@@ -772,7 +774,7 @@ fn validate_strategic_records(
                 .iter()
                 .any(|input| input.good_id() == contract.good_id)
             || (contract.status == crate::core::ContractStatus::Active
-                && contract.end_day < contract.next_due_day.saturating_sub(7))
+                && contract.next_due_day > contract.end_day)
         {
             return Err(format!(
                 "supply contract {contract_id} is incompatible with its parties or term"
@@ -800,11 +802,21 @@ fn validate_strategic_records(
             let business = state.businesses.get(business_id).ok_or_else(|| {
                 format!("property {property_id} references a missing occupant business")
             })?;
-            if !occupied_businesses.insert(business_id)
+            if property.owner_dynasty_id.is_none()
+                || !occupied_businesses.insert(business_id)
                 || business.district_id() != property.district_id
             {
                 return Err(format!(
                     "property {property_id} has an invalid or duplicate occupant"
+                ));
+            }
+            let expected_tenant = property
+                .owner_dynasty_id
+                .filter(|owner_id| *owner_id != business.owner_dynasty_id())
+                .map(|_| business.owner_dynasty_id());
+            if property.tenant_dynasty_id != expected_tenant {
+                return Err(format!(
+                    "property {property_id} tenancy does not match its occupant business owner"
                 ));
             }
         }
@@ -845,22 +857,51 @@ fn validate_loan_records(state: &AppState) -> Result<(), String> {
         {
             return Err(format!("loan {loan_id} has an invalid dynasty reference"));
         }
-        if loan.status == crate::core::LoanStatus::Repaid && loan.balance != Money::ZERO {
-            return Err(format!("repaid loan {loan_id} retains a balance"));
+        match loan.status {
+            crate::core::LoanStatus::Current
+            | crate::core::LoanStatus::Delinquent
+            | crate::core::LoanStatus::Restructured
+            | crate::core::LoanStatus::Defaulted => {
+                if loan.balance <= Money::ZERO {
+                    return Err(format!("unsettled loan {loan_id} has no remaining balance"));
+                }
+            }
+            crate::core::LoanStatus::Repaid => {
+                if loan.balance != Money::ZERO {
+                    return Err(format!("repaid loan {loan_id} retains a balance"));
+                }
+            }
         }
         if let Some(property_id) = loan.collateral_property_id {
             let property = state.properties.get(&property_id).ok_or_else(|| {
                 format!("loan {loan_id} references a missing collateral property")
             })?;
-            if !matches!(
-                loan.status,
-                crate::core::LoanStatus::Defaulted | crate::core::LoanStatus::Repaid
-            ) && (property.collateral_loan_id != Some(*loan_id)
-                || property.owner_dynasty_id != Some(loan.borrower_dynasty_id))
-            {
-                return Err(format!(
-                    "loan {loan_id} has an invalid collateral relationship"
-                ));
+            match loan.status {
+                crate::core::LoanStatus::Current
+                | crate::core::LoanStatus::Delinquent
+                | crate::core::LoanStatus::Restructured => {
+                    if property.collateral_loan_id != Some(*loan_id)
+                        || property.owner_dynasty_id != Some(loan.borrower_dynasty_id)
+                    {
+                        return Err(format!(
+                            "loan {loan_id} has an invalid active collateral relationship"
+                        ));
+                    }
+                }
+                crate::core::LoanStatus::Defaulted => {
+                    if property.collateral_loan_id == Some(*loan_id) {
+                        return Err(format!(
+                            "defaulted loan {loan_id} has an invalid collateral settlement"
+                        ));
+                    }
+                }
+                crate::core::LoanStatus::Repaid => {
+                    if property.collateral_loan_id == Some(*loan_id) {
+                        return Err(format!(
+                            "repaid loan {loan_id} has an invalid collateral release"
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1210,6 +1251,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             2 => migrate_v2_to_v3(value)?,
             3 => migrate_v3_to_v4(value)?,
             4 => migrate_v4_to_v5(value)?,
+            5 => migrate_v5_to_v6(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -1424,6 +1466,92 @@ fn migrate_v4_to_v5(mut value: Value) -> Result<Value, PersistenceError> {
         }
     }
     object.insert("schema_version".to_owned(), Value::from(5));
+    Ok(value)
+}
+
+fn migrate_v5_to_v6(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 5,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let business_owners = object
+        .get("businesses")
+        .and_then(Value::as_object)
+        .and_then(|businesses| businesses.get("records"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 5,
+            reason: "save businesses.records must be an object".to_owned(),
+        })?
+        .values()
+        .map(|business| {
+            let identity = business
+                .get("identity")
+                .and_then(Value::as_object)
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 5,
+                    reason: "save business identity must be an object".to_owned(),
+                })?;
+            let business_id = identity.get("id").and_then(Value::as_u64).ok_or_else(|| {
+                PersistenceError::Migration {
+                    version: 5,
+                    reason: "save business has an invalid id".to_owned(),
+                }
+            })?;
+            let owner_dynasty_id = identity
+                .get("owner_dynasty_id")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 5,
+                    reason: format!("save business {business_id} has an invalid owner"),
+                })?;
+            Ok((business_id, owner_dynasty_id))
+        })
+        .collect::<Result<BTreeMap<_, _>, PersistenceError>>()?;
+    let properties = object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 5,
+            reason: "save properties must be an object".to_owned(),
+        })?;
+    for property in properties.values_mut() {
+        let property = property
+            .as_object_mut()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 5,
+                reason: "save property must be an object".to_owned(),
+            })?;
+        let Some(occupant_business_id) = property
+            .get("occupant_business_id")
+            .filter(|value| !value.is_null())
+            .and_then(Value::as_u64)
+        else {
+            continue;
+        };
+        let business_owner_id = business_owners
+            .get(&occupant_business_id)
+            .copied()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 5,
+                reason: format!(
+                    "save property references missing occupant business {occupant_business_id}"
+                ),
+            })?;
+        let property_owner_id = property
+            .get("owner_dynasty_id")
+            .filter(|value| !value.is_null())
+            .and_then(Value::as_u64);
+        let tenant = if property_owner_id.is_some_and(|owner_id| owner_id != business_owner_id) {
+            Value::from(business_owner_id)
+        } else {
+            Value::Null
+        };
+        property.insert("tenant_dynasty_id".to_owned(), tenant);
+    }
+    object.insert("schema_version".to_owned(), Value::from(6));
     Ok(value)
 }
 

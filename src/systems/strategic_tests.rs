@@ -24,19 +24,34 @@ fn make_test_contract_terms(state: &AppState) -> SupplyContractTerms {
 }
 
 fn make_test_loan_terms(state: &AppState) -> LoanTerms {
-    let loan = state
-        .loans
+    for lender in state
+        .dynasties
         .values()
-        .find(|loan| loan.status == LoanStatus::Current)
-        .expect("bootstrap must create a current loan");
-    LoanTerms {
-        lender_dynasty_id: loan.lender_dynasty_id,
-        borrower_dynasty_id: loan.borrower_dynasty_id,
-        principal: Money::from_copper(1),
-        weekly_payment: Money::from_copper(1),
-        interest_basis_points: 500,
-        collateral_property_id: None,
+        .filter(|dynasty| dynasty.treasury() >= Money::from_copper(1))
+    {
+        for borrower in state
+            .dynasties
+            .values()
+            .filter(|dynasty| dynasty.id() != lender.id())
+        {
+            let has_unsettled_pair = state.loans.values().any(|loan| {
+                loan.lender_dynasty_id == lender.id()
+                    && loan.borrower_dynasty_id == borrower.id()
+                    && loan.status != LoanStatus::Repaid
+            });
+            if !has_unsettled_pair {
+                return LoanTerms {
+                    lender_dynasty_id: lender.id(),
+                    borrower_dynasty_id: borrower.id(),
+                    principal: Money::from_copper(1),
+                    weekly_payment: Money::from_copper(1),
+                    interest_basis_points: 500,
+                    collateral_property_id: None,
+                };
+            }
+        }
     }
+    panic!("test campaign must contain a dynasty pair without unsettled credit");
 }
 
 fn active_contract_id(state: &AppState) -> crate::ids::ContractId {
@@ -407,6 +422,75 @@ mod contracts {
     use super::*;
 
     #[test]
+    fn signing_a_contract_creates_relationship_memory_and_counterparty_intelligence() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let terms = make_test_contract_terms(&state);
+        let buyer_owner = state
+            .businesses
+            .get(terms.buyer_business_id)
+            .expect("buyer must exist")
+            .owner_dynasty_id();
+        let seller_owner = state
+            .businesses
+            .get(terms.seller_business_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
+        let pair = DynastyPair::new(buyer_owner, seller_owner);
+        let memories_before = state
+            .relationships
+            .get(&pair)
+            .expect("relationship must exist")
+            .memories
+            .len();
+        let contract_id =
+            sign_supply_contract(registry, &mut state, terms).expect("contract must be signed");
+
+        let relationship = state
+            .relationships
+            .get(&pair)
+            .expect("relationship must exist");
+        assert_eq!(relationship.memories.len(), memories_before + 1);
+        assert!(
+            relationship
+                .memories
+                .last()
+                .is_some_and(|memory| memory.contains(&contract_id.to_string()))
+        );
+        if buyer_owner == state.player_dynasty_id || seller_owner == state.player_dynasty_id {
+            assert!(state.information_reports.values().any(|report| {
+                report.owner_dynasty_id == state.player_dynasty_id
+                    && report.source == "Contract negotiation and delivery records"
+                    && report.subject.starts_with("Counterparty report:")
+            }));
+        }
+    }
+
+    fn contract_relationship(
+        state: &AppState,
+        contract_id: crate::ids::ContractId,
+    ) -> &RelationshipState {
+        let contract = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist");
+        let buyer_owner = state
+            .businesses
+            .get(contract.buyer_business_id)
+            .expect("buyer must exist")
+            .owner_dynasty_id();
+        let seller_owner = state
+            .businesses
+            .get(contract.seller_business_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
+        state
+            .relationships
+            .get(&DynastyPair::new(buyer_owner, seller_owner))
+            .expect("contract parties must have a relationship")
+    }
+
+    #[test]
     fn rejects_identical_buyer_and_seller() {
         let registry = test_registry();
         let state = make_test_campaign();
@@ -467,6 +551,38 @@ mod contracts {
     }
 
     #[test]
+    fn signing_a_contract_builds_social_capital_between_houses() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let terms = make_test_contract_terms(&state);
+        let buyer_owner = state
+            .businesses
+            .get(terms.buyer_business_id)
+            .expect("buyer must exist")
+            .owner_dynasty_id();
+        let seller_owner = state
+            .businesses
+            .get(terms.seller_business_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
+        let pair = DynastyPair::new(buyer_owner, seller_owner);
+        let before = state
+            .relationships
+            .get(&pair)
+            .expect("relationship must exist")
+            .clone();
+
+        let contract_id = sign_supply_contract(registry, &mut state, terms)
+            .expect("compatible houses must sign the contract");
+        let after = contract_relationship(&state, contract_id);
+
+        assert!(after.trust_basis_points > before.trust_basis_points);
+        assert!(after.respect_basis_points > before.respect_basis_points);
+        assert!(after.obligation > before.obligation);
+        assert_eq!(after.last_interaction_day, state.clock.day());
+    }
+
+    #[test]
     fn charges_nonpayment_penalty_to_the_buyer() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
@@ -521,6 +637,7 @@ mod contracts {
             .expect("buyer owner must exist")
             .resources
             .reputation_reliability_basis_points;
+        let relationship_before = contract_relationship(&state, contract_id).clone();
 
         settle_contracts(&mut state);
 
@@ -558,6 +675,12 @@ mod contracts {
                 .reputation_reliability_basis_points
                 < buyer_reliability_before,
             "contract nonpayment must reduce the responsible dynasty's reliability reputation"
+        );
+        let relationship_after = contract_relationship(&state, contract_id);
+        assert!(relationship_after.trust_basis_points < relationship_before.trust_basis_points);
+        assert!(
+            relationship_after.resentment_basis_points
+                > relationship_before.resentment_basis_points
         );
     }
 
@@ -973,10 +1096,137 @@ mod employment {
             "the missed wage must still affect the employment relationship"
         );
     }
+
+    #[test]
+    fn payroll_affordability_never_returns_a_negative_payment() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let agreement = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment");
+        let business_id = agreement.business_id;
+        let household_id = agreement.household_id;
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("employment business must exist");
+            business.finance.cash = Money::from_copper(100);
+            business.policy.minimum_cash_reserve = Money::from_copper(500);
+        }
+        let version_before = state
+            .businesses
+            .get(business_id)
+            .expect("employment business must exist")
+            .finance
+            .version;
+        let household_cash_before = state
+            .households
+            .get(household_id)
+            .expect("employment household must exist")
+            .cash();
+
+        let paid = pay_employment_wage(
+            registry,
+            &mut state,
+            business_id,
+            household_id,
+            Money::from_copper(200),
+        );
+
+        assert_eq!(paid, Money::ZERO);
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("employment business must exist")
+                .finance
+                .version,
+            version_before
+        );
+        assert_eq!(
+            state
+                .households
+                .get(household_id)
+                .expect("employment household must exist")
+                .cash(),
+            household_cash_before
+        );
+    }
 }
 
 mod loans {
     use super::*;
+
+    #[test]
+    fn issuing_a_loan_creates_relationship_memory_and_counterparty_intelligence() {
+        let mut state = make_test_campaign();
+        let terms = make_test_loan_terms(&state);
+        let pair = DynastyPair::new(terms.lender_dynasty_id, terms.borrower_dynasty_id);
+        let player_is_party = terms.lender_dynasty_id == state.player_dynasty_id
+            || terms.borrower_dynasty_id == state.player_dynasty_id;
+        let memories_before = state
+            .relationships
+            .get(&pair)
+            .expect("relationship must exist")
+            .memories
+            .len();
+        let loan_id = issue_loan(&mut state, terms).expect("loan must be issued");
+
+        let relationship = state
+            .relationships
+            .get(&pair)
+            .expect("relationship must exist");
+        assert_eq!(relationship.memories.len(), memories_before + 1);
+        assert!(
+            relationship
+                .memories
+                .last()
+                .is_some_and(|memory| memory.contains(&loan_id.to_string()))
+        );
+        if player_is_party {
+            assert!(state.information_reports.values().any(|report| {
+                report.owner_dynasty_id == state.player_dynasty_id
+                    && report.source == "Credit underwriting and repayment records"
+                    && report.subject.starts_with("Counterparty report:")
+            }));
+        }
+    }
+
+    #[test]
+    fn relationship_memory_is_bounded_and_keeps_recent_history() {
+        let mut state = make_test_campaign();
+        let dynasty_ids: Vec<_> = state.dynasties.keys().copied().take(2).collect();
+        let pair = DynastyPair::new(dynasty_ids[0], dynasty_ids[1]);
+
+        for index in 0..20 {
+            remember_dynasty_interaction(
+                &mut state,
+                dynasty_ids[0],
+                dynasty_ids[1],
+                &format!("interaction {index}"),
+            );
+        }
+
+        let memories = &state
+            .relationships
+            .get(&pair)
+            .expect("relationship must exist")
+            .memories;
+        assert_eq!(memories.len(), MAX_RELATIONSHIP_MEMORIES);
+        assert!(
+            memories
+                .first()
+                .is_some_and(|memory| memory.contains("interaction 8"))
+        );
+        assert!(
+            memories
+                .last()
+                .is_some_and(|memory| memory.contains("interaction 19"))
+        );
+    }
 
     #[test]
     fn rejects_interest_above_one_hundred_percent() {
@@ -1003,8 +1253,25 @@ mod loans {
         let property_id = existing_loan
             .collateral_property_id
             .expect("selected loan must have collateral");
+        let alternate_lender_id = state
+            .dynasties
+            .values()
+            .filter(|dynasty| {
+                dynasty.id() != existing_loan.borrower_dynasty_id
+                    && dynasty.id() != existing_loan.lender_dynasty_id
+                    && dynasty.treasury() >= Money::from_copper(1)
+            })
+            .map(crate::core::Dynasty::id)
+            .find(|lender_id| {
+                !state.loans.values().any(|loan| {
+                    loan.lender_dynasty_id == *lender_id
+                        && loan.borrower_dynasty_id == existing_loan.borrower_dynasty_id
+                        && loan.status != LoanStatus::Repaid
+                })
+            })
+            .expect("fixture must contain an alternate lender without borrower exposure");
         let pledged_terms = LoanTerms {
-            lender_dynasty_id: existing_loan.lender_dynasty_id,
+            lender_dynasty_id: alternate_lender_id,
             borrower_dynasty_id: existing_loan.borrower_dynasty_id,
             principal: Money::from_copper(1),
             weekly_payment: Money::from_copper(1),
@@ -1017,6 +1284,34 @@ mod loans {
             StrategicError::PropertyAlreadyPledged {
                 property_id,
                 loan_id: existing_loan.id,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_new_credit_while_the_same_pair_has_unsettled_debt() {
+        let state = make_test_campaign();
+        let existing = state
+            .loans
+            .values()
+            .find(|loan| loan.status != LoanStatus::Repaid)
+            .expect("bootstrap must create unsettled credit");
+        let duplicate_terms = LoanTerms {
+            lender_dynasty_id: existing.lender_dynasty_id,
+            borrower_dynasty_id: existing.borrower_dynasty_id,
+            principal: Money::from_copper(1),
+            weekly_payment: Money::from_copper(1),
+            interest_basis_points: 500,
+            collateral_property_id: None,
+        };
+
+        assert_eq!(
+            validate_loan(&state, duplicate_terms)
+                .expect_err("unsettled debt must block a second loan for the same pair"),
+            StrategicError::ExistingUnsettledLoan {
+                lender_dynasty_id: existing.lender_dynasty_id,
+                borrower_dynasty_id: existing.borrower_dynasty_id,
+                loan_id: existing.id,
             }
         );
     }
@@ -1049,6 +1344,22 @@ mod loans {
             &before_commit,
             &state,
             "a failed stale-token commit must not partially mutate state",
+        );
+    }
+
+    #[test]
+    fn negative_manual_payment_is_a_no_op() {
+        let mut state = make_test_campaign();
+        let loan_id = current_loan_id(&state);
+        let before = state.clone();
+
+        let paid = apply_loan_payment(&mut state, loan_id, Money::from_copper(-1));
+
+        assert_eq!(paid, Money::ZERO);
+        assert_state_unchanged(
+            &before,
+            &state,
+            "invalid negative payment must not mutate loan parties or balance",
         );
     }
 
@@ -1103,6 +1414,33 @@ mod loans {
                 .reputation_reliability_basis_points
                 < reliability_before,
             "a missed loan payment must reduce borrower reliability"
+        );
+    }
+
+    #[test]
+    fn positive_annual_interest_does_not_disappear_from_weekly_accrual() {
+        let mut state = make_test_campaign();
+        let loan_id = current_loan_id(&state);
+        let borrower_id = {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.balance = Money::from_copper(1_000);
+            loan.interest_basis_points = 500;
+            loan.next_due_day = state.clock.day();
+            loan.borrower_dynasty_id
+        };
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::ZERO;
+
+        settle_loans(&mut state);
+
+        assert_eq!(
+            state.loans.get(&loan_id).expect("loan must exist").balance,
+            Money::from_copper(1_001),
+            "positive annual interest must accrue when its weekly share is fractional"
         );
     }
 
@@ -1379,6 +1717,49 @@ mod laws {
     }
 }
 
+mod legal_cases {
+    use super::*;
+
+    #[test]
+    fn filed_case_enters_hearing_before_judgment() {
+        let mut state = make_test_campaign();
+        let legal_case_id = *state
+            .legal_cases
+            .keys()
+            .next()
+            .expect("campaign must contain a legal case");
+        {
+            let legal_case = state
+                .legal_cases
+                .get_mut(&legal_case_id)
+                .expect("legal case must exist");
+            legal_case.status = LegalCaseStatus::Filed;
+            legal_case.hearing_day = state.clock.day().saturating_add(30);
+        }
+        let outbox_before = state.outbox.len();
+
+        advance_legal_case_hearings(&mut state);
+
+        assert_eq!(
+            state
+                .legal_cases
+                .get(&legal_case_id)
+                .expect("legal case must exist")
+                .status,
+            LegalCaseStatus::Hearing
+        );
+        assert_eq!(state.outbox.len(), outbox_before + 1);
+        assert!(
+            state
+                .outbox
+                .last()
+                .expect("hearing notification must exist")
+                .subject
+                .contains("entered hearing")
+        );
+    }
+}
+
 mod crises {
     use super::*;
 
@@ -1474,6 +1855,45 @@ mod crises {
                 .subject
                 .contains("resolved"),
             "natural resolution must be visible to adapters"
+        );
+    }
+
+    #[test]
+    fn resolved_banking_panic_is_not_recreated_from_the_same_defaults() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let loan_ids: Vec<_> = state.loans.keys().copied().take(2).collect();
+        assert_eq!(loan_ids.len(), 2, "fixture must contain two loans");
+        for loan_id in loan_ids {
+            state
+                .loans
+                .get_mut(&loan_id)
+                .expect("loan must exist")
+                .status = LoanStatus::Defaulted;
+        }
+        let crisis_id = insert_crisis(
+            &mut state,
+            CrisisKind::BankingPanic,
+            None,
+            400,
+            "historical panic",
+        );
+        {
+            let crisis = state.crises.get_mut(&crisis_id).expect("crisis must exist");
+            crisis.severity_basis_points = 0;
+            crisis.status = CrisisStatus::Resolved;
+        }
+
+        detect_and_advance_crises(registry, &mut state);
+
+        assert_eq!(
+            state
+                .crises
+                .values()
+                .filter(|crisis| crisis.kind == CrisisKind::BankingPanic)
+                .count(),
+            1,
+            "historical defaults must not generate an endless sequence of duplicate panics"
         );
     }
 
@@ -1837,6 +2257,73 @@ mod ai {
                 .treasury(),
             borrower_before.saturating_sub(Money::from_copper(500))
         );
+    }
+
+    #[test]
+    fn supply_objective_skips_inactive_businesses_and_tries_viable_alternatives() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| {
+                *dynasty_id != state.player_dynasty_id
+                    && state
+                        .businesses
+                        .ids_for_owner(*dynasty_id)
+                        .is_some_and(|ids| ids.len() >= 2)
+            })
+            .expect("campaign must contain a nonplayer dynasty with multiple businesses");
+        let business_ids: Vec<_> = state
+            .businesses
+            .ids_for_owner(dynasty_id)
+            .expect("selected dynasty must own businesses")
+            .iter()
+            .copied()
+            .take(2)
+            .collect();
+        let inactive_id = business_ids[0];
+        let viable_id = business_ids[1];
+        state
+            .businesses
+            .get_mut(inactive_id)
+            .expect("inactive business must exist")
+            .operations
+            .status = BusinessStatus::Closed;
+        state
+            .businesses
+            .get_mut(inactive_id)
+            .expect("inactive business must exist")
+            .identity
+            .recipe_id = registry
+            .get_recipe_id("milling")
+            .expect("registry must define milling");
+        state
+            .businesses
+            .get_mut(viable_id)
+            .expect("viable business must exist")
+            .operations
+            .status = BusinessStatus::Active;
+        state
+            .businesses
+            .get_mut(viable_id)
+            .expect("viable business must exist")
+            .identity
+            .recipe_id = registry
+            .get_recipe_id("weaving")
+            .expect("registry must define weaving");
+        state.contracts.retain(|_, contract| {
+            contract.buyer_business_id != inactive_id && contract.buyer_business_id != viable_id
+        });
+
+        assert_eq!(
+            advance_ai_supply_objective(registry, &mut state, dynasty_id),
+            ObjectiveProgress::Achieved
+        );
+        assert!(state.contracts.values().any(|contract| {
+            contract.buyer_business_id == viable_id && contract.status == ContractStatus::Active
+        }));
     }
 
     #[test]

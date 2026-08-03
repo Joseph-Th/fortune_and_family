@@ -115,10 +115,14 @@ struct BusinessPolicyInput {
     quality_target_basis_points: u16,
 }
 
-pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 90;
+pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 180;
 pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 90;
-pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 90;
+pub(crate) const LAW_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
+pub(crate) const LAW_LEGITIMACY_REQUIREMENT: u16 = 3_000;
+pub(crate) const LAW_LEGITIMACY_COST: u16 = 250;
+pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
+pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum CommandError {
@@ -151,6 +155,8 @@ pub enum CommandError {
     UnchangedLaw { kind: LawKind, value: i64 },
     #[error("law {kind:?} is not implemented by the current simulation")]
     UnsupportedLaw { kind: LawKind },
+    #[error("the player dynasty cannot sponsor another law before day {next_enactment_day}")]
+    LawCooldown { next_enactment_day: i64 },
     #[error("district {district_id} does not exist")]
     MissingDistrict { district_id: DistrictId },
     #[error("dynasty {dynasty_id} does not exist")]
@@ -213,11 +219,8 @@ pub enum CommandError {
     MissingCrisis { crisis_id: CrisisId },
     #[error("crisis {crisis_id} is no longer active")]
     InactiveCrisis { crisis_id: CrisisId },
-    #[error("crisis {crisis_id} cannot receive another response before day {next_response_day}")]
-    CrisisResponseCooldown {
-        crisis_id: CrisisId,
-        next_response_day: i64,
-    },
+    #[error("crisis {crisis_id} already has a committed player response")]
+    CrisisAlreadyAddressed { crisis_id: CrisisId },
     #[error("employment agreement {employment_id} does not exist")]
     MissingEmployment { employment_id: EmploymentId },
     #[error("employment agreement {employment_id} is not a player labor dispute")]
@@ -401,20 +404,39 @@ fn apply_business_investment(
         .expect("validated business must exist");
     business.finance.cash = business.finance.cash.saturating_add(amount);
     business.finance.version = business.finance.version.saturating_add(1);
+    let rehabilitation = u16::try_from((amount.copper() / 2).clamp(0, 3_000))
+        .expect("bounded rehabilitation must fit u16");
+    business.operations.condition_basis_points = business
+        .operations
+        .condition_basis_points
+        .saturating_add(rehabilitation)
+        .min(10_000);
+    business.operations.quality_basis_points = business
+        .operations
+        .quality_basis_points
+        .saturating_add(rehabilitation / 2)
+        .min(10_000);
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::BusinessCapitalization,
         subject: format!("business:{business_id}"),
-        detail: format!("amount={}", amount.copper()),
+        detail: format!(
+            "amount={};rehabilitation_basis_points={rehabilitation}",
+            amount.copper()
+        ),
     });
     super::strategic::push_outbox(
         state,
         OutboxKind::Finance,
         format!("Business {business_id} capitalized"),
-        format!("The dynasty invested {amount} into the enterprise."),
+        format!(
+            "The dynasty invested {amount} into the enterprise, restoring {rehabilitation} basis points of operating condition."
+        ),
     );
     Ok(CommandOutcome {
-        summary: format!("Invested {amount} in business {business_id}."),
+        summary: format!(
+            "Invested {amount} in business {business_id} and restored {rehabilitation} basis points of condition."
+        ),
     })
 }
 
@@ -567,8 +589,38 @@ fn apply_law(
     {
         return Err(CommandError::UnchangedLaw { kind, value });
     }
+    if let Some(last_enactment_day) = state
+        .laws
+        .values()
+        .filter(|law| law.sponsor_dynasty_id == Some(state.player_dynasty_id))
+        .map(|law| law.enacted_day)
+        .max()
+    {
+        let next_enactment_day = last_enactment_day.saturating_add(LAW_SPONSORSHIP_INTERVAL_DAYS);
+        if state.clock.day() < next_enactment_day {
+            return Err(CommandError::LawCooldown { next_enactment_day });
+        }
+    }
+    let legitimacy = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .resources
+        .legitimacy_basis_points;
+    if legitimacy < LAW_LEGITIMACY_REQUIREMENT {
+        return Err(CommandError::InsufficientPlayerLegitimacy {
+            available: legitimacy,
+            required: LAW_LEGITIMACY_REQUIREMENT,
+        });
+    }
     let cost = Money::from_copper(2_000);
     spend_player_treasury(state, cost)?;
+    state
+        .dynasties
+        .get_mut(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .resources
+        .legitimacy_basis_points = legitimacy.saturating_sub(LAW_LEGITIMACY_COST);
     for law in state
         .laws
         .values_mut()
@@ -755,6 +807,12 @@ fn apply_legal_case(
             status: LegalCaseStatus::Filed,
         },
     );
+    super::strategic::adjust_dynasty_relationship(
+        state,
+        state.player_dynasty_id,
+        defendant_dynasty_id,
+        super::strategic::RelationshipDelta::new(-100, -30, 0, 150, 0),
+    );
     super::strategic::push_outbox(
         state,
         OutboxKind::Legal,
@@ -912,20 +970,14 @@ fn apply_crisis_response(
         return Err(CommandError::InactiveCrisis { crisis_id });
     }
     let subject = format!("crisis:{crisis_id}");
-    if let Some(last_response_day) = state
+    if state
         .audit_log
         .iter()
         .rev()
         .find(|record| record.kind() == AuditKind::CrisisResponse && record.subject() == subject)
-        .map(AuditRecord::day)
+        .is_some()
     {
-        let next_response_day = last_response_day.saturating_add(30);
-        if state.clock.day() < next_response_day {
-            return Err(CommandError::CrisisResponseCooldown {
-                crisis_id,
-                next_response_day,
-            });
-        }
+        return Err(CommandError::CrisisAlreadyAddressed { crisis_id });
     }
     let severity = crisis.severity_basis_points;
     let district_id = crisis.district_id;
@@ -1121,13 +1173,14 @@ fn apply_labor_response(
                     district_id,
                     workers,
                 })?;
+            spend_business_cash(state, business_id, LABOR_REPLACEMENT_COST)?;
             let agreement = state
                 .employment
                 .get_mut(&employment_id)
                 .expect("validated employment must exist");
             agreement.household_id = replacement;
-            agreement.loyalty_basis_points = 5_000;
-            agreement.conditions_basis_points = 5_500;
+            agreement.loyalty_basis_points = 6_000;
+            agreement.conditions_basis_points = 6_000;
             agreement.status = EmploymentStatus::Active;
             adjust_district_unrest(state, Some(district_id), 400, true);
         }

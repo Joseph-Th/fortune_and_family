@@ -26,7 +26,7 @@ The Rivergate campaign includes:
 - Regional trade routes with capacity, tolls, risk, disruption, and market supply.
 - Systemic grain, banking, fire, epidemic, trade, guild, and external-authority crises.
 - Durable player notifications, chronicle records, and audit records.
-- A complete read-only campaign projection for dynasty, district, market, contract, finance, property, institution, law, court, crisis, information, and notification views.
+- A complete read-only campaign projection for dynasty, relationship, district, market, contract, finance, property, institution, law, court, crisis, information, and notification views.
 - A self-contained dashboard that HTML-escapes visible content and safely encodes embedded JSON against script-block breakout.
 
 ## Deterministic simulation
@@ -54,9 +54,9 @@ The same seed, state, inputs, and commands produce the same result.
 
 ## Persistence
 
-Campaigns are stored as human-readable JSON. Schema version 5 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation. Version 4 saves migrate deterministically by retaining at most one office per character. Saves are serialized to a same-directory temporary file, synchronized, and atomically persisted over the destination so an interrupted write does not truncate the previous campaign.
+Campaigns are stored as human-readable JSON. Schema version 6 preserves every generated record, ID, relationship, index, RNG value, objective, report, notification, and strategic obligation required for deterministic continuation. Version 4 saves migrate deterministically by retaining at most one office per character, and version 5 saves restore tenant assignments when enterprise ownership differs from separately owned premises. Saves are serialized to a same-directory temporary file, synchronized, and atomically persisted over the destination so an interrupted write does not truncate the previous campaign.
 
-Explicit migrations are provided for schema versions 0 through 4. Version 1 Rivergate saves are deterministically hydrated with strategic records, version 2 saves consolidate institution runtime and remove redundant staffing fields, version 3 saves remove the unused parallel business-debt aggregate in favor of explicit loan records, and version 4 saves resolve duplicate simultaneous officeholders in stable institution order.
+Explicit migrations are provided for schema versions 0 through 5. Version 1 Rivergate saves are deterministically hydrated with strategic records, version 2 saves consolidate institution runtime and remove redundant staffing fields, version 3 saves remove the unused parallel business-debt aggregate in favor of explicit loan records, version 4 saves resolve duplicate simultaneous officeholders in stable institution order, and version 5 saves synchronize occupied-property tenancy with business ownership.
 
 ## CLI
 
@@ -134,7 +134,7 @@ cargo run --release --locked -- playtest \
   --output gameplay-report.json
 ```
 
-The harness validates state-derived candidates through the canonical command API, advances both an action branch and a no-action counterfactual branch, and reports immediate, delayed, and ambient system changes separately. See `GAMEPLAY_HARNESS.md` for personas, scores, causal attribution, findings, traces, and performance guidance.
+The harness validates state-derived candidates through the canonical command API, records real activation opportunities for reactive legal, crisis, and labor routes, advances both an action branch and a no-action counterfactual branch, and reports immediate, delayed, and ambient system changes separately. Relationship changes, earned intelligence, and notification feedback are measured as distinct domains, and every report states the questions that still require human playtesting. See `GAMEPLAY_HARNESS.md` for personas, scores, causal attribution, findings, traces, limitations, and performance guidance.
 
 CI runs can use `--minimum-overall <score>` or `--fail-on-critical`; the report is still written before the command returns a failing status.
 
