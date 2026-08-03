@@ -680,6 +680,35 @@ mod validation {
     }
 
     #[test]
+    fn rejects_operational_employment_for_an_insolvent_business() {
+        let state = make_test_campaign();
+        let business_id = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == crate::core::EmploymentStatus::Active)
+            .expect("campaign must contain active employment")
+            .business_id;
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let business = value["businesses"]["records"]
+            .as_object_mut()
+            .and_then(|records| {
+                records.values_mut().find(|business| {
+                    business["identity"]["id"].as_u64() == Some(u64::from(business_id.value()))
+                })
+            })
+            .expect("serialized state must contain the employment business");
+        business["operations"]["status"] = Value::String("Insolvent".to_owned());
+        let (_directory, path) =
+            write_test_json_fixture("active-insolvent-employment.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "incompatible with its business lifecycle",
+        );
+    }
+
+    #[test]
     fn rejects_defaulted_loan_with_unseized_collateral() {
         let mut state = make_test_campaign();
         let loan = state

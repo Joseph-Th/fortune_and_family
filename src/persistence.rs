@@ -918,13 +918,16 @@ fn validate_employment_records(state: &AppState) -> Result<(), String> {
             || agreement.weekly_wage <= Money::ZERO
             || business.is_none()
             || state.households.get(agreement.household_id).is_none()
-            || (agreement.status == crate::core::EmploymentStatus::Active
-                && business.is_some_and(|business| {
-                    business.status() == crate::core::BusinessStatus::Closed
-                }))
         {
             return Err(format!(
                 "employment agreement {employment_id} has an invalid reference"
+            ));
+        }
+        if business.is_some_and(|business| {
+            !crate::systems::is_employment_status_compatible(business.status(), agreement.status)
+        }) {
+            return Err(format!(
+                "employment agreement {employment_id} status is incompatible with its business lifecycle"
             ));
         }
         if agreement.status != crate::core::EmploymentStatus::Ended {

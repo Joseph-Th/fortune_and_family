@@ -51,9 +51,11 @@ At each decision cycle, the harness reads current campaign state and derives con
 
 Candidate generation covers all exposed player command families:
 
-- Direct dynasty capitalization of stressed owned businesses, distressed-business acquisition and
-  recapitalization, business cash transfers, and operating policies.
-- Supply contracts, loans, and property purchases.
+- Direct dynasty capitalization for proactive modernization or stressed-business recovery,
+  distressed-business acquisition and recapitalization, business cash transfers, and operating
+  policies.
+- Input-supply security, output sales, borrowing, lending, and property purchases. These directional
+  categories remain distinct in reports even though contracts and loans share canonical commands.
 - Laws, public works, legal cases, governance, and office nominations.
 - Crisis responses, labor-dispute responses, and notification acknowledgement.
 
@@ -97,7 +99,7 @@ This is a deterministic intervention test. It does not prove philosophical causa
 
 ## Report measures
 
-The human report is compact enough for CI logs. The JSON report retains all campaign statistics and representative traces. It includes a top-level `schema_version` so automated consumers can reject incompatible report contracts explicitly. Schema version 9 records how many decision cycles offered each command family and how many cycles actually contained the external trigger required by legal, crisis, or labor responses. It separates persistent consequences from newly delayed consequences, tracks building and peak unfinished public works, separates player-involved contract outcomes from ambient city contracts, records available offices and the identities of offices, laws, governance, and sponsored works, and measures minimum food satisfaction only after simulation begins so the authored starting value cannot mask trajectory changes. It also separates inter-dynasty relationships, earned intelligence reports, and notification feedback into distinct domains. Trigger-aware reachability prevents long horizons from classifying a reactive route as broken when no grievance, crisis, or dispute occurred, while still making an unhandled trigger a release-gate failure.
+The human report is compact enough for CI logs. The JSON report retains all campaign statistics and representative traces. It includes a top-level `schema_version` so automated consumers can reject incompatible report contracts explicitly. Schema version 13 records how many decision cycles offered each strategic direction, distinguishes securing inputs from selling outputs and borrowing from extending credit, records which event-dependent routes became relevant, preserves the top ranked candidates with scores and descriptions at every retained trace step, and measures recent same-direction command streaks. It also records the core-fantasy milestones for commercial standing, office campaigning, officeholding, city-shaping action, player labor conflict, and succession. This lets the harness test whether systems merely coexist or actually form the intended commercial-to-political-to-dynastic sequence. It separates persistent consequences from newly delayed consequences, tracks building and peak unfinished public works, separates player-involved contract outcomes from ambient city contracts, records available offices and the identities of offices, laws, governance, and sponsored works, and measures minimum food satisfaction only after simulation begins so the authored starting value cannot mask trajectory changes. It also separates city-wide labor activity from employment at player-owned businesses, inter-dynasty relationships, earned intelligence reports, and notification feedback. Activation-aware reachability prevents short horizons from classifying a conditional route as broken before its prerequisites exist, while still making an offered but unusable route a release-gate failure.
 
 ### Actionability
 
@@ -108,9 +110,11 @@ viable action are recorded as blocked. Notification acknowledgement is excluded 
 
 ### Variety
 
-Combines command-family coverage, action distribution, and distinct viable command families per
-decision. Multiple templates or targets from one command family no longer masquerade as broad
-strategic choice.
+Combines strategic-direction coverage, action distribution, viable alternatives, and distinct viable
+directions per decision. The report presents both concrete choice depth and cross-direction breadth.
+Several materially different policies, properties, projects, or counterparties therefore remain
+visible even during a focused strategic window, while genuinely one-option cycles still produce a
+warning.
 
 ### Interconnection
 
@@ -148,17 +152,22 @@ The harness emits explicit findings for conditions such as:
 - A viable command is never selected by any configured persona.
 - A command executes without an observed domain consequence.
 - One action dominates the decision distribution.
+- One substantive command repeats for a long consecutive streak, indicating routine micromanagement.
 - A domain remains static, or changes autonomously without attributable player influence.
 - Entire player portfolios frequently end distressed, insolvent, or non-operational.
 - Any campaign falls below 10% food satisfaction, food access collapses broadly, contracts breach more often than they complete, credit defaults outnumber
-  repayments, or labor disputes dominate active employment.
+  repayments, or labor disputes dominate the player workforce.
 - Notification volume becomes unusable or crisis responses crowd out strategic play.
 - Public works accumulate faster than the civic treasury can complete them.
-- Raw choice counts hide a low number of distinct viable command families.
+- Actionable cycles offer fewer than two viable alternatives on average.
+- Concrete alternatives are healthy but concentrate within one strategic direction; this is retained
+  as informational evidence rather than misclassified as missing agency.
 - Experience scores vary sharply by background, persona, or seed.
 - Distinct personas converge on the same most-used action families.
+- Commercial standing, office campaigning, officeholding, and city-shaping action occur at nearly identical times across starts and personas.
 - Civic outcomes converge on the same law mix, sponsored works, offices, and governance despite different strategies.
 - Commercial actions do not create relationship or institutional leverage, or institutional actions do not reshape material conditions.
+- Labor changes throughout the city but never become an issue inside a player-owned workplace.
 - Intelligence changes only through autonomous reports rather than player-directed commercial activity.
 - Long campaigns do not exercise succession, or funded businesses suffer long-run condition collapse.
 
@@ -176,6 +185,8 @@ Each campaign retains a bounded deterministic trace. It includes:
 - Simulation day.
 - Candidate and viable-choice counts.
 - Distinct viable command families.
+- The top ranked command-family candidates with scores and descriptions.
+- Core-fantasy milestone timing for the campaign.
 - Selected command and canonical command outcome.
 - Representative rejection categories.
 - Immediate, persistent, delayed, and ambient changed domains.

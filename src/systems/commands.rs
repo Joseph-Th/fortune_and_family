@@ -123,6 +123,9 @@ pub(crate) const LAW_LEGITIMACY_COST: u16 = 250;
 pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
+pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_800;
+pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 180;
+pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum CommandError {
@@ -155,6 +158,8 @@ pub enum CommandError {
     UnchangedLaw { kind: LawKind, value: i64 },
     #[error("law {kind:?} is not implemented by the current simulation")]
     UnsupportedLaw { kind: LawKind },
+    #[error("the player dynasty must hold political office before sponsoring a law")]
+    LawSponsorshipRequiresOffice,
     #[error("the player dynasty cannot sponsor another law before day {next_enactment_day}")]
     LawCooldown { next_enactment_day: i64 },
     #[error("district {district_id} does not exist")]
@@ -173,6 +178,8 @@ pub enum CommandError {
     },
     #[error("public-work budget must be positive")]
     InvalidPublicWorkBudget,
+    #[error("the player dynasty must hold political office before sponsoring a public work")]
+    PublicWorkSponsorshipRequiresOffice,
     #[error("an unfinished {kind:?} public work already exists in district {district_id}")]
     DuplicateActivePublicWork {
         district_id: DistrictId,
@@ -201,6 +208,18 @@ pub enum CommandError {
     UnchangedHouseGovernance { governance: HouseGovernance },
     #[error("house governance cannot change again before day {next_change_day}")]
     HouseGovernanceCooldown { next_change_day: i64 },
+    #[error(
+        "player reputation is too weak for an office campaign: quality {quality}, reliability {reliability}, required {required}"
+    )]
+    InsufficientOfficeReputation {
+        quality: u16,
+        reliability: u16,
+        required: u16,
+    },
+    #[error(
+        "the player dynasty cannot launch another office campaign before day {next_nomination_day}"
+    )]
+    OfficeNominationCooldown { next_nomination_day: i64 },
     #[error("institution {institution_id} does not exist")]
     MissingInstitution { institution_id: InstitutionId },
     #[error("character {character_id} is already a member of institution {institution_id}")]
@@ -372,6 +391,14 @@ fn apply_cash_transfer(
     ensure_owned_business(state, from_business_id)?;
     ensure_owned_business(state, to_business_id)?;
     transfer_business_cash(state, from_business_id, to_business_id, amount)?;
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Finance,
+        format!("Portfolio cash moved to business {to_business_id}"),
+        format!(
+            "The dynasty transferred {amount} from business {from_business_id} to business {to_business_id}."
+        ),
+    );
     Ok(CommandOutcome {
         summary: format!(
             "Transferred {amount} from business {from_business_id} to business {to_business_id}."
@@ -388,21 +415,28 @@ fn apply_business_investment(
     if amount <= Money::ZERO {
         return Err(CommandError::InvalidBusinessInvestment);
     }
-    if state
+    let business = state
         .businesses
         .get(business_id)
-        .is_some_and(|business| business.status() == BusinessStatus::Closed)
-    {
+        .expect("owned business must exist");
+    if business.status() == BusinessStatus::Closed {
         return Err(CommandError::Strategic(StrategicError::BusinessInactive {
             business_id,
         }));
     }
+    let resulting_cash = business.cash().checked_add(amount).ok_or_else(|| {
+        CommandError::Simulation(super::SimulationError::BusinessCashOverflow {
+            business_id,
+            current: business.cash(),
+            incoming: amount,
+        })
+    })?;
     spend_player_treasury(state, amount)?;
     let business = state
         .businesses
         .get_mut(business_id)
         .expect("validated business must exist");
-    business.finance.cash = business.finance.cash.saturating_add(amount);
+    business.finance.cash = resulting_cash;
     business.finance.version = business.finance.version.saturating_add(1);
     let rehabilitation = u16::try_from((amount.copper() / 2).clamp(0, 3_000))
         .expect("bounded rehabilitation must fit u16");
@@ -520,6 +554,14 @@ fn apply_business_policy(
             minimum_cash_reserve.copper()
         ),
     });
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Finance,
+        format!("Business {business_id} operating policy updated"),
+        format!(
+            "The enterprise now targets {target_input_days} input days, {target_output_days} output days, a {minimum_cash_reserve} cash reserve, {maintenance_basis_points} maintenance basis points, and {quality_target_basis_points} quality basis points."
+        ),
+    );
     Ok(CommandOutcome {
         summary: format!("Updated operating policy for business {business_id}."),
     })
@@ -613,6 +655,9 @@ fn apply_law(
             required: LAW_LEGITIMACY_REQUIREMENT,
         });
     }
+    if !has_player_office(state) {
+        return Err(CommandError::LawSponsorshipRequiresOffice);
+    }
     let cost = Money::from_copper(2_000);
     spend_player_treasury(state, cost)?;
     state
@@ -704,6 +749,9 @@ fn apply_public_work(
             return Err(CommandError::PublicWorkCooldown { next_start_day });
         }
     }
+    if !has_player_office(state) {
+        return Err(CommandError::PublicWorkSponsorshipRequiresOffice);
+    }
     let contribution = Money::from_copper((budget.copper() / 10).max(1)).min(budget);
     spend_player_treasury(state, contribution)?;
     let progress_basis_points =
@@ -743,6 +791,17 @@ fn apply_public_work(
     );
     Ok(CommandOutcome {
         summary: format!("Started public work {id}."),
+    })
+}
+
+fn has_player_office(state: &AppState) -> bool {
+    state.institutions.values().any(|institution| {
+        institution.office_holder_id.is_some_and(|character_id| {
+            state
+                .characters
+                .get(character_id)
+                .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+        })
     })
 }
 
@@ -846,7 +905,7 @@ fn apply_house_governance(
         })
         .map(AuditRecord::day)
     {
-        let next_change_day = last_change_day.saturating_add(360);
+        let next_change_day = last_change_day.saturating_add(HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS);
         if state.clock.day() < next_change_day {
             return Err(CommandError::HouseGovernanceCooldown { next_change_day });
         }
@@ -911,6 +970,34 @@ fn apply_office_nomination(
             institution_id,
             character_id,
         });
+    }
+    let player = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    let quality = player.resources.reputation_quality_basis_points;
+    let reliability = player.resources.reputation_reliability_basis_points;
+    if quality.max(reliability) < OFFICE_NOMINATION_REPUTATION_REQUIREMENT {
+        return Err(CommandError::InsufficientOfficeReputation {
+            quality,
+            reliability,
+            required: OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+        });
+    }
+    if let Some(last_nomination_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::OfficeNomination)
+        .map(AuditRecord::day)
+    {
+        let next_nomination_day =
+            last_nomination_day.saturating_add(OFFICE_NOMINATION_INTERVAL_DAYS);
+        if state.clock.day() < next_nomination_day {
+            return Err(CommandError::OfficeNominationCooldown {
+                next_nomination_day,
+            });
+        }
     }
     let campaign_cost = Money::from_copper(300);
     spend_player_treasury(state, campaign_cost)?;
@@ -1016,11 +1103,26 @@ fn apply_crisis_response(
                 });
             }
             let gain = Money::from_copper(i64::from(severity));
+            let current_treasury = state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury();
+            let resulting_treasury =
+                current_treasury
+                    .checked_add(gain)
+                    .ok_or(CommandError::Strategic(
+                        StrategicError::DynastyTreasuryOverflow {
+                            dynasty_id: state.player_dynasty_id,
+                            current: current_treasury,
+                            incoming: gain,
+                        },
+                    ))?;
             let dynasty = state
                 .dynasties
                 .get_mut(&state.player_dynasty_id)
                 .expect("player dynasty must exist");
-            dynasty.resources.treasury = dynasty.resources.treasury.saturating_add(gain);
+            dynasty.resources.treasury = resulting_treasury;
             let crisis = state
                 .crises
                 .get_mut(&crisis_id)

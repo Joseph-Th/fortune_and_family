@@ -76,6 +76,40 @@ mod integration {
     use super::*;
 
     #[test]
+    fn player_bootstrap_contracts_are_provisional_while_city_contracts_stabilize_trade() {
+        let state = make_test_campaign();
+        let mut player_involved = 0;
+        let mut ambient = 0;
+
+        for contract in state
+            .contracts
+            .values()
+            .filter(|contract| contract.status == ContractStatus::Active)
+        {
+            let buyer_owner = state
+                .businesses
+                .get(contract.buyer_business_id)
+                .expect("contract buyer must exist")
+                .owner_dynasty_id();
+            let seller_owner = state
+                .businesses
+                .get(contract.seller_business_id)
+                .expect("contract seller must exist")
+                .owner_dynasty_id();
+            if buyer_owner == state.player_dynasty_id || seller_owner == state.player_dynasty_id {
+                player_involved += 1;
+                assert_eq!(contract.end_day, 26 * 7);
+            } else {
+                ambient += 1;
+                assert_eq!(contract.end_day, 52 * 7);
+            }
+        }
+
+        assert!(player_involved > 0);
+        assert!(ambient > 0);
+    }
+
+    #[test]
     fn bootstrap_records_enter_the_weekly_simulation() {
         let registry = test_registry();
         let mut state = make_test_campaign();
@@ -890,6 +924,8 @@ mod reputation {
             .filter(|business| business.owner_dynasty_id() == dynasty_id)
         {
             business.operations.quality_basis_points = 9_000;
+            business.finance.lifetime_revenue = Money::from_copper(10_000);
+            business.finance.lifetime_costs = Money::from_copper(8_000);
         }
         state
             .dynasties
@@ -909,6 +945,45 @@ mod reputation {
                 .reputation_quality_basis_points,
             5_050,
             "quality reputation must move gradually toward current portfolio quality"
+        );
+    }
+
+    #[test]
+    fn unproven_or_unprofitable_quality_builds_reputation_more_slowly() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .owner_dynasty_id();
+        for business in state
+            .businesses
+            .iter_mut()
+            .filter(|business| business.owner_dynasty_id() == dynasty_id)
+        {
+            business.operations.quality_basis_points = 9_000;
+            business.finance.lifetime_revenue = Money::from_copper(8_000);
+            business.finance.lifetime_costs = Money::from_copper(10_000);
+        }
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("business owner must exist")
+            .resources
+            .reputation_quality_basis_points = 5_000;
+
+        update_quality_reputations(&mut state);
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("business owner must exist")
+                .resources
+                .reputation_quality_basis_points,
+            5_025,
+            "visible quality must build standing more slowly until trade proves commercially sustainable"
         );
     }
 }
@@ -1015,6 +1090,61 @@ mod family_councils {
 
 mod employment {
     use super::*;
+
+    #[test]
+    fn sustained_high_utilization_with_low_maintenance_creates_labor_pressure() {
+        let state = make_test_campaign();
+        let mut agreement = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment")
+            .clone();
+        let environment = LaborEnvironment {
+            utilization: 10_000,
+            business_condition: 8_000,
+            maintenance: 800,
+        };
+        let mut became_disputed = false;
+
+        for _ in 0..120 {
+            let (_, disputed) =
+                update_fully_paid_employment(&mut agreement, EmploymentStatus::Active, environment);
+            if disputed {
+                became_disputed = true;
+                break;
+            }
+        }
+
+        assert!(became_disputed);
+        assert_eq!(agreement.status, EmploymentStatus::Disputed);
+        assert!(agreement.conditions_basis_points < 3_000);
+    }
+
+    #[test]
+    fn maintained_workplace_does_not_generate_artificial_disputes() {
+        let state = make_test_campaign();
+        let mut agreement = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment")
+            .clone();
+        let environment = LaborEnvironment {
+            utilization: 10_000,
+            business_condition: 8_000,
+            maintenance: 1_200,
+        };
+
+        for _ in 0..120 {
+            let (_, disputed) =
+                update_fully_paid_employment(&mut agreement, EmploymentStatus::Active, environment);
+            assert!(!disputed);
+        }
+
+        assert_eq!(agreement.status, EmploymentStatus::Active);
+        assert!(agreement.conditions_basis_points >= 6_800);
+    }
 
     #[test]
     fn zero_payment_does_not_invalidate_business_finance_version() {
@@ -1344,6 +1474,35 @@ mod loans {
             &before_commit,
             &state,
             "a failed stale-token commit must not partially mutate state",
+        );
+    }
+
+    #[test]
+    fn rejects_borrower_treasury_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        let terms = make_test_loan_terms(&state);
+        state
+            .dynasties
+            .get_mut(&terms.borrower_dynasty_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = issue_loan(&mut state, terms.clone());
+
+        assert_eq!(
+            result,
+            Err(StrategicError::DynastyTreasuryOverflow {
+                dynasty_id: terms.borrower_dynasty_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: terms.principal,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing loan issuance must not debit the lender or create records",
         );
     }
 
@@ -2191,6 +2350,75 @@ mod ai {
                 && objective.kind == ObjectiveKind::AcquireProperty
                 && objective.created_day == state.clock.day()
         }));
+    }
+
+    #[test]
+    fn defaulted_occupied_collateral_becomes_a_tenancy() {
+        let mut state = make_test_campaign();
+        let property = state
+            .properties
+            .values()
+            .find(|property| {
+                property.occupant_business_id.is_some()
+                    && property.owner_dynasty_id.is_some()
+                    && property.tenant_dynasty_id.is_none()
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("campaign must contain owner-occupied unpledged business premises");
+        let property_id = property.id;
+        let borrower_id = property
+            .owner_dynasty_id
+            .expect("occupied property must have an owner");
+        let lender_id = state
+            .dynasties
+            .values()
+            .filter(|dynasty| dynasty.id() != borrower_id)
+            .filter(|dynasty| dynasty.treasury() >= Money::from_copper(1))
+            .find(|dynasty| {
+                !state.loans.values().any(|loan| {
+                    loan.lender_dynasty_id == dynasty.id()
+                        && loan.borrower_dynasty_id == borrower_id
+                        && loan.status != LoanStatus::Repaid
+                })
+            })
+            .map(crate::core::Dynasty::id)
+            .expect("campaign must contain an eligible lender");
+        let loan_id = issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: borrower_id,
+                principal: Money::from_copper(1),
+                weekly_payment: Money::from_copper(1),
+                interest_basis_points: 0,
+                collateral_property_id: Some(property_id),
+            },
+        )
+        .expect("occupied property must be accepted as collateral");
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+        loan.missed_payments = 2;
+        loan.next_due_day = state.clock.day();
+
+        settle_loans(&mut state);
+
+        assert_eq!(
+            state.loans.get(&loan_id).expect("loan must exist").status,
+            LoanStatus::Defaulted
+        );
+        let property = state
+            .properties
+            .get(&property_id)
+            .expect("collateral property must remain");
+        assert_eq!(property.owner_dynasty_id, Some(lender_id));
+        assert_eq!(property.tenant_dynasty_id, Some(borrower_id));
+        assert_eq!(property.collateral_loan_id, None);
+        validate_invariants(test_registry(), &state);
     }
 
     #[test]

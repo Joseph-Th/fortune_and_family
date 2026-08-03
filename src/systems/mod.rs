@@ -37,6 +37,25 @@ pub(crate) fn available_household_workers(
     members.saturating_sub(assigned)
 }
 
+pub(crate) const fn is_employment_status_compatible(
+    business_status: crate::core::BusinessStatus,
+    employment_status: crate::core::EmploymentStatus,
+) -> bool {
+    match employment_status {
+        crate::core::EmploymentStatus::Active | crate::core::EmploymentStatus::Disputed => {
+            matches!(
+                business_status,
+                crate::core::BusinessStatus::Active | crate::core::BusinessStatus::Distressed
+            )
+        }
+        crate::core::EmploymentStatus::Suspended => matches!(
+            business_status,
+            crate::core::BusinessStatus::Insolvent | crate::core::BusinessStatus::Closed
+        ),
+        crate::core::EmploymentStatus::Ended => true,
+    }
+}
+
 pub(crate) fn synchronize_employment_for_business_status(
     state: &mut crate::core::AppState,
     business_id: crate::ids::BusinessId,
@@ -68,9 +87,11 @@ pub(crate) fn synchronize_employment_for_business_status(
 
 pub use bootstrap::{NewGameError, build_new_game};
 pub(crate) use commands::{
-    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_INTERVAL_DAYS,
-    MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS,
+    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
+    LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS,
+    LEGAL_CASE_FILING_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+    OFFICE_NOMINATION_INTERVAL_DAYS, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS,
 };
 pub use commands::{
     CommandError, CommandOutcome, CrisisResponse, LaborResponse, PlayerCommand,

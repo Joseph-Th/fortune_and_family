@@ -1,7 +1,7 @@
 //! Behavioral coverage for the deterministic gameplay harness.
 
 use super::*;
-use crate::core::{Crisis, CrisisKind, OutboxKind, OutboxMessage};
+use crate::core::{AuditKind, AuditRecord, Crisis, CrisisKind, OutboxKind, OutboxMessage};
 use crate::ids::OutboxMessageId;
 use crate::registry::build_rivergate_registry;
 use crate::systems::issue_loan;
@@ -113,77 +113,27 @@ fn plays_through_real_commands_and_reports_system_reactions() {
 #[test]
 fn candidate_builder_can_reach_every_command_family() {
     let registry = build_rivergate_registry();
-    let mut state = build_new_game(
-        &registry,
-        NewGameConfig {
-            seed: 7,
-            dynasty_name: "Harness".to_owned(),
-            founder_name: "Harness Founder".to_owned(),
-            background: StartingBackground::Baker,
-        },
-    )
-    .expect("campaign must build");
-    add_second_player_business(&mut state);
-    make_nonplayer_business_acquirable(&mut state);
-    state
-        .dynasties
-        .get_mut(&state.player_dynasty_id)
-        .expect("player dynasty must exist")
-        .resources
-        .treasury = Money::from_copper(100_000);
-    for business_id in state
-        .businesses
-        .ids_for_owner(state.player_dynasty_id)
-        .into_iter()
-        .flatten()
-        .copied()
-        .collect::<Vec<_>>()
-    {
-        let business = state
-            .businesses
-            .get_mut(business_id)
-            .expect("player business must exist");
-        business.operations.status = BusinessStatus::Active;
-        business.operations.condition_basis_points = 8_000;
-        business.finance.cash = Money::from_copper(20_000);
-    }
-    let mut kinds: BTreeSet<_> = ranked_candidates(
-        &registry,
-        &state,
-        GameplayPersona::Opportunist,
-        &CampaignAccumulator::new(),
-    )
-    .into_iter()
-    .map(|candidate| candidate.kind)
-    .collect();
+    let mut state = make_test_candidate_coverage_state(&registry);
+    let mut kinds = candidate_kinds_for_test(&registry, &state);
+
+    let mut directional_state = state.clone();
+    make_supply_security_and_borrowing_available(&mut directional_state);
+    kinds.extend(candidate_kinds_for_test(&registry, &directional_state));
+
+    make_player_business_distressed(&mut state);
+    kinds.extend(candidate_kinds_for_test(&registry, &state));
+    restore_distressed_business_cash_for_test(&mut state);
     add_active_crisis(&mut state);
     make_player_labor_disputed(&mut state);
     make_player_contract_breached(&mut state);
     for _ in 0..LEGAL_CASE_FILING_INTERVAL_DAYS {
         state.clock.advance_one_day();
     }
+    kinds.extend(candidate_kinds_for_test(&registry, &state));
 
-    kinds.extend(
-        ranked_candidates(
-            &registry,
-            &state,
-            GameplayPersona::Opportunist,
-            &CampaignAccumulator::new(),
-        )
-        .into_iter()
-        .map(|candidate| candidate.kind),
-    );
+    remove_internal_transfer_surplus_for_test(&mut state);
     make_player_business_distressed(&mut state);
-    kinds.extend(
-        ranked_candidates(
-            &registry,
-            &state,
-            GameplayPersona::Opportunist,
-            &CampaignAccumulator::new(),
-        )
-        .into_iter()
-        .map(|candidate| candidate.kind),
-    );
+    kinds.extend(candidate_kinds_for_test(&registry, &state));
 
     assert_eq!(
         kinds,
@@ -307,7 +257,87 @@ fn policy_candidates_offer_one_contextual_strategy_instead_of_policy_cycling() {
 }
 
 #[test]
+fn healthy_businesses_offer_bounded_annual_modernization() {
+    let mut state = make_test_campaign();
+    let business_id = *state
+        .businesses
+        .ids_for_owner(state.player_dynasty_id)
+        .and_then(|ids| ids.iter().next())
+        .expect("player dynasty must own a business");
+    state
+        .dynasties
+        .get_mut(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .resources
+        .treasury = Money::from_copper(100_000);
+    let mut candidates = Vec::new();
+
+    generate_planned_business_investment(
+        &state,
+        GameplayPersona::Entrepreneur,
+        state
+            .businesses
+            .get(business_id)
+            .expect("player business must exist"),
+        &mut candidates,
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert!(matches!(
+        candidates[0].command,
+        PlayerCommand::InvestInBusiness { amount, .. }
+            if amount >= Money::from_copper(1_000)
+                && amount <= AGENT_PLANNED_CAPITALIZATION_MAX
+    ));
+
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::BusinessCapitalization,
+        subject: format!("business:{business_id}"),
+        detail: "amount=6000;rehabilitation_basis_points=3000".to_owned(),
+    });
+    candidates.clear();
+    generate_planned_business_investment(
+        &state,
+        GameplayPersona::Entrepreneur,
+        state
+            .businesses
+            .get(business_id)
+            .expect("player business must exist"),
+        &mut candidates,
+    );
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn supply_renewal_scales_after_the_business_proves_itself() {
+    let mut state = make_test_campaign();
+    let business_id = *state
+        .businesses
+        .ids_for_owner(state.player_dynasty_id)
+        .and_then(|ids| ids.iter().next())
+        .expect("player dynasty must own a business");
+    let business = state
+        .businesses
+        .get_mut(business_id)
+        .expect("player business must exist");
+    business.finance.lifetime_revenue = Money::from_copper(8_000);
+    business.finance.lifetime_costs = Money::from_copper(10_000);
+
+    assert_eq!(secure_supply_batches(business), 1);
+
+    business.finance.lifetime_revenue = Money::from_copper(12_000);
+
+    assert_eq!(
+        secure_supply_batches(business),
+        STANDARD_CONTRACT_BATCHES_PER_WEEK
+    );
+}
+
+#[test]
 fn cash_rebalancing_requires_a_real_liquidity_shortfall() {
+    let registry = build_rivergate_registry();
     let mut state = make_test_campaign();
     add_second_player_business(&mut state);
     let business_ids: Vec<_> = state
@@ -331,7 +361,7 @@ fn cash_rebalancing_requires_a_real_liquidity_shortfall() {
         .filter_map(|business_id| state.businesses.get(*business_id))
         .collect();
     let mut candidates = Vec::new();
-    generate_cash_rebalance_candidate(&businesses, &mut candidates);
+    generate_cash_rebalance_candidate(&registry, &state, &businesses, &mut candidates);
     assert!(candidates.is_empty());
 
     let target_id = business_ids[1];
@@ -345,14 +375,88 @@ fn cash_rebalancing_requires_a_real_liquidity_shortfall() {
         .iter()
         .filter_map(|business_id| state.businesses.get(*business_id))
         .collect();
-    generate_cash_rebalance_candidate(&businesses, &mut candidates);
+    generate_cash_rebalance_candidate(&registry, &state, &businesses, &mut candidates);
 
     assert_eq!(candidates.len(), 1);
-    assert!(matches!(
-        candidates[0].command,
-        PlayerCommand::TransferBusinessCash { amount, .. }
-            if amount == Money::from_copper(2_500)
-    ));
+    let PlayerCommand::TransferBusinessCash {
+        from_business_id,
+        to_business_id,
+        amount,
+    } = candidates[0].command
+    else {
+        panic!("liquidity shortfall must produce a cash-transfer candidate");
+    };
+    let source = state
+        .businesses
+        .get(from_business_id)
+        .expect("candidate source must exist");
+    let target = state
+        .businesses
+        .get(to_business_id)
+        .expect("candidate target must exist");
+    let source_surplus = source
+        .cash()
+        .saturating_sub(business_cash_target(&registry, &state, source));
+    let buffered_deficit = business_cash_target(&registry, &state, target)
+        .saturating_add(AGENT_CASH_REBALANCE_BUFFER)
+        .saturating_sub(target.cash());
+    assert_eq!(amount, source_surplus.min(buffered_deficit));
+    assert!(amount >= AGENT_CASH_REBALANCE_TRIGGER);
+}
+
+#[test]
+fn cash_rebalancing_waits_between_portfolio_interventions() {
+    let registry = build_rivergate_registry();
+    let mut state = make_test_campaign();
+    add_second_player_business(&mut state);
+    let business_ids: Vec<_> = state
+        .businesses
+        .ids_for_owner(state.player_dynasty_id)
+        .expect("player businesses must exist")
+        .iter()
+        .copied()
+        .collect();
+    for business_id in &business_ids {
+        let business = state
+            .businesses
+            .get_mut(*business_id)
+            .expect("player business must exist");
+        business.finance.cash = Money::from_copper(20_000);
+        business.policy.minimum_cash_reserve = Money::from_copper(500);
+        business.operations.status = BusinessStatus::Active;
+    }
+    let target = state
+        .businesses
+        .get_mut(business_ids[1])
+        .expect("target business must exist");
+    target.finance.cash = Money::ZERO;
+    target.operations.status = BusinessStatus::Distressed;
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::CashTransfer,
+        subject: format!("business:{}->business:{}", business_ids[0], business_ids[1]),
+        detail: "amount=1000".to_owned(),
+    });
+    let businesses: Vec<_> = business_ids
+        .iter()
+        .filter_map(|business_id| state.businesses.get(*business_id))
+        .collect();
+    let mut candidates = Vec::new();
+
+    generate_cash_rebalance_candidate(&registry, &state, &businesses, &mut candidates);
+
+    assert!(candidates.is_empty());
+
+    for _ in 0..AGENT_CASH_REBALANCE_INTERVAL_DAYS {
+        state.clock.advance_one_day();
+    }
+    let businesses: Vec<_> = business_ids
+        .iter()
+        .filter_map(|business_id| state.businesses.get(*business_id))
+        .collect();
+    generate_cash_rebalance_candidate(&registry, &state, &businesses, &mut candidates);
+
+    assert_eq!(candidates.len(), 1);
 }
 
 #[test]
@@ -841,6 +945,199 @@ fn trajectory_food_minimum_excludes_the_bootstrap_baseline() {
 }
 
 #[test]
+fn substantive_command_streaks_ignore_notification_housekeeping() {
+    let mut accumulator = CampaignAccumulator::new();
+    for day in (0..56).step_by(7) {
+        accumulator.record_executed_command(GameplayCommandKind::TransferBusinessCash, day);
+    }
+    accumulator.record_executed_command(GameplayCommandKind::AcknowledgeNotification, 56);
+    accumulator.record_executed_command(GameplayCommandKind::TransferBusinessCash, 63);
+
+    assert_eq!(accumulator.longest_substantive_command_streak, 9);
+    assert_eq!(
+        accumulator.longest_substantive_streak_command,
+        Some(GameplayCommandKind::TransferBusinessCash)
+    );
+
+    accumulator.record_executed_command(GameplayCommandKind::ExtendCredit, 70);
+    assert_eq!(accumulator.current_substantive_command_streak, 1);
+}
+
+#[test]
+fn substantive_command_streaks_reset_after_a_strategic_pause() {
+    let mut accumulator = CampaignAccumulator::new();
+    accumulator.record_executed_command(GameplayCommandKind::TransferBusinessCash, 0);
+    accumulator.record_executed_command(GameplayCommandKind::TransferBusinessCash, 7);
+    accumulator.record_executed_command(
+        GameplayCommandKind::TransferBusinessCash,
+        7 + SUBSTANTIVE_STREAK_MAX_GAP_DAYS + 1,
+    );
+
+    assert_eq!(accumulator.longest_substantive_command_streak, 2);
+    assert_eq!(accumulator.current_substantive_command_streak, 1);
+}
+
+#[test]
+fn fantasy_arc_records_commercial_political_and_dynastic_milestones() {
+    let state = make_test_campaign();
+    let mut snapshot = GameplaySnapshot::capture(&state);
+    let mut accumulator = CampaignAccumulator::new();
+    accumulator.observe_initial_snapshot(&snapshot);
+
+    snapshot.day = 70;
+    snapshot.quality_reputation = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+    accumulator.observe_snapshot(&snapshot);
+    accumulator.record_executed_command(GameplayCommandKind::NominateForOffice, 77);
+
+    snapshot.day = 140;
+    snapshot.offices_held = 1;
+    accumulator.observe_snapshot(&snapshot);
+    accumulator.record_executed_command(GameplayCommandKind::StartPublicWork, 154);
+
+    snapshot.day = 900;
+    snapshot.player_disputed_employment = 1;
+    accumulator.observe_snapshot(&snapshot);
+
+    snapshot.day = 5_200;
+    snapshot.generation = snapshot.generation.saturating_add(1);
+    accumulator.observe_snapshot(&snapshot);
+
+    assert_eq!(
+        accumulator.fantasy_arc,
+        GameplayFantasyArc {
+            first_commercial_standing_day: Some(70),
+            first_office_campaign_day: Some(77),
+            first_office_day: Some(140),
+            first_city_shaping_action_day: Some(154),
+            first_player_labor_dispute_day: Some(900),
+            first_succession_day: Some(5_200),
+        }
+    );
+}
+
+#[test]
+fn findings_surface_political_power_that_precedes_commercial_standing() {
+    let registry = build_rivergate_registry();
+    let mut report = run_gameplay_harness(&registry, focused_config(360))
+        .expect("gameplay harness must complete");
+    let campaign = report
+        .campaigns
+        .first_mut()
+        .expect("focused configuration must produce one campaign");
+    campaign.fantasy_arc.first_commercial_standing_day = Some(90);
+    campaign.fantasy_arc.first_office_campaign_day = Some(30);
+
+    let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.title == "Political ascent precedes commercial standing")
+    );
+}
+
+#[test]
+fn findings_surface_synchronized_core_fantasy_timing() {
+    let registry = build_rivergate_registry();
+    let mut report = run_gameplay_harness(&registry, focused_config(360))
+        .expect("gameplay harness must complete");
+    let baseline = report
+        .campaigns
+        .first()
+        .expect("focused configuration must produce one campaign")
+        .clone();
+    report.campaigns = [
+        GameplayPersona::Steward,
+        GameplayPersona::Entrepreneur,
+        GameplayPersona::PowerBroker,
+        GameplayPersona::Opportunist,
+    ]
+    .into_iter()
+    .map(|persona| {
+        let mut campaign = baseline.clone();
+        campaign.persona = persona;
+        campaign.fantasy_arc.first_commercial_standing_day = Some(70);
+        campaign.fantasy_arc.first_office_campaign_day = Some(70);
+        campaign.fantasy_arc.first_office_day = Some(154);
+        campaign.fantasy_arc.first_city_shaping_action_day = Some(154);
+        campaign
+    })
+    .collect();
+
+    let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.title == "Core fantasy timing is highly synchronized")
+    );
+}
+
+#[test]
+fn findings_surface_long_repetitive_command_streaks() {
+    let registry = build_rivergate_registry();
+    let mut report = run_gameplay_harness(&registry, focused_config(30))
+        .expect("gameplay harness must complete");
+    let campaign = report
+        .campaigns
+        .first_mut()
+        .expect("focused configuration must produce one campaign");
+    campaign.longest_substantive_command_streak = 8;
+    campaign.longest_substantive_streak_command = Some(GameplayCommandKind::TransferBusinessCash);
+
+    let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+    assert!(findings.iter().any(|finding| {
+        finding.title == "Repeated command streak resembles routine micromanagement"
+    }));
+}
+
+#[test]
+fn choice_depth_within_a_focused_family_is_informational() {
+    let registry = build_rivergate_registry();
+    let mut report = run_gameplay_harness(&registry, focused_config(30))
+        .expect("gameplay harness must complete");
+    report.aggregate.decision_cycles = 10;
+    report.aggregate.quiet_cycles = 0;
+    report.aggregate.viable_choices = 30;
+    report.aggregate.viable_command_kinds = 10;
+    report.aggregate.cycles_with_multiple_viable_command_kinds = 0;
+
+    let findings = derive_findings(&report.aggregate, &report.campaigns);
+    let finding = findings
+        .iter()
+        .find(|finding| {
+            finding.title == "Strategic alternatives concentrate within command families"
+        })
+        .expect("focused but deep choices must remain visible");
+
+    assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+    assert!(!findings.iter().any(|finding| {
+        finding.title == "Actionable cycles offer too few meaningful alternatives"
+    }));
+}
+
+#[test]
+fn genuinely_sparse_actionable_cycles_remain_a_warning() {
+    let registry = build_rivergate_registry();
+    let mut report = run_gameplay_harness(&registry, focused_config(30))
+        .expect("gameplay harness must complete");
+    report.aggregate.decision_cycles = 10;
+    report.aggregate.quiet_cycles = 0;
+    report.aggregate.viable_choices = 10;
+    report.aggregate.viable_command_kinds = 10;
+    report.aggregate.cycles_with_multiple_viable_command_kinds = 0;
+
+    let findings = derive_findings(&report.aggregate, &report.campaigns);
+    let finding = findings
+        .iter()
+        .find(|finding| finding.title == "Actionable cycles offer too few meaningful alternatives")
+        .expect("one-option actionable cycles must be warned about");
+
+    assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+}
+
+#[test]
 fn findings_surface_a_single_complete_food_collapse() {
     let registry = build_rivergate_registry();
     let mut report = run_gameplay_harness(&registry, focused_config(30))
@@ -1061,6 +1358,118 @@ fn findings_surface_complete_player_capture_of_all_offices() {
             .iter()
             .any(|finding| { finding.title == "Player captures every political office" })
     );
+}
+
+fn make_test_candidate_coverage_state(registry: &Registry) -> AppState {
+    let mut state = build_new_game(
+        registry,
+        NewGameConfig {
+            seed: 7,
+            dynasty_name: "Harness".to_owned(),
+            founder_name: "Harness Founder".to_owned(),
+            background: StartingBackground::Baker,
+        },
+    )
+    .expect("campaign must build");
+    add_second_player_business(&mut state);
+    make_nonplayer_business_acquirable(&mut state);
+    let player = state
+        .dynasties
+        .get_mut(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    player.resources.treasury = Money::from_copper(100_000);
+    player.resources.reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+    grant_player_office_for_test(&mut state);
+    for business_id in player_business_ids_for_test(&state) {
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("player business must exist");
+        business.operations.status = BusinessStatus::Active;
+        business.operations.condition_basis_points = 8_000;
+        business.finance.cash = Money::from_copper(20_000);
+    }
+    state
+}
+
+fn candidate_kinds_for_test(
+    registry: &Registry,
+    state: &AppState,
+) -> BTreeSet<GameplayCommandKind> {
+    ranked_candidates(
+        registry,
+        state,
+        GameplayPersona::Opportunist,
+        &CampaignAccumulator::new(),
+    )
+    .into_iter()
+    .map(|candidate| candidate.kind)
+    .collect()
+}
+
+fn player_business_ids_for_test(state: &AppState) -> Vec<BusinessId> {
+    state
+        .businesses
+        .ids_for_owner(state.player_dynasty_id)
+        .into_iter()
+        .flatten()
+        .copied()
+        .collect()
+}
+
+fn restore_distressed_business_cash_for_test(state: &mut AppState) {
+    let business_id = *player_business_ids_for_test(state)
+        .first()
+        .expect("player business must exist");
+    state
+        .businesses
+        .get_mut(business_id)
+        .expect("player business must exist")
+        .finance
+        .cash = Money::from_copper(1_000);
+}
+
+fn remove_internal_transfer_surplus_for_test(state: &mut AppState) {
+    let distressed_id = *player_business_ids_for_test(state)
+        .first()
+        .expect("player business must exist");
+    for business_id in player_business_ids_for_test(state)
+        .into_iter()
+        .filter(|business_id| *business_id != distressed_id)
+    {
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("player business must exist");
+        business.finance.cash = business.policy.minimum_cash_reserve;
+    }
+}
+
+fn grant_player_office_for_test(state: &mut AppState) {
+    let holder_id = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .head_id();
+    state
+        .institutions
+        .values_mut()
+        .find(|institution| institution.office_holder_id.is_none())
+        .expect("campaign must contain a vacant office")
+        .office_holder_id = Some(holder_id);
+}
+
+fn make_supply_security_and_borrowing_available(state: &mut AppState) {
+    let player_businesses: BTreeSet<_> = player_business_ids_for_test(state).into_iter().collect();
+    state
+        .contracts
+        .retain(|_, contract| !player_businesses.contains(&contract.buyer_business_id));
+    state
+        .dynasties
+        .get_mut(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .resources
+        .treasury = Money::ZERO;
 }
 
 fn add_second_player_business(state: &mut AppState) {

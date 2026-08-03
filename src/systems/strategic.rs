@@ -63,6 +63,29 @@ pub enum StrategicError {
         available: Money,
         required: Money,
     },
+    #[error(
+        "dynasty {dynasty_id} cannot receive {incoming}; current treasury {current} would exceed the supported money range"
+    )]
+    DynastyTreasuryOverflow {
+        dynasty_id: DynastyId,
+        current: Money,
+        incoming: Money,
+    },
+    #[error(
+        "business {business_id} cannot receive {incoming}; current cash {current} would exceed the supported money range"
+    )]
+    BusinessCashOverflow {
+        business_id: BusinessId,
+        current: Money,
+        incoming: Money,
+    },
+    #[error(
+        "business acquisition cost overflows the supported money range: price {purchase_price}, recapitalization {recapitalization}"
+    )]
+    AcquisitionCostOverflow {
+        purchase_price: Money,
+        recapitalization: Money,
+    },
     #[error("loan interest {interest_basis_points} is outside the 0..=10000 basis-point range")]
     InterestOutOfRange { interest_basis_points: u16 },
     #[error("property {property_id} is not owned by borrower dynasty {borrower_dynasty_id}")]
@@ -310,7 +333,11 @@ fn commit_loan(state: &mut AppState, terms: &LoanTerms) -> crate::ids::LoanId {
         .dynasties
         .get_mut(&borrower_dynasty_id)
         .expect("validated borrower must exist");
-    borrower.resources.treasury = borrower.resources.treasury.saturating_add(principal);
+    borrower.resources.treasury = borrower
+        .resources
+        .treasury
+        .checked_add(principal)
+        .expect("revalidated borrower treasury must fit the supported range");
     if let Some(property_id) = collateral_property_id {
         state
             .properties
@@ -487,9 +514,18 @@ fn validate_loan_terms(state: &AppState, terms: &LoanTerms) -> Result<(), Strate
             .ok_or(StrategicError::MissingDynasty {
                 dynasty_id: terms.lender_dynasty_id,
             })?;
-    if !state.dynasties.contains_key(&terms.borrower_dynasty_id) {
-        return Err(StrategicError::MissingDynasty {
+    let borrower =
+        state
+            .dynasties
+            .get(&terms.borrower_dynasty_id)
+            .ok_or(StrategicError::MissingDynasty {
+                dynasty_id: terms.borrower_dynasty_id,
+            })?;
+    if borrower.treasury().checked_add(terms.principal).is_none() {
+        return Err(StrategicError::DynastyTreasuryOverflow {
             dynasty_id: terms.borrower_dynasty_id,
+            current: borrower.treasury(),
+            incoming: terms.principal,
         });
     }
     if let Some(existing) = state.loans.values().find(|loan| {
@@ -699,6 +735,9 @@ pub fn quote_business_acquisition(
 struct ValidatedBusinessAcquisition {
     quote: BusinessAcquisitionQuote,
     buyer_treasury: Money,
+    total_required: Money,
+    seller_treasury_after: Money,
+    business_cash_after: Money,
     administrative_load: u16,
 }
 
@@ -770,7 +809,12 @@ fn validate_business_acquisition(
             required: quote.minimum_recapitalization,
         });
     }
-    let total_required = quote.purchase_price.saturating_add(recapitalization);
+    let total_required = quote.purchase_price.checked_add(recapitalization).ok_or(
+        StrategicError::AcquisitionCostOverflow {
+            purchase_price: quote.purchase_price,
+            recapitalization,
+        },
+    )?;
     let buyer_treasury = state
         .dynasties
         .get(&buyer_dynasty_id)
@@ -783,11 +827,30 @@ fn validate_business_acquisition(
             required: total_required,
         });
     }
-    let recipe_id = state
+    let seller_treasury = state
+        .dynasties
+        .get(&quote.seller_dynasty_id)
+        .expect("business owner dynasty must exist")
+        .treasury();
+    let seller_treasury_after = seller_treasury.checked_add(quote.purchase_price).ok_or(
+        StrategicError::DynastyTreasuryOverflow {
+            dynasty_id: quote.seller_dynasty_id,
+            current: seller_treasury,
+            incoming: quote.purchase_price,
+        },
+    )?;
+    let business = state
         .businesses
         .get(business_id)
-        .expect("quoted business must exist")
-        .recipe_id();
+        .expect("quoted business must exist");
+    let business_cash_after = business.cash().checked_add(recapitalization).ok_or(
+        StrategicError::BusinessCashOverflow {
+            business_id,
+            current: business.cash(),
+            incoming: recapitalization,
+        },
+    )?;
+    let recipe_id = business.recipe_id();
     let administrative_load = registry
         .get_recipe(recipe_id)
         .expect("business recipe references must be validated")
@@ -795,6 +858,9 @@ fn validate_business_acquisition(
     Ok(ValidatedBusinessAcquisition {
         quote,
         buyer_treasury,
+        total_required,
+        seller_treasury_after,
+        business_cash_after,
         administrative_load,
     })
 }
@@ -808,21 +874,19 @@ fn commit_business_acquisition(
 ) {
     let quote = validated.quote;
     let business_id = quote.business_id;
-    let total_required = quote.purchase_price.saturating_add(recapitalization);
     state
         .dynasties
         .get_mut(&buyer_dynasty_id)
         .expect("validated buyer must exist")
         .resources
-        .treasury = validated.buyer_treasury.saturating_sub(total_required);
+        .treasury = validated
+        .buyer_treasury
+        .saturating_sub(validated.total_required);
     let seller = state
         .dynasties
         .get_mut(&quote.seller_dynasty_id)
         .expect("business owner dynasty must exist");
-    seller.resources.treasury = seller
-        .resources
-        .treasury
-        .saturating_add(quote.purchase_price);
+    seller.resources.treasury = validated.seller_treasury_after;
     seller.resources.administrative_load = seller
         .resources
         .administrative_load
@@ -845,7 +909,7 @@ fn commit_business_acquisition(
         .businesses
         .get_mut(business_id)
         .expect("transferred business must exist");
-    business.finance.cash = business.finance.cash.saturating_add(recapitalization);
+    business.finance.cash = validated.business_cash_after;
     business.finance.version = business.finance.version.saturating_add(1);
     let rehabilitation = u16::try_from((recapitalization.copper() / 2).clamp(0, 3_000))
         .expect("bounded acquisition rehabilitation must fit u16");
@@ -1288,7 +1352,7 @@ fn initialize_contracts(registry: &Registry, state: &mut AppState) {
                         .get_recipe(*seller_recipe_id)
                         .is_some_and(|recipe| recipe.output_good_id() == input.good_id())
                 });
-            let Some((seller_id, _, _)) = seller else {
+            let Some((seller_id, seller_owner, _)) = seller else {
                 continue;
             };
             let price = state
@@ -1305,7 +1369,13 @@ fn initialize_contracts(registry: &Registry, state: &mut AppState) {
                     .saturating_mul_ratio(STANDARD_CONTRACT_BATCHES_PER_WEEK, 1),
                 unit_price: price,
                 penalty: cost_for(input.quantity(), price).saturating_mul(2),
-                duration_weeks: 52,
+                duration_weeks: if *buyer_owner == state.player_dynasty_id
+                    || *seller_owner == state.player_dynasty_id
+                {
+                    26
+                } else {
+                    52
+                },
             };
             if let Ok(token) = validate_supply_contract(registry, state, terms) {
                 token.commit(registry, state).expect(
@@ -2071,11 +2141,28 @@ fn settle_missed_loan_payment(state: &mut AppState, due: DueLoan) {
 
 fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) {
     if let Some(property_id) = due.collateral_property_id {
+        let (occupant_owner_id, existing_tenant_id) = {
+            let property = state
+                .properties
+                .get(&property_id)
+                .expect("loan collateral must exist");
+            let occupant_owner_id = property.occupant_business_id.map(|business_id| {
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("collateral occupant business must exist")
+                    .owner_dynasty_id()
+            });
+            (occupant_owner_id, property.tenant_dynasty_id)
+        };
         let property = state
             .properties
             .get_mut(&property_id)
             .expect("loan collateral must exist");
         property.owner_dynasty_id = Some(due.lender_id);
+        property.tenant_dynasty_id = occupant_owner_id
+            .or(existing_tenant_id)
+            .filter(|tenant_id| *tenant_id != due.lender_id);
         property.collateral_loan_id = None;
     }
 }
@@ -2330,6 +2417,13 @@ fn settle_employment(registry: &Registry, state: &mut AppState) {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LaborEnvironment {
+    utilization: u16,
+    business_condition: u16,
+    maintenance: u16,
+}
+
 fn settle_employment_agreement(
     registry: &Registry,
     state: &mut AppState,
@@ -2341,6 +2435,17 @@ fn settle_employment_agreement(
 ) {
     let utilization_basis_points =
         business_labor_utilization_basis_points(registry, state, business_id);
+    let labor_environment = {
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("employment business must exist");
+        LaborEnvironment {
+            utilization: utilization_basis_points,
+            business_condition: business.operations.condition_basis_points,
+            maintenance: business.policy.maintenance_basis_points,
+        }
+    };
     let scaled_wage = wage.saturating_mul(i64::from(utilization_basis_points));
     let wage_due = Money::from_copper(scaled_wage.copper() / 10_000);
     let paid = pay_employment_wage(registry, state, business_id, household_id, wage_due);
@@ -2348,7 +2453,7 @@ fn settle_employment_agreement(
         state,
         employment_id,
         prior_status,
-        utilization_basis_points,
+        labor_environment,
         paid,
         wage_due,
     );
@@ -2399,7 +2504,7 @@ fn update_employment_after_payment(
     state: &mut AppState,
     employment_id: EmploymentId,
     prior_status: EmploymentStatus,
-    utilization_basis_points: u16,
+    environment: LaborEnvironment,
     paid: Money,
     wage_due: Money,
 ) -> (bool, bool) {
@@ -2408,7 +2513,7 @@ fn update_employment_after_payment(
         .get_mut(&employment_id)
         .expect("employment must exist");
     if paid == wage_due {
-        return update_fully_paid_employment(agreement, prior_status, utilization_basis_points);
+        return update_fully_paid_employment(agreement, prior_status, environment);
     }
     let loyalty_loss = if prior_status == EmploymentStatus::Disputed {
         100
@@ -2435,22 +2540,39 @@ fn update_employment_after_payment(
 fn update_fully_paid_employment(
     agreement: &mut EmploymentAgreement,
     prior_status: EmploymentStatus,
-    utilization_basis_points: u16,
+    environment: LaborEnvironment,
 ) -> (bool, bool) {
-    if prior_status != EmploymentStatus::Disputed && utilization_basis_points != 10_000 {
+    if prior_status != EmploymentStatus::Disputed {
+        let strain = labor_strain_basis_points(environment);
+        if strain > 0 {
+            agreement.conditions_basis_points =
+                agreement.conditions_basis_points.saturating_sub(strain);
+            agreement.loyalty_basis_points = agreement
+                .loyalty_basis_points
+                .saturating_sub(strain.saturating_div(2));
+            let became_disputed =
+                agreement.conditions_basis_points < 3_000 || agreement.loyalty_basis_points < 2_000;
+            if became_disputed {
+                agreement.status = EmploymentStatus::Disputed;
+            }
+            return (false, became_disputed);
+        }
+        if environment.utilization == 10_000 {
+            agreement.loyalty_basis_points = agreement
+                .loyalty_basis_points
+                .saturating_add(30)
+                .min(10_000);
+            agreement.conditions_basis_points = agreement
+                .conditions_basis_points
+                .saturating_add(10)
+                .min(10_000);
+        }
         return (false, false);
     }
     agreement.loyalty_basis_points = agreement
         .loyalty_basis_points
-        .saturating_add(if prior_status == EmploymentStatus::Disputed {
-            180
-        } else {
-            30
-        })
+        .saturating_add(180)
         .min(10_000);
-    if prior_status != EmploymentStatus::Disputed {
-        return (false, false);
-    }
     agreement.conditions_basis_points = agreement
         .conditions_basis_points
         .saturating_add(60)
@@ -2461,6 +2583,19 @@ fn update_fully_paid_employment(
         agreement.status = EmploymentStatus::Active;
     }
     (recovered, false)
+}
+
+fn labor_strain_basis_points(environment: LaborEnvironment) -> u16 {
+    if environment.utilization < 9_000 {
+        return 0;
+    }
+    let maintenance_strain = 1_000_u16
+        .saturating_sub(environment.maintenance)
+        .saturating_div(5);
+    let condition_strain = 7_000_u16
+        .saturating_sub(environment.business_condition)
+        .saturating_div(20);
+    maintenance_strain.saturating_add(condition_strain).min(180)
 }
 
 fn emit_employment_outcome(
@@ -2482,7 +2617,8 @@ fn emit_employment_outcome(
             state,
             OutboxKind::District,
             format!("Labor dispute at business {business_id}"),
-            "Repeated wage shortfalls have caused organized workplace resistance.".to_owned(),
+            "Accumulated wage, workload, or workplace-condition pressure caused organized resistance."
+                .to_owned(),
         );
     }
 }
@@ -2699,6 +2835,8 @@ fn update_quality_reputations(state: &mut AppState) {
     for dynasty_id in dynasty_ids {
         let mut total_quality = 0_u64;
         let mut business_count = 0_u64;
+        let mut lifetime_revenue = Money::ZERO;
+        let mut lifetime_costs = Money::ZERO;
         for business in state.businesses.iter().filter(|business| {
             business.owner_dynasty_id() == dynasty_id
                 && business.status() != crate::core::BusinessStatus::Closed
@@ -2706,6 +2844,8 @@ fn update_quality_reputations(state: &mut AppState) {
             total_quality =
                 total_quality.saturating_add(u64::from(business.operations.quality_basis_points));
             business_count = business_count.saturating_add(1);
+            lifetime_revenue = lifetime_revenue.saturating_add(business.finance.lifetime_revenue);
+            lifetime_costs = lifetime_costs.saturating_add(business.finance.lifetime_costs);
         }
         if business_count == 0 {
             continue;
@@ -2715,11 +2855,34 @@ fn update_quality_reputations(state: &mut AppState) {
             .dynasties
             .get_mut(&dynasty_id)
             .expect("reputation dynasty must exist");
+        let maximum_step = quality_reputation_step(
+            dynasty.resources.reputation_quality_basis_points,
+            target,
+            lifetime_revenue,
+            lifetime_costs,
+        );
         dynasty.resources.reputation_quality_basis_points = move_basis_points_toward(
             dynasty.resources.reputation_quality_basis_points,
             target,
-            50,
+            maximum_step,
         );
+    }
+}
+
+fn quality_reputation_step(
+    current: u16,
+    target: u16,
+    lifetime_revenue: Money,
+    lifetime_costs: Money,
+) -> u16 {
+    if current >= target {
+        return 50;
+    }
+    let has_trade_history = lifetime_revenue > Money::ZERO || lifetime_costs > Money::ZERO;
+    if has_trade_history && lifetime_revenue >= lifetime_costs {
+        50
+    } else {
+        25
     }
 }
 

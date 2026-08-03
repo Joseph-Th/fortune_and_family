@@ -60,7 +60,7 @@ run_to_file 'campaign creation' "$work_dir/new.txt" "$binary" new \
 run_to_file 'campaign simulation' "$work_dir/simulate.txt" \
   "$binary" simulate "$campaign" --days 30
 run_to_file 'player command' "$work_dir/execute.txt" "$binary" execute "$campaign" \
-  --command '{"EnactLaw":{"kind":"BreadPriceCeiling","value":30}}'
+  --command '{"SetHouseGovernance":{"governance":"FamilyPartnership"}}'
 run_to_file 'JSON summary' "$summary" "$binary" summary "$campaign" --json
 run_to_file 'campaign projection' "$projection" "$binary" inspect "$campaign"
 run_to_file 'dashboard rendering' "$work_dir/dashboard.txt" \
@@ -78,7 +78,7 @@ run_to_file 'save validation' "$work_dir/validate.txt" "$binary" validate "$camp
 require_nonempty_file "$campaign" 'campaign save'
 require_nonempty_file "$dashboard" 'HTML dashboard'
 require_nonempty_file "$playtest" 'gameplay harness JSON report'
-require_literal 'Enacted law' "$work_dir/execute.txt" 'command result'
+require_literal 'Changed house governance' "$work_dir/execute.txt" 'command result'
 require_literal 'Validated ' "$work_dir/validate.txt" 'validation result'
 grep -Fiq '<!doctype html>' "$dashboard" || fail 'dashboard is not a complete HTML document'
 
@@ -125,16 +125,6 @@ if not projection["districts"] or not projection["businesses"] or not projection
     raise SystemExit("projection must contain district, business, and market views")
 if projection["scenario"]["elapsed_days"] != 60:
     raise SystemExit("projection did not preserve both simulation advances")
-active_ceiling = [
-    law
-    for law in projection.get("laws", [])
-    if law.get("active")
-    and law.get("kind") == "BreadPriceCeiling"
-    and law.get("value") == 30
-]
-if len(active_ceiling) != 1:
-    raise SystemExit("projection must contain the enacted bread price ceiling")
-
 required_playtest = {"schema_version", "config", "aggregate", "campaigns", "findings"}
 missing_playtest = sorted(required_playtest - playtest.keys())
 if missing_playtest:

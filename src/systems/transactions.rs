@@ -28,6 +28,14 @@ pub enum SimulationError {
         available: Money,
         required: Money,
     },
+    #[error(
+        "business {business_id} cannot receive {incoming}; current cash {current} would exceed the supported money range"
+    )]
+    BusinessCashOverflow {
+        business_id: BusinessId,
+        current: Money,
+        incoming: Money,
+    },
     #[error("market quote is missing for good {good_id}")]
     MarketQuoteMissing { good_id: GoodId },
 }
@@ -72,7 +80,11 @@ impl ValidatedCashTransfer {
                 .businesses
                 .get_mut(to_business_id)
                 .expect("validated transfer target must exist");
-            target.finance.cash = target.finance.cash.saturating_add(amount);
+            target.finance.cash = target
+                .finance
+                .cash
+                .checked_add(amount)
+                .expect("revalidated transfer target cash must fit the supported range");
             target.finance.version = target.finance.version.saturating_add(1);
         }
 
@@ -151,6 +163,13 @@ pub fn validate_business_cash_transfer(
             business_id: from_business_id,
             available: source.cash(),
             required: amount,
+        });
+    }
+    if target.cash().checked_add(amount).is_none() {
+        return Err(SimulationError::BusinessCashOverflow {
+            business_id: to_business_id,
+            current: target.cash(),
+            incoming: amount,
         });
     }
 
@@ -237,6 +256,48 @@ mod tests {
             &before,
             &state,
             "stale validation tokens must fail before mutating either business",
+        );
+    }
+
+    #[test]
+    fn rejects_target_cash_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        let (from_business_id, to_business_id) = {
+            let mut businesses = state.businesses().iter().map(crate::core::Business::id);
+            (
+                businesses.next().expect("source business must exist"),
+                businesses.next().expect("target business must exist"),
+            )
+        };
+        let amount = Money::from_copper(1);
+        state
+            .businesses
+            .get_mut(from_business_id)
+            .expect("source business must exist")
+            .finance
+            .cash = amount;
+        state
+            .businesses
+            .get_mut(to_business_id)
+            .expect("target business must exist")
+            .finance
+            .cash = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = transfer_business_cash(&mut state, from_business_id, to_business_id, amount);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::BusinessCashOverflow {
+                business_id: to_business_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: amount,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing transfers must not debit the source or append audit records",
         );
     }
 }

@@ -1,8 +1,8 @@
 //! Debug-only assertions for registry, reference, index, lifecycle, and value invariants.
 
 use crate::core::{
-    AppState, Business, BusinessStatus, CharacterStatus, ContractStatus, CrisisStatus,
-    EmploymentStatus, LegalCaseStatus, LoanStatus, ObjectiveStatus, PublicWorkStatus,
+    AppState, Business, CharacterStatus, ContractStatus, CrisisStatus, EmploymentStatus,
+    LegalCaseStatus, LoanStatus, ObjectiveStatus, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, DistrictId, DynastyId, GoodId, HouseholdId, InstitutionId, RecipeId,
@@ -738,13 +738,10 @@ fn validate_employment(state: &AppState) {
                 })
                 .or_insert(u32::from(agreement.workers));
         }
-        if agreement.status == EmploymentStatus::Active {
+        if let Some(business) = state.businesses.get(agreement.business_id) {
             debug_assert!(
-                state
-                    .businesses
-                    .get(agreement.business_id)
-                    .is_some_and(|business| business.status() != BusinessStatus::Closed),
-                "Lifecycle Validity: active employment belongs to a closed business"
+                super::is_employment_status_compatible(business.status(), agreement.status),
+                "Lifecycle Validity: employment status is incompatible with business status"
             );
         }
     }

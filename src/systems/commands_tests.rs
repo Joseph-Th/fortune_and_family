@@ -8,6 +8,20 @@ use crate::test_support::{
     assert_state_unchanged, make_test_campaign, rivergate_registry_for_test,
 };
 
+fn grant_player_office_for_test(state: &mut AppState) {
+    let holder_id = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .head_id();
+    let institution = state
+        .institutions
+        .values_mut()
+        .find(|institution| institution.office_holder_id.is_none())
+        .expect("campaign must contain a vacant office");
+    institution.office_holder_id = Some(holder_id);
+}
+
 mod validation {
     use super::*;
 
@@ -76,9 +90,42 @@ mod validation {
     }
 
     #[test]
+    fn public_work_sponsorship_requires_an_office_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let district_id = registry
+            .districts()
+            .first()
+            .expect("registry must contain a district")
+            .id();
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::StartPublicWork {
+                district_id,
+                kind: PublicWorkKind::Bridge,
+                budget: Money::from_copper(10_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::PublicWorkSponsorshipRequiresOffice)
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a dynasty without office must not fund or create a public work",
+        );
+    }
+
+    #[test]
     fn enforces_public_work_sponsorship_interval_without_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
         let mut districts = registry
             .districts()
             .iter()
@@ -315,6 +362,93 @@ mod validation {
             "inactive businesses must not accept operating-policy mutations",
         );
     }
+
+    #[test]
+    fn business_policy_changes_create_durable_player_feedback() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let current = state
+            .businesses
+            .get(business_id)
+            .expect("owned business must exist")
+            .policy
+            .clone();
+        let outbox_before = state.outbox.len();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetBusinessPolicy {
+                business_id,
+                target_input_days: current.target_input_days.saturating_add(1).min(30),
+                target_output_days: current.target_output_days,
+                minimum_cash_reserve: current.minimum_cash_reserve,
+                maintenance_basis_points: current.maintenance_basis_points,
+                quality_target_basis_points: current.quality_target_basis_points,
+            },
+        )
+        .expect("material policy change must succeed");
+
+        assert_eq!(state.outbox.len(), outbox_before + 1);
+        let message = state.outbox.last().expect("policy change must be reported");
+        assert_eq!(message.kind(), OutboxKind::Finance);
+        assert!(message.subject().contains("operating policy updated"));
+    }
+
+    #[test]
+    fn portfolio_cash_transfers_create_durable_player_feedback() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let source_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a source business");
+        let target_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let manager_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        state
+            .businesses
+            .transfer_ownership(target_id, state.player_dynasty_id, manager_id)
+            .expect("test target business must exist");
+        let amount = Money::from_copper(100);
+        state
+            .businesses
+            .get_mut(source_id)
+            .expect("source business must exist")
+            .finance
+            .cash = amount;
+        let outbox_before = state.outbox.len();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::TransferBusinessCash {
+                from_business_id: source_id,
+                to_business_id: target_id,
+                amount,
+            },
+        )
+        .expect("funded portfolio transfer must succeed");
+
+        assert_eq!(state.outbox.len(), outbox_before + 1);
+        let message = state.outbox.last().expect("cash transfer must be reported");
+        assert_eq!(message.kind(), OutboxKind::Finance);
+        assert!(message.subject().contains("Portfolio cash moved"));
+    }
 }
 
 mod business_acquisition {
@@ -543,6 +677,135 @@ mod business_acquisition {
     }
 
     #[test]
+    fn rejects_acquisition_cost_overflow_without_mutation() {
+        let (registry, mut state, business_id, manager_id, quote) = acquisition_fixture();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        let recapitalization = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AcquireBusiness {
+                business_id,
+                manager_id,
+                recapitalization,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Strategic(
+                StrategicError::AcquisitionCostOverflow {
+                    purchase_price: quote.purchase_price,
+                    recapitalization,
+                }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing total acquisition cost must not move funds or ownership",
+        );
+    }
+
+    #[test]
+    fn rejects_acquisition_when_seller_treasury_would_overflow() {
+        let (registry, mut state, business_id, manager_id, quote) = acquisition_fixture();
+        state
+            .dynasties
+            .get_mut(&quote.seller_dynasty_id)
+            .expect("seller dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AcquireBusiness {
+                business_id,
+                manager_id,
+                recapitalization: quote.minimum_recapitalization,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Strategic(
+                StrategicError::DynastyTreasuryOverflow {
+                    dynasty_id: quote.seller_dynasty_id,
+                    current: Money::from_copper(i64::MAX),
+                    incoming: quote.purchase_price,
+                }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing acquisition proceeds must not move funds or ownership",
+        );
+    }
+
+    #[test]
+    fn rejects_acquisition_when_recapitalization_would_overflow_business_cash() {
+        let (registry, mut state, business_id, manager_id, _) = acquisition_fixture();
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("selected business must exist")
+            .finance
+            .cash = Money::from_copper(i64::MAX);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        let quote = crate::systems::quote_business_acquisition(
+            registry,
+            &state,
+            state.player_dynasty_id,
+            business_id,
+        )
+        .expect("distressed business must remain acquirable");
+        let recapitalization = Money::from_copper(1);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AcquireBusiness {
+                business_id,
+                manager_id,
+                recapitalization,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Strategic(
+                StrategicError::BusinessCashOverflow {
+                    business_id,
+                    current: Money::from_copper(i64::MAX),
+                    incoming: recapitalization,
+                }
+            ))
+        );
+        assert!(quote.purchase_price < Money::from_copper(i64::MAX));
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing recapitalization must not move funds or ownership",
+        );
+    }
+
+    #[test]
     fn invests_dynasty_treasury_into_owned_business() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -623,6 +886,50 @@ mod business_acquisition {
     }
 
     #[test]
+    fn rejects_business_investment_cash_overflow_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let amount = Money::from_copper(1);
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist")
+            .finance
+            .cash = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::InvestInBusiness {
+                business_id,
+                amount,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Simulation(
+                crate::systems::SimulationError::BusinessCashOverflow {
+                    business_id,
+                    current: Money::from_copper(i64::MAX),
+                    incoming: amount,
+                }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing capitalization must not debit the dynasty or mutate the business",
+        );
+    }
+
+    #[test]
     fn rejects_nonpositive_business_investment_without_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -658,6 +965,7 @@ mod laws {
     fn enact_through_the_canonical_command_path() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
         let treasury_before = state
             .dynasties
             .get(&state.player_dynasty_id)
@@ -774,9 +1082,33 @@ mod laws {
     }
 
     #[test]
+    fn law_sponsorship_requires_an_office_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EnactLaw {
+                kind: LawKind::BreadPriceCeiling,
+                value: 30,
+            },
+        );
+
+        assert_eq!(result, Err(CommandError::LawSponsorshipRequiresOffice));
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a dynasty without office must not spend legitimacy or enact a law",
+        );
+    }
+
+    #[test]
     fn law_sponsorship_has_a_yearly_strategic_interval() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
         apply_player_command(
             registry,
             &mut state,
@@ -885,6 +1217,12 @@ mod politics {
         for dynasty in state.dynasties.values_mut() {
             dynasty.resources.legitimacy_basis_points = 0;
         }
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .reputation_reliability_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
         let treasury_before = state
             .dynasties
             .get(&state.player_dynasty_id)
@@ -933,6 +1271,112 @@ mod politics {
     }
 
     #[test]
+    fn office_nomination_requires_earned_reputation_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        let institution_id = state
+            .institutions
+            .values()
+            .find(|institution| !institution.members.contains(&character_id))
+            .expect("campaign must contain an institution open to the heir")
+            .institution_id;
+        let player = state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        player.resources.reputation_quality_basis_points =
+            OFFICE_NOMINATION_REPUTATION_REQUIREMENT.saturating_sub(1);
+        player.resources.reputation_reliability_basis_points =
+            OFFICE_NOMINATION_REPUTATION_REQUIREMENT.saturating_sub(1);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id,
+                character_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InsufficientOfficeReputation {
+                quality: OFFICE_NOMINATION_REPUTATION_REQUIREMENT.saturating_sub(1),
+                reliability: OFFICE_NOMINATION_REPUTATION_REQUIREMENT.saturating_sub(1),
+                required: OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an unproven dynasty must not spend money or join an institution",
+        );
+    }
+
+    #[test]
+    fn office_nomination_has_a_dynasty_wide_cooldown() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .reputation_reliability_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        let institution_ids: Vec<_> = state
+            .institutions
+            .values()
+            .filter(|institution| !institution.members.contains(&character_id))
+            .map(|institution| institution.institution_id)
+            .take(2)
+            .collect();
+        assert_eq!(institution_ids.len(), 2);
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id: institution_ids[0],
+                character_id,
+            },
+        )
+        .expect("first earned nomination must succeed");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id: institution_ids[1],
+                character_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::OfficeNominationCooldown {
+                next_nomination_day: OFFICE_NOMINATION_INTERVAL_DAYS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a rapid second campaign must not spend money or alter membership",
+        );
+    }
+
+    #[test]
     fn repeated_office_nomination_is_rejected_without_reward() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -946,6 +1390,12 @@ mod politics {
             .keys()
             .next()
             .expect("campaign must contain an institution");
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
 
         apply_player_command(
             registry,
@@ -1064,7 +1514,7 @@ mod politics {
     }
 
     #[test]
-    fn governance_cannot_be_rewritten_twice_in_one_year() {
+    fn governance_cannot_be_rewritten_twice_within_five_years() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let current = state
@@ -1102,7 +1552,7 @@ mod politics {
         assert_eq!(
             result,
             Err(CommandError::HouseGovernanceCooldown {
-                next_change_day: 360,
+                next_change_day: HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
             })
         );
         assert_state_unchanged(
@@ -1161,6 +1611,58 @@ mod crises {
             &before,
             &state,
             "failed exploitation must not mint treasury or intensify the crisis",
+        );
+    }
+
+    #[test]
+    fn exploitation_rejects_treasury_overflow_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        let crisis_id = state.next_ids.crisis();
+        let severity = 4_000;
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: crate::core::CrisisKind::NobleDemand,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: severity,
+                status: CrisisStatus::Active,
+                cause: "test crisis".to_owned(),
+            },
+        );
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Exploit,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Strategic(
+                StrategicError::DynastyTreasuryOverflow {
+                    dynasty_id: state.player_dynasty_id,
+                    current: Money::from_copper(i64::MAX),
+                    incoming: Money::from_copper(i64::from(severity)),
+                }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing exploitation must not consume legitimacy or intensify the crisis",
         );
     }
 

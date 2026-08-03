@@ -102,13 +102,14 @@ Apply a canonical player command. Commands use Serde's externally tagged JSON re
 
 ```bash
 cargo run --locked -- execute saves/valeri.json \
-  --command '{"EnactLaw":{"kind":"BreadPriceCeiling","value":30}}'
+  --command '{"SetHouseGovernance":{"governance":"FamilyPartnership"}}'
 ```
 
 Other command variants support direct dynasty investment in owned businesses, distressed-business
 acquisition and recapitalization, business policy, cash transfer, contracts, loans, property
 acquisition, public works, court cases, family governance, office nomination, crisis response,
 labor disputes, and notification acknowledgement.
+Law and public-work sponsorship require the player dynasty to hold political office.
 Run `cargo run --locked -- --help` for command syntax. The complete command schema is represented by
 `PlayerCommand` in `src/systems/commands.rs`.
 
@@ -134,7 +135,7 @@ cargo run --release --locked -- playtest \
   --output gameplay-report.json
 ```
 
-The harness validates state-derived candidates through the canonical command API, records real activation opportunities for reactive legal, crisis, and labor routes, advances both an action branch and a no-action counterfactual branch, and reports immediate, delayed, and ambient system changes separately. Relationship changes, earned intelligence, and notification feedback are measured as distinct domains, and every report states the questions that still require human playtesting. See `GAMEPLAY_HARNESS.md` for personas, scores, causal attribution, findings, traces, limitations, and performance guidance.
+The harness validates state-derived candidates through the canonical command API, records real activation opportunities for reactive legal, crisis, and labor routes, advances both an action branch and a no-action counterfactual branch, and reports immediate, delayed, and ambient system changes separately. Relationship changes, earned intelligence, and notification feedback are measured as distinct domains. Reports distinguish securing inputs from selling outputs and borrowing from extending credit, measure both concrete choice depth and cross-direction breadth, and record when each campaign earns commercial standing, campaigns for office, gains office, reshapes the city, encounters player labor conflict, and reaches succession. This exposes whether the intended dynasty arc is present, incomplete, misordered, overly synchronized, or strategically repetitive. Every report states the questions that still require human playtesting. See `GAMEPLAY_HARNESS.md` for personas, scores, causal attribution, findings, traces, limitations, and performance guidance.
 
 CI runs can use `--minimum-overall <score>` or `--fail-on-critical`; the report is still written before the command returns a failing status.
 
