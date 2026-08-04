@@ -3,7 +3,7 @@
 use super::*;
 use crate::core::{AuditKind, AuditRecord, Crisis, CrisisKind, OutboxKind, OutboxMessage};
 use crate::ids::OutboxMessageId;
-use crate::systems::issue_loan;
+use crate::systems::{OFFICE_POWER_ESTABLISHMENT_DAYS, OFFICE_TERM_DAYS, issue_loan};
 use crate::test_support::{make_test_campaign, rivergate_registry_for_test};
 use std::sync::OnceLock;
 
@@ -1086,6 +1086,199 @@ mod metrics {
     }
 
     #[test]
+    fn substantive_action_gaps_include_quiet_and_housekeeping_cycles() {
+        let mut accumulator = CampaignAccumulator::new();
+
+        accumulator.record_action_gap(None, 180);
+        accumulator.record_action_gap(Some(GameplayCommandKind::AcknowledgeNotification), 180);
+
+        assert_eq!(accumulator.longest_substantive_action_gap_days, 360);
+        accumulator.record_action_gap(Some(GameplayCommandKind::EnactLaw), 30);
+        assert_eq!(accumulator.current_substantive_action_gap_days, 0);
+        assert_eq!(accumulator.longest_substantive_action_gap_days, 360);
+    }
+
+    #[test]
+    fn personas_value_distinct_institutional_powers() {
+        let public_works = BTreeSet::from([OfficePower::PublicWorks]);
+        let market_tolls = BTreeSet::from([OfficePower::MarketTolls]);
+        let debt = BTreeSet::from([OfficePower::DebtEnforcement]);
+        let taxation = BTreeSet::from([OfficePower::Taxation]);
+
+        assert!(
+            institution_power_bonus(GameplayPersona::Steward, &public_works)
+                > institution_power_bonus(GameplayPersona::Entrepreneur, &public_works)
+        );
+        assert!(
+            institution_power_bonus(GameplayPersona::Entrepreneur, &market_tolls)
+                > institution_power_bonus(GameplayPersona::Steward, &market_tolls)
+        );
+        assert!(
+            institution_power_bonus(GameplayPersona::Opportunist, &debt)
+                > institution_power_bonus(GameplayPersona::Steward, &debt)
+        );
+        assert!(
+            institution_power_bonus(GameplayPersona::PowerBroker, &taxation)
+                > institution_power_bonus(GameplayPersona::Entrepreneur, &taxation)
+        );
+    }
+
+    #[test]
+    fn personas_prioritize_distinct_family_education() {
+        assert!(
+            education_focus_persona_bonus(GameplayPersona::Steward, EducationFocus::Administration)
+                > education_focus_persona_bonus(GameplayPersona::Steward, EducationFocus::Craft)
+        );
+        assert!(
+            education_focus_persona_bonus(GameplayPersona::Entrepreneur, EducationFocus::Commerce)
+                > education_focus_persona_bonus(
+                    GameplayPersona::Entrepreneur,
+                    EducationFocus::Social
+                )
+        );
+        assert!(
+            education_focus_persona_bonus(GameplayPersona::PowerBroker, EducationFocus::Social)
+                > education_focus_persona_bonus(
+                    GameplayPersona::PowerBroker,
+                    EducationFocus::Craft
+                )
+        );
+    }
+
+    #[test]
+    fn snapshots_attribute_ward_adoption_and_education_to_family_state() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        {
+            let player = state
+                .dynasties
+                .get_mut(&player_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(30_000);
+            player.resources.legitimacy_basis_points = WARD_ADOPTION_LEGITIMACY_REQUIREMENT;
+            player.resources.reputation_reliability_basis_points =
+                WARD_ADOPTION_REPUTATION_REQUIREMENT;
+        }
+        grant_office_nomination_record_for_test(&mut state);
+        let before = GameplaySnapshot::capture(&state);
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AdoptWard {
+                focus: EducationFocus::Administration,
+            },
+        )
+        .expect("ward adoption must succeed in the prepared fixture");
+        let after_adoption = GameplaySnapshot::capture(&state);
+
+        assert_eq!(after_adoption.active_wards, before.active_wards + 1);
+        assert_eq!(
+            after_adoption.eligible_officeholders,
+            before.eligible_officeholders + 1
+        );
+        assert!(
+            before
+                .changed_domains(&after_adoption)
+                .contains(&GameplayDomain::Family)
+        );
+
+        advance_days(
+            registry,
+            &mut state,
+            u32::try_from(FAMILY_EDUCATION_INTERVAL_DAYS)
+                .expect("family education interval must fit simulation API"),
+        )
+        .expect("campaign must advance through the education interval");
+        let ward_id = state
+            .family_links
+            .values()
+            .find(|link| link.kind == FamilyLinkKind::Ward)
+            .expect("ward link must exist")
+            .second_character_id;
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EducateFamilyMember {
+                character_id: ward_id,
+                focus: EducationFocus::Social,
+            },
+        )
+        .expect("ward education must succeed after the interval");
+        let after_education = GameplaySnapshot::capture(&state);
+
+        assert_ne!(
+            after_adoption.player_family_capability_checksum,
+            after_education.player_family_capability_checksum
+        );
+        assert!(
+            after_adoption
+                .changed_domains(&after_education)
+                .contains(&GameplayDomain::Family)
+        );
+    }
+
+    #[test]
+    fn persona_outcome_divergence_distinguishes_shared_command_families() {
+        let base = cached_focused_report(30)
+            .campaigns
+            .first()
+            .expect("focused configuration must produce a campaign")
+            .clone();
+        let mut campaigns = Vec::new();
+        for (index, persona) in [
+            GameplayPersona::Steward,
+            GameplayPersona::Entrepreneur,
+            GameplayPersona::PowerBroker,
+            GameplayPersona::Opportunist,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut campaign = base.clone();
+            campaign.persona = persona;
+            campaign.end.player_office_checksum = i64::try_from(index + 1).unwrap_or(i64::MAX);
+            campaign.end.player_family_capability_checksum =
+                u32::try_from((index + 1) * 1_000).unwrap_or(u32::MAX);
+            campaigns.push(campaign);
+        }
+
+        assert!(persona_outcomes_diverge(&campaigns, |campaign| {
+            campaign.end.player_office_checksum
+        }));
+        assert!(persona_outcomes_diverge(&campaigns, |campaign| {
+            campaign.end.player_family_capability_checksum
+        }));
+
+        for campaign in &mut campaigns {
+            campaign.end.player_office_checksum = 7;
+        }
+        assert!(!persona_outcomes_diverge(&campaigns, |campaign| {
+            campaign.end.player_office_checksum
+        }));
+    }
+
+    #[test]
+    fn reactive_commands_do_not_define_persona_identity() {
+        assert!(!is_persona_identity_command(
+            GameplayCommandKind::RespondToCrisis
+        ));
+        assert!(!is_persona_identity_command(
+            GameplayCommandKind::ResolveLaborDispute
+        ));
+        assert!(!is_persona_identity_command(
+            GameplayCommandKind::AcknowledgeNotification
+        ));
+        assert!(is_persona_identity_command(
+            GameplayCommandKind::SetBusinessPolicy
+        ));
+        assert!(is_persona_identity_command(
+            GameplayCommandKind::NominateForOffice
+        ));
+    }
+
+    #[test]
     fn fantasy_arc_records_commercial_political_and_dynastic_milestones() {
         let state = make_test_campaign();
         let mut snapshot = GameplaySnapshot::capture(&state);
@@ -1093,7 +1286,7 @@ mod metrics {
         accumulator.observe_initial_snapshot(&snapshot);
 
         snapshot.day = 70;
-        snapshot.quality_reputation = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        snapshot.quality_reputation = COMMERCIAL_STANDING_REPUTATION_REQUIREMENT;
         accumulator.observe_snapshot(&snapshot);
         accumulator.record_executed_command(GameplayCommandKind::NominateForOffice, 77);
 
@@ -1190,6 +1383,69 @@ mod findings {
             &findings,
             "Repeated command streak resembles routine micromanagement",
         );
+    }
+
+    #[test]
+    fn findings_surface_year_long_action_droughts() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 720;
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 720;
+        campaign.longest_substantive_action_gap_days = 360;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Long stretches pass without a substantive player decision",
+        );
+    }
+
+    #[test]
+    fn findings_surface_compressed_commercial_and_political_phases() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 720;
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 720;
+        campaign.fantasy_arc.first_commercial_standing_day = Some(70);
+        campaign.fantasy_arc.first_office_campaign_day = Some(70);
+        campaign.fantasy_arc.first_office_day = Some(140);
+        campaign.fantasy_arc.first_city_shaping_action_day = Some(147);
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Commercial standing immediately becomes political access",
+        );
+        finding_with_title(
+            &findings,
+            "Officeholding immediately becomes city-shaping power",
+        );
+    }
+
+    #[test]
+    fn findings_surface_effective_officeholder_capacity_capture() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 720;
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 720;
+        campaign.end.available_offices = 11;
+        campaign.end.eligible_officeholders = 2;
+        campaign.maximum_offices_held = 2;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(&findings, "Dynasty fills every available officeholder slot");
     }
 
     #[test]
@@ -1451,6 +1707,7 @@ fn make_test_candidate_coverage_state(registry: &Registry) -> AppState {
         .expect("player dynasty must exist");
     player.resources.treasury = Money::from_copper(100_000);
     player.resources.reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+    grant_office_nomination_record_for_test(&mut state);
     grant_player_office_for_test(&mut state);
     for business_id in player_business_ids_for_test(&state) {
         let business = state
@@ -1518,17 +1775,38 @@ fn remove_internal_transfer_surplus_for_test(state: &mut AppState) {
 }
 
 fn grant_player_office_for_test(state: &mut AppState) {
+    let mature_next_selection_day = state
+        .clock
+        .day()
+        .saturating_add(OFFICE_TERM_DAYS)
+        .saturating_sub(OFFICE_POWER_ESTABLISHMENT_DAYS);
     let holder_id = state
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist")
         .head_id();
-    state
+    let institution = state
         .institutions
         .values_mut()
-        .find(|institution| institution.office_holder_id.is_none())
-        .expect("campaign must contain a vacant office")
-        .office_holder_id = Some(holder_id);
+        .find(|institution| institution.powers.contains(&OfficePower::PublicWorks))
+        .expect("campaign must contain an office with public-works power");
+    institution.members.insert(holder_id);
+    institution.office_holder_id = Some(holder_id);
+    institution.next_selection_day = mature_next_selection_day;
+}
+
+fn grant_office_nomination_record_for_test(state: &mut AppState) {
+    let player_businesses: BTreeSet<_> = player_business_ids_for_test(state).into_iter().collect();
+    let contract = state
+        .contracts
+        .values_mut()
+        .find(|contract| {
+            player_businesses.contains(&contract.buyer_business_id)
+                || player_businesses.contains(&contract.seller_business_id)
+        })
+        .expect("campaign must contain a player contract");
+    contract.fulfilled_deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
+        .expect("office delivery requirement must fit contract counters");
 }
 
 fn make_supply_security_and_borrowing_available(state: &mut AppState) {

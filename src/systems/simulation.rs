@@ -215,15 +215,9 @@ fn decide_business_purchases(
             .get_recipe(business.recipe_id())
             .expect("business recipe reference must be valid");
         for input in recipe.inputs() {
-            let desired = input.quantity().saturating_mul_ratio(
-                i64::from(
-                    business
-                        .operations
-                        .capacity_batches_per_day
-                        .saturating_mul(business.policy.target_input_days),
-                ),
-                1,
-            );
+            let target_batches = i64::from(business.operations.capacity_batches_per_day)
+                .saturating_mul(i64::from(business.policy.target_input_days));
+            let desired = input.quantity().saturating_mul_ratio(target_batches, 1);
             let current = business.inventory_quantity(input.good_id());
             if current >= desired {
                 continue;
@@ -627,20 +621,24 @@ fn decide_business_sales(
             .get(&good_id)
             .copied()
             .unwrap_or(Quantity::ZERO);
-        let commerce_efficiency = 9_000_i64
-            .saturating_add(i64::from(manager.capabilities.commerce).saturating_mul(10))
-            .min(10_000);
-        let quantity = surplus
-            .min(capacity)
-            .saturating_mul_ratio(commerce_efficiency, 10_000);
-        if quantity.is_zero() {
-            continue;
-        }
         let quote = state
             .market
             .quotes
             .get(&good_id)
             .ok_or(SimulationError::MarketQuoteMissing { good_id })?;
+        let commerce_efficiency = 9_000_i64
+            .saturating_add(i64::from(manager.capabilities.commerce).saturating_mul(10))
+            .min(10_000);
+        let quantity = surplus
+            .min(capacity)
+            .saturating_mul_ratio(commerce_efficiency, 10_000)
+            .min(affordable_quantity(
+                business.cash().max_nonnegative_addend(),
+                quote.price,
+            ));
+        if quantity.is_zero() {
+            continue;
+        }
         let revenue = cost_for(quantity, quote.price);
         market_capacity.insert(good_id, capacity.saturating_sub(quantity));
         lines.push(BusinessSaleLine {
@@ -670,7 +668,11 @@ fn apply_business_sales(state: &mut AppState, plan: BusinessSalePlan) {
                 .get_mut(business_id)
                 .expect("planned business sale source must exist");
             business.remove_inventory(good_id, quantity);
-            business.finance.cash = business.finance.cash.saturating_add(revenue);
+            business.finance.cash = business
+                .finance
+                .cash
+                .checked_add(revenue)
+                .expect("planned sale revenue must fit business cash");
             business.finance.lifetime_revenue =
                 business.finance.lifetime_revenue.saturating_add(revenue);
             business.finance.version = business.finance.version.saturating_add(1);
@@ -1338,8 +1340,14 @@ fn settle_weekly_external_income(state: &mut AppState) {
             .households
             .get_mut(household_id)
             .expect("weekly income household must exist");
-        household.cash = household.cash.saturating_add(household.weekly_income);
-        total = total.saturating_add(household.weekly_income);
+        let paid = household
+            .weekly_income
+            .min(household.cash.max_nonnegative_addend());
+        household.cash = household
+            .cash
+            .checked_add(paid)
+            .expect("bounded weekly income must fit household cash");
+        total = total.saturating_add(paid);
     }
     state.market.clearing_account = state.market.clearing_account.saturating_sub(total);
     state.audit_log.push(AuditRecord {

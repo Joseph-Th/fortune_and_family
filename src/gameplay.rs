@@ -2,28 +2,34 @@
 
 use crate::core::{
     AppState, AuditKind, BusinessStatus, CharacterStatus, ContractStatus, CrisisStatus,
-    EmploymentStatus, HouseGovernance, LawKind, LegalCaseKind, LegalCaseStatus, LoanStatus,
-    NewGameConfig, ObjectiveStatus, PublicWorkKind, PublicWorkStatus, StartingBackground,
+    EmploymentStatus, FamilyLinkKind, HouseGovernance, LawKind, LegalCaseKind, LegalCaseStatus,
+    LoanStatus, NewGameConfig, ObjectiveStatus, OfficePower, PublicWorkKind, PublicWorkStatus,
+    StartingBackground,
 };
 use crate::ids::{BusinessId, DynastyId};
 use crate::money::{Money, Quantity, cost_for};
 use crate::registry::{GoodCategory, RecipeDef, Registry};
 use crate::systems::{
-    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CommandError, CrisisResponse,
-    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms,
-    MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, NewGameError, OFFICE_NOMINATION_INTERVAL_DAYS,
-    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, SimulationError, StrategicError, SupplyContractTerms,
-    advance_days, apply_player_command, available_household_workers, build_new_game,
-    quote_business_acquisition, validate_invariants,
+    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CommandError, CrisisResponse, EducationFocus,
+    FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
+    LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS,
+    LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+    MAX_ACTIVE_WARDS, NewGameError, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+    OFFICE_NOMINATION_INTERVAL_DAYS, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
+    SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
+    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT, advance_days,
+    apply_player_command, available_household_workers, build_new_game,
+    has_established_player_office_power, player_contract_deliveries, quote_business_acquisition,
+    required_office_power_for_law, validate_invariants,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use thiserror::Error;
 
-const ALL_COMMAND_KINDS: [GameplayCommandKind; 17] = [
+const ALL_COMMAND_KINDS: [GameplayCommandKind; 19] = [
     GameplayCommandKind::TransferBusinessCash,
     GameplayCommandKind::AcquireBusiness,
     GameplayCommandKind::InvestInBusiness,
@@ -37,6 +43,8 @@ const ALL_COMMAND_KINDS: [GameplayCommandKind; 17] = [
     GameplayCommandKind::StartPublicWork,
     GameplayCommandKind::FileLegalCase,
     GameplayCommandKind::SetHouseGovernance,
+    GameplayCommandKind::AdoptWard,
+    GameplayCommandKind::EducateFamilyMember,
     GameplayCommandKind::NominateForOffice,
     GameplayCommandKind::RespondToCrisis,
     GameplayCommandKind::ResolveLaborDispute,
@@ -64,7 +72,8 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 13;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 15;
+const COMMERCIAL_STANDING_REPUTATION_REQUIREMENT: u16 = 5_200;
 const NOTIFICATION_BATCH_THRESHOLD: usize = 8;
 const AGENT_LOAN_AMORTIZATION_WEEKS: i64 = 104;
 const AGENT_CONTRACT_DURATION_WEEKS: u16 = 104;
@@ -196,6 +205,8 @@ pub enum GameplayCommandKind {
     StartPublicWork,
     FileLegalCase,
     SetHouseGovernance,
+    AdoptWard,
+    EducateFamilyMember,
     NominateForOffice,
     RespondToCrisis,
     ResolveLaborDispute,
@@ -219,6 +230,8 @@ impl GameplayCommandKind {
             Self::StartPublicWork => "public-work",
             Self::FileLegalCase => "legal-case",
             Self::SetHouseGovernance => "house-governance",
+            Self::AdoptWard => "adopt-ward",
+            Self::EducateFamilyMember => "family-education",
             Self::NominateForOffice => "office-nomination",
             Self::RespondToCrisis => "crisis-response",
             Self::ResolveLaborDispute => "labor-response",
@@ -236,6 +249,7 @@ impl GameplayCommandKind {
             | Self::FileLegalCase
             | Self::RespondToCrisis => 360,
             Self::ResolveLaborDispute => 720,
+            Self::AdoptWard | Self::EducateFamilyMember => 180,
             Self::SetBusinessPolicy
             | Self::BorrowFunds
             | Self::ExtendCredit
@@ -398,6 +412,9 @@ pub struct GameplaySnapshot {
     pub house_governance: HouseGovernance,
     pub offices_held: u16,
     pub available_offices: u16,
+    pub eligible_officeholders: u16,
+    pub active_wards: u16,
+    pub player_family_capability_checksum: u32,
     pub player_office_checksum: i64,
     pub institution_memberships: u16,
     pub institution_budget_total: Money,
@@ -692,6 +709,9 @@ struct CivicSnapshotPart {
     house_governance: HouseGovernance,
     offices_held: u16,
     available_offices: u16,
+    eligible_officeholders: u16,
+    active_wards: u16,
+    player_family_capability_checksum: u32,
     player_office_checksum: i64,
     institution_memberships: u16,
     institution_budget_total: Money,
@@ -725,6 +745,9 @@ impl CivicSnapshotPart {
             house_governance: council.governance,
             offices_held: count_player_offices(state, player_id),
             available_offices: usize_to_u16(state.institutions.len()),
+            eligible_officeholders: count_eligible_officeholders(state, player_id),
+            active_wards: count_active_player_wards(state, player_id),
+            player_family_capability_checksum: player_family_capability_checksum(state, player_id),
             player_office_checksum: state
                 .institutions
                 .values()
@@ -978,6 +1001,9 @@ impl GameplaySnapshot {
             house_governance: civic.house_governance,
             offices_held: civic.offices_held,
             available_offices: civic.available_offices,
+            eligible_officeholders: civic.eligible_officeholders,
+            active_wards: civic.active_wards,
+            player_family_capability_checksum: civic.player_family_capability_checksum,
             player_office_checksum: civic.player_office_checksum,
             institution_memberships: civic.institution_memberships,
             institution_budget_total: civic.institution_budget_total,
@@ -1087,6 +1113,7 @@ pub struct GameplayCampaignReport {
     pub maximum_unread_notifications: u16,
     pub longest_substantive_command_streak: u16,
     pub longest_substantive_streak_command: Option<GameplayCommandKind>,
+    pub longest_substantive_action_gap_days: u32,
     pub fantasy_arc: GameplayFantasyArc,
     pub trace: Vec<GameplayTraceStep>,
 }
@@ -1197,6 +1224,8 @@ struct CampaignAccumulator {
     current_substantive_command_streak: u16,
     longest_substantive_command_streak: u16,
     longest_substantive_streak_command: Option<GameplayCommandKind>,
+    current_substantive_action_gap_days: u32,
+    longest_substantive_action_gap_days: u32,
     starting_generation: Option<u16>,
     fantasy_arc: GameplayFantasyArc,
 }
@@ -1233,6 +1262,8 @@ impl CampaignAccumulator {
             current_substantive_command_streak: 0,
             longest_substantive_command_streak: 0,
             longest_substantive_streak_command: None,
+            current_substantive_action_gap_days: 0,
+            longest_substantive_action_gap_days: 0,
             starting_generation: None,
             fantasy_arc: GameplayFantasyArc::default(),
         }
@@ -1276,6 +1307,19 @@ impl CampaignAccumulator {
         }
     }
 
+    fn record_action_gap(&mut self, action: Option<GameplayCommandKind>, step_days: u32) {
+        if action.is_some_and(|kind| kind != GameplayCommandKind::AcknowledgeNotification) {
+            self.current_substantive_action_gap_days = 0;
+            return;
+        }
+        self.current_substantive_action_gap_days = self
+            .current_substantive_action_gap_days
+            .saturating_add(step_days);
+        self.longest_substantive_action_gap_days = self
+            .longest_substantive_action_gap_days
+            .max(self.current_substantive_action_gap_days);
+    }
+
     fn observe_initial_snapshot(&mut self, snapshot: &GameplaySnapshot) {
         self.starting_generation = Some(snapshot.generation);
         self.observe_fantasy_arc(snapshot);
@@ -1294,7 +1338,7 @@ impl CampaignAccumulator {
         if snapshot
             .quality_reputation
             .max(snapshot.reliability_reputation)
-            >= OFFICE_NOMINATION_REPUTATION_REQUIREMENT
+            >= COMMERCIAL_STANDING_REPUTATION_REQUIREMENT
         {
             self.fantasy_arc
                 .first_commercial_standing_day
@@ -1468,6 +1512,7 @@ fn run_campaign(
         maximum_unread_notifications: accumulator.maximum_unread_notifications,
         longest_substantive_command_streak: accumulator.longest_substantive_command_streak,
         longest_substantive_streak_command: accumulator.longest_substantive_streak_command,
+        longest_substantive_action_gap_days: accumulator.longest_substantive_action_gap_days,
         fantasy_arc: accumulator.fantasy_arc,
         trace,
     })
@@ -1526,6 +1571,7 @@ fn run_decision_cycle(
             .saturating_add(1);
     }
     let action = apply_selected_candidate(registry, state, selected, accumulator)?;
+    accumulator.record_action_gap(action.as_ref().map(|action| action.kind), step_days);
     let after_command = GameplaySnapshot::capture(state);
     let consequence_horizon = consequence_horizon_days(
         action.as_ref().map(|action| action.kind),
@@ -1569,7 +1615,11 @@ fn consequence_horizon_days(
     maximum: u16,
 ) -> u32 {
     let desired = match command {
-        Some(GameplayCommandKind::SetHouseGovernance) => 360,
+        Some(
+            GameplayCommandKind::SetHouseGovernance
+            | GameplayCommandKind::AdoptWard
+            | GameplayCommandKind::EducateFamilyMember,
+        ) => 360,
         Some(
             GameplayCommandKind::NominateForOffice
             | GameplayCommandKind::StartPublicWork
@@ -3310,6 +3360,9 @@ fn generate_law_candidates(
         GameplayPersona::Opportunist => 140,
     };
     for (kind, value) in law_candidates(registry, state) {
+        if !has_established_player_office_power(state, required_office_power_for_law(kind)) {
+            continue;
+        }
         if state
             .laws
             .values()
@@ -3384,7 +3437,7 @@ fn generate_public_work_candidates(
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) {
-    if !has_player_office(state) {
+    if !has_established_player_office_power(state, OfficePower::PublicWorks) {
         return;
     }
     let active_sponsored = state
@@ -3637,7 +3690,9 @@ fn generate_family_candidates(
             );
         }
     }
-    let nomination_bonus = match persona {
+    generate_ward_adoption_candidates(state, persona, candidates);
+    generate_family_education_candidates(state, persona, candidates);
+    let nomination_bonus: i64 = match persona {
         GameplayPersona::PowerBroker => 620,
         GameplayPersona::Steward => 170,
         GameplayPersona::Entrepreneur => 130,
@@ -3664,6 +3719,7 @@ fn generate_family_candidates(
             .iter()
             .find(|character| !institution.members.contains(&character.id()))
         {
+            let power_bonus = institution_power_bonus(persona, &institution.powers);
             push_candidate(
                 candidates,
                 GameplayCommandKind::NominateForOffice,
@@ -3676,10 +3732,196 @@ fn generate_family_candidates(
                     character.id(),
                     institution.institution_id
                 ),
-                nomination_bonus,
+                nomination_bonus.saturating_add(power_bonus),
             );
         }
     }
+}
+
+fn generate_ward_adoption_candidates(
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) {
+    let player = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    let adoption_available = player.treasury() >= WARD_ADOPTION_COST
+        && player.resources.legitimacy_basis_points >= WARD_ADOPTION_LEGITIMACY_REQUIREMENT
+        && player
+            .resources
+            .reputation_quality_basis_points
+            .max(player.resources.reputation_reliability_basis_points)
+            >= WARD_ADOPTION_REPUTATION_REQUIREMENT
+        && player_contract_deliveries(state) >= WARD_ADOPTION_DELIVERY_REQUIREMENT
+        && usize::from(count_active_player_wards(state, state.player_dynasty_id))
+            < MAX_ACTIVE_WARDS
+        && state
+            .audit_log
+            .iter()
+            .rev()
+            .find(|record| record.kind() == AuditKind::WardAdoption)
+            .is_none_or(|record| {
+                state.clock.day() >= record.day().saturating_add(WARD_ADOPTION_INTERVAL_DAYS)
+            });
+    if !adoption_available {
+        return;
+    }
+    let base_bonus: i64 = match persona {
+        GameplayPersona::PowerBroker => 620,
+        GameplayPersona::Steward => 500,
+        GameplayPersona::Opportunist => 420,
+        GameplayPersona::Entrepreneur => 360,
+    };
+    for focus in education_focus_order(persona) {
+        push_candidate(
+            candidates,
+            GameplayCommandKind::AdoptWard,
+            PlayerCommand::AdoptWard { focus },
+            format!("adopt a {focus:?}-focused ward into the dynasty"),
+            base_bonus.saturating_add(education_focus_persona_bonus(persona, focus)),
+        );
+    }
+}
+
+fn generate_family_education_candidates(
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) {
+    let player = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    let education_available = player.treasury() >= FAMILY_EDUCATION_COST
+        && player
+            .resources
+            .reputation_quality_basis_points
+            .max(player.resources.reputation_reliability_basis_points)
+            >= COMMERCIAL_STANDING_REPUTATION_REQUIREMENT
+        && player_contract_deliveries(state) >= OFFICE_NOMINATION_DELIVERY_REQUIREMENT
+        && state
+            .audit_log
+            .iter()
+            .rev()
+            .find(|record| record.kind() == AuditKind::FamilyEducation)
+            .is_none_or(|record| {
+                state.clock.day() >= record.day().saturating_add(FAMILY_EDUCATION_INTERVAL_DAYS)
+            });
+    if !education_available {
+        return;
+    }
+    let base_bonus: i64 = match persona {
+        GameplayPersona::PowerBroker => 480,
+        GameplayPersona::Entrepreneur => 430,
+        GameplayPersona::Steward => 400,
+        GameplayPersona::Opportunist => 320,
+    };
+    let active_characters: Vec<_> = state
+        .characters
+        .iter()
+        .filter(|character| {
+            character.dynasty_id() == state.player_dynasty_id
+                && character.status() == CharacterStatus::Active
+        })
+        .collect();
+    for focus in education_focus_order(persona) {
+        let student = active_characters
+            .iter()
+            .filter(|character| character_focus_value(character, focus) < 100)
+            .min_by_key(|character| (character_focus_value(character, focus), character.id()));
+        let Some(student) = student else {
+            continue;
+        };
+        push_candidate(
+            candidates,
+            GameplayCommandKind::EducateFamilyMember,
+            PlayerCommand::EducateFamilyMember {
+                character_id: student.id(),
+                focus,
+            },
+            format!("educate character {} in {focus:?}", student.id()),
+            base_bonus.saturating_add(education_focus_persona_bonus(persona, focus)),
+        );
+    }
+}
+
+const fn education_focus_order(persona: GameplayPersona) -> [EducationFocus; 4] {
+    match persona {
+        GameplayPersona::Steward => [
+            EducationFocus::Administration,
+            EducationFocus::Social,
+            EducationFocus::Commerce,
+            EducationFocus::Craft,
+        ],
+        GameplayPersona::Entrepreneur => [
+            EducationFocus::Commerce,
+            EducationFocus::Administration,
+            EducationFocus::Craft,
+            EducationFocus::Social,
+        ],
+        GameplayPersona::PowerBroker => [
+            EducationFocus::Social,
+            EducationFocus::Administration,
+            EducationFocus::Commerce,
+            EducationFocus::Craft,
+        ],
+        GameplayPersona::Opportunist => [
+            EducationFocus::Commerce,
+            EducationFocus::Social,
+            EducationFocus::Administration,
+            EducationFocus::Craft,
+        ],
+    }
+}
+
+const fn education_focus_persona_bonus(persona: GameplayPersona, focus: EducationFocus) -> i64 {
+    match (persona, focus) {
+        (GameplayPersona::Steward, EducationFocus::Administration)
+        | (
+            GameplayPersona::Entrepreneur | GameplayPersona::Opportunist,
+            EducationFocus::Commerce,
+        )
+        | (GameplayPersona::PowerBroker, EducationFocus::Social) => 260,
+        (GameplayPersona::Steward | GameplayPersona::Opportunist, EducationFocus::Social)
+        | (
+            GameplayPersona::Entrepreneur | GameplayPersona::PowerBroker,
+            EducationFocus::Administration,
+        ) => 140,
+        _ => 0,
+    }
+}
+
+const fn character_focus_value(character: &crate::core::Character, focus: EducationFocus) -> u16 {
+    match focus {
+        EducationFocus::Administration => character.capabilities.administration,
+        EducationFocus::Commerce => character.capabilities.commerce,
+        EducationFocus::Social => character.capabilities.social,
+        EducationFocus::Craft => character.capabilities.craft,
+    }
+}
+
+fn institution_power_bonus(persona: GameplayPersona, powers: &BTreeSet<OfficePower>) -> i64 {
+    powers
+        .iter()
+        .map(|power| match (persona, power) {
+            (GameplayPersona::Steward, OfficePower::PublicWorks)
+            | (GameplayPersona::Entrepreneur, OfficePower::MarketTolls)
+            | (GameplayPersona::PowerBroker, OfficePower::Taxation)
+            | (GameplayPersona::Opportunist, OfficePower::DebtEnforcement) => 500,
+            (GameplayPersona::Steward, OfficePower::EmergencyImports)
+            | (GameplayPersona::Entrepreneur, OfficePower::Licenses)
+            | (GameplayPersona::Opportunist, OfficePower::MarketTolls) => 420,
+            (GameplayPersona::Steward, OfficePower::Inspections) => 300,
+            (GameplayPersona::Entrepreneur, OfficePower::CityContracts)
+            | (GameplayPersona::Opportunist, OfficePower::WatchPriorities) => 360,
+            (GameplayPersona::PowerBroker, OfficePower::PublicWorks) => 440,
+            (GameplayPersona::PowerBroker, OfficePower::DebtEnforcement) => 400,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn is_office_nomination_available(state: &AppState) -> bool {
@@ -3692,6 +3934,7 @@ fn is_office_nomination_available(state: &AppState) -> bool {
             .reputation_quality_basis_points
             .max(player.resources.reputation_reliability_basis_points)
             < OFFICE_NOMINATION_REPUTATION_REQUIREMENT
+        || player_contract_deliveries(state) < OFFICE_NOMINATION_DELIVERY_REQUIREMENT
     {
         return false;
     }
@@ -3767,7 +4010,9 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
         GameplayPersona::Steward => match kind {
             GameplayCommandKind::RespondToCrisis | GameplayCommandKind::ResolveLaborDispute => 900,
             GameplayCommandKind::InvestInBusiness => 800,
+            GameplayCommandKind::EducateFamilyMember => 650,
             GameplayCommandKind::SetBusinessPolicy | GameplayCommandKind::StartPublicWork => 600,
+            GameplayCommandKind::AdoptWard => 520,
             GameplayCommandKind::SecureSupply => 420,
             GameplayCommandKind::AcknowledgeNotification => 300,
             GameplayCommandKind::TransferBusinessCash
@@ -3790,7 +4035,9 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::BuyProperty
             | GameplayCommandKind::TransferBusinessCash => 850,
             GameplayCommandKind::BorrowFunds => 700,
+            GameplayCommandKind::EducateFamilyMember => 600,
             GameplayCommandKind::ExtendCredit => 420,
+            GameplayCommandKind::AdoptWard => 360,
             GameplayCommandKind::EnactLaw
             | GameplayCommandKind::StartPublicWork
             | GameplayCommandKind::FileLegalCase
@@ -3806,6 +4053,8 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::StartPublicWork
             | GameplayCommandKind::FileLegalCase => 900,
             GameplayCommandKind::ExtendCredit => 820,
+            GameplayCommandKind::AdoptWard => 780,
+            GameplayCommandKind::EducateFamilyMember => 720,
             GameplayCommandKind::SetHouseGovernance => 700,
             GameplayCommandKind::TransferBusinessCash
             | GameplayCommandKind::AcquireBusiness
@@ -3827,6 +4076,8 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::FileLegalCase => 850,
             GameplayCommandKind::SellOutput => 700,
             GameplayCommandKind::ExtendCredit => 620,
+            GameplayCommandKind::AdoptWard => 500,
+            GameplayCommandKind::EducateFamilyMember => 420,
             GameplayCommandKind::TransferBusinessCash
             | GameplayCommandKind::InvestInBusiness
             | GameplayCommandKind::SetBusinessPolicy
@@ -3934,6 +4185,8 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         | GameplayCommandKind::StartPublicWork
         | GameplayCommandKind::FileLegalCase
         | GameplayCommandKind::SetHouseGovernance
+        | GameplayCommandKind::AdoptWard
+        | GameplayCommandKind::EducateFamilyMember
         | GameplayCommandKind::NominateForOffice => 0,
     }
 }
@@ -4062,6 +4315,12 @@ fn command_error_category(error: &CommandError) -> String {
         CommandError::UnchangedLaw { .. } => "unchanged law".to_owned(),
         CommandError::UnsupportedLaw { .. } => "unsupported law".to_owned(),
         CommandError::LawSponsorshipRequiresOffice => "law sponsorship requires office".to_owned(),
+        CommandError::LawSponsorshipRequiresPower { .. } => {
+            "law sponsorship requires office power".to_owned()
+        }
+        CommandError::LawSponsorshipPowerNotEstablished { .. } => {
+            "law sponsorship office power not established".to_owned()
+        }
         CommandError::LawCooldown { .. } => "law cooldown".to_owned(),
         CommandError::MissingDistrict { .. } => "missing district".to_owned(),
         CommandError::MissingDynasty { .. } => "missing dynasty".to_owned(),
@@ -4073,6 +4332,12 @@ fn command_error_category(error: &CommandError) -> String {
         CommandError::InvalidPublicWorkBudget => "invalid public-work budget".to_owned(),
         CommandError::PublicWorkSponsorshipRequiresOffice => {
             "public-work sponsorship requires office".to_owned()
+        }
+        CommandError::PublicWorkSponsorshipRequiresPower => {
+            "public-work sponsorship requires office power".to_owned()
+        }
+        CommandError::PublicWorkPowerNotEstablished { .. } => {
+            "public-work office power not established".to_owned()
         }
         CommandError::DuplicateActivePublicWork { .. } => "duplicate active public work".to_owned(),
         CommandError::PublicWorkCooldown { .. } => "public-work cooldown".to_owned(),
@@ -4087,7 +4352,21 @@ fn command_error_category(error: &CommandError) -> String {
         CommandError::InsufficientOfficeReputation { .. } => {
             "insufficient office reputation".to_owned()
         }
+        CommandError::InsufficientOfficeCommercialRecord { .. } => {
+            "insufficient office commercial record".to_owned()
+        }
         CommandError::OfficeNominationCooldown { .. } => "office nomination cooldown".to_owned(),
+        CommandError::WardAdoptionCooldown { .. } => "ward adoption cooldown".to_owned(),
+        CommandError::WardCapacity { .. } => "ward capacity".to_owned(),
+        CommandError::InsufficientWardReputation { .. } => {
+            "insufficient ward reputation".to_owned()
+        }
+        CommandError::InsufficientWardCommercialRecord { .. } => {
+            "insufficient ward commercial record".to_owned()
+        }
+        CommandError::InvalidFamilyStudent { .. } => "invalid family student".to_owned(),
+        CommandError::FamilyEducationAtMaximum { .. } => "family education at maximum".to_owned(),
+        CommandError::FamilyEducationCooldown { .. } => "family education cooldown".to_owned(),
         CommandError::MissingInstitution { .. } => "missing institution".to_owned(),
         CommandError::AlreadyInstitutionMember { .. } => "already institution member".to_owned(),
         CommandError::InvalidNominee { .. } => "invalid nominee".to_owned(),
@@ -4496,6 +4775,7 @@ fn derive_findings(
     add_domain_findings(aggregate, &mut findings);
     add_action_concentration_finding(aggregate, &mut findings);
     add_repetitive_command_streak_finding(campaigns, &mut findings);
+    add_long_substantive_gap_finding(campaigns, &mut findings);
     add_business_survival_finding(campaigns, &mut findings);
     add_system_health_findings(aggregate, campaigns, &mut findings);
     add_choice_quality_finding(aggregate, &mut findings);
@@ -4536,6 +4816,42 @@ fn add_repetitive_command_streak_finding(
             campaign.seed,
             campaign.persona.label(),
             campaign.background
+        ),
+    });
+}
+
+fn add_long_substantive_gap_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let eligible: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| campaign.simulated_days >= 720)
+        .collect();
+    if eligible.is_empty() {
+        return;
+    }
+    let long_gaps = eligible
+        .iter()
+        .filter(|campaign| campaign.longest_substantive_action_gap_days >= 360)
+        .count();
+    if scaled_ratio_usize(long_gaps, eligible.len(), 100) < 25 {
+        return;
+    }
+    let worst = eligible
+        .iter()
+        .max_by_key(|campaign| campaign.longest_substantive_action_gap_days)
+        .expect("eligible campaigns must have a longest gap");
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Long stretches pass without a substantive player decision".to_owned(),
+        evidence: format!(
+            "{long_gaps} of {} campaigns had a decision gap of at least one year; the worst gap was {} days for seed {}, {} {:?}.",
+            eligible.len(),
+            worst.longest_substantive_action_gap_days,
+            worst.seed,
+            worst.persona.label(),
+            worst.background
         ),
     });
 }
@@ -4758,10 +5074,16 @@ const fn domain_player_commands(domain: GameplayDomain) -> &'static [GameplayCom
             GameplayCommandKind::BorrowFunds,
             GameplayCommandKind::ExtendCredit,
             GameplayCommandKind::EnactLaw,
+            GameplayCommandKind::AdoptWard,
+            GameplayCommandKind::EducateFamilyMember,
             GameplayCommandKind::NominateForOffice,
             GameplayCommandKind::RespondToCrisis,
         ],
-        GameplayDomain::Family => &[GameplayCommandKind::SetHouseGovernance],
+        GameplayDomain::Family => &[
+            GameplayCommandKind::SetHouseGovernance,
+            GameplayCommandKind::AdoptWard,
+            GameplayCommandKind::EducateFamilyMember,
+        ],
         GameplayDomain::Institutions => &[
             GameplayCommandKind::StartPublicWork,
             GameplayCommandKind::NominateForOffice,
@@ -5171,6 +5493,28 @@ fn add_political_health_finding(
             ),
         });
     }
+    let officeholder_capacity_capture = campaigns
+        .iter()
+        .filter(|campaign| {
+            let effective_capacity = campaign
+                .end
+                .available_offices
+                .min(campaign.end.eligible_officeholders);
+            effective_capacity > 1
+                && campaign.end.active_wards == 0
+                && campaign.maximum_offices_held >= effective_capacity
+        })
+        .count();
+    if scaled_ratio_usize(officeholder_capacity_capture, campaigns.len(), 100) >= 25 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Dynasty fills every available officeholder slot".to_owned(),
+            evidence: format!(
+                "{officeholder_capacity_capture} of {} campaigns filled every office slot their active family members could legally occupy without adopting a ward, so political growth stalled at the founding household.",
+                campaigns.len()
+            ),
+        });
+    }
 }
 
 fn add_feed_health_findings(
@@ -5248,6 +5592,7 @@ fn add_fantasy_arc_findings(
         return;
     }
     add_fantasy_arc_order_finding(campaigns, findings);
+    add_fantasy_arc_compression_findings(campaigns, findings);
     add_synchronized_fantasy_timing_finding(campaigns, findings);
     add_fantasy_arc_completion_findings(average_campaign_days(aggregate), campaigns, findings);
 }
@@ -5274,6 +5619,57 @@ fn add_fantasy_arc_order_finding(
             title: "Political ascent precedes commercial standing".to_owned(),
             evidence: format!(
                 "{political_before_commercial} of {} campaigns launched an office campaign before reaching the commercial reputation threshold.",
+                campaigns.len()
+            ),
+        });
+    }
+}
+
+fn add_fantasy_arc_compression_findings(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let immediate_political_access = campaigns
+        .iter()
+        .filter(|campaign| {
+            matches!(
+                (
+                    campaign.fantasy_arc.first_commercial_standing_day,
+                    campaign.fantasy_arc.first_office_campaign_day,
+                ),
+                (Some(commercial), Some(campaign_day)) if campaign_day <= commercial.saturating_add(7)
+            )
+        })
+        .count();
+    if scaled_ratio_usize(immediate_political_access, campaigns.len(), 100) >= 50 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Commercial standing immediately becomes political access".to_owned(),
+            evidence: format!(
+                "{immediate_political_access} of {} campaigns launched an office campaign within seven days of reaching commercial standing, leaving little distinct social-standing phase.",
+                campaigns.len()
+            ),
+        });
+    }
+
+    let immediate_city_power = campaigns
+        .iter()
+        .filter(|campaign| {
+            matches!(
+                (
+                    campaign.fantasy_arc.first_office_day,
+                    campaign.fantasy_arc.first_city_shaping_action_day,
+                ),
+                (Some(office), Some(city_action)) if city_action <= office.saturating_add(30)
+            )
+        })
+        .count();
+    if scaled_ratio_usize(immediate_city_power, campaigns.len(), 100) >= 50 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Officeholding immediately becomes city-shaping power".to_owned(),
+            evidence: format!(
+                "{immediate_city_power} of {} campaigns sponsored a law or public work within 30 days of first taking office, leaving little time for office-specific duties or coalition building.",
                 campaigns.len()
             ),
         });
@@ -5523,7 +5919,7 @@ fn add_persona_convergence_finding(
                 .filter(|campaign| campaign.persona == *persona)
             {
                 for (kind, stats) in &campaign.commands {
-                    if *kind != GameplayCommandKind::AcknowledgeNotification {
+                    if is_persona_identity_command(*kind) {
                         let total = totals.entry(*kind).or_default();
                         *total = total.saturating_add(stats.executed);
                     }
@@ -5534,12 +5930,23 @@ fn add_persona_convergence_finding(
             ranked.into_iter().take(3).map(|(kind, _)| kind).collect()
         })
         .collect();
-    let common = top_sets
+    let mut common = top_sets
         .iter()
         .skip(1)
         .fold(top_sets[0].clone(), |common, next| {
             common.intersection(next).copied().collect()
         });
+    if common.contains(&GameplayCommandKind::NominateForOffice)
+        && persona_outcomes_diverge(campaigns, |campaign| campaign.end.player_office_checksum)
+    {
+        common.remove(&GameplayCommandKind::NominateForOffice);
+    }
+    if persona_outcomes_diverge(campaigns, |campaign| {
+        campaign.end.player_family_capability_checksum
+    }) {
+        common.remove(&GameplayCommandKind::AdoptWard);
+        common.remove(&GameplayCommandKind::EducateFamilyMember);
+    }
     if common.len() >= 2 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
@@ -5555,6 +5962,47 @@ fn add_persona_convergence_finding(
             ),
         });
     }
+}
+
+fn persona_outcomes_diverge<T: Copy + Ord>(
+    campaigns: &[GameplayCampaignReport],
+    outcome: impl Fn(&GameplayCampaignReport) -> T,
+) -> bool {
+    let personas: BTreeSet<_> = campaigns.iter().map(|campaign| campaign.persona).collect();
+    let outcome_sets: Vec<BTreeSet<T>> = personas
+        .iter()
+        .map(|persona| {
+            campaigns
+                .iter()
+                .filter(|campaign| campaign.persona == *persona)
+                .map(&outcome)
+                .collect()
+        })
+        .collect();
+    let mut comparisons = 0_u64;
+    let mut overlap_total = 0_u64;
+    for (index, left) in outcome_sets.iter().enumerate() {
+        for right in outcome_sets.iter().skip(index + 1) {
+            let union = left.union(right).count();
+            if union == 0 {
+                continue;
+            }
+            let intersection = left.intersection(right).count();
+            overlap_total =
+                overlap_total.saturating_add(scaled_ratio_usize(intersection, union, 100));
+            comparisons = comparisons.saturating_add(1);
+        }
+    }
+    comparisons > 0 && overlap_total / comparisons < 75
+}
+
+const fn is_persona_identity_command(kind: GameplayCommandKind) -> bool {
+    !matches!(
+        kind,
+        GameplayCommandKind::AcknowledgeNotification
+            | GameplayCommandKind::RespondToCrisis
+            | GameplayCommandKind::ResolveLaborDispute
+    )
 }
 
 fn add_civic_convergence_finding(
@@ -6116,10 +6564,13 @@ fn compare_dynasty_and_civic(
     if earlier.family_unity != later.family_unity
         || earlier.family_charter_version != later.family_charter_version
         || earlier.house_governance != later.house_governance
+        || earlier.active_wards != later.active_wards
+        || earlier.player_family_capability_checksum != later.player_family_capability_checksum
     {
         domains.insert(GameplayDomain::Family);
     }
     if earlier.offices_held != later.offices_held
+        || earlier.eligible_officeholders != later.eligible_officeholders
         || earlier.player_office_checksum != later.player_office_checksum
         || earlier.institution_memberships != later.institution_memberships
         || earlier.institution_budget_total != later.institution_budget_total
@@ -6285,6 +6736,53 @@ fn count_player_offices(state: &AppState, player_id: DynastyId) -> u16 {
             })
             .count(),
     )
+}
+
+fn count_eligible_officeholders(state: &AppState, player_id: DynastyId) -> u16 {
+    usize_to_u16(
+        state
+            .characters
+            .iter()
+            .filter(|character| {
+                character.dynasty_id() == player_id && character.status() == CharacterStatus::Active
+            })
+            .count(),
+    )
+}
+
+fn count_active_player_wards(state: &AppState, player_id: DynastyId) -> u16 {
+    usize_to_u16(
+        state
+            .family_links
+            .values()
+            .filter(|link| link.active && link.kind == FamilyLinkKind::Ward)
+            .filter(|link| {
+                state
+                    .characters
+                    .get(link.second_character_id)
+                    .is_some_and(|character| {
+                        character.dynasty_id() == player_id
+                            && character.status() == CharacterStatus::Active
+                    })
+            })
+            .count(),
+    )
+}
+
+fn player_family_capability_checksum(state: &AppState, player_id: DynastyId) -> u32 {
+    state
+        .characters
+        .iter()
+        .filter(|character| {
+            character.dynasty_id() == player_id && character.status() == CharacterStatus::Active
+        })
+        .fold(0_u32, |total, character| {
+            total
+                .saturating_add(u32::from(character.capabilities.administration) * 11)
+                .saturating_add(u32::from(character.capabilities.commerce) * 13)
+                .saturating_add(u32::from(character.capabilities.social) * 17)
+                .saturating_add(u32::from(character.capabilities.craft) * 19)
+        })
 }
 
 fn count_player_memberships(state: &AppState, player_id: DynastyId) -> u16 {

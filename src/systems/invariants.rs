@@ -2,7 +2,7 @@
 
 use crate::core::{
     AppState, Business, CharacterStatus, ContractStatus, CrisisStatus, EmploymentStatus,
-    LegalCaseStatus, LoanStatus, ObjectiveStatus, PublicWorkStatus,
+    FamilyLinkKind, LegalCaseStatus, LoanStatus, ObjectiveStatus, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, DistrictId, DynastyId, GoodId, HouseholdId, InstitutionId, RecipeId,
@@ -191,6 +191,16 @@ fn validate_dynasties(state: &AppState) {
         debug_assert!(
             dynasty.resources.legitimacy_basis_points <= 10_000,
             "Lifecycle Validity: dynasty legitimacy is outside basis-point range"
+        );
+        debug_assert!(
+            dynasty.resources.reputation_quality_basis_points <= 10_000
+                && dynasty.resources.reputation_reliability_basis_points <= 10_000
+                && dynasty.runtime.succession_risk_basis_points <= 10_000,
+            "Lifecycle Validity: dynasty reputation or succession risk is outside basis-point range"
+        );
+        debug_assert!(
+            dynasty.runtime.generation > 0,
+            "Lifecycle Validity: dynasty generation must be positive"
         );
     }
 }
@@ -792,6 +802,30 @@ fn validate_family_state(state: &AppState) {
             link.property_claim_basis_points <= 10_000,
             "Lifecycle Validity: family property claim is outside basis-point range"
         );
+        if matches!(link.kind, FamilyLinkKind::Adoptive | FamilyLinkKind::Ward) {
+            let first = state
+                .characters
+                .get(link.first_character_id)
+                .expect("validated family link character must exist");
+            let second = state
+                .characters
+                .get(link.second_character_id)
+                .expect("validated family link character must exist");
+            debug_assert_eq!(
+                first.dynasty_id(),
+                second.dynasty_id(),
+                "Ownership Exclusivity: adoptive and ward links must remain within one dynasty"
+            );
+            if link.active && link.kind == FamilyLinkKind::Ward {
+                debug_assert!(
+                    state
+                        .family_councils
+                        .get(&second.dynasty_id())
+                        .is_some_and(|council| council.members.contains(&second.id())),
+                    "Index Completeness: an active ward must belong to its dynasty council"
+                );
+            }
+        }
     }
     debug_assert_eq!(
         state.family_councils.len(),
@@ -959,7 +993,9 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
             "Registry Reference Validity: district runtime references missing definition"
         );
         debug_assert!(
-            district.employment_basis_points <= 10_000
+            district.rent_index_basis_points >= super::MIN_DISTRICT_RENT_INDEX_BASIS_POINTS
+                && district.rent_index_basis_points <= super::MAX_DISTRICT_RENT_INDEX_BASIS_POINTS
+                && district.employment_basis_points <= 10_000
                 && district.sanitation_basis_points <= 10_000
                 && district.safety_basis_points <= 10_000
                 && district.unrest_basis_points <= 10_000,

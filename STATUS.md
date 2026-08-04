@@ -22,9 +22,9 @@ The engine supports multi-generation campaigns and preserves all consequential s
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 6 |
-| Supported save migrations | Versions 0 through 5 |
-| Gameplay report schema | 13 |
+| Save schema | 7 |
+| Supported save migrations | Versions 0 through 6 |
+| Gameplay report schema | 15 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |
@@ -36,7 +36,7 @@ The engine supports multi-generation campaigns and preserves all consequential s
 - One detailed Rivergate city with six districts and abstract regional trade links.
 - Eight major dynasties and grouped ordinary households.
 - Typed persistent IDs and generated ID allocation.
-- Characters, family links, heads, heirs, councils, governance, education, marriage, health, loyalty, succession, and multi-generation continuity.
+- Characters, family links, heads, heirs, wards, councils, governance, focused player-funded education, marriage, health, loyalty, succession, and multi-generation continuity.
 
 ### Economy and business
 
@@ -76,7 +76,7 @@ The engine supports multi-generation campaigns and preserves all consequential s
 - Complete read-only campaign projections for core and strategic records.
 - Self-contained HTML rendering with escaped visible content and script-safe embedded JSON.
 - Durable outbox notifications, chronicle entries, and audit records.
-- Deterministic gameplay analysis with state-derived candidates, counterfactual branches, scores, findings, and bounded traces.
+- Deterministic gameplay analysis with state-derived candidates, counterfactual branches, family-capacity metrics, scores, findings, and bounded traces.
 
 ## Public integration surface
 
@@ -134,9 +134,9 @@ The following areas are outside the implemented contract or remain reserved for 
 
 ## Verification status
 
-Verified on August 3, 2026:
+Verified on August 4, 2026:
 
-- 232 non-ignored library tests pass.
+- 263 non-ignored library tests pass.
 - 2 deterministic long-horizon soak tests pass.
 - Documentation tests pass.
 - Release-mode library tests pass.

@@ -828,6 +828,64 @@ mod contracts {
     }
 
     #[test]
+    fn settlement_does_not_move_goods_or_money_when_seller_cash_cannot_receive_payment() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (buyer_id, seller_id, good_id, quantity, payment) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.next_due_day = state.clock.day();
+            let payment = cost_for(contract.quantity_per_week, contract.unit_price);
+            (
+                contract.buyer_business_id,
+                contract.seller_business_id,
+                contract.good_id,
+                contract.quantity_per_week,
+                payment,
+            )
+        };
+        {
+            let seller = state
+                .businesses
+                .get_mut(seller_id)
+                .expect("seller must exist");
+            seller.inventory.insert(good_id, quantity);
+            seller.finance.cash = Money::from_copper(i64::MAX);
+        }
+        state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist")
+            .finance
+            .cash = payment;
+        let buyer_inventory_before = state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .inventory_quantity(good_id);
+
+        settle_contracts(&mut state);
+
+        let buyer = state.businesses.get(buyer_id).expect("buyer must exist");
+        let seller = state.businesses.get(seller_id).expect("seller must exist");
+        assert_eq!(buyer.cash(), payment);
+        assert_eq!(buyer.inventory_quantity(good_id), buyer_inventory_before);
+        assert_eq!(seller.cash(), Money::from_copper(i64::MAX));
+        assert_eq!(seller.inventory_quantity(good_id), quantity);
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .missed_deliveries,
+            1,
+            "an unrepresentable settlement must remain an unfulfilled obligation"
+        );
+    }
+
+    #[test]
     fn missed_final_delivery_cannot_end_as_fulfilled() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
@@ -1325,6 +1383,64 @@ mod employment {
             household_cash_before
         );
     }
+
+    #[test]
+    fn payroll_does_not_debit_business_when_household_cash_has_no_headroom() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let agreement = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment");
+        let business_id = agreement.business_id;
+        let household_id = agreement.household_id;
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("employment business must exist");
+            business.finance.cash = Money::from_copper(1_000);
+            business.policy.minimum_cash_reserve = Money::ZERO;
+        }
+        state
+            .households
+            .get_mut(household_id)
+            .expect("employment household must exist")
+            .cash = Money::from_copper(i64::MAX);
+        let finance_before = state
+            .businesses
+            .get(business_id)
+            .expect("employment business must exist")
+            .finance
+            .clone();
+
+        let paid = pay_employment_wage(
+            registry,
+            &mut state,
+            business_id,
+            household_id,
+            Money::from_copper(100),
+        );
+
+        assert_eq!(paid, Money::ZERO);
+        assert_eq!(
+            &state
+                .businesses
+                .get(business_id)
+                .expect("employment business must exist")
+                .finance,
+            &finance_before
+        );
+        assert_eq!(
+            state
+                .households
+                .get(household_id)
+                .expect("employment household must exist")
+                .cash,
+            Money::from_copper(i64::MAX)
+        );
+    }
 }
 
 mod loans {
@@ -1562,6 +1678,69 @@ mod loans {
             &before,
             &state,
             "invalid negative payment must not mutate loan parties or balance",
+        );
+    }
+
+    #[test]
+    fn due_loan_does_not_debit_borrower_when_lender_treasury_has_no_headroom() {
+        let mut state = make_test_campaign();
+        let loan_id = current_loan_id(&state);
+        let (lender_id, borrower_id, payment, missed_before, balance_before) = {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.next_due_day = state.clock.day();
+            (
+                loan.lender_dynasty_id,
+                loan.borrower_dynasty_id,
+                loan.weekly_payment,
+                loan.missed_payments,
+                loan.balance,
+            )
+        };
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = payment;
+
+        settle_loans(&mut state);
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&lender_id)
+                .expect("lender must exist")
+                .treasury(),
+            Money::from_copper(i64::MAX)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&borrower_id)
+                .expect("borrower must exist")
+                .treasury(),
+            payment,
+            "a payment that cannot be credited must not be removed from the borrower"
+        );
+        assert_eq!(
+            state
+                .loans
+                .get(&loan_id)
+                .expect("loan must exist")
+                .missed_payments,
+            missed_before,
+            "a lender-side capacity limit must not count as borrower nonpayment"
+        );
+        assert_eq!(
+            state.loans.get(&loan_id).expect("loan must exist").balance,
+            balance_before,
+            "a deferred settlement must not accrue interest while the lender cannot receive it"
         );
     }
 
@@ -2231,6 +2410,65 @@ mod crises {
         assert!(
             guild_revolt_probability_basis_points(0, 5_000) > 0,
             "restrictive guild law must create revolt pressure"
+        );
+    }
+}
+
+mod districts {
+    use super::*;
+
+    #[test]
+    fn rent_pressure_uses_the_full_safety_and_sanitation_signal() {
+        let mut state = make_test_campaign();
+        let district_id = *state
+            .districts
+            .keys()
+            .next()
+            .expect("campaign must contain a district");
+        let district = state
+            .districts
+            .get_mut(&district_id)
+            .expect("district must exist");
+        district.safety_basis_points = 10_000;
+        district.sanitation_basis_points = 10_000;
+
+        update_district_conditions(&mut state);
+
+        assert_eq!(
+            state
+                .districts
+                .get(&district_id)
+                .expect("district must exist")
+                .rent_index_basis_points,
+            13_666,
+            "maximum desirability must produce meaningful rent pressure below the hard cap"
+        );
+    }
+
+    #[test]
+    fn rent_pressure_respects_the_domain_floor() {
+        let mut state = make_test_campaign();
+        let district_id = *state
+            .districts
+            .keys()
+            .next()
+            .expect("campaign must contain a district");
+        let district = state
+            .districts
+            .get_mut(&district_id)
+            .expect("district must exist");
+        district.safety_basis_points = 0;
+        district.sanitation_basis_points = 0;
+
+        update_district_conditions(&mut state);
+
+        assert_eq!(
+            state
+                .districts
+                .get(&district_id)
+                .expect("district must exist")
+                .rent_index_basis_points,
+            crate::systems::MIN_DISTRICT_RENT_INDEX_BASIS_POINTS
         );
     }
 }

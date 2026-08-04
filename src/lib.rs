@@ -34,9 +34,9 @@ pub use persistence::{PersistenceError, StateValidationKind, load_state, save_st
 pub use projection::{CampaignProjection, build_campaign_projection, render_campaign_html};
 pub use registry::{Registry, build_rivergate_registry};
 pub use systems::{
-    BusinessAcquisitionQuote, CommandError, CommandOutcome, CrisisResponse, LaborResponse,
-    NewGameError, PlayerCommand, SimulationError, advance_days, apply_player_command,
-    build_new_game, quote_business_acquisition, validate_invariants,
+    BusinessAcquisitionQuote, CommandError, CommandOutcome, CrisisResponse, EducationFocus,
+    LaborResponse, NewGameError, PlayerCommand, SimulationError, advance_days,
+    apply_player_command, build_new_game, quote_business_acquisition, validate_invariants,
 };
 
 #[cfg(test)]

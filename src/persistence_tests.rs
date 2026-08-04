@@ -1,9 +1,14 @@
 //! Persistence round-trip, migration, and release-mode validation tests.
 
 use super::*;
+use crate::core::FamilyLinkKind;
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
+use crate::money::Money;
 use crate::registry::Registry;
-use crate::systems::{acquire_business, advance_days, quote_business_acquisition};
+use crate::systems::{
+    EducationFocus, OFFICE_NOMINATION_DELIVERY_REQUIREMENT, PlayerCommand, acquire_business,
+    advance_days, apply_player_command, quote_business_acquisition,
+};
 use crate::test_support::{
     assert_state_eq, make_test_campaign, rivergate_registry_for_test, write_test_json_fixture,
 };
@@ -103,6 +108,73 @@ mod round_trip {
             &state,
             &loaded,
             "save/load round-trip must preserve the complete deterministic state",
+        );
+    }
+
+    #[test]
+    fn preserves_adopted_wards_and_family_education() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        {
+            let player = state
+                .dynasties
+                .get_mut(&player_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(30_000);
+            player.resources.legitimacy_basis_points = 5_000;
+            player.resources.reputation_reliability_basis_points = 5_500;
+        }
+        let player_business_ids: BTreeSet<_> = state
+            .businesses
+            .iter()
+            .filter(|business| business.owner_dynasty_id() == player_id)
+            .map(crate::core::Business::id)
+            .collect();
+        state
+            .contracts
+            .values_mut()
+            .find(|contract| {
+                player_business_ids.contains(&contract.buyer_business_id)
+                    || player_business_ids.contains(&contract.seller_business_id)
+            })
+            .expect("campaign must contain a player contract")
+            .fulfilled_deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
+            .expect("delivery requirement must fit contract counters");
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AdoptWard {
+                focus: EducationFocus::Administration,
+            },
+        )
+        .expect("ward adoption must succeed");
+        let ward_id = state
+            .family_links
+            .values()
+            .find(|link| link.kind == FamilyLinkKind::Ward)
+            .expect("ward link must exist")
+            .second_character_id;
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EducateFamilyMember {
+                character_id: ward_id,
+                focus: EducationFocus::Social,
+            },
+        )
+        .expect("ward education must succeed");
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("family-campaign.json");
+
+        save_state(&path, &state).expect("family state must save");
+        let loaded = load_state(&path).expect("family state must load");
+
+        assert_state_eq(
+            &state,
+            &loaded,
+            "save/load must preserve ward records, family links, education, and histories",
         );
     }
 
@@ -376,6 +448,21 @@ mod migrations {
     }
 
     #[test]
+    fn v6_advances_to_the_family_command_schema() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(6);
+
+        let migrated =
+            migrate_to_current(value, Path::new("memory.json")).expect("version six must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        validate_state(&loaded).expect("version-six campaign must remain valid");
+    }
+
+    #[test]
     fn v1_hydrates_strategic_state() {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
@@ -449,6 +536,85 @@ mod migrations {
 
 mod validation {
     use super::*;
+
+    #[test]
+    fn rejects_zero_dynasty_generation() {
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .values_mut()
+            .next()
+            .expect("campaign must contain a dynasty")
+            .runtime
+            .generation = 0;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("zero-generation.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid resource value",
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_district_rent_index() {
+        let mut state = make_test_campaign();
+        state
+            .districts
+            .values_mut()
+            .next()
+            .expect("campaign must contain a district")
+            .rent_index_basis_points = crate::systems::MAX_DISTRICT_RENT_INDEX_BASIS_POINTS + 1;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("invalid-rent-index.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid basis-point value",
+        );
+    }
+
+    #[test]
+    fn rejects_ward_links_that_cross_dynasties() {
+        let mut state = make_test_campaign();
+        let link_id = *state
+            .family_links
+            .keys()
+            .next()
+            .expect("campaign must contain a family link");
+        let first_character_id = state
+            .family_links
+            .get(&link_id)
+            .expect("selected family link must exist")
+            .first_character_id;
+        let first_dynasty_id = state
+            .characters
+            .get(first_character_id)
+            .expect("family link character must exist")
+            .dynasty_id();
+        let foreign_character_id = state
+            .characters
+            .iter()
+            .find(|character| character.dynasty_id() != first_dynasty_id)
+            .expect("campaign must contain another dynasty")
+            .id();
+        let link = state
+            .family_links
+            .get_mut(&link_id)
+            .expect("selected family link must exist");
+        link.kind = FamilyLinkKind::Ward;
+        link.second_character_id = foreign_character_id;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("cross-dynasty-ward.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "crosses dynasties",
+        );
+    }
 
     #[test]
     fn rejects_exhausted_identifier_allocator() {

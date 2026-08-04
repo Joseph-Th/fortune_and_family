@@ -1,6 +1,6 @@
 //! JSON persistence adapter with explicit schema migration and contextual errors.
 
-use crate::core::{AppState, CURRENT_SCHEMA_VERSION};
+use crate::core::{AppState, CURRENT_SCHEMA_VERSION, FamilyLinkKind};
 use crate::ids::{BusinessId, HouseholdId};
 use crate::money::{Money, Quantity};
 use serde_json::Value;
@@ -43,6 +43,12 @@ pub enum PersistenceError {
     },
     #[error("failed to write save file {path}: {source}")]
     Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to synchronize save directory {path}: {source}")]
+    SyncDirectory {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -139,7 +145,19 @@ pub fn save_state(path: impl AsRef<Path>, state: &AppState) -> Result<(), Persis
             path: path.to_path_buf(),
             source: error.error,
         })?;
+    #[cfg(unix)]
+    sync_save_directory(parent)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn sync_save_directory(parent: &Path) -> Result<(), PersistenceError> {
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| PersistenceError::SyncDirectory {
+            path: parent.to_path_buf(),
+            source,
+        })
 }
 
 /// Loads, migrates, and deserializes a JSON save file.
@@ -294,6 +312,7 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
             || dynasty.resources.legitimacy_basis_points > 10_000
             || dynasty.resources.reputation_quality_basis_points > 10_000
             || dynasty.resources.reputation_reliability_basis_points > 10_000
+            || dynasty.runtime.generation == 0
             || dynasty.runtime.succession_risk_basis_points > 10_000
         {
             return Err(format!(
@@ -444,7 +463,10 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
         }
     }
     for district in state.districts.values() {
-        if district.employment_basis_points > 10_000
+        if district.rent_index_basis_points < crate::systems::MIN_DISTRICT_RENT_INDEX_BASIS_POINTS
+            || district.rent_index_basis_points
+                > crate::systems::MAX_DISTRICT_RENT_INDEX_BASIS_POINTS
+            || district.employment_basis_points > 10_000
             || district.sanitation_basis_points > 10_000
             || district.safety_basis_points > 10_000
             || district.unrest_basis_points > 10_000
@@ -997,6 +1019,32 @@ fn validate_family_records(state: &AppState) -> Result<(), String> {
                 "family link {link_id} has an invalid character reference"
             ));
         }
+        if matches!(link.kind, FamilyLinkKind::Adoptive | FamilyLinkKind::Ward) {
+            let first = state
+                .characters
+                .get(link.first_character_id)
+                .expect("validated family link character must exist");
+            let second = state
+                .characters
+                .get(link.second_character_id)
+                .expect("validated family link character must exist");
+            if first.dynasty_id() != second.dynasty_id() {
+                return Err(format!(
+                    "family link {link_id} crosses dynasties for an adoptive or ward relationship"
+                ));
+            }
+            if link.active
+                && link.kind == FamilyLinkKind::Ward
+                && !state
+                    .family_councils
+                    .get(&second.dynasty_id())
+                    .is_some_and(|council| council.members.contains(&second.id()))
+            {
+                return Err(format!(
+                    "family link {link_id} has an active ward outside its dynasty council"
+                ));
+            }
+        }
     }
     if state.family_councils.len() != state.dynasties.len() {
         return Err("every dynasty must have exactly one family council".to_owned());
@@ -1269,6 +1317,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             3 => migrate_v3_to_v4(value)?,
             4 => migrate_v4_to_v5(value)?,
             5 => migrate_v5_to_v6(value)?,
+            6 => migrate_v6_to_v7(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -1569,6 +1618,17 @@ fn migrate_v5_to_v6(mut value: Value) -> Result<Value, PersistenceError> {
         property.insert("tenant_dynasty_id".to_owned(), tenant);
     }
     object.insert("schema_version".to_owned(), Value::from(6));
+    Ok(value)
+}
+
+fn migrate_v6_to_v7(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 6,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    object.insert("schema_version".to_owned(), Value::from(7));
     Ok(value)
 }
 

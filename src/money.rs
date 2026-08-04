@@ -40,6 +40,17 @@ impl Money {
         }
     }
 
+    /// Returns the largest nonnegative amount that can be added without overflowing.
+    #[must_use]
+    pub const fn max_nonnegative_addend(self) -> Self {
+        let headroom = i64::MAX.saturating_sub(self.0);
+        if headroom > 0 {
+            Self(headroom)
+        } else {
+            Self::ZERO
+        }
+    }
+
     #[must_use]
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
@@ -146,6 +157,25 @@ impl Quantity {
     #[must_use]
     pub const fn saturating_add(self, other: Self) -> Self {
         Self(self.0.saturating_add(other.0))
+    }
+
+    #[must_use]
+    pub const fn checked_add(self, other: Self) -> Option<Self> {
+        match self.0.checked_add(other.0) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    /// Returns the largest nonnegative amount that can be added without overflowing.
+    #[must_use]
+    pub const fn max_nonnegative_addend(self) -> Self {
+        let headroom = i64::MAX.saturating_sub(self.0);
+        if headroom > 0 {
+            Self(headroom)
+        } else {
+            Self::ZERO
+        }
     }
 
     #[must_use]
@@ -305,6 +335,26 @@ mod tests {
         assert_eq!(
             Money::from_copper(i64::MAX).saturating_mul_ratio_ceil_nonnegative(2, 2),
             Money::from_copper(i64::MAX)
+        );
+    }
+
+    #[test]
+    fn nonnegative_addend_capacity_preserves_exact_boundary_addition() {
+        let money = Money::from_copper(i64::MAX - 7);
+        let quantity = Quantity::from_milliunits(i64::MAX - 11);
+
+        assert_eq!(money.max_nonnegative_addend(), Money::from_copper(7));
+        assert_eq!(
+            money.checked_add(money.max_nonnegative_addend()),
+            Some(Money::from_copper(i64::MAX))
+        );
+        assert_eq!(
+            quantity.max_nonnegative_addend(),
+            Quantity::from_milliunits(11)
+        );
+        assert_eq!(
+            quantity.checked_add(quantity.max_nonnegative_addend()),
+            Some(Quantity::from_milliunits(i64::MAX))
         );
     }
 }

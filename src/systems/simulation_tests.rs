@@ -66,6 +66,45 @@ mod preflight {
     }
 }
 
+mod transfer_boundaries {
+    use super::*;
+
+    #[test]
+    fn external_income_debits_only_the_amount_households_can_receive() {
+        let mut state = make_test_campaign();
+        for household in state.households.iter_mut() {
+            household.weekly_income = Money::ZERO;
+        }
+        let household_id = state
+            .households
+            .iter()
+            .next()
+            .expect("campaign must contain a household")
+            .id();
+        {
+            let household = state
+                .households
+                .get_mut(household_id)
+                .expect("household must exist");
+            household.cash = Money::from_copper(i64::MAX);
+            household.weekly_income = Money::from_copper(100);
+        }
+        let clearing_before = state.market.clearing_account;
+
+        settle_weekly_external_income(&mut state);
+
+        assert_eq!(
+            state
+                .households
+                .get(household_id)
+                .expect("household must exist")
+                .cash,
+            Money::from_copper(i64::MAX)
+        );
+        assert_eq!(state.market.clearing_account, clearing_before);
+    }
+}
+
 mod starting_economies {
     use super::*;
 
@@ -161,6 +200,140 @@ mod labor {
 
 mod inventory_policy {
     use super::*;
+
+    #[test]
+    fn input_reserve_uses_a_wide_capacity_day_product() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let recipe = registry
+            .get_recipe(
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("business must exist")
+                    .recipe_id(),
+            )
+            .expect("business recipe must exist");
+        let input = recipe
+            .inputs()
+            .first()
+            .expect("business recipe must consume an input");
+        let capacity = u16::MAX;
+        let target_days = 30_u16;
+        let narrow_limit_inventory = input
+            .quantity()
+            .saturating_mul_ratio(i64::from(u16::MAX), 1);
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.operations.capacity_batches_per_day = capacity;
+            business.policy.target_input_days = target_days;
+            business.policy.minimum_cash_reserve = Money::ZERO;
+            business.finance.cash = Money::from_copper(i64::MAX);
+            business
+                .inventory
+                .insert(input.good_id(), narrow_limit_inventory);
+        }
+        let quote = state
+            .market
+            .quotes
+            .get_mut(&input.good_id())
+            .expect("input quote must exist");
+        quote.stock = Quantity::from_milliunits(i64::MAX);
+        quote.price = Money::from_copper(1);
+
+        let plan = decide_business_purchases(registry, &state)
+            .expect("business purchase plan must resolve");
+        let purchase = plan
+            .lines
+            .iter()
+            .find(|line| line.business_id == business_id && line.good_id == input.good_id())
+            .expect("wide inventory target must expose the remaining shortfall");
+        let target_batches = i64::from(capacity).saturating_mul(i64::from(target_days));
+        let expected = input
+            .quantity()
+            .saturating_mul_ratio(target_batches, 1)
+            .saturating_sub(narrow_limit_inventory);
+
+        assert_eq!(purchase.quantity, expected);
+    }
+
+    #[test]
+    fn market_sale_does_not_remove_inventory_when_business_cash_has_no_headroom() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let recipe = registry
+            .get_recipe(
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("business must exist")
+                    .recipe_id(),
+            )
+            .expect("business recipe must exist");
+        let good_id = recipe.output_good_id();
+        let inventory = Quantity::from_units(10);
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.policy.target_output_days = 0;
+            business.inventory.insert(good_id, inventory);
+            business.finance.cash = Money::from_copper(i64::MAX);
+        }
+        let manager_id = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .manager_id();
+        state
+            .characters
+            .get_mut(manager_id)
+            .expect("manager must exist")
+            .capabilities
+            .commerce = 100;
+        state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("output quote must exist")
+            .stock = Quantity::ZERO;
+
+        let plan = decide_business_sales(registry, &state).expect("sale plan must resolve");
+        apply_business_sales(&mut state, plan);
+
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist");
+        assert_eq!(business.cash(), Money::from_copper(i64::MAX));
+        assert_eq!(business.inventory_quantity(good_id), inventory);
+        assert_eq!(
+            state
+                .market
+                .quotes
+                .get(&good_id)
+                .expect("output quote must exist")
+                .stock,
+            Quantity::ZERO,
+            "a sale that cannot be credited must not move inventory into the market"
+        );
+    }
 
     #[test]
     #[should_panic(expected = "inventory additions must not be negative")]

@@ -410,8 +410,10 @@ impl Business {
             return;
         }
         let current = self.inventory_quantity(good_id);
-        self.inventory
-            .insert(good_id, current.saturating_add(quantity));
+        let updated = current
+            .checked_add(quantity)
+            .expect("inventory additions must fit the supported quantity range");
+        self.inventory.insert(good_id, updated);
     }
 
     pub(crate) fn remove_inventory(&mut self, good_id: GoodId, quantity: Quantity) {
@@ -514,6 +516,7 @@ pub enum ChronicleKind {
     BusinessDistress,
     BusinessRecovered,
     BusinessAcquired,
+    FamilyExpanded,
     NewYear,
     Succession,
 }
@@ -567,6 +570,8 @@ pub enum AuditKind {
     CrisisResponse,
     OfficeNomination,
     HouseGovernanceChange,
+    WardAdoption,
+    FamilyEducation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

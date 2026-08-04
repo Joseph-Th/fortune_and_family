@@ -7,8 +7,43 @@ use crate::systems::validate_invariants;
 use crate::test_support::{
     assert_state_unchanged, make_test_campaign, rivergate_registry_for_test,
 };
+use std::collections::BTreeSet;
 
 fn grant_player_office_for_test(state: &mut AppState) {
+    let mature_next_selection_day = state
+        .clock
+        .day()
+        .saturating_add(OFFICE_TERM_DAYS)
+        .saturating_sub(OFFICE_POWER_ESTABLISHMENT_DAYS);
+    let dynasty = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    let holders = [
+        dynasty.head_id(),
+        dynasty.heir_id().expect("player dynasty must have an heir"),
+    ];
+    for (power, holder_id) in [
+        (OfficePower::PublicWorks, holders[0]),
+        (OfficePower::MarketTolls, holders[1]),
+    ] {
+        let institution = state
+            .institutions
+            .values_mut()
+            .find(|institution| institution.powers.contains(&power))
+            .expect("campaign must contain an office with the requested power");
+        institution.members.insert(holder_id);
+        institution.office_holder_id = Some(holder_id);
+        institution.next_selection_day = mature_next_selection_day;
+    }
+}
+
+fn grant_player_office_with_power_for_test(state: &mut AppState, power: OfficePower) {
+    let mature_next_selection_day = state
+        .clock
+        .day()
+        .saturating_add(OFFICE_TERM_DAYS)
+        .saturating_sub(OFFICE_POWER_ESTABLISHMENT_DAYS);
     let holder_id = state
         .dynasties
         .get(&state.player_dynasty_id)
@@ -17,9 +52,30 @@ fn grant_player_office_for_test(state: &mut AppState) {
     let institution = state
         .institutions
         .values_mut()
-        .find(|institution| institution.office_holder_id.is_none())
-        .expect("campaign must contain a vacant office");
+        .find(|institution| institution.powers.contains(&power))
+        .expect("campaign must contain an office with the requested power");
+    institution.members.insert(holder_id);
     institution.office_holder_id = Some(holder_id);
+    institution.next_selection_day = mature_next_selection_day;
+}
+
+fn grant_office_nomination_record_for_test(state: &mut AppState) {
+    let player_business_ids: BTreeSet<_> = state
+        .businesses
+        .iter()
+        .filter(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+        .map(crate::core::Business::id)
+        .collect();
+    let contract = state
+        .contracts
+        .values_mut()
+        .find(|contract| {
+            player_business_ids.contains(&contract.buyer_business_id)
+                || player_business_ids.contains(&contract.seller_business_id)
+        })
+        .expect("campaign must contain a player contract");
+    contract.fulfilled_deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
+        .expect("office delivery requirement must fit contract counters");
 }
 
 mod validation {
@@ -118,6 +174,80 @@ mod validation {
             &before,
             &state,
             "a dynasty without office must not fund or create a public work",
+        );
+    }
+
+    #[test]
+    fn public_work_sponsorship_requires_public_works_power_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_with_power_for_test(&mut state, OfficePower::WatchPriorities);
+        let district_id = registry
+            .districts()
+            .first()
+            .expect("registry must contain a district")
+            .id();
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::StartPublicWork {
+                district_id,
+                kind: PublicWorkKind::Bridge,
+                budget: Money::from_copper(10_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::PublicWorkSponsorshipRequiresPower)
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an unrelated office must not authorize public-work sponsorship",
+        );
+    }
+
+    #[test]
+    fn public_work_sponsorship_waits_for_office_power_to_be_established() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_with_power_for_test(&mut state, OfficePower::PublicWorks);
+        let current_day = state.clock.day();
+        let available_day = current_day.saturating_add(OFFICE_POWER_ESTABLISHMENT_DAYS);
+        state
+            .institutions
+            .values_mut()
+            .find(|institution| institution.powers.contains(&OfficePower::PublicWorks))
+            .expect("campaign must contain a public-works office")
+            .next_selection_day = current_day.saturating_add(OFFICE_TERM_DAYS);
+        let district_id = registry
+            .districts()
+            .first()
+            .expect("registry must contain a district")
+            .id();
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::StartPublicWork {
+                district_id,
+                kind: PublicWorkKind::Bridge,
+                budget: Money::from_copper(10_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::PublicWorkPowerNotEstablished { available_day })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "new office power must not fund a public work before its establishment period",
         );
     }
 
@@ -1105,6 +1235,75 @@ mod laws {
     }
 
     #[test]
+    fn law_sponsorship_requires_matching_office_power_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_with_power_for_test(&mut state, OfficePower::WatchPriorities);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EnactLaw {
+                kind: LawKind::BreadPriceCeiling,
+                value: 30,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::LawSponsorshipRequiresPower {
+                kind: LawKind::BreadPriceCeiling,
+                required: OfficePower::MarketTolls,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an unrelated office must not authorize law sponsorship",
+        );
+    }
+
+    #[test]
+    fn law_sponsorship_waits_for_office_power_to_be_established() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_with_power_for_test(&mut state, OfficePower::MarketTolls);
+        let current_day = state.clock.day();
+        let available_day = current_day.saturating_add(OFFICE_POWER_ESTABLISHMENT_DAYS);
+        state
+            .institutions
+            .values_mut()
+            .find(|institution| institution.powers.contains(&OfficePower::MarketTolls))
+            .expect("campaign must contain a market-tolls office")
+            .next_selection_day = current_day.saturating_add(OFFICE_TERM_DAYS);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EnactLaw {
+                kind: LawKind::BreadPriceCeiling,
+                value: 30,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::LawSponsorshipPowerNotEstablished {
+                kind: LawKind::BreadPriceCeiling,
+                required: OfficePower::MarketTolls,
+                available_day,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "new office power must not enact a law before its establishment period",
+        );
+    }
+
+    #[test]
     fn law_sponsorship_has_a_yearly_strategic_interval() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -1223,6 +1422,7 @@ mod politics {
             .expect("player dynasty must exist")
             .resources
             .reputation_reliability_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        grant_office_nomination_record_for_test(&mut state);
         let treasury_before = state
             .dynasties
             .get(&state.player_dynasty_id)
@@ -1320,6 +1520,54 @@ mod politics {
     }
 
     #[test]
+    fn office_nomination_requires_completed_deliveries_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        let institution_id = state
+            .institutions
+            .values()
+            .find(|institution| !institution.members.contains(&character_id))
+            .expect("campaign must contain an institution open to the heir")
+            .institution_id;
+        let player = state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        player.resources.reputation_reliability_basis_points =
+            OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        let delivered = player_contract_deliveries(&state);
+        assert!(delivered < OFFICE_NOMINATION_DELIVERY_REQUIREMENT);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id,
+                character_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InsufficientOfficeCommercialRecord {
+                delivered,
+                required: OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an unproven commercial record must not spend money or alter membership",
+        );
+    }
+
+    #[test]
     fn office_nomination_has_a_dynasty_wide_cooldown() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -1334,6 +1582,7 @@ mod politics {
             .expect("player dynasty must exist")
             .resources
             .reputation_reliability_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        grant_office_nomination_record_for_test(&mut state);
         let institution_ids: Vec<_> = state
             .institutions
             .values()
@@ -1398,6 +1647,7 @@ mod politics {
             .expect("player dynasty must exist")
             .resources
             .reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        grant_office_nomination_record_for_test(&mut state);
 
         apply_player_command(
             registry,
@@ -1565,6 +1815,189 @@ mod politics {
             &state,
             "a premature charter amendment must not mutate family governance",
         );
+    }
+
+    #[test]
+    fn ward_adoption_expands_the_family_and_creates_a_trainable_officeholder() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        {
+            let player = state
+                .dynasties
+                .get_mut(&player_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(20_000);
+            player.resources.legitimacy_basis_points = WARD_ADOPTION_LEGITIMACY_REQUIREMENT;
+            player.resources.reputation_reliability_basis_points =
+                WARD_ADOPTION_REPUTATION_REQUIREMENT;
+        }
+        grant_office_nomination_record_for_test(&mut state);
+        let characters_before = state.characters.iter().count();
+        let chronicle_before = state.chronicle.len();
+        let outbox_before = state.outbox.len();
+        let council_members_before = state
+            .family_councils
+            .get(&player_id)
+            .expect("player family council must exist")
+            .members
+            .len();
+        let capacity_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .administrative_capacity();
+
+        let outcome = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AdoptWard {
+                focus: EducationFocus::Social,
+            },
+        )
+        .expect("an established dynasty must be able to adopt a ward");
+
+        assert!(outcome.summary.contains("Adopted ward"));
+        assert_eq!(state.characters.iter().count(), characters_before + 1);
+        assert_eq!(state.chronicle.len(), chronicle_before + 1);
+        assert_eq!(state.outbox.len(), outbox_before + 1);
+        let ward_link = state
+            .family_links
+            .values()
+            .find(|link| link.kind == FamilyLinkKind::Ward)
+            .expect("ward adoption must create a family link");
+        let ward = state
+            .characters
+            .get(ward_link.second_character_id)
+            .expect("ward character must exist");
+        assert_eq!(ward.dynasty_id(), player_id);
+        assert_eq!(ward.status(), CharacterStatus::Active);
+        assert_eq!(ward.runtime.role, CharacterRole::Clerk);
+        assert_eq!(ward.capabilities.social, 62);
+        assert_eq!(
+            state
+                .family_councils
+                .get(&player_id)
+                .expect("player family council must exist")
+                .members
+                .len(),
+            council_members_before + 1
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .administrative_capacity(),
+            capacity_before.saturating_add(8)
+        );
+        assert!(state.audit_log.iter().any(|record| {
+            record.kind() == AuditKind::WardAdoption
+                && record.subject().contains(&ward.id().to_string())
+        }));
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn ward_adoption_requires_a_proven_commercial_record_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player = state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        player.resources.treasury = Money::from_copper(20_000);
+        player.resources.legitimacy_basis_points = WARD_ADOPTION_LEGITIMACY_REQUIREMENT;
+        player.resources.reputation_quality_basis_points = WARD_ADOPTION_REPUTATION_REQUIREMENT;
+        let delivered = player_contract_deliveries(&state);
+        assert!(delivered < WARD_ADOPTION_DELIVERY_REQUIREMENT);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AdoptWard {
+                focus: EducationFocus::Administration,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InsufficientWardCommercialRecord {
+                delivered,
+                required: WARD_ADOPTION_DELIVERY_REQUIREMENT,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "failed ward adoption must not spend funds or create family records",
+        );
+    }
+
+    #[test]
+    fn family_education_improves_capability_and_obeys_the_annual_interval() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let student_id = state
+            .dynasties
+            .get(&player_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(20_000);
+        let commerce_before = state
+            .characters
+            .get(student_id)
+            .expect("student must exist")
+            .capabilities
+            .commerce;
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EducateFamilyMember {
+                character_id: student_id,
+                focus: EducationFocus::Commerce,
+            },
+        )
+        .expect("family education must succeed");
+
+        assert_eq!(
+            state
+                .characters
+                .get(student_id)
+                .expect("student must exist")
+                .capabilities
+                .commerce,
+            commerce_before.saturating_add(8).min(100)
+        );
+        let before = state.clone();
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EducateFamilyMember {
+                character_id: student_id,
+                focus: EducationFocus::Social,
+            },
+        );
+        assert_eq!(
+            result,
+            Err(CommandError::FamilyEducationCooldown {
+                next_education_day: FAMILY_EDUCATION_INTERVAL_DAYS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a premature second education must not spend funds or change capabilities",
+        );
+        validate_invariants(registry, &state);
     }
 }
 
@@ -2152,11 +2585,13 @@ mod serialization {
     use super::*;
     use std::collections::BTreeSet;
 
-    const COMMAND_KINDS: [&str; 15] = [
+    const COMMAND_KINDS: [&str; 17] = [
         "acquire-business",
         "acknowledge-notification",
+        "adopt-ward",
         "buy-property",
         "create-supply-contract",
+        "educate-family-member",
         "enact-law",
         "file-legal-case",
         "issue-loan",
@@ -2183,6 +2618,8 @@ mod serialization {
             PlayerCommand::StartPublicWork { .. } => "start-public-work",
             PlayerCommand::FileLegalCase { .. } => "file-legal-case",
             PlayerCommand::SetHouseGovernance { .. } => "set-house-governance",
+            PlayerCommand::AdoptWard { .. } => "adopt-ward",
+            PlayerCommand::EducateFamilyMember { .. } => "educate-family-member",
             PlayerCommand::NominateForOffice { .. } => "nominate-for-office",
             PlayerCommand::RespondToCrisis { .. } => "respond-to-crisis",
             PlayerCommand::ResolveLaborDispute { .. } => "resolve-labor-dispute",
@@ -2256,6 +2693,13 @@ mod serialization {
             },
             PlayerCommand::SetHouseGovernance {
                 governance: HouseGovernance::BranchFederation,
+            },
+            PlayerCommand::AdoptWard {
+                focus: EducationFocus::Administration,
+            },
+            PlayerCommand::EducateFamilyMember {
+                character_id: CharacterId::new(2),
+                focus: EducationFocus::Commerce,
             },
             PlayerCommand::NominateForOffice {
                 institution_id: InstitutionId::new(1),

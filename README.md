@@ -98,7 +98,7 @@ cargo run --locked -- execute saves/valeri.json \
   --command '{"SetHouseGovernance":{"governance":"FamilyPartnership"}}'
 ```
 
-`PlayerCommand` in `src/systems/commands.rs` is the authoritative command schema. It covers business capitalization and acquisition, operating policy, cash transfers, contracts, loans, property, civic actions, legal cases, family governance, office nomination, crisis response, labor disputes, and notification acknowledgement.
+`PlayerCommand` in `src/systems/commands.rs` is the authoritative command schema. It covers business capitalization and acquisition, operating policy, cash transfers, contracts, loans, property, civic actions, legal cases, family governance, ward adoption, focused family education, office nomination, crisis response, labor disputes, and notification acknowledgement.
 
 Run `cargo run --locked -- --help` for CLI syntax.
 

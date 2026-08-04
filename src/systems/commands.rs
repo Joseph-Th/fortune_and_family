@@ -1,13 +1,16 @@
 //! Canonical player-command validation and dispatch across simulation subsystems.
 
 use super::{
-    LoanTerms, StrategicError, SupplyContractTerms, acquire_business, buy_unowned_property,
-    issue_loan, sign_supply_contract, transfer_business_cash,
+    LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, OFFICE_TERM_DAYS, StrategicError,
+    SupplyContractTerms, acquire_business, buy_unowned_property, issue_loan, sign_supply_contract,
+    transfer_business_cash,
 };
 use crate::core::{
-    AppState, AuditKind, AuditRecord, BusinessStatus, CrisisStatus, EmploymentStatus, EnactedLaw,
-    HouseGovernance, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus, OutboxKind, PublicWork,
-    PublicWorkKind, PublicWorkStatus,
+    AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
+    CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry,
+    ChronicleKind, CrisisStatus, EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind,
+    HouseGovernance, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus, OfficePower, OutboxKind,
+    PublicWork, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, CrisisId, DistrictId, DynastyId, EmploymentId, InstitutionId,
@@ -31,6 +34,14 @@ pub enum LaborResponse {
     ImproveConditions,
     Negotiate,
     ReplaceWorkers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EducationFocus {
+    Administration,
+    Commerce,
+    Social,
+    Craft,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +95,13 @@ pub enum PlayerCommand {
     SetHouseGovernance {
         governance: HouseGovernance,
     },
+    AdoptWard {
+        focus: EducationFocus,
+    },
+    EducateFamilyMember {
+        character_id: CharacterId,
+        focus: EducationFocus,
+    },
     NominateForOffice {
         institution_id: InstitutionId,
         character_id: CharacterId,
@@ -124,8 +142,17 @@ pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
 pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_800;
-pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 180;
+pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
+pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 16;
+pub(crate) const WARD_ADOPTION_INTERVAL_DAYS: i64 = 720;
+pub(crate) const WARD_ADOPTION_COST: Money = Money::from_copper(6_000);
+pub(crate) const WARD_ADOPTION_LEGITIMACY_REQUIREMENT: u16 = 3_500;
+pub(crate) const WARD_ADOPTION_REPUTATION_REQUIREMENT: u16 = 5_200;
+pub(crate) const WARD_ADOPTION_DELIVERY_REQUIREMENT: u32 = 16;
+pub(crate) const MAX_ACTIVE_WARDS: usize = 4;
+pub(crate) const FAMILY_EDUCATION_INTERVAL_DAYS: i64 = 360;
+pub(crate) const FAMILY_EDUCATION_COST: Money = Money::from_copper(2_000);
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum CommandError {
@@ -160,6 +187,19 @@ pub enum CommandError {
     UnsupportedLaw { kind: LawKind },
     #[error("the player dynasty must hold political office before sponsoring a law")]
     LawSponsorshipRequiresOffice,
+    #[error("law {kind:?} requires an office with {required:?} power")]
+    LawSponsorshipRequiresPower {
+        kind: LawKind,
+        required: OfficePower,
+    },
+    #[error(
+        "law {kind:?} cannot use {required:?} power until the office is established on day {available_day}"
+    )]
+    LawSponsorshipPowerNotEstablished {
+        kind: LawKind,
+        required: OfficePower,
+        available_day: i64,
+    },
     #[error("the player dynasty cannot sponsor another law before day {next_enactment_day}")]
     LawCooldown { next_enactment_day: i64 },
     #[error("district {district_id} does not exist")]
@@ -180,6 +220,12 @@ pub enum CommandError {
     InvalidPublicWorkBudget,
     #[error("the player dynasty must hold political office before sponsoring a public work")]
     PublicWorkSponsorshipRequiresOffice,
+    #[error("public-work sponsorship requires an office with PublicWorks power")]
+    PublicWorkSponsorshipRequiresPower,
+    #[error(
+        "public-work sponsorship cannot use PublicWorks power until the office is established on day {available_day}"
+    )]
+    PublicWorkPowerNotEstablished { available_day: i64 },
     #[error("an unfinished {kind:?} public work already exists in district {district_id}")]
     DuplicateActivePublicWork {
         district_id: DistrictId,
@@ -217,9 +263,38 @@ pub enum CommandError {
         required: u16,
     },
     #[error(
+        "office nomination requires {required} completed contract deliveries, but dynasty has {delivered}"
+    )]
+    InsufficientOfficeCommercialRecord { delivered: u32, required: u32 },
+    #[error(
         "the player dynasty cannot launch another office campaign before day {next_nomination_day}"
     )]
     OfficeNominationCooldown { next_nomination_day: i64 },
+    #[error("the dynasty cannot adopt another ward before day {next_adoption_day}")]
+    WardAdoptionCooldown { next_adoption_day: i64 },
+    #[error("the dynasty already has {active} active wards; maximum is {maximum}")]
+    WardCapacity { active: usize, maximum: usize },
+    #[error(
+        "ward adoption requires commercial reputation {required}, but quality is {quality} and reliability is {reliability}"
+    )]
+    InsufficientWardReputation {
+        quality: u16,
+        reliability: u16,
+        required: u16,
+    },
+    #[error(
+        "ward adoption requires {required} completed contract deliveries, but dynasty has {delivered}"
+    )]
+    InsufficientWardCommercialRecord { delivered: u32, required: u32 },
+    #[error("character {character_id} is not an active member of the player dynasty")]
+    InvalidFamilyStudent { character_id: CharacterId },
+    #[error("character {character_id} has already mastered {focus:?}")]
+    FamilyEducationAtMaximum {
+        character_id: CharacterId,
+        focus: EducationFocus,
+    },
+    #[error("the dynasty cannot fund another family education before day {next_education_day}")]
+    FamilyEducationCooldown { next_education_day: i64 },
     #[error("institution {institution_id} does not exist")]
     MissingInstitution { institution_id: InstitutionId },
     #[error("character {character_id} is already a member of institution {institution_id}")]
@@ -341,6 +416,11 @@ pub fn apply_player_command(
         PlayerCommand::SetHouseGovernance { governance } => {
             apply_house_governance(state, governance)
         }
+        PlayerCommand::AdoptWard { focus } => apply_adopt_ward(state, focus),
+        PlayerCommand::EducateFamilyMember {
+            character_id,
+            focus,
+        } => apply_family_education(state, character_id, focus),
         PlayerCommand::NominateForOffice {
             institution_id,
             character_id,
@@ -658,6 +738,22 @@ fn apply_law(
     if !has_player_office(state) {
         return Err(CommandError::LawSponsorshipRequiresOffice);
     }
+    let required_power = required_office_power_for_law(kind);
+    if !has_player_office_power(state, required_power) {
+        return Err(CommandError::LawSponsorshipRequiresPower {
+            kind,
+            required: required_power,
+        });
+    }
+    let available_day = player_office_power_available_day(state, required_power)
+        .expect("validated office power must have an availability day");
+    if state.clock.day() < available_day {
+        return Err(CommandError::LawSponsorshipPowerNotEstablished {
+            kind,
+            required: required_power,
+            available_day,
+        });
+    }
     let cost = Money::from_copper(2_000);
     spend_player_treasury(state, cost)?;
     state
@@ -752,6 +848,14 @@ fn apply_public_work(
     if !has_player_office(state) {
         return Err(CommandError::PublicWorkSponsorshipRequiresOffice);
     }
+    if !has_player_office_power(state, OfficePower::PublicWorks) {
+        return Err(CommandError::PublicWorkSponsorshipRequiresPower);
+    }
+    let available_day = player_office_power_available_day(state, OfficePower::PublicWorks)
+        .expect("validated public-works office must have an availability day");
+    if state.clock.day() < available_day {
+        return Err(CommandError::PublicWorkPowerNotEstablished { available_day });
+    }
     let contribution = Money::from_copper((budget.copper() / 10).max(1)).min(budget);
     spend_player_treasury(state, contribution)?;
     let progress_basis_points = u16::try_from(
@@ -806,6 +910,59 @@ fn has_player_office(state: &AppState) -> bool {
                 .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
         })
     })
+}
+
+pub(crate) fn has_player_office_power(state: &AppState, power: OfficePower) -> bool {
+    state.institutions.values().any(|institution| {
+        institution.powers.contains(&power)
+            && institution.office_holder_id.is_some_and(|character_id| {
+                state
+                    .characters
+                    .get(character_id)
+                    .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+            })
+    })
+}
+
+pub(crate) fn player_office_power_available_day(
+    state: &AppState,
+    power: OfficePower,
+) -> Option<i64> {
+    state
+        .institutions
+        .values()
+        .filter(|institution| institution.powers.contains(&power))
+        .filter(|institution| {
+            institution.office_holder_id.is_some_and(|character_id| {
+                state
+                    .characters
+                    .get(character_id)
+                    .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+            })
+        })
+        .map(|institution| {
+            institution
+                .next_selection_day
+                .saturating_sub(OFFICE_TERM_DAYS)
+                .saturating_add(OFFICE_POWER_ESTABLISHMENT_DAYS)
+        })
+        .min()
+}
+
+pub(crate) fn has_established_player_office_power(state: &AppState, power: OfficePower) -> bool {
+    player_office_power_available_day(state, power)
+        .is_some_and(|available_day| state.clock.day() >= available_day)
+}
+
+pub(crate) const fn required_office_power_for_law(kind: LawKind) -> OfficePower {
+    match kind {
+        LawKind::BreadPriceCeiling | LawKind::ForeignMerchantToll => OfficePower::MarketTolls,
+        LawKind::InterestLimit => OfficePower::DebtEnforcement,
+        LawKind::FireCode => OfficePower::Inspections,
+        LawKind::RentRestriction | LawKind::PublicDebtAuthorization => OfficePower::Taxation,
+        LawKind::GuildEntryRestriction => OfficePower::Licenses,
+        LawKind::EmergencyImports => OfficePower::EmergencyImports,
+    }
 }
 
 fn apply_legal_case(
@@ -939,6 +1096,319 @@ fn apply_house_governance(
     })
 }
 
+fn apply_adopt_ward(
+    state: &mut AppState,
+    focus: EducationFocus,
+) -> Result<CommandOutcome, CommandError> {
+    let context = validate_ward_adoption(state)?;
+    let WardAdoptionContext {
+        dynasty_id,
+        head_id,
+        dynasty_name,
+    } = context;
+    spend_player_treasury(state, WARD_ADOPTION_COST)?;
+    let ward_id = state.next_ids.character();
+    let ward_name = format!("{dynasty_name} Ward {ward_id}");
+    insert_ward_character(state, dynasty_id, ward_id, ward_name.clone(), focus);
+    insert_ward_family_link(state, head_id, ward_id);
+    let council = state
+        .family_councils
+        .get_mut(&dynasty_id)
+        .expect("validated family council must exist");
+    council.members.insert(ward_id);
+    council.unity_basis_points = council.unity_basis_points.saturating_sub(100);
+    let dynasty = state
+        .dynasties
+        .get_mut(&dynasty_id)
+        .expect("player dynasty must exist");
+    dynasty.resources.legitimacy_basis_points = dynasty
+        .resources
+        .legitimacy_basis_points
+        .saturating_sub(250);
+    dynasty.resources.administrative_capacity =
+        dynasty.resources.administrative_capacity.saturating_add(8);
+    record_ward_adoption(state, dynasty_id, ward_id, &ward_name, focus);
+    Ok(CommandOutcome {
+        summary: format!("Adopted ward {ward_id} with {focus:?} training."),
+    })
+}
+
+#[derive(Debug)]
+struct WardAdoptionContext {
+    dynasty_id: DynastyId,
+    head_id: CharacterId,
+    dynasty_name: String,
+}
+
+fn validate_ward_adoption(state: &AppState) -> Result<WardAdoptionContext, CommandError> {
+    let dynasty_id = state.player_dynasty_id;
+    let dynasty = state
+        .dynasties
+        .get(&dynasty_id)
+        .expect("player dynasty must exist");
+    let quality = dynasty.resources.reputation_quality_basis_points;
+    let reliability = dynasty.resources.reputation_reliability_basis_points;
+    let legitimacy = dynasty.resources.legitimacy_basis_points;
+    if !state.family_councils.contains_key(&dynasty_id) {
+        return Err(CommandError::MissingFamilyCouncil { dynasty_id });
+    }
+    let active = active_player_ward_count(state);
+    if active >= MAX_ACTIVE_WARDS {
+        return Err(CommandError::WardCapacity {
+            active,
+            maximum: MAX_ACTIVE_WARDS,
+        });
+    }
+    if quality.max(reliability) < WARD_ADOPTION_REPUTATION_REQUIREMENT {
+        return Err(CommandError::InsufficientWardReputation {
+            quality,
+            reliability,
+            required: WARD_ADOPTION_REPUTATION_REQUIREMENT,
+        });
+    }
+    let delivered = player_contract_deliveries(state);
+    if delivered < WARD_ADOPTION_DELIVERY_REQUIREMENT {
+        return Err(CommandError::InsufficientWardCommercialRecord {
+            delivered,
+            required: WARD_ADOPTION_DELIVERY_REQUIREMENT,
+        });
+    }
+    if legitimacy < WARD_ADOPTION_LEGITIMACY_REQUIREMENT {
+        return Err(CommandError::InsufficientPlayerLegitimacy {
+            available: legitimacy,
+            required: WARD_ADOPTION_LEGITIMACY_REQUIREMENT,
+        });
+    }
+    if let Some(last_adoption_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::WardAdoption)
+        .map(AuditRecord::day)
+    {
+        let next_adoption_day = last_adoption_day.saturating_add(WARD_ADOPTION_INTERVAL_DAYS);
+        if state.clock.day() < next_adoption_day {
+            return Err(CommandError::WardAdoptionCooldown { next_adoption_day });
+        }
+    }
+    Ok(WardAdoptionContext {
+        dynasty_id,
+        head_id: dynasty.head_id(),
+        dynasty_name: dynasty.name().to_owned(),
+    })
+}
+
+fn insert_ward_character(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+    ward_id: CharacterId,
+    ward_name: String,
+    focus: EducationFocus,
+) {
+    state.characters.insert(Character {
+        identity: CharacterIdentity {
+            id: ward_id,
+            dynasty_id,
+            name: ward_name,
+            birth_day: state.clock.day().saturating_sub(18 * 360),
+        },
+        capabilities: ward_capabilities(focus),
+        runtime: CharacterRuntime {
+            status: CharacterStatus::Active,
+            health_basis_points: 9_500,
+            loyalty_basis_points: 8_500,
+            role: CharacterRole::Clerk,
+        },
+    });
+}
+
+fn insert_ward_family_link(state: &mut AppState, head_id: CharacterId, ward_id: CharacterId) {
+    let family_link_id = state.next_ids.family_link();
+    state.family_links.insert(
+        family_link_id,
+        FamilyLink {
+            id: family_link_id,
+            first_character_id: head_id,
+            second_character_id: ward_id,
+            kind: FamilyLinkKind::Ward,
+            active: true,
+            property_claim_basis_points: 1_500,
+        },
+    );
+}
+
+fn record_ward_adoption(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+    ward_id: CharacterId,
+    ward_name: &str,
+    focus: EducationFocus,
+) {
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::WardAdoption,
+        subject: format!("dynasty:{dynasty_id}:character:{ward_id}"),
+        detail: format!("focus={focus:?};cost={}", WARD_ADOPTION_COST.copper()),
+    });
+    let chronicle_id = state.next_ids.chronicle();
+    state.chronicle.push(ChronicleEntry {
+        id: chronicle_id,
+        day: state.clock.day(),
+        kind: ChronicleKind::FamilyExpanded,
+        summary: format!("{ward_name} entered the dynasty as a ward focused on {focus:?}."),
+    });
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Family,
+        format!("Ward adopted: {ward_name}"),
+        format!(
+            "The dynasty spent {WARD_ADOPTION_COST} to adopt and train a new {focus:?}-focused household member."
+        ),
+    );
+}
+
+fn active_player_ward_count(state: &AppState) -> usize {
+    state
+        .family_links
+        .values()
+        .filter(|link| link.active && link.kind == FamilyLinkKind::Ward)
+        .filter(|link| {
+            state
+                .characters
+                .get(link.second_character_id)
+                .is_some_and(|character| {
+                    character.dynasty_id() == state.player_dynasty_id
+                        && character.status() == CharacterStatus::Active
+                })
+        })
+        .count()
+}
+
+const fn ward_capabilities(focus: EducationFocus) -> CharacterCapabilities {
+    match focus {
+        EducationFocus::Administration => CharacterCapabilities {
+            administration: 62,
+            commerce: 42,
+            social: 45,
+            craft: 35,
+        },
+        EducationFocus::Commerce => CharacterCapabilities {
+            administration: 45,
+            commerce: 62,
+            social: 42,
+            craft: 35,
+        },
+        EducationFocus::Social => CharacterCapabilities {
+            administration: 45,
+            commerce: 42,
+            social: 62,
+            craft: 35,
+        },
+        EducationFocus::Craft => CharacterCapabilities {
+            administration: 40,
+            commerce: 42,
+            social: 40,
+            craft: 62,
+        },
+    }
+}
+
+fn apply_family_education(
+    state: &mut AppState,
+    character_id: CharacterId,
+    focus: EducationFocus,
+) -> Result<CommandOutcome, CommandError> {
+    let character = state
+        .characters
+        .get(character_id)
+        .ok_or(CommandError::InvalidFamilyStudent { character_id })?;
+    if character.dynasty_id() != state.player_dynasty_id
+        || character.status() != CharacterStatus::Active
+    {
+        return Err(CommandError::InvalidFamilyStudent { character_id });
+    }
+    if education_focus_value(&character.capabilities, focus) >= 100 {
+        return Err(CommandError::FamilyEducationAtMaximum {
+            character_id,
+            focus,
+        });
+    }
+    if let Some(last_education_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::FamilyEducation)
+        .map(AuditRecord::day)
+    {
+        let next_education_day = last_education_day.saturating_add(FAMILY_EDUCATION_INTERVAL_DAYS);
+        if state.clock.day() < next_education_day {
+            return Err(CommandError::FamilyEducationCooldown { next_education_day });
+        }
+    }
+    spend_player_treasury(state, FAMILY_EDUCATION_COST)?;
+    let character = state
+        .characters
+        .get_mut(character_id)
+        .expect("validated family student must exist");
+    apply_education_focus(&mut character.capabilities, focus);
+    if focus == EducationFocus::Administration {
+        let dynasty = state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        dynasty.resources.administrative_capacity =
+            dynasty.resources.administrative_capacity.saturating_add(2);
+    }
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::FamilyEducation,
+        subject: format!(
+            "dynasty:{}:character:{character_id}",
+            state.player_dynasty_id
+        ),
+        detail: format!("focus={focus:?};cost={}", FAMILY_EDUCATION_COST.copper()),
+    });
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Family,
+        format!("Family education completed for character {character_id}"),
+        format!("The dynasty spent {FAMILY_EDUCATION_COST} on advanced {focus:?} training."),
+    );
+    Ok(CommandOutcome {
+        summary: format!("Educated character {character_id} in {focus:?}."),
+    })
+}
+
+const fn education_focus_value(capabilities: &CharacterCapabilities, focus: EducationFocus) -> u16 {
+    match focus {
+        EducationFocus::Administration => capabilities.administration,
+        EducationFocus::Commerce => capabilities.commerce,
+        EducationFocus::Social => capabilities.social,
+        EducationFocus::Craft => capabilities.craft,
+    }
+}
+
+fn apply_education_focus(capabilities: &mut CharacterCapabilities, focus: EducationFocus) {
+    match focus {
+        EducationFocus::Administration => {
+            capabilities.administration = capabilities.administration.saturating_add(8).min(100);
+            capabilities.social = capabilities.social.saturating_add(2).min(100);
+        }
+        EducationFocus::Commerce => {
+            capabilities.commerce = capabilities.commerce.saturating_add(8).min(100);
+            capabilities.administration = capabilities.administration.saturating_add(2).min(100);
+        }
+        EducationFocus::Social => {
+            capabilities.social = capabilities.social.saturating_add(8).min(100);
+            capabilities.commerce = capabilities.commerce.saturating_add(2).min(100);
+        }
+        EducationFocus::Craft => {
+            capabilities.craft = capabilities.craft.saturating_add(8).min(100);
+            capabilities.commerce = capabilities.commerce.saturating_add(2).min(100);
+        }
+    }
+}
+
 fn apply_office_nomination(
     state: &mut AppState,
     institution_id: InstitutionId,
@@ -974,19 +1444,7 @@ fn apply_office_nomination(
             character_id,
         });
     }
-    let player = state
-        .dynasties
-        .get(&state.player_dynasty_id)
-        .expect("player dynasty must exist");
-    let quality = player.resources.reputation_quality_basis_points;
-    let reliability = player.resources.reputation_reliability_basis_points;
-    if quality.max(reliability) < OFFICE_NOMINATION_REPUTATION_REQUIREMENT {
-        return Err(CommandError::InsufficientOfficeReputation {
-            quality,
-            reliability,
-            required: OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
-        });
-    }
+    validate_office_nomination_standing(state)?;
     if let Some(last_nomination_day) = state
         .audit_log
         .iter()
@@ -1040,11 +1498,54 @@ fn apply_office_nomination(
     })
 }
 
+fn validate_office_nomination_standing(state: &AppState) -> Result<(), CommandError> {
+    let player = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    let quality = player.resources.reputation_quality_basis_points;
+    let reliability = player.resources.reputation_reliability_basis_points;
+    if quality.max(reliability) < OFFICE_NOMINATION_REPUTATION_REQUIREMENT {
+        return Err(CommandError::InsufficientOfficeReputation {
+            quality,
+            reliability,
+            required: OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+        });
+    }
+    let delivered = player_contract_deliveries(state);
+    if delivered < OFFICE_NOMINATION_DELIVERY_REQUIREMENT {
+        return Err(CommandError::InsufficientOfficeCommercialRecord {
+            delivered,
+            required: OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn office_nomination_subject(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> String {
     format!("institution:{institution_id}:character:{character_id}")
+}
+
+pub(crate) fn player_contract_deliveries(state: &AppState) -> u32 {
+    state
+        .contracts
+        .values()
+        .filter(|contract| {
+            state
+                .businesses
+                .get(contract.buyer_business_id)
+                .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+                || state
+                    .businesses
+                    .get(contract.seller_business_id)
+                    .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+        })
+        .fold(0_u32, |total, contract| {
+            total.saturating_add(u32::from(contract.fulfilled_deliveries))
+        })
 }
 
 fn apply_crisis_response(

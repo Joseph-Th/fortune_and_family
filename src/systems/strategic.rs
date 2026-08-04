@@ -186,11 +186,29 @@ struct DueContract {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct ContractPartySettlementState {
+    owner_id: DynastyId,
+    can_perform: bool,
+    can_receive: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct ContractSettlementState {
-    buyer_owner_id: DynastyId,
-    seller_owner_id: DynastyId,
-    seller_can_deliver: bool,
-    buyer_can_pay: bool,
+    buyer: ContractPartySettlementState,
+    seller: ContractPartySettlementState,
+}
+
+impl ContractSettlementState {
+    const fn is_fulfilled(self) -> bool {
+        self.buyer.can_perform
+            && self.buyer.can_receive
+            && self.seller.can_perform
+            && self.seller.can_receive
+    }
+
+    const fn has_attributable_nonperformance(self) -> bool {
+        !self.buyer.can_perform || !self.seller.can_perform
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1077,7 +1095,7 @@ fn initialize_institutions(registry: &Registry, state: &mut AppState) {
                 powers: powers_for(definition.kind()),
                 budget: Money::from_copper(120_000),
                 legitimacy_basis_points: 7_000,
-                next_selection_day: 360,
+                next_selection_day: super::OFFICE_TERM_DAYS,
                 term_number: 1,
             },
         );
@@ -1725,7 +1743,7 @@ fn settle_contracts(state: &mut AppState) {
 
 fn settle_due_contract(state: &mut AppState, due: DueContract) {
     let payment = cost_for(due.quantity, due.unit_price);
-    let (seller_active, seller_owner_id, seller_can_deliver) = {
+    let (seller_active, seller_owner_id, seller_can_deliver, seller_can_receive_payment) = {
         let seller = state
             .businesses
             .get(due.seller_id)
@@ -1737,9 +1755,10 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) {
             ),
             seller.owner_dynasty_id(),
             seller.inventory_quantity(due.good_id) >= due.quantity,
+            seller.cash().max_nonnegative_addend() >= payment,
         )
     };
-    let (buyer_active, buyer_owner_id, buyer_can_pay) = {
+    let (buyer_active, buyer_owner_id, buyer_can_pay, buyer_can_receive_delivery) = {
         let buyer = state
             .businesses
             .get(due.buyer_id)
@@ -1751,6 +1770,10 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) {
             ),
             buyer.owner_dynasty_id(),
             buyer.cash() >= payment,
+            buyer
+                .inventory_quantity(due.good_id)
+                .max_nonnegative_addend()
+                >= due.quantity,
         )
     };
     if !seller_active || !buyer_active {
@@ -1765,12 +1788,18 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) {
         return;
     }
     let settlement = ContractSettlementState {
-        buyer_owner_id,
-        seller_owner_id,
-        seller_can_deliver,
-        buyer_can_pay,
+        buyer: ContractPartySettlementState {
+            owner_id: buyer_owner_id,
+            can_perform: buyer_can_pay,
+            can_receive: buyer_can_receive_delivery,
+        },
+        seller: ContractPartySettlementState {
+            owner_id: seller_owner_id,
+            can_perform: seller_can_deliver,
+            can_receive: seller_can_receive_payment,
+        },
     };
-    let fulfilled = settlement.seller_can_deliver && settlement.buyer_can_pay;
+    let fulfilled = settlement.is_fulfilled();
     if fulfilled {
         settle_fulfilled_contract(state, due, payment, settlement);
     } else {
@@ -1848,7 +1877,7 @@ fn finalize_expired_contract(
     } else {
         ContractStatus::Breached
     };
-    if settlement.buyer_owner_id != settlement.seller_owner_id {
+    if settlement.buyer.owner_id != settlement.seller.owner_id {
         let memory = if fulfilled {
             format!("Supply contract {} completed successfully.", due.id)
         } else {
@@ -1856,14 +1885,14 @@ fn finalize_expired_contract(
         };
         remember_dynasty_interaction(
             state,
-            settlement.buyer_owner_id,
-            settlement.seller_owner_id,
+            settlement.buyer.owner_id,
+            settlement.seller.owner_id,
             &memory,
         );
         record_counterparty_information(
             state,
-            settlement.buyer_owner_id,
-            settlement.seller_owner_id,
+            settlement.buyer.owner_id,
+            settlement.seller.owner_id,
             "Completed contract performance records",
         );
     }
@@ -1893,20 +1922,24 @@ fn settle_fulfilled_contract(
         .get_mut(due.buyer_id)
         .expect("contract buyer must exist")
         .add_inventory(due.good_id, due.quantity);
-    transfer_contract_money(state, due.buyer_id, due.seller_id, payment);
+    let transferred = transfer_contract_money(state, due.buyer_id, due.seller_id, payment);
+    debug_assert_eq!(
+        transferred, payment,
+        "prevalidated contract payment must transfer in full"
+    );
     let contract = state
         .contracts
         .get_mut(&due.id)
         .expect("contract must exist");
     contract.fulfilled_deliveries = contract.fulfilled_deliveries.saturating_add(1);
     contract.next_due_day = contract.next_due_day.saturating_add(7);
-    if settlement.buyer_owner_id != settlement.seller_owner_id {
-        adjust_reliability_reputation(state, settlement.buyer_owner_id, 20);
-        adjust_reliability_reputation(state, settlement.seller_owner_id, 20);
+    if settlement.buyer.owner_id != settlement.seller.owner_id {
+        adjust_reliability_reputation(state, settlement.buyer.owner_id, 20);
+        adjust_reliability_reputation(state, settlement.seller.owner_id, 20);
         adjust_dynasty_relationship(
             state,
-            settlement.buyer_owner_id,
-            settlement.seller_owner_id,
+            settlement.buyer.owner_id,
+            settlement.seller.owner_id,
             RelationshipDelta::new(5, 3, 0, -2, 0),
         );
     }
@@ -1917,11 +1950,10 @@ fn settle_failed_contract(
     due: DueContract,
     settlement: ContractSettlementState,
 ) {
-    let penalty_parties = match (settlement.seller_can_deliver, settlement.buyer_can_pay) {
+    let penalty_parties = match (settlement.seller.can_perform, settlement.buyer.can_perform) {
         (true, false) => Some((due.buyer_id, due.seller_id)),
         (false, true) => Some((due.seller_id, due.buyer_id)),
-        (false, false) => None,
-        (true, true) => unreachable!("fulfilled contracts do not enter failure settlement"),
+        (false, false) | (true, true) => None,
     };
     if let Some((payer_id, recipient_id)) = penalty_parties {
         let available = state
@@ -1954,24 +1986,26 @@ fn settle_failed_contract(
             ),
         );
     }
-    if settlement.buyer_owner_id != settlement.seller_owner_id {
-        if !settlement.seller_can_deliver {
-            adjust_reliability_reputation(state, settlement.seller_owner_id, -120);
+    if settlement.has_attributable_nonperformance()
+        && settlement.buyer.owner_id != settlement.seller.owner_id
+    {
+        if !settlement.seller.can_perform {
+            adjust_reliability_reputation(state, settlement.seller.owner_id, -120);
         }
-        if !settlement.buyer_can_pay {
-            adjust_reliability_reputation(state, settlement.buyer_owner_id, -120);
+        if !settlement.buyer.can_perform {
+            adjust_reliability_reputation(state, settlement.buyer.owner_id, -120);
         }
         adjust_dynasty_relationship(
             state,
-            settlement.buyer_owner_id,
-            settlement.seller_owner_id,
+            settlement.buyer.owner_id,
+            settlement.seller.owner_id,
             RelationshipDelta::new(-30, -10, 0, 40, 0),
         );
         if breached {
             remember_dynasty_interaction(
                 state,
-                settlement.buyer_owner_id,
-                settlement.seller_owner_id,
+                settlement.buyer.owner_id,
+                settlement.seller.owner_id,
                 &format!(
                     "Supply contract {} was terminated for repeated nonperformance.",
                     due.id
@@ -1979,8 +2013,8 @@ fn settle_failed_contract(
             );
             record_counterparty_information(
                 state,
-                settlement.buyer_owner_id,
-                settlement.seller_owner_id,
+                settlement.buyer.owner_id,
+                settlement.seller.owner_id,
                 "Contract breach and penalty records",
             );
         }
@@ -1992,17 +2026,32 @@ fn transfer_contract_money(
     payer_id: BusinessId,
     recipient_id: BusinessId,
     amount: Money,
-) {
+) -> Money {
     if amount <= Money::ZERO {
-        return;
+        return Money::ZERO;
+    }
+    let payer_cash = state
+        .businesses
+        .get(payer_id)
+        .expect("contract payer must exist")
+        .cash();
+    let recipient_headroom = state
+        .businesses
+        .get(recipient_id)
+        .expect("contract recipient must exist")
+        .cash()
+        .max_nonnegative_addend();
+    let transferred = amount.min(payer_cash).min(recipient_headroom);
+    if transferred <= Money::ZERO {
+        return Money::ZERO;
     }
     {
         let payer = state
             .businesses
             .get_mut(payer_id)
             .expect("contract payer must exist");
-        payer.finance.cash = payer.finance.cash.saturating_sub(amount);
-        payer.finance.lifetime_costs = payer.finance.lifetime_costs.saturating_add(amount);
+        payer.finance.cash = payer.finance.cash.saturating_sub(transferred);
+        payer.finance.lifetime_costs = payer.finance.lifetime_costs.saturating_add(transferred);
         payer.finance.version = payer.finance.version.saturating_add(1);
     }
     {
@@ -2010,11 +2059,18 @@ fn transfer_contract_money(
             .businesses
             .get_mut(recipient_id)
             .expect("contract recipient must exist");
-        recipient.finance.cash = recipient.finance.cash.saturating_add(amount);
-        recipient.finance.lifetime_revenue =
-            recipient.finance.lifetime_revenue.saturating_add(amount);
+        recipient.finance.cash = recipient
+            .finance
+            .cash
+            .checked_add(transferred)
+            .expect("bounded contract transfer must fit recipient cash");
+        recipient.finance.lifetime_revenue = recipient
+            .finance
+            .lifetime_revenue
+            .saturating_add(transferred);
         recipient.finance.version = recipient.finance.version.saturating_add(1);
     }
+    transferred
 }
 
 fn settle_loans(state: &mut AppState) {
@@ -2057,6 +2113,20 @@ fn settle_due_loan(state: &mut AppState, due: DueLoan, interest_limit: Option<u1
         .get(&due.borrower_id)
         .expect("loan borrower must exist")
         .treasury();
+    let lender_headroom = state
+        .dynasties
+        .get(&due.lender_id)
+        .expect("loan lender must exist")
+        .treasury()
+        .max_nonnegative_addend();
+    if lender_headroom < amount_due {
+        state
+            .loans
+            .get_mut(&due.id)
+            .expect("loan must exist")
+            .next_due_day = state.clock.day().saturating_add(7);
+        return;
+    }
     state
         .loans
         .get_mut(&due.id)
@@ -2217,7 +2287,11 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
         .dynasties
         .get_mut(&lender_id)
         .expect("loan lender must exist");
-    lender.resources.treasury = lender.resources.treasury.saturating_add(payment);
+    lender.resources.treasury = lender
+        .resources
+        .treasury
+        .checked_add(payment)
+        .expect("prevalidated loan payment must fit lender treasury");
     let repaid = {
         let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
         loan.balance = loan.balance.saturating_sub(payment);
@@ -2285,7 +2359,14 @@ fn settle_property_rents(state: &mut AppState) {
             let annual_cap = property_value.saturating_mul_ratio(limit, 10_000);
             contractual_rent.min(Money::from_copper(annual_cap.copper() / 52))
         });
-        if rent <= Money::ZERO {
+        let owner_headroom = state
+            .dynasties
+            .get(&owner_id)
+            .expect("property owner dynasty must exist")
+            .treasury()
+            .max_nonnegative_addend();
+        let receivable_rent = rent.min(owner_headroom);
+        if receivable_rent <= Money::ZERO {
             continue;
         }
         let paid = if let Some(tenant_id) = tenant_id {
@@ -2297,7 +2378,7 @@ fn settle_property_rents(state: &mut AppState) {
                 .get(&tenant_id)
                 .expect("property tenant dynasty must exist")
                 .treasury();
-            let paid = rent.min(tenant_cash);
+            let paid = receivable_rent.min(tenant_cash);
             state
                 .dynasties
                 .get_mut(&tenant_id)
@@ -2306,8 +2387,11 @@ fn settle_property_rents(state: &mut AppState) {
                 .treasury = tenant_cash.saturating_sub(paid);
             paid
         } else if occupant_business_id.is_none() {
-            state.market.clearing_account = state.market.clearing_account.saturating_sub(rent);
-            rent
+            state.market.clearing_account = state
+                .market
+                .clearing_account
+                .saturating_sub(receivable_rent);
+            receivable_rent
         } else {
             Money::ZERO
         };
@@ -2318,7 +2402,11 @@ fn settle_property_rents(state: &mut AppState) {
             .dynasties
             .get_mut(&owner_id)
             .expect("property owner dynasty must exist");
-        owner.resources.treasury = owner.resources.treasury.saturating_add(paid);
+        owner.resources.treasury = owner
+            .resources
+            .treasury
+            .checked_add(paid)
+            .expect("bounded rent must fit owner treasury");
     }
 }
 
@@ -2340,7 +2428,15 @@ fn distribute_business_dividends(registry: &Registry, state: &mut AppState) {
                 .minimum_cash_reserve
                 .saturating_add(recipe.daily_operating_cost().saturating_mul(21));
             let excess = business.cash().saturating_sub(operating_floor);
-            let dividend = Money::from_copper(excess.copper() / 10).min(Money::from_copper(1_000));
+            let owner_headroom = state
+                .dynasties
+                .get(&business.owner_dynasty_id())
+                .expect("dividend owner dynasty must exist")
+                .treasury()
+                .max_nonnegative_addend();
+            let dividend = Money::from_copper(excess.copper() / 10)
+                .min(Money::from_copper(1_000))
+                .min(owner_headroom);
             (dividend > Money::ZERO).then_some((
                 business.id(),
                 business.owner_dynasty_id(),
@@ -2360,7 +2456,11 @@ fn distribute_business_dividends(registry: &Registry, state: &mut AppState) {
             .dynasties
             .get_mut(&owner_id)
             .expect("dividend owner dynasty must exist");
-        owner.resources.treasury = owner.resources.treasury.saturating_add(dividend);
+        owner.resources.treasury = owner
+            .resources
+            .treasury
+            .checked_add(dividend)
+            .expect("bounded dividend must fit owner treasury");
         total = total.saturating_add(dividend);
     }
     if total > Money::ZERO {
@@ -2472,7 +2572,16 @@ fn pay_employment_wage(
     if wage_due <= Money::ZERO || spendable <= Money::ZERO {
         return Money::ZERO;
     }
-    let paid = wage_due.min(spendable);
+    let household_headroom = state
+        .households
+        .get(household_id)
+        .expect("employment household must exist")
+        .cash
+        .max_nonnegative_addend();
+    let paid = wage_due.min(spendable).min(household_headroom);
+    if paid <= Money::ZERO {
+        return Money::ZERO;
+    }
     let business = state
         .businesses
         .get_mut(business_id)
@@ -2484,7 +2593,10 @@ fn pay_employment_wage(
         .households
         .get_mut(household_id)
         .expect("employment household must exist");
-    household.cash = household.cash.saturating_add(paid);
+    household.cash = household
+        .cash
+        .checked_add(paid)
+        .expect("bounded wage must fit household cash");
     paid
 }
 
@@ -3192,7 +3304,15 @@ fn award_city_contract(
         .get(&institution_id)
         .expect("city contract institution must exist")
         .budget;
-    let award = Money::from_copper(250).min(institution_budget);
+    let business_headroom = state
+        .businesses
+        .get(business_id)
+        .expect("city contract business must exist")
+        .cash()
+        .max_nonnegative_addend();
+    let award = Money::from_copper(250)
+        .min(institution_budget)
+        .min(business_headroom);
     if award == Money::ZERO {
         return;
     }
@@ -3205,7 +3325,11 @@ fn award_city_contract(
         .businesses
         .get_mut(business_id)
         .expect("city contract business must exist");
-    business.finance.cash = business.finance.cash.saturating_add(award);
+    business.finance.cash = business
+        .finance
+        .cash
+        .checked_add(award)
+        .expect("bounded city-contract award must fit business cash");
     business.finance.lifetime_revenue = business.finance.lifetime_revenue.saturating_add(award);
     business.finance.version = business.finance.version.saturating_add(1);
 }
@@ -3257,10 +3381,13 @@ fn update_district_conditions(state: &mut AppState) {
             / 5)
         .min(10_000) as u16;
         let desirability = u32::from(district.safety_basis_points)
-            .saturating_add(u32::from(district.sanitation_basis_points))
-            / 2;
-        district.rent_index_basis_points =
-            u16::try_from(7_000_u32.saturating_add(desirability / 3).min(14_000)).unwrap_or(10_000);
+            .saturating_add(u32::from(district.sanitation_basis_points));
+        district.rent_index_basis_points = u16::try_from(
+            u32::from(super::MIN_DISTRICT_RENT_INDEX_BASIS_POINTS)
+                .saturating_add(desirability / 3)
+                .min(u32::from(super::MAX_DISTRICT_RENT_INDEX_BASIS_POINTS)),
+        )
+        .expect("bounded district rent index must fit u16");
     }
 }
 
@@ -3324,7 +3451,7 @@ fn resolve_institution_selections(state: &mut AppState) {
                 .get_mut(&institution_id)
                 .expect("institution runtime must exist");
             institution.office_holder_id = winner;
-            institution.next_selection_day = day.saturating_add(360);
+            institution.next_selection_day = day.saturating_add(super::OFFICE_TERM_DAYS);
             institution.term_number = institution.term_number.saturating_add(1);
             institution.term_number
         };
@@ -3764,23 +3891,7 @@ fn resolve_legal_cases(state: &mut AppState) {
             .saturating_add(u32::from(defendant_legitimacy));
         let plaintiff_wins = plaintiff_score >= defendant_score;
         if plaintiff_wins {
-            let defendant_cash = state
-                .dynasties
-                .get(&defendant_id)
-                .expect("legal defendant must exist")
-                .treasury();
-            let paid = damages.min(defendant_cash);
-            state
-                .dynasties
-                .get_mut(&defendant_id)
-                .expect("legal defendant must exist")
-                .resources
-                .treasury = defendant_cash.saturating_sub(paid);
-            let plaintiff = state
-                .dynasties
-                .get_mut(&plaintiff_id)
-                .expect("legal plaintiff must exist");
-            plaintiff.resources.treasury = plaintiff.resources.treasury.saturating_add(paid);
+            settle_legal_damages(state, plaintiff_id, defendant_id, damages);
         }
         state
             .legal_cases
@@ -3811,6 +3922,41 @@ fn resolve_legal_cases(state: &mut AppState) {
             ),
         );
     }
+}
+
+fn settle_legal_damages(
+    state: &mut AppState,
+    plaintiff_id: DynastyId,
+    defendant_id: DynastyId,
+    damages: Money,
+) {
+    let defendant_cash = state
+        .dynasties
+        .get(&defendant_id)
+        .expect("legal defendant must exist")
+        .treasury();
+    let plaintiff_headroom = state
+        .dynasties
+        .get(&plaintiff_id)
+        .expect("legal plaintiff must exist")
+        .treasury()
+        .max_nonnegative_addend();
+    let paid = damages.min(defendant_cash).min(plaintiff_headroom);
+    state
+        .dynasties
+        .get_mut(&defendant_id)
+        .expect("legal defendant must exist")
+        .resources
+        .treasury = defendant_cash.saturating_sub(paid);
+    let plaintiff = state
+        .dynasties
+        .get_mut(&plaintiff_id)
+        .expect("legal plaintiff must exist");
+    plaintiff.resources.treasury = plaintiff
+        .resources
+        .treasury
+        .checked_add(paid)
+        .expect("bounded damages must fit plaintiff treasury");
 }
 
 fn update_external_route_risk(state: &mut AppState) {
