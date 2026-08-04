@@ -179,6 +179,51 @@ mod coverage {
     }
 
     #[test]
+    fn exposes_private_costs_and_administrative_burden_of_officeholding() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let holder_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        let council_id = registry
+            .get_institution_id("city_council")
+            .expect("registry must define the city council");
+        state
+            .institutions
+            .get_mut(&council_id)
+            .expect("city council must exist")
+            .office_holder_id = Some(holder_id);
+        let player = state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist");
+        player.resources.civic_contributions = Money::from_copper(3_600);
+        player.resources.unmet_office_duties = 2;
+
+        let projection = build_campaign_projection(registry, &state);
+
+        assert_eq!(
+            projection.player.civic_contributions,
+            Money::from_copper(3_600)
+        );
+        assert_eq!(projection.player.unmet_office_duties, 2);
+        assert!(projection.player.office_administrative_load > 0);
+        assert_eq!(
+            projection.player.effective_administrative_load,
+            projection
+                .player
+                .administrative_load
+                .saturating_add(projection.player.office_administrative_load)
+        );
+    }
+
+    #[test]
     fn exposes_acquisition_terms_for_troubled_nonplayer_businesses() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

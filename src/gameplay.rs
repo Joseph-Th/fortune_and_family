@@ -13,12 +13,12 @@ use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CommandError, CrisisResponse, EducationFocus,
     FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
     LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS,
-    LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
-    MAX_ACTIVE_WARDS, NewGameError, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
-    OFFICE_NOMINATION_INTERVAL_DAYS, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
-    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
-    SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
-    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms,
+    MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, NewGameError,
+    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_INTERVAL_DAYS,
+    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand,
+    STANDARD_CONTRACT_BATCHES_PER_WEEK, SimulationError, StrategicError, SupplyContractTerms,
+    WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT, advance_days,
     apply_player_command, available_household_workers, build_new_game,
     has_established_player_office_power, player_contract_deliveries, quote_business_acquisition,
@@ -72,7 +72,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 15;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 17;
 const COMMERCIAL_STANDING_REPUTATION_REQUIREMENT: u16 = 5_200;
 const NOTIFICATION_BATCH_THRESHOLD: usize = 8;
 const AGENT_LOAN_AMORTIZATION_WEEKS: i64 = 104;
@@ -133,7 +133,7 @@ impl Default for GameplayHarnessConfig {
             start_seed: 1,
             seed_count: 1,
             days_per_campaign: 1_080,
-            decision_interval_days: 7,
+            decision_interval_days: 30,
             max_candidate_probes: 24,
             max_consequence_horizon_days: 360,
             trace_limit_per_campaign: 40,
@@ -247,17 +247,16 @@ impl GameplayCommandKind {
             | Self::SecureSupply
             | Self::SellOutput
             | Self::FileLegalCase
-            | Self::RespondToCrisis => 360,
-            Self::ResolveLaborDispute => 720,
-            Self::AdoptWard | Self::EducateFamilyMember => 180,
+            | Self::RespondToCrisis
+            | Self::AdoptWard
+            | Self::EducateFamilyMember
+            | Self::NominateForOffice => 360,
+            Self::ResolveLaborDispute | Self::EnactLaw | Self::StartPublicWork => 720,
             Self::SetBusinessPolicy
             | Self::BorrowFunds
             | Self::ExtendCredit
             | Self::BuyProperty
-            | Self::EnactLaw
-            | Self::StartPublicWork
             | Self::SetHouseGovernance
-            | Self::NominateForOffice
             | Self::AcknowledgeNotification => 1,
         }
     }
@@ -368,6 +367,8 @@ pub struct GameplayScores {
 pub struct GameplaySnapshot {
     pub day: i64,
     pub player_treasury: Money,
+    pub player_civic_contributions: Money,
+    pub player_unmet_office_duties: u32,
     pub player_business_cash: Money,
     pub active_businesses: u16,
     pub distressed_businesses: u16,
@@ -445,6 +446,8 @@ pub struct GameplaySnapshot {
 #[derive(Debug)]
 struct BusinessSnapshotPart {
     player_treasury: Money,
+    player_civic_contributions: Money,
+    player_unmet_office_duties: u32,
     player_business_cash: Money,
     active_businesses: u16,
     distressed_businesses: u16,
@@ -471,6 +474,8 @@ impl BusinessSnapshotPart {
             .collect();
         Self {
             player_treasury: player.treasury(),
+            player_civic_contributions: player.civic_contributions(),
+            player_unmet_office_duties: player.unmet_office_duties(),
             player_business_cash: businesses.iter().fold(Money::ZERO, |total, business| {
                 total.saturating_add(business.cash())
             }),
@@ -957,6 +962,8 @@ impl GameplaySnapshot {
         Self {
             day: state.clock.day(),
             player_treasury: business.player_treasury,
+            player_civic_contributions: business.player_civic_contributions,
+            player_unmet_office_duties: business.player_unmet_office_duties,
             player_business_cash: business.player_business_cash,
             active_businesses: business.active_businesses,
             distressed_businesses: business.distressed_businesses,
@@ -1435,6 +1442,7 @@ fn gameplay_harness_limitations() -> Vec<String> {
     vec![
         "Automated agents measure reachability and systemic outcomes, not whether a human understands the interface or enjoys the decisions.".to_owned(),
         "The report cannot measure emotional investment, narrative quality, or the cognitive burden of comparing choices.".to_owned(),
+        "Agents inspect authoritative simulation state when constructing candidates; they do not model a human player's incomplete knowledge or prove that information reports are sufficient for decision-making.".to_owned(),
         "Counterfactual attribution can only detect consequences represented by the report snapshot and configured consequence horizon.".to_owned(),
     ]
 }
@@ -3540,6 +3548,13 @@ fn generate_legal_candidates(
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) {
+    if state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .is_none_or(|dynasty| dynasty.treasury() < LEGAL_CASE_FILING_COST)
+    {
+        return;
+    }
     let filing_available = state
         .legal_cases
         .values()
@@ -4776,6 +4791,7 @@ fn derive_findings(
     add_action_concentration_finding(aggregate, &mut findings);
     add_repetitive_command_streak_finding(campaigns, &mut findings);
     add_long_substantive_gap_finding(campaigns, &mut findings);
+    add_campaign_blocking_finding(campaigns, &mut findings);
     add_business_survival_finding(campaigns, &mut findings);
     add_system_health_findings(aggregate, campaigns, &mut findings);
     add_choice_quality_finding(aggregate, &mut findings);
@@ -4852,6 +4868,46 @@ fn add_long_substantive_gap_finding(
             worst.seed,
             worst.persona.label(),
             worst.background
+        ),
+    });
+}
+
+fn add_campaign_blocking_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let Some((campaign, opportunity_cycles, blocked_share)) = campaigns
+        .iter()
+        .filter_map(|campaign| {
+            let opportunity_cycles = campaign
+                .decision_cycles
+                .saturating_sub(campaign.quiet_cycles);
+            (opportunity_cycles > 0).then_some((
+                campaign,
+                opportunity_cycles,
+                scaled_ratio_u64(
+                    u64::from(campaign.blocked_cycles),
+                    u64::from(opportunity_cycles),
+                    100,
+                ),
+            ))
+        })
+        .max_by_key(|(_, _, blocked_share)| *blocked_share)
+    else {
+        return;
+    };
+    if campaign.blocked_cycles < 4 || blocked_share < 25 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "An individual campaign becomes strategically blocked".to_owned(),
+        evidence: format!(
+            "{} of {opportunity_cycles} actionable cycles in seed {}, {} {:?} ended with no viable command ({blocked_share}%). Aggregate averages can hide this start-specific failure mode.",
+            campaign.blocked_cycles,
+            campaign.seed,
+            campaign.persona.label(),
+            campaign.background,
         ),
     });
 }
@@ -5224,6 +5280,16 @@ fn add_choice_quality_finding(aggregate: &GameplayAggregate, findings: &mut Vec<
                 format_tenths(average_kinds_tenths)
             ),
         });
+    } else if average_kinds_tenths < 15 || multiple_share < 25 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Actionable cycles are usually single-track".to_owned(),
+            evidence: format!(
+                "The average actionable cycle exposed {} viable choices but only {} command families; just {multiple_share}% offered at least two substantive families. Mature play risks becoming a sequence of predetermined task categories rather than competing plans.",
+                format_tenths(average_choices_tenths),
+                format_tenths(average_kinds_tenths)
+            ),
+        });
     } else if average_kinds_tenths < 20 || multiple_share < 50 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Info,
@@ -5580,6 +5646,8 @@ fn add_core_fantasy_findings(
     add_player_labor_agency_finding(aggregate, campaigns, findings);
     add_persona_convergence_finding(campaigns, findings);
     add_civic_convergence_finding(aggregate, campaigns, findings);
+    add_power_exposure_finding(aggregate, campaigns, findings);
+    add_office_duty_failure_finding(aggregate, campaigns, findings);
     add_dynastic_continuity_finding(aggregate, campaigns, findings);
 }
 
@@ -5593,6 +5661,7 @@ fn add_fantasy_arc_findings(
     }
     add_fantasy_arc_order_finding(campaigns, findings);
     add_fantasy_arc_compression_findings(campaigns, findings);
+    add_absolute_fantasy_pacing_finding(campaigns, findings);
     add_synchronized_fantasy_timing_finding(campaigns, findings);
     add_fantasy_arc_completion_findings(average_campaign_days(aggregate), campaigns, findings);
 }
@@ -5676,6 +5745,44 @@ fn add_fantasy_arc_compression_findings(
     }
 }
 
+fn add_absolute_fantasy_pacing_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let eligible: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| campaign.simulated_days >= 720)
+        .collect();
+    if eligible.is_empty() {
+        return;
+    }
+    let compressed = eligible
+        .iter()
+        .filter(|campaign| {
+            matches!(
+                (
+                    campaign.fantasy_arc.first_commercial_standing_day,
+                    campaign.fantasy_arc.first_office_campaign_day,
+                    campaign.fantasy_arc.first_city_shaping_action_day,
+                ),
+                (Some(standing), Some(campaign_day), Some(city_day))
+                    if standing <= 90 && campaign_day <= 180 && city_day <= 450
+            )
+        })
+        .count();
+    if scaled_ratio_usize(compressed, eligible.len(), 100) < 50 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "The core fantasy arc is compressed into the opening campaign".to_owned(),
+        evidence: format!(
+            "{compressed} of {} campaigns reached commercial standing within 90 days, began an office campaign within 180 days, and exercised city-shaping power within 450 days. Foundation, social ascent, and institutional authority are not receiving distinct phases.",
+            eligible.len()
+        ),
+    });
+}
+
 fn add_synchronized_fantasy_timing_finding(
     campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
@@ -5733,7 +5840,7 @@ fn add_fantasy_arc_completion_findings(
     campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
 ) {
-    if average_days >= 360 {
+    if average_days >= 1_080 {
         let incomplete = campaigns
             .iter()
             .filter(|campaign| {
@@ -5742,7 +5849,7 @@ fn add_fantasy_arc_completion_findings(
                     || campaign.fantasy_arc.first_office_day.is_none()
             })
             .count();
-        if incomplete > 0 {
+        if scaled_ratio_usize(incomplete, campaigns.len(), 100) >= 25 {
             findings.push(GameplayFinding {
                 severity: GameplayFindingSeverity::Warning,
                 title: "The early commercial-to-political arc is incomplete".to_owned(),
@@ -5753,18 +5860,30 @@ fn add_fantasy_arc_completion_findings(
             });
         }
     }
-    if average_days >= 720 {
-        let without_city_shaping = campaigns
+    if average_days >= 1_080 {
+        let established_in_time: Vec<_> = campaigns
+            .iter()
+            .filter(|campaign| {
+                campaign.fantasy_arc.first_office_day.is_some_and(|day| {
+                    day <= i64::try_from(average_days)
+                        .unwrap_or(i64::MAX)
+                        .saturating_sub(90)
+                })
+            })
+            .collect();
+        let without_city_shaping = established_in_time
             .iter()
             .filter(|campaign| campaign.fantasy_arc.first_city_shaping_action_day.is_none())
             .count();
-        if without_city_shaping > 0 {
+        if !established_in_time.is_empty()
+            && scaled_ratio_usize(without_city_shaping, established_in_time.len(), 100) >= 25
+        {
             findings.push(GameplayFinding {
                 severity: GameplayFindingSeverity::Warning,
                 title: "Institutional power does not become city-shaping action".to_owned(),
                 evidence: format!(
-                    "{without_city_shaping} of {} campaigns never sponsored a law or public work.",
-                    campaigns.len()
+                    "{without_city_shaping} of {} campaigns that held office for at least 90 days never sponsored a law or public work.",
+                    established_in_time.len()
                 ),
             });
         }
@@ -6050,12 +6169,99 @@ fn add_civic_convergence_finding(
     }
 }
 
+fn add_power_exposure_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if average_campaign_days(aggregate) < 3_600 {
+        return;
+    }
+    let established: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| campaign.maximum_offices_held > 0)
+        .collect();
+    if established.len() < 4 {
+        return;
+    }
+    let sheltered = established
+        .iter()
+        .filter(|campaign| {
+            let civic_contribution = campaign
+                .end
+                .player_civic_contributions
+                .copper()
+                .saturating_sub(campaign.start.player_civic_contributions.copper());
+            let unmet_duties = campaign
+                .end
+                .player_unmet_office_duties
+                .saturating_sub(campaign.start.player_unmet_office_duties);
+            campaign.maximum_player_disputed_employment == 0
+                && campaign.end.player_contract_failures == 0
+                && campaign.end.distressed_businesses == 0
+                && campaign.end.insolvent_businesses == 0
+                && campaign.end.player_treasury.copper()
+                    >= campaign.start.player_treasury.copper().saturating_div(2)
+                && civic_contribution < 5_000
+                && unmet_duties == 0
+        })
+        .count();
+    if scaled_ratio_usize(sheltered, established.len(), 100) < 50 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Established dynasties often avoid measured internal exposure".to_owned(),
+        evidence: format!(
+            "{sheltered} of {} officeholding campaigns reached the endpoint without a player labor dispute, contract failure, distressed business, insolvent business, major treasury drawdown, material civic contribution, or unmet office duty. The design calls for greater power to create obligations and vulnerability, not only additional tools.",
+            established.len()
+        ),
+    });
+}
+
+fn add_office_duty_failure_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if average_campaign_days(aggregate) < 1_080 || campaigns.is_empty() {
+        return;
+    }
+    let chronic_failures: Vec<_> = campaigns
+        .iter()
+        .filter_map(|campaign| {
+            let failures = campaign
+                .end
+                .player_unmet_office_duties
+                .saturating_sub(campaign.start.player_unmet_office_duties);
+            (failures >= 12).then_some((campaign, failures))
+        })
+        .collect();
+    if chronic_failures.is_empty() {
+        return;
+    }
+    let (worst, failures) = chronic_failures
+        .into_iter()
+        .max_by_key(|(_, failures)| *failures)
+        .expect("non-empty chronic office-duty failures must have a maximum");
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Office obligations repeatedly exceed dynasty liquidity".to_owned(),
+        evidence: format!(
+            "At least one campaign accumulated twelve or more unmet monthly office duties; the worst was {failures} for seed {}, {} {:?}. Political service is creating a recurring liquidity trap rather than a manageable strategic liability.",
+            worst.seed,
+            worst.persona.label(),
+            worst.background,
+        ),
+    });
+}
+
 fn add_dynastic_continuity_finding(
     aggregate: &GameplayAggregate,
     campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
 ) {
-    if average_campaign_days(aggregate) < 3_600 || campaigns.is_empty() {
+    if average_campaign_days(aggregate) < 7_200 || campaigns.is_empty() {
         return;
     }
     let successions = campaigns
@@ -6480,6 +6686,7 @@ fn compare_economy_and_business(
     domains: &mut BTreeSet<GameplayDomain>,
 ) {
     if earlier.player_treasury != later.player_treasury
+        || earlier.player_civic_contributions != later.player_civic_contributions
         || earlier.player_business_cash != later.player_business_cash
     {
         domains.insert(GameplayDomain::Economy);
@@ -6556,6 +6763,7 @@ fn compare_dynasty_and_civic(
     if earlier.legitimacy != later.legitimacy
         || earlier.quality_reputation != later.quality_reputation
         || earlier.reliability_reputation != later.reliability_reputation
+        || earlier.player_unmet_office_duties != later.player_unmet_office_duties
         || earlier.generation != later.generation
         || earlier.achieved_ai_objectives != later.achieved_ai_objectives
     {
@@ -6574,6 +6782,8 @@ fn compare_dynasty_and_civic(
         || earlier.player_office_checksum != later.player_office_checksum
         || earlier.institution_memberships != later.institution_memberships
         || earlier.institution_budget_total != later.institution_budget_total
+        || earlier.player_civic_contributions != later.player_civic_contributions
+        || earlier.player_unmet_office_duties != later.player_unmet_office_duties
     {
         domains.insert(GameplayDomain::Institutions);
     }

@@ -490,6 +490,320 @@ mod gameplay_stability {
             "holding an office with city-contract power must affect the holder's economy"
         );
     }
+
+    #[test]
+    fn office_revenue_is_limited_by_institution_budget_headroom() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let institution_id = registry
+            .get_institution_id("market_office")
+            .expect("registry must define the market office");
+        let holder_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let available_headroom = Money::from_copper(40);
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        {
+            let institution = state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("market-tolls institution must exist");
+            institution.office_holder_id = Some(holder_id);
+            institution.budget = Money::from_copper(i64::MAX).saturating_sub(available_headroom);
+        }
+        let clearing_before = state.market.clearing_account;
+
+        apply_office_power_effects(registry, &mut state);
+
+        assert_eq!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("market-tolls institution must exist")
+                .budget,
+            Money::from_copper(i64::MAX)
+        );
+        assert_eq!(
+            state.market.clearing_account,
+            clearing_before.saturating_sub(available_headroom),
+            "the external clearing account must fund only revenue the institution can retain"
+        );
+    }
+
+    #[test]
+    fn funded_office_duties_transfer_private_money_into_the_institution() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let institution_id = registry
+            .get_institution_id("city_council")
+            .expect("registry must define the city council");
+        let player_id = state.player_dynasty_id;
+        let holder_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("city council must exist")
+            .office_holder_id = Some(holder_id);
+        let power_count = i64::try_from(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("city council must exist")
+                .powers
+                .len(),
+        )
+        .expect("power count must fit i64");
+        let required = OFFICE_DUTY_COST_PER_POWER.saturating_mul(power_count);
+        let treasury_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .treasury();
+        let budget_before = state
+            .institutions
+            .get(&institution_id)
+            .expect("city council must exist")
+            .budget;
+
+        apply_office_duties(&mut state);
+
+        let player = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist");
+        assert_eq!(player.treasury(), treasury_before.saturating_sub(required));
+        assert_eq!(player.civic_contributions(), required);
+        assert_eq!(player.unmet_office_duties(), 0);
+        assert_eq!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("city council must exist")
+                .budget,
+            budget_before.saturating_add(required)
+        );
+    }
+
+    #[test]
+    fn unfunded_office_duties_create_reputational_and_institutional_exposure() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let institution_id = registry
+            .get_institution_id("city_council")
+            .expect("registry must define the city council");
+        let player_id = state.player_dynasty_id;
+        let holder_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("city council must exist")
+            .office_holder_id = Some(holder_id);
+        let player = state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist");
+        player.resources.treasury = Money::from_copper(100);
+        let legitimacy_before = player.resources.legitimacy_basis_points;
+        let reliability_before = player.resources.reputation_reliability_basis_points;
+        let institution_legitimacy_before = state
+            .institutions
+            .get(&institution_id)
+            .expect("city council must exist")
+            .legitimacy_basis_points;
+
+        apply_office_duties(&mut state);
+        apply_office_duties(&mut state);
+
+        let player = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist");
+        assert_eq!(player.treasury(), Money::ZERO);
+        assert_eq!(player.civic_contributions(), Money::from_copper(100));
+        assert_eq!(player.unmet_office_duties(), 2);
+        assert_eq!(
+            player.resources.legitimacy_basis_points,
+            legitimacy_before.saturating_sub(240)
+        );
+        assert_eq!(
+            player.resources.reputation_reliability_basis_points,
+            reliability_before.saturating_sub(160)
+        );
+        assert_eq!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("city council must exist")
+                .legitimacy_basis_points,
+            institution_legitimacy_before.saturating_sub(200)
+        );
+        assert_eq!(
+            state
+                .audit_log
+                .iter()
+                .filter(|record| record.kind() == AuditKind::OfficeDutyShortfall)
+                .count(),
+            2
+        );
+        assert_eq!(
+            state
+                .outbox
+                .iter()
+                .filter(|message| message.kind == OutboxKind::Politics)
+                .filter(|message| message.subject.contains("Office duty shortfall"))
+                .count(),
+            1,
+            "repeated shortfalls inside the notification window should not spam the player"
+        );
+    }
+
+    #[test]
+    fn repeated_office_duty_failures_forfeit_office_and_block_immediate_return() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let institution_id = registry
+            .get_institution_id("city_council")
+            .expect("registry must define the city council");
+        let player_id = state.player_dynasty_id;
+        let holder_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("city council must exist")
+            .office_holder_id = Some(holder_id);
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+
+        apply_office_duties(&mut state);
+        apply_office_duties(&mut state);
+        apply_office_duties(&mut state);
+
+        let institution = state
+            .institutions
+            .get(&institution_id)
+            .expect("city council must exist");
+        assert_eq!(institution.office_holder_id, None);
+        assert_eq!(
+            institution.next_selection_day,
+            state.clock.day().saturating_add(30)
+        );
+        assert_eq!(
+            state
+                .audit_log
+                .iter()
+                .filter(|record| record.kind() == AuditKind::OfficeDutyForfeiture)
+                .count(),
+            1
+        );
+        assert!(
+            state
+                .outbox
+                .iter()
+                .any(|message| message.subject.contains("Office forfeited"))
+        );
+        for _ in 0..30 {
+            state.clock.advance_one_day();
+        }
+
+        resolve_institution_selections(registry, &mut state);
+
+        let winner_id = state
+            .institutions
+            .get(&institution_id)
+            .expect("city council must exist")
+            .office_holder_id
+            .expect("a replacement must be selected");
+        assert_ne!(
+            state
+                .characters
+                .get(winner_id)
+                .expect("winner must exist")
+                .dynasty_id(),
+            player_id,
+            "a dynasty removed for unmet duties must not immediately reclaim the office"
+        );
+    }
+
+    #[test]
+    fn player_cannot_win_office_without_an_explicit_nomination() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let institution_id = state
+            .institutions
+            .values()
+            .find(|institution| institution.office_holder_id.is_none())
+            .expect("campaign must contain an open institution")
+            .institution_id;
+        let player_head_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        for character in state.characters.iter_mut() {
+            character.capabilities.social = if character.id() == player_head_id {
+                100
+            } else {
+                0
+            };
+        }
+        for dynasty in state.dynasties.values_mut() {
+            dynasty.resources.legitimacy_basis_points =
+                if dynasty.id() == player_id { 10_000 } else { 0 };
+        }
+        let day = state.clock.day();
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("selected institution must exist")
+            .next_selection_day = day;
+
+        resolve_institution_selections(test_registry(), &mut state);
+
+        let winner_id = state
+            .institutions
+            .get(&institution_id)
+            .expect("selected institution must exist")
+            .office_holder_id
+            .expect("an eligible non-player member must win the office");
+        assert_ne!(
+            state
+                .characters
+                .get(winner_id)
+                .expect("winner must exist")
+                .dynasty_id(),
+            player_id,
+            "membership and raw statistics must not grant passive player political power"
+        );
+    }
 }
 
 mod contracts {

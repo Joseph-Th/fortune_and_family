@@ -193,6 +193,6 @@ bash scripts/test.sh all
 
 ## Product scope
 
-The engine focuses on one deeply simulated city and abstract regional connections. Its core loop converts productive competence into commercial leverage, social standing, political office, institutional power, and dynastic continuity.
+The engine focuses on one deeply simulated city and abstract regional connections. Its core loop converts productive competence into commercial leverage, social standing, political office, institutional power, and dynastic continuity. Officeholding is not a free upgrade: public service consumes administrative capacity, requires recurring private civic contributions, and can be forfeited when a dynasty repeatedly fails its duties.
 
 Tactical combat, manual movement of every character, equal-detail multi-city simulation, repetitive crafting, routine dialogue trees, and decorative interiors without systemic effects are outside the project scope. See `DESIGN.md` for the product contract.

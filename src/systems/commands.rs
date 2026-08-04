@@ -1,8 +1,8 @@
 //! Canonical player-command validation and dispatch across simulation subsystems.
 
 use super::{
-    LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, OFFICE_TERM_DAYS, StrategicError,
-    SupplyContractTerms, acquire_business, buy_unowned_property, issue_loan, sign_supply_contract,
+    LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
+    acquire_business, buy_unowned_property, issue_loan, sign_supply_contract,
     transfer_business_cash,
 };
 use crate::core::{
@@ -135,6 +135,7 @@ struct BusinessPolicyInput {
 
 pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 180;
 pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 90;
+pub(crate) const LEGAL_CASE_FILING_COST: Money = Money::from_copper(300);
 pub(crate) const LAW_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const LAW_LEGITIMACY_REQUIREMENT: u16 = 3_000;
 pub(crate) const LAW_LEGITIMACY_COST: u16 = 250;
@@ -144,12 +145,12 @@ pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
 pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_800;
 pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
-pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 16;
+pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 52;
 pub(crate) const WARD_ADOPTION_INTERVAL_DAYS: i64 = 720;
 pub(crate) const WARD_ADOPTION_COST: Money = Money::from_copper(6_000);
 pub(crate) const WARD_ADOPTION_LEGITIMACY_REQUIREMENT: u16 = 3_500;
 pub(crate) const WARD_ADOPTION_REPUTATION_REQUIREMENT: u16 = 5_200;
-pub(crate) const WARD_ADOPTION_DELIVERY_REQUIREMENT: u32 = 16;
+pub(crate) const WARD_ADOPTION_DELIVERY_REQUIREMENT: u32 = 52;
 pub(crate) const MAX_ACTIVE_WARDS: usize = 4;
 pub(crate) const FAMILY_EDUCATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const FAMILY_EDUCATION_COST: Money = Money::from_copper(2_000);
@@ -942,8 +943,7 @@ pub(crate) fn player_office_power_available_day(
         })
         .map(|institution| {
             institution
-                .next_selection_day
-                .saturating_sub(OFFICE_TERM_DAYS)
+                .term_started_day
                 .saturating_add(OFFICE_POWER_ESTABLISHMENT_DAYS)
         })
         .min()
@@ -1009,7 +1009,7 @@ fn apply_legal_case(
             return Err(CommandError::LegalCaseCooldown { next_filing_day });
         }
     }
-    spend_player_treasury(state, Money::from_copper(300))?;
+    spend_player_treasury(state, LEGAL_CASE_FILING_COST)?;
     let id = state.next_ids.legal_case();
     state.legal_cases.insert(
         id,

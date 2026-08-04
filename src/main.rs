@@ -52,7 +52,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print the complete read-only campaign projection as JSON.
+    /// Print the adapter-facing read-only campaign projection as JSON.
     Inspect { input: PathBuf },
     /// Generate a self-contained HTML campaign dashboard.
     Dashboard {
@@ -277,7 +277,7 @@ struct PlaytestArgs {
     #[arg(long, default_value_t = 1_080)]
     days: u32,
     /// Days advanced after each player decision.
-    #[arg(long, default_value_t = 7)]
+    #[arg(long, default_value_t = 30)]
     decision_interval: u16,
     /// Maximum candidate commands validated per decision.
     #[arg(long, default_value_t = 24)]

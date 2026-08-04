@@ -189,6 +189,11 @@ fn validate_dynasties(state: &AppState) {
             dynasty.id()
         );
         debug_assert!(
+            !dynasty.civic_contributions().is_negative(),
+            "Lifecycle Validity: dynasty {} civic contributions are negative",
+            dynasty.id()
+        );
+        debug_assert!(
             dynasty.resources.legitimacy_basis_points <= 10_000,
             "Lifecycle Validity: dynasty legitimacy is outside basis-point range"
         );
@@ -426,8 +431,11 @@ fn validate_institutions(state: &AppState, ids: &RegistryIds) {
             "Registry Reference Validity: runtime institution references missing definition"
         );
         debug_assert!(
-            !institution.budget.is_negative(),
-            "Lifecycle Validity: institution budget is negative"
+            !institution.budget.is_negative()
+                && institution.term_number > 0
+                && institution.term_started_day <= state.clock.day()
+                && institution.next_selection_day >= institution.term_started_day,
+            "Lifecycle Validity: institution budget or term timing is invalid"
         );
         debug_assert!(
             institution.legitimacy_basis_points <= 10_000,

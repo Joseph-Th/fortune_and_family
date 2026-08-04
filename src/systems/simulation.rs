@@ -386,13 +386,16 @@ fn effective_capacity_batches(state: &AppState, business: &crate::core::Business
     let effective_administrative_capacity = u32::from(dynasty.administrative_capacity())
         .saturating_mul(governance_administrative_multiplier(governance))
         / 10_000;
-    let administrative_efficiency = if dynasty.administrative_load() == 0
-        || u32::from(dynasty.administrative_load()) <= effective_administrative_capacity
+    let effective_administrative_load = dynasty.administrative_load().saturating_add(
+        super::strategic::dynasty_office_administrative_load(state, dynasty.id()),
+    );
+    let administrative_efficiency = if effective_administrative_load == 0
+        || u32::from(effective_administrative_load) <= effective_administrative_capacity
     {
         10_000_u16
     } else {
         u16::try_from(
-            effective_administrative_capacity * 10_000 / u32::from(dynasty.administrative_load()),
+            effective_administrative_capacity * 10_000 / u32::from(effective_administrative_load),
         )
         .expect("administrative efficiency must fit u16")
     };
@@ -1429,10 +1432,23 @@ fn update_campaign_phases(state: &mut AppState) {
         .iter()
         .map(|(dynasty_id, council)| (*dynasty_id, council.governance))
         .collect();
+    let office_loads: BTreeMap<_, _> = state
+        .dynasties
+        .keys()
+        .copied()
+        .map(|dynasty_id| {
+            (
+                dynasty_id,
+                super::strategic::dynasty_office_administrative_load(state, dynasty_id),
+            )
+        })
+        .collect();
     for dynasty in state.dynasties.values_mut() {
         dynasty.runtime.phase = phase;
+        let office_load = office_loads.get(&dynasty.id()).copied().unwrap_or(0);
         let overextension = dynasty
             .administrative_load()
+            .saturating_add(office_load)
             .saturating_sub(dynasty.administrative_capacity());
         let base_risk = i32::from(
             1_000_u16

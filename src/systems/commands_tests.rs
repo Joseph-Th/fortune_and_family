@@ -3,6 +3,7 @@
 use super::*;
 use crate::ids::GoodId;
 use crate::money::Quantity;
+use crate::systems::OFFICE_TERM_DAYS;
 use crate::systems::validate_invariants;
 use crate::test_support::{
     assert_state_unchanged, make_test_campaign, rivergate_registry_for_test,
@@ -10,6 +11,10 @@ use crate::test_support::{
 use std::collections::BTreeSet;
 
 fn grant_player_office_for_test(state: &mut AppState) {
+    let mature_term_started_day = state
+        .clock
+        .day()
+        .saturating_sub(OFFICE_POWER_ESTABLISHMENT_DAYS);
     let mature_next_selection_day = state
         .clock
         .day()
@@ -34,11 +39,16 @@ fn grant_player_office_for_test(state: &mut AppState) {
             .expect("campaign must contain an office with the requested power");
         institution.members.insert(holder_id);
         institution.office_holder_id = Some(holder_id);
+        institution.term_started_day = mature_term_started_day;
         institution.next_selection_day = mature_next_selection_day;
     }
 }
 
 fn grant_player_office_with_power_for_test(state: &mut AppState, power: OfficePower) {
+    let mature_term_started_day = state
+        .clock
+        .day()
+        .saturating_sub(OFFICE_POWER_ESTABLISHMENT_DAYS);
     let mature_next_selection_day = state
         .clock
         .day()
@@ -56,6 +66,7 @@ fn grant_player_office_with_power_for_test(state: &mut AppState, power: OfficePo
         .expect("campaign must contain an office with the requested power");
     institution.members.insert(holder_id);
     institution.office_holder_id = Some(holder_id);
+    institution.term_started_day = mature_term_started_day;
     institution.next_selection_day = mature_next_selection_day;
 }
 
@@ -222,7 +233,7 @@ mod validation {
             .values_mut()
             .find(|institution| institution.powers.contains(&OfficePower::PublicWorks))
             .expect("campaign must contain a public-works office")
-            .next_selection_day = current_day.saturating_add(OFFICE_TERM_DAYS);
+            .term_started_day = current_day;
         let district_id = registry
             .districts()
             .first()
@@ -1276,7 +1287,7 @@ mod laws {
             .values_mut()
             .find(|institution| institution.powers.contains(&OfficePower::MarketTolls))
             .expect("campaign must contain a market-tolls office")
-            .next_selection_day = current_day.saturating_add(OFFICE_TERM_DAYS);
+            .term_started_day = current_day;
         let before = state.clone();
 
         let result = apply_player_command(
@@ -1400,19 +1411,25 @@ mod politics {
             .copied()
             .collect();
         for member_id in member_ids {
-            state
+            let capabilities = &mut state
                 .characters
                 .get_mut(member_id)
                 .expect("institution member must exist")
-                .capabilities
-                .social = 0;
+                .capabilities;
+            capabilities.administration = 0;
+            capabilities.commerce = 0;
+            capabilities.social = 0;
+            capabilities.craft = 0;
         }
-        state
+        let nominee_capabilities = &mut state
             .characters
             .get_mut(nominee_id)
             .expect("nominee must exist")
-            .capabilities
-            .social = 100;
+            .capabilities;
+        nominee_capabilities.administration = 100;
+        nominee_capabilities.commerce = 100;
+        nominee_capabilities.social = 100;
+        nominee_capabilities.craft = 100;
         for dynasty in state.dynasties.values_mut() {
             dynasty.resources.legitimacy_basis_points = 0;
         }
@@ -1467,6 +1484,76 @@ mod politics {
                 .office_holder_id,
             Some(nominee_id),
             "a strong funded nomination must be capable of winning office"
+        );
+    }
+
+    #[test]
+    fn nomination_does_not_retroactively_establish_incumbent_office_power() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        advance_days(registry, &mut state, 120).expect("campaign must advance");
+        let current_day = state.clock.day();
+        let player = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        let holder_id = player.head_id();
+        let nominee_id = player.heir_id().expect("player dynasty must have an heir");
+        let institution_id = state
+            .institutions
+            .values()
+            .find(|institution| {
+                institution.powers.contains(&OfficePower::MarketTolls)
+                    && !institution.members.contains(&nominee_id)
+            })
+            .expect("campaign must contain a suitable market office")
+            .institution_id;
+        {
+            let institution = state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("selected institution must exist");
+            institution.members.insert(holder_id);
+            institution.office_holder_id = Some(holder_id);
+            institution.term_started_day = current_day;
+            institution.next_selection_day = current_day.saturating_add(OFFICE_TERM_DAYS);
+        }
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .reputation_reliability_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        grant_office_nomination_record_for_test(&mut state);
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id,
+                character_id: nominee_id,
+            },
+        )
+        .expect("nomination must succeed");
+
+        let expected_available_day = current_day.saturating_add(OFFICE_POWER_ESTABLISHMENT_DAYS);
+        assert_eq!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .next_selection_day,
+            current_day.saturating_add(60),
+            "nomination should still schedule a timely contest"
+        );
+        assert_eq!(
+            player_office_power_available_day(&state, OfficePower::MarketTolls),
+            Some(expected_available_day),
+            "election scheduling must not rewrite the incumbent term start"
+        );
+        assert!(
+            !has_established_player_office_power(&state, OfficePower::MarketTolls),
+            "a newly acquired office power must remain unavailable during establishment"
         );
     }
 

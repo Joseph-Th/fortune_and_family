@@ -19,6 +19,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
+pub(crate) const OFFICE_ADMINISTRATIVE_LOAD_PER_POWER: u16 = 10;
+pub(crate) const OFFICE_DUTY_COST_PER_POWER: Money = Money::from_copper(100);
+const OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS: i64 = 90;
+const OFFICE_DUTY_FORFEITURE_WINDOW_DAYS: i64 = 90;
+const OFFICE_DUTY_REELECTION_BAN_DAYS: i64 = 180;
+const OFFICE_DUTY_FORFEITURE_THRESHOLD: usize = 3;
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StrategicError {
     #[error("business {business_id} does not exist")]
@@ -1095,6 +1102,7 @@ fn initialize_institutions(registry: &Registry, state: &mut AppState) {
                 powers: powers_for(definition.kind()),
                 budget: Money::from_copper(120_000),
                 legitimacy_basis_points: 7_000,
+                term_started_day: 0,
                 next_selection_day: super::OFFICE_TERM_DAYS,
                 term_number: 1,
             },
@@ -3167,7 +3175,8 @@ fn apply_law_economic_effects(registry: &Registry, state: &mut AppState) {
 
 pub(crate) fn run_monthly_strategic_systems(registry: &Registry, state: &mut AppState) {
     update_district_conditions(state);
-    resolve_institution_selections(state);
+    resolve_institution_selections(registry, state);
+    apply_office_duties(state);
     apply_office_power_effects(registry, state);
     advance_ai_objectives(registry, state);
     update_information_reports(registry, state);
@@ -3176,6 +3185,272 @@ pub(crate) fn run_monthly_strategic_systems(registry: &Registry, state: &mut App
     update_external_route_risk(state);
     detect_and_advance_crises(registry, state);
     recover_external_routes(state);
+}
+
+pub(crate) fn dynasty_office_administrative_load(state: &AppState, dynasty_id: DynastyId) -> u16 {
+    state
+        .institutions
+        .values()
+        .filter(|institution| {
+            institution.office_holder_id.is_some_and(|character_id| {
+                state
+                    .characters
+                    .get(character_id)
+                    .is_some_and(|character| character.dynasty_id() == dynasty_id)
+            })
+        })
+        .fold(0_u16, |load, institution| {
+            let power_count = u16::try_from(institution.powers.len()).unwrap_or(u16::MAX);
+            load.saturating_add(power_count.saturating_mul(OFFICE_ADMINISTRATIVE_LOAD_PER_POWER))
+        })
+}
+
+fn apply_office_duties(state: &mut AppState) {
+    let duties: Vec<_> = state
+        .institutions
+        .values()
+        .filter_map(|institution| {
+            let holder_id = institution.office_holder_id?;
+            let dynasty_id = state.characters.get(holder_id)?.dynasty_id();
+            let power_count = u16::try_from(institution.powers.len()).unwrap_or(u16::MAX);
+            Some((institution.institution_id, dynasty_id, power_count))
+        })
+        .collect();
+    for (institution_id, dynasty_id, power_count) in duties {
+        apply_office_duty(state, institution_id, dynasty_id, power_count);
+    }
+}
+
+fn apply_office_duty(
+    state: &mut AppState,
+    institution_id: crate::ids::InstitutionId,
+    dynasty_id: DynastyId,
+    power_count: u16,
+) {
+    let required = OFFICE_DUTY_COST_PER_POWER.saturating_mul(i64::from(power_count));
+    let institution_budget = state
+        .institutions
+        .get(&institution_id)
+        .expect("office institution must exist")
+        .budget;
+    let collectible = required.min(institution_budget.max_nonnegative_addend());
+    if collectible == Money::ZERO {
+        return;
+    }
+    let treasury = state
+        .dynasties
+        .get(&dynasty_id)
+        .expect("officeholder dynasty must exist")
+        .treasury();
+    let paid = collectible.min(treasury);
+    transfer_office_duty_payment(
+        state,
+        institution_id,
+        dynasty_id,
+        institution_budget,
+        treasury,
+        paid,
+    );
+    if paid < collectible {
+        record_office_duty_shortfall(
+            state,
+            institution_id,
+            dynasty_id,
+            required,
+            paid,
+            collectible.saturating_sub(paid),
+        );
+    }
+}
+
+fn transfer_office_duty_payment(
+    state: &mut AppState,
+    institution_id: crate::ids::InstitutionId,
+    dynasty_id: DynastyId,
+    institution_budget: Money,
+    treasury: Money,
+    paid: Money,
+) {
+    if paid == Money::ZERO {
+        return;
+    }
+    let dynasty = state
+        .dynasties
+        .get_mut(&dynasty_id)
+        .expect("officeholder dynasty must exist");
+    dynasty.resources.treasury = treasury.saturating_sub(paid);
+    dynasty.resources.civic_contributions =
+        dynasty.resources.civic_contributions.saturating_add(paid);
+    state
+        .institutions
+        .get_mut(&institution_id)
+        .expect("office institution must exist")
+        .budget = institution_budget
+        .checked_add(paid)
+        .expect("bounded civic duty contribution must fit institution budget");
+}
+
+fn record_office_duty_shortfall(
+    state: &mut AppState,
+    institution_id: crate::ids::InstitutionId,
+    dynasty_id: DynastyId,
+    required: Money,
+    paid: Money,
+    shortfall: Money,
+) {
+    let subject = office_duty_subject(institution_id, dynasty_id);
+    let recent_shortfalls = recent_office_duty_shortfalls(state, &subject);
+    let should_notify = should_notify_office_duty_shortfall(state, &subject);
+    penalize_office_duty_shortfall(state, institution_id, dynasty_id);
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::OfficeDutyShortfall,
+        subject: subject.clone(),
+        detail: format!("required={required};paid={paid};shortfall={shortfall}"),
+    });
+    let forfeited = recent_shortfalls.saturating_add(1) >= OFFICE_DUTY_FORFEITURE_THRESHOLD;
+    if forfeited {
+        forfeit_office_for_unmet_duties(
+            state,
+            institution_id,
+            &subject,
+            recent_shortfalls.saturating_add(1),
+        );
+    }
+    notify_player_office_duty_outcome(
+        state,
+        OfficeDutyOutcome {
+            institution_id,
+            dynasty_id,
+            required,
+            paid,
+            shortfall,
+            forfeited,
+            should_notify,
+        },
+    );
+}
+
+fn recent_office_duty_shortfalls(state: &AppState, subject: &str) -> usize {
+    state
+        .audit_log
+        .iter()
+        .filter(|record| {
+            record.kind() == AuditKind::OfficeDutyShortfall
+                && record.subject() == subject
+                && state.clock.day().saturating_sub(record.day())
+                    <= OFFICE_DUTY_FORFEITURE_WINDOW_DAYS
+        })
+        .count()
+}
+
+fn should_notify_office_duty_shortfall(state: &AppState, subject: &str) -> bool {
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::OfficeDutyShortfall && record.subject() == subject
+        })
+        .is_none_or(|record| {
+            state.clock.day()
+                >= record
+                    .day()
+                    .saturating_add(OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS)
+        })
+}
+
+fn penalize_office_duty_shortfall(
+    state: &mut AppState,
+    institution_id: crate::ids::InstitutionId,
+    dynasty_id: DynastyId,
+) {
+    let dynasty = state
+        .dynasties
+        .get_mut(&dynasty_id)
+        .expect("officeholder dynasty must exist");
+    dynasty.resources.unmet_office_duties = dynasty.resources.unmet_office_duties.saturating_add(1);
+    dynasty.resources.legitimacy_basis_points = dynasty
+        .resources
+        .legitimacy_basis_points
+        .saturating_sub(120);
+    dynasty.resources.reputation_reliability_basis_points = dynasty
+        .resources
+        .reputation_reliability_basis_points
+        .saturating_sub(80);
+    let institution = state
+        .institutions
+        .get_mut(&institution_id)
+        .expect("office institution must exist");
+    institution.legitimacy_basis_points = institution.legitimacy_basis_points.saturating_sub(100);
+}
+
+fn forfeit_office_for_unmet_duties(
+    state: &mut AppState,
+    institution_id: crate::ids::InstitutionId,
+    subject: &str,
+    recent_shortfalls: usize,
+) {
+    let day = state.clock.day();
+    let institution = state
+        .institutions
+        .get_mut(&institution_id)
+        .expect("office institution must exist");
+    institution.office_holder_id = None;
+    institution.next_selection_day = day.saturating_add(30);
+    state.audit_log.push(AuditRecord {
+        day,
+        kind: AuditKind::OfficeDutyForfeiture,
+        subject: subject.to_owned(),
+        detail: format!("office forfeited after {recent_shortfalls} recent duty shortfalls"),
+    });
+}
+
+#[derive(Clone, Copy)]
+struct OfficeDutyOutcome {
+    institution_id: crate::ids::InstitutionId,
+    dynasty_id: DynastyId,
+    required: Money,
+    paid: Money,
+    shortfall: Money,
+    forfeited: bool,
+    should_notify: bool,
+}
+
+fn notify_player_office_duty_outcome(state: &mut AppState, outcome: OfficeDutyOutcome) {
+    if outcome.dynasty_id != state.player_dynasty_id {
+        return;
+    }
+    if outcome.forfeited {
+        push_outbox(
+            state,
+            OutboxKind::Politics,
+            format!("Office forfeited at institution {}", outcome.institution_id),
+            "Repeatedly unmet civic duties forced the dynasty to surrender the office. The institution will select a replacement next month, and the dynasty cannot immediately return to the same office."
+                .to_owned(),
+        );
+    } else if outcome.should_notify {
+        push_outbox(
+            state,
+            OutboxKind::Politics,
+            format!(
+                "Office duty shortfall at institution {}",
+                outcome.institution_id
+            ),
+            format!(
+                "The dynasty funded {} of a {} monthly civic duty. The {} shortfall reduced institutional and dynastic standing.",
+                outcome.paid, outcome.required, outcome.shortfall
+            ),
+        );
+    }
+}
+
+fn office_duty_subject(institution_id: crate::ids::InstitutionId, dynasty_id: DynastyId) -> String {
+    format!(
+        "institution:{};dynasty:{}",
+        institution_id.value(),
+        dynasty_id.value()
+    )
 }
 
 fn recover_external_routes(state: &mut AppState) {
@@ -3227,19 +3502,24 @@ fn apply_office_power_effects(registry: &Registry, state: &mut AppState) {
                         .min(10_000);
                 }
                 OfficePower::MarketTolls | OfficePower::Taxation => {
-                    let revenue = Money::from_copper(100);
-                    state
-                        .institutions
-                        .get_mut(&institution_id)
-                        .expect("office institution must exist")
-                        .budget = state
+                    let institution_budget = state
                         .institutions
                         .get(&institution_id)
                         .expect("office institution must exist")
-                        .budget
-                        .saturating_add(revenue);
-                    state.market.clearing_account =
-                        state.market.clearing_account.saturating_sub(revenue);
+                        .budget;
+                    let revenue =
+                        Money::from_copper(100).min(institution_budget.max_nonnegative_addend());
+                    if revenue > Money::ZERO {
+                        state
+                            .institutions
+                            .get_mut(&institution_id)
+                            .expect("office institution must exist")
+                            .budget = institution_budget
+                            .checked_add(revenue)
+                            .expect("bounded office revenue must fit institution budget");
+                        state.market.clearing_account =
+                            state.market.clearing_account.saturating_sub(revenue);
+                    }
                 }
                 OfficePower::DebtEnforcement => {
                     adjust_reliability_reputation(state, dynasty_id, 15);
@@ -3391,7 +3671,7 @@ fn update_district_conditions(state: &mut AppState) {
     }
 }
 
-fn resolve_institution_selections(state: &mut AppState) {
+fn resolve_institution_selections(registry: &Registry, state: &mut AppState) {
     let day = state.clock.day();
     let due: Vec<_> = state
         .institutions
@@ -3400,11 +3680,17 @@ fn resolve_institution_selections(state: &mut AppState) {
         .map(|institution| institution.institution_id)
         .collect();
     for institution_id in due {
-        let candidates: Vec<_> = state
+        let institution_kind = registry
+            .get_institution(institution_id)
+            .expect("runtime institution must have a registry definition")
+            .kind();
+        let institution = state
             .institutions
             .get(&institution_id)
-            .expect("institution runtime must exist")
-            .members
+            .expect("institution runtime must exist");
+        let incumbent_id = institution.office_holder_id;
+        let member_ids: Vec<_> = institution.members.iter().copied().collect();
+        let candidates: Vec<_> = member_ids
             .iter()
             .filter_map(|character_id| state.characters.get(*character_id))
             .filter(|character| character.status() == crate::core::CharacterStatus::Active)
@@ -3414,27 +3700,30 @@ fn resolve_institution_selections(state: &mut AppState) {
                         && other.office_holder_id == Some(character.id())
                 })
             })
+            .filter(|character| {
+                !has_recent_office_duty_forfeiture(
+                    state,
+                    institution_id,
+                    character.dynasty_id(),
+                    day,
+                ) && (character.dynasty_id() != state.player_dynasty_id
+                    || incumbent_id == Some(character.id())
+                    || has_recent_office_nomination(state, institution_id, character.id(), day))
+            })
             .map(|character| {
                 let dynasty = state
                     .dynasties
                     .get(&character.dynasty_id())
                     .expect("candidate dynasty must exist");
-                let nomination_subject =
-                    super::commands::office_nomination_subject(institution_id, character.id());
-                let campaign_bonus = state
-                    .audit_log
-                    .iter()
-                    .rev()
-                    .find(|record| {
-                        record.kind() == AuditKind::OfficeNomination
-                            && record.subject() == nomination_subject
-                            && day.saturating_sub(record.day()) <= 180
-                    })
-                    .map_or(0_u32, |_| 4_000);
+                let campaign_bonus =
+                    if has_recent_office_nomination(state, institution_id, character.id(), day) {
+                        4_000
+                    } else {
+                        0
+                    };
                 let relationship_support =
                     institution_relationship_support(state, institution_id, character.dynasty_id());
-                let score = u32::from(character.capabilities.social)
-                    .saturating_mul(100)
+                let score = institution_capability_score(character, institution_kind)
                     .saturating_add(u32::from(dynasty.resources.legitimacy_basis_points))
                     .saturating_add(campaign_bonus)
                     .saturating_add(relationship_support);
@@ -3451,6 +3740,7 @@ fn resolve_institution_selections(state: &mut AppState) {
                 .get_mut(&institution_id)
                 .expect("institution runtime must exist");
             institution.office_holder_id = winner;
+            institution.term_started_day = day;
             institution.next_selection_day = day.saturating_add(super::OFFICE_TERM_DAYS);
             institution.term_number = institution.term_number.saturating_add(1);
             institution.term_number
@@ -3464,6 +3754,58 @@ fn resolve_institution_selections(state: &mut AppState) {
             );
         }
     }
+}
+
+fn institution_capability_score(
+    character: &crate::core::Character,
+    institution_kind: InstitutionKind,
+) -> u32 {
+    let capabilities = &character.capabilities;
+    let (primary, secondary) = match institution_kind {
+        InstitutionKind::CraftGuild => (capabilities.craft, capabilities.commerce),
+        InstitutionKind::MerchantGuild | InstitutionKind::MarketOffice => {
+            (capabilities.commerce, capabilities.administration)
+        }
+        InstitutionKind::Council | InstitutionKind::Charity => {
+            (capabilities.social, capabilities.administration)
+        }
+        InstitutionKind::Court | InstitutionKind::Watch => {
+            (capabilities.administration, capabilities.social)
+        }
+        InstitutionKind::Treasury => (capabilities.administration, capabilities.commerce),
+    };
+    u32::from(primary)
+        .saturating_mul(100)
+        .saturating_add(u32::from(secondary).saturating_mul(30))
+}
+
+fn has_recent_office_nomination(
+    state: &AppState,
+    institution_id: crate::ids::InstitutionId,
+    character_id: CharacterId,
+    day: i64,
+) -> bool {
+    let nomination_subject =
+        super::commands::office_nomination_subject(institution_id, character_id);
+    state.audit_log.iter().rev().any(|record| {
+        record.kind() == AuditKind::OfficeNomination
+            && record.subject() == nomination_subject
+            && day.saturating_sub(record.day()) <= 180
+    })
+}
+
+fn has_recent_office_duty_forfeiture(
+    state: &AppState,
+    institution_id: crate::ids::InstitutionId,
+    dynasty_id: DynastyId,
+    day: i64,
+) -> bool {
+    let subject = office_duty_subject(institution_id, dynasty_id);
+    state.audit_log.iter().rev().any(|record| {
+        record.kind() == AuditKind::OfficeDutyForfeiture
+            && record.subject() == subject
+            && day.saturating_sub(record.day()) <= OFFICE_DUTY_REELECTION_BAN_DAYS
+    })
 }
 
 fn institution_relationship_support(

@@ -463,6 +463,67 @@ mod migrations {
     }
 
     #[test]
+    fn v7_adds_stable_institution_term_start_dates() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(7);
+        let institutions = value["institutions"]
+            .as_object_mut()
+            .expect("institutions must be an object");
+        for institution in institutions.values_mut() {
+            institution
+                .as_object_mut()
+                .expect("institution must be an object")
+                .remove("term_started_day");
+        }
+
+        let migrated = migrate_to_current(value, Path::new("memory.json"))
+            .expect("version seven must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        assert!(
+            loaded.institutions.values().all(|institution| {
+                institution.term_started_day
+                    == institution
+                        .next_selection_day
+                        .saturating_sub(crate::systems::OFFICE_TERM_DAYS)
+            }),
+            "migration must preserve the term timing implied by version-seven saves"
+        );
+        validate_state(&loaded).expect("version-seven campaign must remain valid");
+    }
+
+    #[test]
+    fn v8_adds_office_duty_history_fields() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(8);
+        let dynasties = value["dynasties"]
+            .as_object_mut()
+            .expect("dynasties must be an object");
+        for dynasty in dynasties.values_mut() {
+            let resources = dynasty["resources"]
+                .as_object_mut()
+                .expect("dynasty resources must be an object");
+            resources.remove("civic_contributions");
+            resources.remove("unmet_office_duties");
+        }
+
+        let migrated = migrate_to_current(value, Path::new("memory.json"))
+            .expect("version eight must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        assert!(loaded.dynasties.values().all(|dynasty| {
+            dynasty.civic_contributions() == Money::ZERO && dynasty.unmet_office_duties() == 0
+        }));
+        validate_state(&loaded).expect("version-eight campaign must remain valid");
+    }
+
+    #[test]
     fn v1_hydrates_strategic_state() {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
@@ -573,6 +634,26 @@ mod validation {
             load_state(&path),
             StateValidationKind::NumericRanges,
             "invalid basis-point value",
+        );
+    }
+
+    #[test]
+    fn rejects_future_dated_institution_term_start() {
+        let mut state = make_test_campaign();
+        let future_day = state.clock.day().saturating_add(1);
+        state
+            .institutions
+            .values_mut()
+            .next()
+            .expect("campaign must contain an institution")
+            .term_started_day = future_day;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("future-office-term.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid budget or term timing",
         );
     }
 
@@ -865,6 +946,24 @@ mod validation {
             load_state(&path),
             StateValidationKind::PrimaryRecords,
             "does not match derived load",
+        );
+    }
+
+    #[test]
+    fn rejects_negative_civic_contributions() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let dynasty = value["dynasties"]
+            .as_object_mut()
+            .and_then(|dynasties| dynasties.values_mut().next())
+            .expect("serialized state must contain a dynasty");
+        dynasty["resources"]["civic_contributions"] = Value::from(-1);
+        let (_directory, path) = write_test_json_fixture("negative-civic-duty.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid resource value",
         );
     }
 

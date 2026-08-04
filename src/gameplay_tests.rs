@@ -77,6 +77,11 @@ mod harness {
     use super::*;
 
     #[test]
+    fn default_harness_uses_the_monthly_strategic_cadence() {
+        assert_eq!(GameplayHarnessConfig::default().decision_interval_days, 30);
+    }
+
+    #[test]
     fn scaled_ratios_use_wide_intermediates() {
         assert_eq!(
             scaled_ratio_u64(u64::MAX, u64::MAX, 100),
@@ -115,8 +120,10 @@ mod harness {
     #[test]
     fn plays_through_real_commands_and_reports_system_reactions() {
         let registry = rivergate_registry_for_test();
-        let report = run_gameplay_harness(registry, focused_config(180))
-            .expect("gameplay harness must complete");
+        let mut config = focused_config(180);
+        config.decision_interval_days = 7;
+        let report =
+            run_gameplay_harness(registry, config).expect("gameplay harness must complete");
         let campaign = report.campaigns.first().expect("one campaign must run");
 
         assert_eq!(report.schema_version, GAMEPLAY_REPORT_SCHEMA_VERSION);
@@ -888,6 +895,43 @@ mod candidates {
             "a decided case must not be refiled against the same historical breach"
         );
     }
+
+    #[test]
+    fn legal_candidates_require_filing_funds() {
+        let mut state = make_test_campaign();
+        state.legal_cases.clear();
+        for _ in 0..LEGAL_CASE_FILING_INTERVAL_DAYS {
+            state.clock.advance_one_day();
+        }
+        make_player_contract_breached(&mut state);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = LEGAL_CASE_FILING_COST.saturating_sub(Money::from_copper(1));
+        let mut candidates = Vec::new();
+
+        generate_legal_candidates(&state, GameplayPersona::PowerBroker, &mut candidates);
+        assert!(
+            candidates.is_empty(),
+            "the agent must not repeatedly offer a lawsuit the dynasty cannot fund"
+        );
+
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = LEGAL_CASE_FILING_COST;
+        generate_legal_candidates(&state, GameplayPersona::PowerBroker, &mut candidates);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::FileLegalCase),
+            "the filing route should become available at the exact cost boundary"
+        );
+    }
 }
 
 mod metrics {
@@ -913,10 +957,14 @@ mod metrics {
 
         let mut identity_change = earlier.clone();
         identity_change.player_office_checksum += 1;
+        identity_change.player_civic_contributions = Money::from_copper(150);
+        identity_change.player_unmet_office_duties += 1;
         identity_change.active_law_checksum += 1;
         identity_change.player_completed_public_work_checksum += 1;
         let domains = earlier.changed_domains(&identity_change);
         assert!(domains.contains(&GameplayDomain::Institutions));
+        assert!(domains.contains(&GameplayDomain::Economy));
+        assert!(domains.contains(&GameplayDomain::Dynasty));
         assert!(domains.contains(&GameplayDomain::Law));
         assert!(domains.contains(&GameplayDomain::Districts));
     }
@@ -1449,7 +1497,7 @@ mod findings {
     }
 
     #[test]
-    fn choice_depth_within_a_focused_family_is_informational() {
+    fn single_track_actionable_cycles_are_a_warning() {
         let mut report = cached_focused_report(30);
         report.aggregate.decision_cycles = 10;
         report.aggregate.quiet_cycles = 0;
@@ -1458,16 +1506,217 @@ mod findings {
         report.aggregate.cycles_with_multiple_viable_command_kinds = 0;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(&findings, "Actionable cycles are usually single-track");
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        assert_finding_absent(
+            &findings,
+            "Actionable cycles offer too few meaningful alternatives",
+        );
+    }
+
+    #[test]
+    fn focused_but_competing_action_families_remain_informational() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.decision_cycles = 10;
+        report.aggregate.quiet_cycles = 0;
+        report.aggregate.viable_choices = 30;
+        report.aggregate.viable_command_kinds = 18;
+        report.aggregate.cycles_with_multiple_viable_command_kinds = 4;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
         let finding = finding_with_title(
             &findings,
             "Strategic alternatives concentrate within command families",
         );
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+        assert_finding_absent(&findings, "Actionable cycles are usually single-track");
+    }
+
+    #[test]
+    fn findings_surface_start_specific_blocking() {
+        let mut report = cached_focused_report(30);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.decision_cycles = 10;
+        campaign.quiet_cycles = 0;
+        campaign.blocked_cycles = 4;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "An individual campaign becomes strategically blocked",
+        );
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn findings_surface_absolute_core_fantasy_compression() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 720;
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 720;
+        campaign.fantasy_arc.first_commercial_standing_day = Some(70);
+        campaign.fantasy_arc.first_office_campaign_day = Some(140);
+        campaign.fantasy_arc.first_city_shaping_action_day = Some(420);
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "The core fantasy arc is compressed into the opening campaign",
+        );
+    }
+
+    #[test]
+    fn foundation_year_does_not_require_completed_political_ascent() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 360;
+        report.campaigns[0].simulated_days = 360;
+        report.campaigns[0].fantasy_arc.first_office_campaign_day = None;
+        report.campaigns[0].fantasy_arc.first_office_day = None;
+        report.campaigns[0]
+            .fantasy_arc
+            .first_city_shaping_action_day = None;
+
+        let foundation_findings = derive_findings(&report.aggregate, &report.campaigns);
+        assert_finding_absent(
+            &foundation_findings,
+            "The early commercial-to-political arc is incomplete",
+        );
+        assert_finding_absent(
+            &foundation_findings,
+            "Institutional power does not become city-shaping action",
+        );
+
+        report.aggregate.simulated_days = 1_080;
+        report.campaigns[0].simulated_days = 1_080;
+        let mature_findings = derive_findings(&report.aggregate, &report.campaigns);
+        finding_with_title(
+            &mature_findings,
+            "The early commercial-to-political arc is incomplete",
+        );
+        assert_finding_absent(
+            &mature_findings,
+            "Institutional power does not become city-shaping action",
+        );
+    }
+
+    #[test]
+    fn dynastic_continuity_is_only_required_at_generation_length() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 3_600;
+        report.campaigns[0].simulated_days = 3_600;
+
+        let midgame_findings = derive_findings(&report.aggregate, &report.campaigns);
+        assert_finding_absent(
+            &midgame_findings,
+            "Long campaigns do not exercise dynastic continuity",
+        );
+
+        report.aggregate.simulated_days = 7_200;
+        report.campaigns[0].simulated_days = 7_200;
+        let generation_findings = derive_findings(&report.aggregate, &report.campaigns);
+        finding_with_title(
+            &generation_findings,
+            "Long campaigns do not exercise dynastic continuity",
+        );
+    }
+
+    #[test]
+    fn findings_surface_low_exposure_after_officeholding() {
+        let mut report = cached_focused_report(30);
+        let baseline = report.campaigns[0].clone();
+        report.aggregate.campaigns = 4;
+        report.aggregate.simulated_days = 14_400;
+        report.campaigns = (0..4)
+            .map(|_| {
+                let mut campaign = baseline.clone();
+                campaign.simulated_days = 3_600;
+                campaign.maximum_offices_held = 1;
+                campaign.maximum_player_disputed_employment = 0;
+                campaign.end.player_contract_failures = 0;
+                campaign.end.distressed_businesses = 0;
+                campaign.end.insolvent_businesses = 0;
+                campaign.end.player_treasury = campaign.start.player_treasury;
+                campaign.end.player_civic_contributions = campaign.start.player_civic_contributions;
+                campaign.end.player_unmet_office_duties = campaign.start.player_unmet_office_duties;
+                campaign
+            })
+            .collect();
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Established dynasties often avoid measured internal exposure",
+        );
+    }
+
+    #[test]
+    fn material_civic_duties_count_as_power_exposure() {
+        let mut report = cached_focused_report(30);
+        let baseline = report.campaigns[0].clone();
+        report.aggregate.campaigns = 4;
+        report.aggregate.simulated_days = 14_400;
+        report.campaigns = (0..4)
+            .map(|_| {
+                let mut campaign = baseline.clone();
+                campaign.simulated_days = 3_600;
+                campaign.maximum_offices_held = 1;
+                campaign.maximum_player_disputed_employment = 0;
+                campaign.end.player_contract_failures = 0;
+                campaign.end.distressed_businesses = 0;
+                campaign.end.insolvent_businesses = 0;
+                campaign.end.player_treasury = campaign.start.player_treasury;
+                campaign.end.player_civic_contributions = campaign
+                    .start
+                    .player_civic_contributions
+                    .saturating_add(Money::from_copper(5_000));
+                campaign
+            })
+            .collect();
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
         assert_finding_absent(
             &findings,
-            "Actionable cycles offer too few meaningful alternatives",
+            "Established dynasties often avoid measured internal exposure",
         );
+    }
+
+    #[test]
+    fn findings_surface_chronic_office_duty_failures() {
+        let mut report = cached_focused_report(30);
+        let baseline = report.campaigns[0].clone();
+        report.aggregate.campaigns = 4;
+        report.aggregate.simulated_days = 4_320;
+        report.campaigns = (0..4)
+            .map(|index| {
+                let mut campaign = baseline.clone();
+                campaign.simulated_days = 1_080;
+                if index == 0 {
+                    campaign.end.player_unmet_office_duties =
+                        campaign.start.player_unmet_office_duties.saturating_add(12);
+                }
+                campaign
+            })
+            .collect();
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "Office obligations repeatedly exceed dynasty liquidity",
+        );
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
     }
 
     #[test]
@@ -1547,7 +1796,7 @@ mod findings {
         );
         let contract_finding = finding_with_title(
             &report.findings,
-            "contracts domain changed before a player route became available",
+            "contracts domain was inactive in this horizon",
         );
         let legal_finding = finding_with_title(
             &report.findings,
@@ -1775,6 +2024,10 @@ fn remove_internal_transfer_surplus_for_test(state: &mut AppState) {
 }
 
 fn grant_player_office_for_test(state: &mut AppState) {
+    let mature_term_started_day = state
+        .clock
+        .day()
+        .saturating_sub(OFFICE_POWER_ESTABLISHMENT_DAYS);
     let mature_next_selection_day = state
         .clock
         .day()
@@ -1792,6 +2045,7 @@ fn grant_player_office_for_test(state: &mut AppState) {
         .expect("campaign must contain an office with public-works power");
     institution.members.insert(holder_id);
     institution.office_holder_id = Some(holder_id);
+    institution.term_started_day = mature_term_started_day;
     institution.next_selection_day = mature_next_selection_day;
 }
 

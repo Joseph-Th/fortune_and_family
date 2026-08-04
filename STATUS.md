@@ -22,9 +22,9 @@ The engine supports multi-generation campaigns and preserves all consequential s
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 7 |
-| Supported save migrations | Versions 0 through 6 |
-| Gameplay report schema | 15 |
+| Save schema | 9 |
+| Supported save migrations | Versions 0 through 8 |
+| Gameplay report schema | 17 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |
@@ -43,7 +43,7 @@ The engine supports multi-generation campaigns and preserves all consequential s
 - Ten goods and connected food, drink, textile, timber, fuel, metal, and tool chains.
 - Businesses with ownership, management, capacity, policy, cash, inventory, condition, quality, distress, insolvency, closure, recovery, acquisition, and recapitalization.
 - Scarce procurement, production, sales, household consumption, spoilage, maintenance, and causal price formation.
-- Manager capabilities, administrative capacity, regional supply, and seasonal pressure.
+- Manager capabilities, administrative capacity, office-derived administrative burden, regional supply, and seasonal pressure.
 
 ### Contracts, finance, property, and labor
 
@@ -55,7 +55,8 @@ The engine supports multi-generation campaigns and preserves all consequential s
 ### Institutions and civic systems
 
 - Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions.
-- Membership, officeholders, budgets, legitimacy, powers, terms, and deterministic elections.
+- Membership, officeholders, budgets, legitimacy, powers, terms, institution-specific electoral competence, and deterministic elections.
+- Monthly office duties funded from the officeholder dynasty, administrative strain from public service, standing penalties for shortfalls, and forced forfeiture after repeated failure.
 - Laws affecting prices, imports, interest, tolls, fire safety, rents, and guild conditions.
 - District employment, sanitation, safety, rent pressure, food satisfaction, unrest, and political support.
 - Public works with budgets, spending, progress, completion, and persistent district effects.
@@ -73,7 +74,7 @@ The engine supports multi-generation campaigns and preserves all consequential s
 ### Adapters and observability
 
 - CLI commands for `new`, `simulate`, `summary`, `inspect`, `dashboard`, `execute`, `validate`, and `playtest`.
-- Complete read-only campaign projections for core and strategic records.
+- Adapter-facing read-only campaign projections for core and strategic records.
 - Self-contained HTML rendering with escaped visible content and script-safe embedded JSON.
 - Durable outbox notifications, chronicle entries, and audit records.
 - Deterministic gameplay analysis with state-derived candidates, counterfactual branches, family-capacity metrics, scores, findings, and bounded traces.
@@ -100,7 +101,7 @@ The authoritative player command schema is `PlayerCommand` in `src/systems/comma
 Save and load support:
 
 - Exact state round trips for the current schema.
-- Deterministic migrations from schema versions 0 through 5.
+- Deterministic migrations from schema versions 0 through 8.
 - Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, and ID allocation.
 - Preservation of RNG state and all generated records required for deterministic continuation.
 - Same-directory temporary writes, synchronization, and atomic replacement.
@@ -136,7 +137,7 @@ The following areas are outside the implemented contract or remain reserved for 
 
 Verified on August 4, 2026:
 
-- 263 non-ignored library tests pass.
+- 286 non-ignored library tests pass.
 - 2 deterministic long-horizon soak tests pass.
 - Documentation tests pass.
 - Release-mode library tests pass.

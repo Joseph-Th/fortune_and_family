@@ -744,6 +744,129 @@ mod household_demand {
     }
 }
 
+mod office_exposure {
+    use super::*;
+
+    #[test]
+    fn office_administrative_load_reduces_overextended_business_capacity() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let business_id = *state
+            .businesses
+            .ids_for_owner(player_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let business_load = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .administrative_load();
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .administrative_capacity = business_load;
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("player business must exist")
+            .operations
+            .capacity_batches_per_day = 6;
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        let baseline = effective_capacity_batches(
+            &state,
+            state
+                .businesses
+                .get(business_id)
+                .expect("player business must exist"),
+        );
+        let holder_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let council_id = registry
+            .get_institution_id("city_council")
+            .expect("registry must define the city council");
+        state
+            .institutions
+            .get_mut(&council_id)
+            .expect("city council must exist")
+            .office_holder_id = Some(holder_id);
+
+        let burdened = effective_capacity_batches(
+            &state,
+            state
+                .businesses
+                .get(business_id)
+                .expect("player business must exist"),
+        );
+
+        assert!(
+            burdened < baseline,
+            "institutional authority must compete with private administrative capacity"
+        );
+    }
+
+    #[test]
+    fn office_overextension_increases_succession_risk() {
+        let registry = rivergate_registry_for_test();
+        let mut baseline = make_test_campaign();
+        let player_id = baseline.player_dynasty_id;
+        for institution in baseline.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        let load = baseline
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .administrative_load();
+        baseline
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .administrative_capacity = load;
+        let mut burdened = baseline.clone();
+        let holder_id = burdened
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let council_id = registry
+            .get_institution_id("city_council")
+            .expect("registry must define the city council");
+        burdened
+            .institutions
+            .get_mut(&council_id)
+            .expect("city council must exist")
+            .office_holder_id = Some(holder_id);
+
+        update_campaign_phases(&mut baseline);
+        update_campaign_phases(&mut burdened);
+
+        assert!(
+            burdened
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .runtime
+                .succession_risk_basis_points
+                > baseline
+                    .dynasties
+                    .get(&player_id)
+                    .expect("player dynasty must exist")
+                    .runtime
+                    .succession_risk_basis_points,
+            "institutional overextension must expose the dynasty during succession"
+        );
+    }
+}
+
 mod manager_capabilities {
     use super::*;
 

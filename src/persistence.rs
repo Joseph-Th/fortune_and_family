@@ -309,6 +309,7 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
     }
     for dynasty in state.dynasties.values() {
         if dynasty.treasury() < Money::ZERO
+            || dynasty.civic_contributions() < Money::ZERO
             || dynasty.resources.legitimacy_basis_points > 10_000
             || dynasty.resources.reputation_quality_basis_points > 10_000
             || dynasty.resources.reputation_reliability_basis_points > 10_000
@@ -435,9 +436,14 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         }
     }
     for institution in state.institutions.values() {
-        if institution.budget < Money::ZERO || institution.legitimacy_basis_points > 10_000 {
+        if institution.budget < Money::ZERO
+            || institution.legitimacy_basis_points > 10_000
+            || institution.term_number == 0
+            || institution.term_started_day > state.clock.day()
+            || institution.next_selection_day < institution.term_started_day
+        {
             return Err(format!(
-                "institution {} has an invalid financial value",
+                "institution {} has an invalid budget or term timing",
                 institution.institution_id
             ));
         }
@@ -1318,6 +1324,8 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             4 => migrate_v4_to_v5(value)?,
             5 => migrate_v5_to_v6(value)?,
             6 => migrate_v6_to_v7(value)?,
+            7 => migrate_v7_to_v8(value)?,
+            8 => migrate_v8_to_v9(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -1629,6 +1637,78 @@ fn migrate_v6_to_v7(mut value: Value) -> Result<Value, PersistenceError> {
             reason: "save root must be an object".to_owned(),
         })?;
     object.insert("schema_version".to_owned(), Value::from(7));
+    Ok(value)
+}
+
+fn migrate_v7_to_v8(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 7,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let institutions = object
+        .get_mut("institutions")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 7,
+            reason: "save institutions must be an object".to_owned(),
+        })?;
+    for institution in institutions.values_mut() {
+        let institution =
+            institution
+                .as_object_mut()
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 7,
+                    reason: "save institution must be an object".to_owned(),
+                })?;
+        let next_selection_day = institution
+            .get("next_selection_day")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 7,
+                reason: "save institution has an invalid next_selection_day".to_owned(),
+            })?;
+        institution.insert(
+            "term_started_day".to_owned(),
+            Value::from(next_selection_day.saturating_sub(crate::systems::OFFICE_TERM_DAYS)),
+        );
+    }
+    object.insert("schema_version".to_owned(), Value::from(8));
+    Ok(value)
+}
+
+fn migrate_v8_to_v9(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 8,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let dynasties = object
+        .get_mut("dynasties")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 8,
+            reason: "save dynasties must be an object".to_owned(),
+        })?;
+    for dynasty in dynasties.values_mut() {
+        let resources = dynasty
+            .as_object_mut()
+            .and_then(|dynasty| dynasty.get_mut("resources"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 8,
+                reason: "save dynasty resources must be an object".to_owned(),
+            })?;
+        resources
+            .entry("civic_contributions".to_owned())
+            .or_insert_with(|| Value::from(0));
+        resources
+            .entry("unmet_office_duties".to_owned())
+            .or_insert_with(|| Value::from(0));
+    }
+    object.insert("schema_version".to_owned(), Value::from(9));
     Ok(value)
 }
 

@@ -252,6 +252,7 @@ pub struct InstitutionRuntime {
     pub(crate) powers: BTreeSet<OfficePower>,
     pub(crate) budget: Money,
     pub(crate) legitimacy_basis_points: u16,
+    pub(crate) term_started_day: i64,
     pub(crate) next_selection_day: i64,
     pub(crate) term_number: u32,
 }

@@ -94,7 +94,7 @@ pub use bootstrap::{NewGameError, build_new_game};
 pub(crate) use commands::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
     HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_INTERVAL_DAYS,
+    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
     MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
     OFFICE_NOMINATION_INTERVAL_DAYS, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
     PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT,
@@ -113,7 +113,10 @@ pub use strategic::{
     ValidatedSupplyContract, acquire_business, buy_unowned_property, issue_loan,
     quote_business_acquisition, sign_supply_contract, validate_loan, validate_supply_contract,
 };
-pub(crate) use strategic::{STANDARD_CONTRACT_BATCHES_PER_WEEK, initialize_strategic_state};
+pub(crate) use strategic::{
+    STANDARD_CONTRACT_BATCHES_PER_WEEK, dynasty_office_administrative_load,
+    initialize_strategic_state,
+};
 pub use transactions::{
     SimulationError, ValidatedCashTransfer, transfer_business_cash, validate_business_cash_transfer,
 };

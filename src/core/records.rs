@@ -171,6 +171,8 @@ pub struct DynastyIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DynastyResources {
     pub(crate) treasury: Money,
+    pub(crate) civic_contributions: Money,
+    pub(crate) unmet_office_duties: u32,
     pub(crate) legitimacy_basis_points: u16,
     pub(crate) administrative_capacity: u16,
     pub(crate) administrative_load: u16,
@@ -223,6 +225,16 @@ impl Dynasty {
     #[must_use]
     pub const fn treasury(&self) -> Money {
         self.resources.treasury
+    }
+
+    #[must_use]
+    pub const fn civic_contributions(&self) -> Money {
+        self.resources.civic_contributions
+    }
+
+    #[must_use]
+    pub const fn unmet_office_duties(&self) -> u32 {
+        self.resources.unmet_office_duties
     }
 
     #[must_use]
@@ -569,6 +581,8 @@ pub enum AuditKind {
     PublicWorkStarted,
     CrisisResponse,
     OfficeNomination,
+    OfficeDutyShortfall,
+    OfficeDutyForfeiture,
     HouseGovernanceChange,
     WardAdoption,
     FamilyEducation,

@@ -54,7 +54,7 @@ The report is written before a quality-gate failure is returned.
 | `--start-seed` | First deterministic seed. | `1` |
 | `--seeds` | Number of consecutive seeds. | `1` |
 | `--days` | Simulated days per campaign. | `1080` |
-| `--decision-interval` | Days advanced after each player decision. | `7` |
+| `--decision-interval` | Days advanced after each player decision. The monthly default matches the strategic-system cadence and avoids treating routine weekly simulation as a required player decision. | `30` |
 | `--max-probes` | Maximum candidate commands validated per decision cycle. | `24` |
 | `--consequence-horizon` | Maximum days used for delayed consequence attribution. | `360` |
 | `--trace-limit` | Representative trace steps retained per campaign. | `40` |
@@ -106,9 +106,9 @@ Candidate generation covers the exposed player command surface:
 - Legal cases, governance, ward adoption, family education, and persona-specific office nomination
 - Crisis response, labor-dispute response, and notification acknowledgement
 
-Political progression is intentionally staged. Commercial standing is recorded before political eligibility; office campaigns require both established reputation and 16 completed contract deliveries. After selection, an office's powers require 60 days of tenure before they can authorize laws or public works.
+Political progression is intentionally staged. Commercial standing is recorded before political eligibility; office campaigns require both established reputation and 52 completed contract deliveries, representing roughly one year of weekly performance. After selection, an office's powers require 60 days of tenure before they can authorize laws or public works. Officeholders also incur recurring civic duties and administrative load; repeated unfunded duties can force forfeiture and a temporary re-election bar.
 
-Dynastic growth is also player-directed. A commercially established house can spend legitimacy and treasury to adopt a trained ward every two years, up to the configured household limit. Wards are active council members and valid office nominees. Once per year, the dynasty can fund focused administration, commerce, social, or craft education for an active family member. The harness does not offer these mature-household actions until the commercial record exists.
+Dynastic growth is also player-directed. A commercially established house with a year-scale delivery record can spend legitimacy and treasury to adopt a trained ward every two years, up to the configured household limit. Wards are active council members and valid office nominees. Once per year, the dynasty can fund focused administration, commerce, social, or craft education for an active family member. The harness does not offer these mature-household actions until the commercial record exists.
 
 When a new command is added, it is not considered harness-integrated until generation, classification, snapshots, attribution, findings, traces, and coverage tests are updated.
 
@@ -159,6 +159,7 @@ Findings are emitted with informational, warning, or critical severity. They cov
 - Player businesses become persistently distressed, insolvent, or non-operational.
 - Food access, contracts, credit, labor, crises, or notifications become structurally unhealthy.
 - Public works exceed execution capacity.
+- Office duties become an indefinite liquidity trap or fail to create material exposure.
 - Political or commercial milestones are unreachable, misordered, overly synchronized, or compressed into the same phase.
 - Political growth stalls at the founding household because no ward is adopted.
 - Personas and starts converge despite different priorities.
@@ -195,7 +196,7 @@ The report contains:
 - Aggregate scores and counters
 - Per-command statistics
 - Command-to-domain interaction edges
-- Per-campaign snapshots and milestone data
+- Per-campaign snapshots and milestone data, including civic contributions and unmet office duties
 - Eligible officeholder and active-ward counts, family capability checksums, and longest substantive-action gaps
 - Representative traces
 - Findings and limitations
@@ -225,6 +226,7 @@ The harness measures deterministic reachability and represented state consequenc
 - Cognitive load
 - Narrative quality
 - Whether a human recognizes the best option
+- Whether the information exposed to a human is sufficient, because candidate agents currently inspect authoritative simulation state
 - Long-horizon plans that a deterministic local-priority persona would not formulate
 - Consequences outside the configured horizon
 - Consequences not represented in snapshots

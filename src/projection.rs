@@ -11,7 +11,7 @@ use crate::ids::{
 };
 use crate::money::{Money, Quantity};
 use crate::registry::Registry;
-use crate::systems::quote_business_acquisition;
+use crate::systems::{dynasty_office_administrative_load, quote_business_acquisition};
 use serde::Serialize;
 use std::fmt::Write as _;
 
@@ -52,11 +52,15 @@ pub struct DynastyProjection {
     pub id: DynastyId,
     pub name: String,
     pub treasury: Money,
+    pub civic_contributions: Money,
+    pub unmet_office_duties: u32,
     pub legitimacy_basis_points: u16,
     pub reputation_quality_basis_points: u16,
     pub reputation_reliability_basis_points: u16,
     pub administrative_capacity: u16,
     pub administrative_load: u16,
+    pub office_administrative_load: u16,
+    pub effective_administrative_load: u16,
     pub generation: u16,
     pub properties: usize,
     pub businesses: usize,
@@ -184,6 +188,7 @@ pub struct InstitutionProjection {
     pub officeholder_dynasty: Option<String>,
     pub budget: Money,
     pub legitimacy_basis_points: u16,
+    pub term_started_day: i64,
     pub next_selection_day: i64,
     pub powers: Vec<String>,
 }
@@ -264,7 +269,7 @@ pub struct NotificationProjection {
     pub acknowledged: bool,
 }
 
-/// Builds the complete read-only campaign projection used by adapters.
+/// Builds the read-only campaign projection used by adapters.
 ///
 /// # Panics
 ///
@@ -402,15 +407,22 @@ fn build_dynasty_projection(
             priority: objective.priority,
             rationale: objective.rationale.clone(),
         });
+    let office_administrative_load = dynasty_office_administrative_load(state, dynasty_id);
     DynastyProjection {
         id: dynasty_id,
         name: dynasty.name().to_owned(),
         treasury: dynasty.treasury(),
+        civic_contributions: dynasty.civic_contributions(),
+        unmet_office_duties: dynasty.unmet_office_duties(),
         legitimacy_basis_points: dynasty.resources.legitimacy_basis_points,
         reputation_quality_basis_points: dynasty.resources.reputation_quality_basis_points,
         reputation_reliability_basis_points: dynasty.resources.reputation_reliability_basis_points,
         administrative_capacity: dynasty.administrative_capacity(),
         administrative_load: dynasty.administrative_load(),
+        office_administrative_load,
+        effective_administrative_load: dynasty
+            .administrative_load()
+            .saturating_add(office_administrative_load),
         generation: dynasty.runtime.generation,
         properties: state
             .properties
@@ -715,6 +727,7 @@ fn build_institution_projections(
                 }),
                 budget: institution.budget,
                 legitimacy_basis_points: institution.legitimacy_basis_points,
+                term_started_day: institution.term_started_day,
                 next_selection_day: institution.next_selection_day,
                 powers: institution
                     .powers
@@ -857,7 +870,7 @@ pub fn render_campaign_html(
 <header><h1>{scenario}</h1><p>Year {year}, day {day} · simulation day {elapsed} · {phase:?}</p></header>
 <main>
 <div class="grid">
-<section><small>Player dynasty</small><h2>House {player}</h2><div class="metric">{treasury}</div><p>Administrative load {load}/{capacity}</p></section>
+<section><small>Player dynasty</small><h2>House {player}</h2><div class="metric">{treasury}</div><p>Administrative load {load}/{capacity}, including {office_load} from offices</p><p>{contributions} in civic duties · {unmet_duties} unmet duties</p></section>
 <section><small>Commercial position</small><div class="metric">{businesses} businesses</div><p>{properties} properties · {loans} current borrowing relationships</p></section>
 <section><small>Civic condition</small><div class="metric">{food:.1}% food satisfaction</div><p>{crises} active crises</p></section>
 </div>
@@ -878,8 +891,11 @@ pub fn render_campaign_html(
         phase = projection.scenario.phase,
         player = escape_html(&player.name),
         treasury = player.treasury,
-        load = player.administrative_load,
+        load = player.effective_administrative_load,
+        office_load = player.office_administrative_load,
         capacity = player.administrative_capacity,
+        contributions = player.civic_contributions,
+        unmet_duties = player.unmet_office_duties,
         businesses = player.businesses,
         properties = player.properties,
         loans = player.current_loans_as_borrower,

@@ -437,6 +437,8 @@ fn insert_dynasty(
             },
             resources: DynastyResources {
                 treasury,
+                civic_contributions: Money::ZERO,
+                unmet_office_duties: 0,
                 legitimacy_basis_points: 4_500,
                 administrative_capacity,
                 administrative_load: 0,
