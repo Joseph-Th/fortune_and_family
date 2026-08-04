@@ -1,24 +1,22 @@
-//! Application-state root, ID allocation, synchronized stores, and read-only summaries.
+//! Application-state root, ID allocation, synchronized stores, and read-only access.
 
 use super::{
-    AiObjective, AuditRecord, Business, BusinessStatus, CampaignPhase, Character, ChronicleEntry,
-    Crisis, DistrictRuntime, Dynasty, DynastyPair, EmploymentAgreement, EnactedLaw, ExternalRoute,
+    AiObjective, AuditRecord, Business, Character, ChronicleEntry, CivicDebt, Crisis,
+    DistrictRuntime, Dynasty, DynastyPair, EmploymentAgreement, EnactedLaw, ExternalRoute,
     FamilyCouncilState, FamilyLink, Household, InformationReport, InstitutionRuntime, LegalCase,
     Loan, MarketState, OutboxMessage, Property, PublicWork, RelationshipState, StartingBackground,
     SupplyContract,
 };
 use crate::ids::{
-    BusinessId, CharacterId, ChronicleEntryId, ContractId, CrisisId, DistrictId, DynastyId,
-    EmploymentId, ExternalRouteId, FamilyLinkId, HouseholdId, InformationReportId, LawId,
-    LegalCaseId, LoanId, ObjectiveId, OutboxMessageId, PropertyId, PublicWorkId,
+    BusinessId, CharacterId, ChronicleEntryId, CivicDebtId, ContractId, CrisisId, DistrictId,
+    DynastyId, EmploymentId, ExternalRouteId, FamilyLinkId, HouseholdId, InformationReportId,
+    LawId, LegalCaseId, LoanId, ObjectiveId, OutboxMessageId, PropertyId, PublicWorkId,
 };
-use crate::money::Money;
-use crate::registry::Registry;
 use crate::rng::DeterministicRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGameConfig {
@@ -362,6 +360,27 @@ impl Default for HouseholdStore {
     }
 }
 
+pub(crate) fn population_weighted_food_satisfaction_basis_points<'a>(
+    households: impl IntoIterator<Item = &'a Household>,
+) -> Option<u16> {
+    let mut weighted_total = 0_u128;
+    let mut total_members = 0_u128;
+    for household in households {
+        let members = u128::from(household.members());
+        let weighted_satisfaction = members
+            .checked_mul(u128::from(household.food_satisfaction_basis_points()))
+            .expect("weighted household satisfaction must fit u128");
+        weighted_total = weighted_total
+            .checked_add(weighted_satisfaction)
+            .expect("total weighted household satisfaction must fit u128");
+        total_members = total_members
+            .checked_add(members)
+            .expect("total household population must fit u128");
+    }
+    let average = weighted_total.checked_div(total_members)?;
+    Some(u16::try_from(average).expect("population-weighted satisfaction must fit u16"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct NextIds {
     dynasty: u32,
@@ -371,6 +390,7 @@ pub(crate) struct NextIds {
     contract: u32,
     property: u32,
     loan: u32,
+    civic_debt: u32,
     employment: u32,
     family_link: u32,
     law: u32,
@@ -407,6 +427,7 @@ impl NextIds {
             contract: 0,
             property: 0,
             loan: 0,
+            civic_debt: 0,
             employment: 0,
             family_link: 0,
             law: 0,
@@ -428,6 +449,7 @@ impl NextIds {
     next_id_method!(contract, contract, ContractId);
     next_id_method!(property, property, PropertyId);
     next_id_method!(loan, loan, LoanId);
+    next_id_method!(civic_debt, civic_debt, CivicDebtId);
     next_id_method!(employment, employment, EmploymentId);
     next_id_method!(family_link, family_link, FamilyLinkId);
     next_id_method!(law, law, LawId);
@@ -457,6 +479,7 @@ pub struct AppState {
     pub(crate) market: MarketState,
     pub(crate) contracts: BTreeMap<ContractId, SupplyContract>,
     pub(crate) loans: BTreeMap<LoanId, Loan>,
+    pub(crate) civic_debts: BTreeMap<CivicDebtId, CivicDebt>,
     pub(crate) properties: BTreeMap<PropertyId, Property>,
     pub(crate) employment: BTreeMap<EmploymentId, EmploymentAgreement>,
     pub(crate) family_links: BTreeMap<FamilyLinkId, FamilyLink>,
@@ -537,6 +560,10 @@ impl AppState {
         self.loans.values()
     }
 
+    pub fn civic_debts(&self) -> impl Iterator<Item = &CivicDebt> {
+        self.civic_debts.values()
+    }
+
     pub fn properties(&self) -> impl Iterator<Item = &Property> {
         self.properties.values()
     }
@@ -607,6 +634,7 @@ impl AppState {
         require_next_id!(contract, "contract", self.contracts.keys().copied());
         require_next_id!(property, "property", self.properties.keys().copied());
         require_next_id!(loan, "loan", self.loans.keys().copied());
+        require_next_id!(civic_debt, "civic debt", self.civic_debts.keys().copied());
         require_next_id!(employment, "employment", self.employment.keys().copied());
         require_next_id!(
             family_link,
@@ -644,117 +672,6 @@ impl AppState {
         );
         Ok(())
     }
-
-    /// Builds a compact read-only projection for user-interface adapters.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the player dynasty reference or a derived numeric invariant is corrupt.
-    #[must_use]
-    pub fn summary(&self, registry: &Registry) -> StateSummary {
-        let dynasty = self
-            .dynasties
-            .get(&self.player_dynasty_id)
-            .expect("player dynasty must exist");
-        let business_ids = self
-            .businesses
-            .ids_for_owner(self.player_dynasty_id)
-            .map_or(0, BTreeSet::len);
-        let active_businesses = self
-            .businesses
-            .ids_for_owner(self.player_dynasty_id)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.businesses.get(*id))
-            .filter(|business| business.status() == BusinessStatus::Active)
-            .count();
-        let business_cash = self
-            .businesses
-            .ids_for_owner(self.player_dynasty_id)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.businesses.get(*id))
-            .fold(Money::ZERO, |total, business| {
-                total.saturating_add(business.cash())
-            });
-        let average_food_satisfaction_basis_points = if self.households.records().is_empty() {
-            0
-        } else {
-            let total: u64 = self
-                .households
-                .iter()
-                .map(|household| u64::from(household.food_satisfaction_basis_points()))
-                .sum();
-            u16::try_from(total / self.households.records().len() as u64)
-                .expect("average satisfaction must fit u16")
-        };
-
-        StateSummary {
-            scenario_name: registry.scenario().name().to_owned(),
-            year: self.clock.year(registry.scenario().start_year()),
-            day_of_year: self.clock.day_of_year(),
-            elapsed_days: self.clock.day(),
-            dynasty_name: dynasty.name().to_owned(),
-            phase: dynasty.phase(),
-            dynasty_treasury: dynasty.treasury(),
-            business_cash,
-            businesses: business_ids,
-            active_businesses,
-            population_groups: self.households.records().len(),
-            average_food_satisfaction_basis_points,
-            chronicle_entries: self.chronicle.len(),
-            active_contracts: self
-                .contracts
-                .values()
-                .filter(|contract| contract.status() == super::ContractStatus::Active)
-                .count(),
-            current_loans: self
-                .loans
-                .values()
-                .filter(|loan| {
-                    matches!(
-                        loan.status(),
-                        super::LoanStatus::Current
-                            | super::LoanStatus::Delinquent
-                            | super::LoanStatus::Restructured
-                    )
-                })
-                .count(),
-            properties: self.properties.len(),
-            active_crises: self
-                .crises
-                .values()
-                .filter(|crisis| crisis.status.is_active())
-                .count(),
-            unread_notifications: self
-                .outbox
-                .iter()
-                .filter(|message| !message.acknowledged)
-                .count(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StateSummary {
-    pub scenario_name: String,
-    pub year: i32,
-    pub day_of_year: u16,
-    pub elapsed_days: i64,
-    pub dynasty_name: String,
-    pub phase: CampaignPhase,
-    pub dynasty_treasury: Money,
-    pub business_cash: Money,
-    pub businesses: usize,
-    pub active_businesses: usize,
-    pub population_groups: usize,
-    pub average_food_satisfaction_basis_points: u16,
-    pub chronicle_entries: usize,
-    pub active_contracts: usize,
-    pub current_loans: usize,
-    pub properties: usize,
-    pub active_crises: usize,
-    pub unread_notifications: usize,
 }
 
 #[cfg(test)]

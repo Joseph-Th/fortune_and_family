@@ -5,8 +5,8 @@ use civic_dynasty::{
     CommandError, GameplayFindingSeverity, GameplayHarnessConfig, GameplayHarnessError,
     GameplayPersona, NewGameConfig, NewGameError, PersistenceError, PlayerCommand, Registry,
     SimulationError, advance_days, apply_player_command, build_campaign_projection, build_new_game,
-    build_rivergate_registry, load_state, render_campaign_html, render_gameplay_report,
-    run_gameplay_harness, save_state, validate_invariants,
+    build_rivergate_registry, build_state_summary, load_state, render_campaign_html,
+    render_gameplay_report, run_gameplay_harness, save_state, validate_invariants,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -207,7 +207,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             let state = load_state(input)?;
             validate_invariants(&registry, &state);
             if json {
-                let summary = serde_json::to_string_pretty(&state.summary(&registry))
+                let summary = serde_json::to_string_pretty(&build_state_summary(&registry, &state))
                     .map_err(|source| CliError::SummarySerialization { source })?;
                 println!("{summary}");
             } else {
@@ -385,7 +385,7 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
 }
 
 fn print_human_summary(registry: &Registry, state: &civic_dynasty::AppState) {
-    let summary = state.summary(registry);
+    let summary = build_state_summary(registry, state);
     println!(
         "{} | year {}, day {} | elapsed {} days",
         summary.scenario_name, summary.year, summary.day_of_year, summary.elapsed_days
@@ -402,9 +402,11 @@ fn print_human_summary(registry: &Registry, state: &civic_dynasty::AppState) {
         f64::from(summary.average_food_satisfaction_basis_points) / 100.0
     );
     println!(
-        "Strategic: {} contracts | {} loans | {} properties | {} active crises | {} unread notices",
+        "Strategic: {} contracts | {} private loans | {} civic debts ({}) | {} properties | {} active crises | {} unread notices",
         summary.active_contracts,
         summary.current_loans,
+        summary.outstanding_civic_debts,
+        summary.civic_debt_balance,
         summary.properties,
         summary.active_crises,
         summary.unread_notifications

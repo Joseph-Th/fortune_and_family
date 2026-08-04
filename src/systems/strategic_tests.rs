@@ -1218,6 +1218,11 @@ mod contracts {
             .expect("seller must exist")
             .inventory
             .insert(good_id, Quantity::ZERO);
+        let seller_dynasty_id = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
 
         settle_contracts(&mut state);
 
@@ -1229,6 +1234,15 @@ mod contracts {
                 .status,
             ContractStatus::Breached,
             "a missed final obligation must not be recorded as contract fulfillment"
+        );
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .breaching_dynasty_id,
+            Some(seller_dynasty_id),
+            "the dynasty that could not deliver must be attributed as the breaching party"
         );
     }
 
@@ -1260,6 +1274,11 @@ mod contracts {
             .expect("seller must exist")
             .operations
             .status = BusinessStatus::Closed;
+        let seller_dynasty_id = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
         let buyer_before = state
             .businesses
             .get(buyer_id)
@@ -1287,6 +1306,15 @@ mod contracts {
                 .expect("contract must exist")
                 .status,
             ContractStatus::Breached
+        );
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .breaching_dynasty_id,
+            Some(seller_dynasty_id),
+            "closing the seller must attribute the breach to the seller's dynasty"
         );
         assert_eq!(
             &state
@@ -1760,6 +1788,46 @@ mod employment {
 mod loans {
     use super::*;
 
+    fn insert_test_civic_debt(state: &mut AppState) -> (crate::ids::CivicDebtId, DynastyId) {
+        let creditor_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a non-player dynasty");
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::PublicDebtAuthorization,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                value: 1_000,
+                active: false,
+            },
+        );
+        let debt_id = state.next_ids.civic_debt();
+        state.civic_debts.insert(
+            debt_id,
+            crate::core::CivicDebt {
+                id: debt_id,
+                creditor_dynasty_id,
+                authorizing_law_id: law_id,
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                principal: Money::from_copper(1_000),
+                balance: Money::from_copper(1_000),
+                weekly_payment: Money::from_copper(100),
+                interest_basis_points: 0,
+                issued_day: state.clock.day(),
+                next_due_day: state.clock.day(),
+                missed_payments: 0,
+                status: CivicDebtStatus::Current,
+            },
+        );
+        (debt_id, creditor_dynasty_id)
+    }
+
     #[test]
     fn issuing_a_loan_creates_relationship_memory_and_counterparty_intelligence() {
         let mut state = make_test_campaign();
@@ -2174,6 +2242,216 @@ mod loans {
                 .reputation_reliability_basis_points,
             reliability_before.saturating_add(10).min(10_000)
         );
+    }
+
+    #[test]
+    fn civic_debt_payment_moves_treasury_budget_to_the_creditor() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let (debt_id, creditor_dynasty_id) = insert_test_civic_debt(&mut state);
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define a treasury");
+        state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget = Money::from_copper(1_000);
+        let creditor_before = state
+            .dynasties
+            .get(&creditor_dynasty_id)
+            .expect("creditor must exist")
+            .treasury();
+        let pair = DynastyPair::new(state.player_dynasty_id, creditor_dynasty_id);
+        state
+            .relationships
+            .get_mut(&pair)
+            .expect("creditor relationship must exist")
+            .obligation = 1;
+
+        settle_civic_debts(registry, &mut state);
+
+        let debt = state.civic_debts.get(&debt_id).expect("debt must exist");
+        assert_eq!(debt.balance, Money::from_copper(900));
+        assert_eq!(debt.status, CivicDebtStatus::Current);
+        assert_eq!(
+            state
+                .institutions
+                .get(&treasury_id)
+                .expect("treasury runtime must exist")
+                .budget,
+            Money::from_copper(900)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&creditor_dynasty_id)
+                .expect("creditor must exist")
+                .treasury(),
+            creditor_before.saturating_add(Money::from_copper(100))
+        );
+        assert_eq!(
+            state
+                .relationships
+                .get(&pair)
+                .expect("creditor relationship must exist")
+                .obligation,
+            1,
+            "partial repayment must not clear the municipal-credit obligation"
+        );
+    }
+
+    #[test]
+    fn final_civic_debt_payment_marks_the_obligation_repaid() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let (debt_id, creditor_dynasty_id) = insert_test_civic_debt(&mut state);
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define a treasury");
+        state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget = Money::from_copper(100);
+        {
+            let debt = state
+                .civic_debts
+                .get_mut(&debt_id)
+                .expect("debt must exist");
+            debt.balance = Money::from_copper(100);
+            debt.weekly_payment = Money::from_copper(100);
+        }
+        let pair = DynastyPair::new(state.player_dynasty_id, creditor_dynasty_id);
+        state
+            .relationships
+            .get_mut(&pair)
+            .expect("creditor relationship must exist")
+            .obligation = 1;
+
+        settle_civic_debts(registry, &mut state);
+
+        let debt = state.civic_debts.get(&debt_id).expect("debt must exist");
+        assert_eq!(debt.balance, Money::ZERO);
+        assert_eq!(debt.status, CivicDebtStatus::Repaid);
+        assert_eq!(debt.missed_payments, 0);
+        assert_eq!(
+            state
+                .relationships
+                .get(&pair)
+                .expect("creditor relationship must exist")
+                .obligation,
+            0,
+            "full repayment must clear the municipal-credit obligation"
+        );
+        assert!(state.outbox.iter().any(|message| {
+            message.kind == OutboxKind::Finance && message.subject.contains("repaid")
+        }));
+        assert!(state.information_reports.values().any(|report| {
+            report.owner_dynasty_id == state.player_dynasty_id
+                && report.source == "Completed municipal debt repayment records"
+        }));
+    }
+
+    #[test]
+    fn interest_limit_caps_civic_debt_accrual_without_rewriting_terms() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let (debt_id, _) = insert_test_civic_debt(&mut state);
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define a treasury");
+        state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget = Money::from_copper(100);
+        state
+            .civic_debts
+            .get_mut(&debt_id)
+            .expect("debt must exist")
+            .interest_basis_points = 1_000;
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::InterestLimit,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: None,
+                value: 0,
+                active: true,
+            },
+        );
+
+        settle_civic_debts(registry, &mut state);
+
+        let debt = state.civic_debts.get(&debt_id).expect("debt must exist");
+        assert_eq!(debt.balance, Money::from_copper(900));
+        assert_eq!(debt.interest_basis_points, 1_000);
+    }
+
+    #[test]
+    fn three_missed_civic_debt_payments_default_and_create_civic_pressure() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let (debt_id, _) = insert_test_civic_debt(&mut state);
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define a treasury");
+        state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget = Money::ZERO;
+        let player_legitimacy_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        let unrest_before: u32 = state
+            .districts
+            .values()
+            .map(|district| u32::from(district.unrest_basis_points))
+            .sum();
+
+        for _ in 0..3 {
+            state
+                .civic_debts
+                .get_mut(&debt_id)
+                .expect("debt must exist")
+                .next_due_day = state.clock.day();
+            settle_civic_debts(registry, &mut state);
+        }
+
+        let debt = state.civic_debts.get(&debt_id).expect("debt must exist");
+        assert_eq!(debt.status, CivicDebtStatus::Defaulted);
+        assert_eq!(debt.missed_payments, 3);
+        assert!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .resources
+                .legitimacy_basis_points
+                < player_legitimacy_before
+        );
+        assert!(
+            state
+                .districts
+                .values()
+                .map(|district| u32::from(district.unrest_basis_points))
+                .sum::<u32>()
+                > unrest_before
+        );
+        assert!(state.outbox.iter().any(|message| {
+            message.kind == OutboxKind::Finance && message.subject.contains("defaulted")
+        }));
+        assert!(state.information_reports.values().any(|report| {
+            report.owner_dynasty_id == state.player_dynasty_id
+                && report.source == "Municipal debt default and civic treasury records"
+        }));
     }
 }
 

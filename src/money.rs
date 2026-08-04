@@ -72,6 +72,23 @@ impl Money {
         Self(saturating_mul_ratio_i64(self.0, numerator, denominator))
     }
 
+    /// Multiplies this value by a rational number using a wide intermediate.
+    ///
+    /// Returns `None` when the final value is outside the supported money range.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `denominator` is zero.
+    #[must_use]
+    pub const fn checked_mul_ratio(self, numerator: i64, denominator: i64) -> Option<Self> {
+        assert!(denominator != 0, "ratio denominator must not be zero");
+        let result = (self.0 as i128) * (numerator as i128) / (denominator as i128);
+        match checked_i128_to_i64(result) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
     #[must_use]
     /// Multiplies nonnegative values by a nonnegative rational number and rounds any fractional
     /// copper upward.
@@ -259,6 +276,16 @@ const fn saturating_i128_to_i64(value: i128) -> i64 {
     }
 }
 
+const fn checked_i128_to_i64(value: i128) -> Option<i64> {
+    if value > i64::MAX as i128 || value < i64::MIN as i128 {
+        None
+    } else {
+        // The explicit bounds check makes this narrowing conversion lossless.
+        #[allow(clippy::cast_possible_truncation)]
+        Some(value as i64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +350,15 @@ mod tests {
         assert_eq!(
             Money::from_copper(i64::MAX).saturating_mul_ratio(2, 2),
             Money::from_copper(i64::MAX)
+        );
+    }
+
+    #[test]
+    fn checked_money_ratio_rejects_final_overflow() {
+        assert_eq!(Money::from_copper(i64::MAX).checked_mul_ratio(11, 10), None);
+        assert_eq!(
+            Money::from_copper(100).checked_mul_ratio(11, 10),
+            Some(Money::from_copper(110))
         );
     }
 

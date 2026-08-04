@@ -401,6 +401,18 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
             return Err(format!("loan {} has an invalid financial value", loan.id));
         }
     }
+    for debt in state.civic_debts.values() {
+        if debt.principal <= Money::ZERO
+            || debt.balance < Money::ZERO
+            || debt.weekly_payment <= Money::ZERO
+            || debt.interest_basis_points > 10_000
+        {
+            return Err(format!(
+                "civic debt {} has an invalid financial value",
+                debt.id
+            ));
+        }
+    }
     for property in state.properties.values() {
         if property.value < Money::ZERO
             || property.weekly_rent < Money::ZERO
@@ -796,20 +808,18 @@ fn validate_strategic_records(
                 "supply contract {contract_id} has an invalid reference"
             ));
         }
+        let buyer = buyer.expect("validated contract buyer must exist");
+        let seller = seller.expect("validated contract seller must exist");
         let buyer_recipe = registry
-            .get_recipe(
-                buyer
-                    .expect("validated contract buyer must exist")
-                    .recipe_id(),
-            )
+            .get_recipe(buyer.recipe_id())
             .expect("validated business recipe must exist");
         let seller_recipe = registry
-            .get_recipe(
-                seller
-                    .expect("validated contract seller must exist")
-                    .recipe_id(),
-            )
+            .get_recipe(seller.recipe_id())
             .expect("validated business recipe must exist");
+        let valid_breach_attribution = contract.breaching_dynasty_id.is_none_or(|dynasty_id| {
+            contract.status == crate::core::ContractStatus::Breached
+                && state.dynasties.contains_key(&dynasty_id)
+        });
         if seller_recipe.output_good_id() != contract.good_id
             || !buyer_recipe
                 .inputs()
@@ -817,6 +827,7 @@ fn validate_strategic_records(
                 .any(|input| input.good_id() == contract.good_id)
             || (contract.status == crate::core::ContractStatus::Active
                 && contract.next_due_day > contract.end_day)
+            || !valid_breach_attribution
         {
             return Err(format!(
                 "supply contract {contract_id} is incompatible with its parties or term"
@@ -885,9 +896,65 @@ fn validate_strategic_records(
 
 fn validate_finance_and_organization_records(state: &AppState) -> Result<(), String> {
     validate_loan_records(state)?;
+    validate_civic_debt_records(state)?;
     validate_employment_records(state)?;
     validate_family_records(state)?;
     validate_institution_and_misc_records(state)
+}
+
+fn validate_civic_debt_records(state: &AppState) -> Result<(), String> {
+    for (debt_id, debt) in &state.civic_debts {
+        let authorizing_law = state.laws.get(&debt.authorizing_law_id);
+        if debt.id != *debt_id
+            || !state.dynasties.contains_key(&debt.creditor_dynasty_id)
+            || debt.sponsor_dynasty_id == Some(debt.creditor_dynasty_id)
+            || debt
+                .sponsor_dynasty_id
+                .is_some_and(|dynasty_id| !state.dynasties.contains_key(&dynasty_id))
+            || !authorizing_law.is_some_and(|law| {
+                law.kind == crate::core::LawKind::PublicDebtAuthorization
+                    && law.sponsor_dynasty_id == debt.sponsor_dynasty_id
+                    && law.value == debt.principal.copper()
+            })
+            || debt.issued_day > state.clock.day()
+            || debt.next_due_day < debt.issued_day
+        {
+            return Err(format!(
+                "civic debt {debt_id} has an invalid identity or authorization reference"
+            ));
+        }
+        match debt.status {
+            crate::core::CivicDebtStatus::Current => {
+                if debt.balance <= Money::ZERO || debt.missed_payments != 0 {
+                    return Err(format!(
+                        "current civic debt {debt_id} has invalid balance or arrears"
+                    ));
+                }
+            }
+            crate::core::CivicDebtStatus::Delinquent => {
+                if debt.balance <= Money::ZERO || !(1..3).contains(&debt.missed_payments) {
+                    return Err(format!(
+                        "delinquent civic debt {debt_id} has invalid balance or arrears"
+                    ));
+                }
+            }
+            crate::core::CivicDebtStatus::Defaulted => {
+                if debt.balance <= Money::ZERO || debt.missed_payments < 3 {
+                    return Err(format!(
+                        "defaulted civic debt {debt_id} has invalid balance or arrears"
+                    ));
+                }
+            }
+            crate::core::CivicDebtStatus::Repaid => {
+                if debt.balance != Money::ZERO || debt.missed_payments != 0 {
+                    return Err(format!(
+                        "repaid civic debt {debt_id} retains balance or arrears"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_loan_records(state: &AppState) -> Result<(), String> {
@@ -1157,8 +1224,11 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
                 law.kind
             ));
         }
-        if law.active && !law.kind.is_implemented() {
-            return Err(format!("active law kind {:?} is not implemented", law.kind));
+        if law.active && !law.kind.remains_active_after_enactment() {
+            return Err(format!(
+                "active law kind {:?} is a consumed one-time authorization",
+                law.kind
+            ));
         }
     }
     for (report_id, report) in &state.information_reports {
@@ -1326,6 +1396,8 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             6 => migrate_v6_to_v7(value)?,
             7 => migrate_v7_to_v8(value)?,
             8 => migrate_v8_to_v9(value)?,
+            9 => migrate_v9_to_v10(value)?,
+            10 => migrate_v10_to_v11(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -1709,6 +1781,76 @@ fn migrate_v8_to_v9(mut value: Value) -> Result<Value, PersistenceError> {
             .or_insert_with(|| Value::from(0));
     }
     object.insert("schema_version".to_owned(), Value::from(9));
+    Ok(value)
+}
+
+fn migrate_v9_to_v10(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 9,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    object
+        .entry("civic_debts".to_owned())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let next_ids = object
+        .get_mut("next_ids")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 9,
+            reason: "save next_ids must be an object".to_owned(),
+        })?;
+    next_ids
+        .entry("civic_debt".to_owned())
+        .or_insert_with(|| Value::from(0));
+    object.insert("schema_version".to_owned(), Value::from(10));
+    Ok(value)
+}
+
+fn migrate_v10_to_v11(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 10,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let contracts = object
+        .get_mut("contracts")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 10,
+            reason: "save contracts must be an object".to_owned(),
+        })?;
+    for contract in contracts.values_mut() {
+        contract
+            .as_object_mut()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 10,
+                reason: "save contract must be an object".to_owned(),
+            })?
+            .entry("breaching_dynasty_id".to_owned())
+            .or_insert(Value::Null);
+    }
+    let laws = object
+        .get_mut("laws")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 10,
+            reason: "save laws must be an object".to_owned(),
+        })?;
+    for law in laws.values_mut() {
+        let law = law
+            .as_object_mut()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 10,
+                reason: "save law must be an object".to_owned(),
+            })?;
+        if law.get("kind").and_then(Value::as_str) == Some("PublicDebtAuthorization") {
+            law.insert("active".to_owned(), Value::Bool(false));
+        }
+    }
+    object.insert("schema_version".to_owned(), Value::from(11));
     Ok(value)
 }
 

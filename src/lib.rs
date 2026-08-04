@@ -21,7 +21,7 @@ pub mod registry;
 pub mod rng;
 pub mod systems;
 
-pub use core::{AppState, NewGameConfig, StateSummary};
+pub use core::{AppState, NewGameConfig};
 pub use gameplay::{
     GAMEPLAY_REPORT_SCHEMA_VERSION, GameplayAggregate, GameplayCampaignReport,
     GameplayCandidateRanking, GameplayCommandKind, GameplayCommandStats, GameplayDomain,
@@ -31,7 +31,10 @@ pub use gameplay::{
     run_gameplay_harness,
 };
 pub use persistence::{PersistenceError, StateValidationKind, load_state, save_state};
-pub use projection::{CampaignProjection, build_campaign_projection, render_campaign_html};
+pub use projection::{
+    CampaignProjection, StateSummary, build_campaign_projection, build_state_summary,
+    render_campaign_html,
+};
 pub use registry::{Registry, build_rivergate_registry};
 pub use systems::{
     BusinessAcquisitionQuote, CommandError, CommandOutcome, CrisisResponse, EducationFocus,

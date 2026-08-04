@@ -83,6 +83,7 @@ The supported library facade is defined in `src/lib.rs`. Primary entry points ar
 - `advance_days`
 - `apply_player_command`
 - `quote_business_acquisition`
+- `build_state_summary`
 - `build_campaign_projection`
 - `render_campaign_html`
 - `save_state` and `load_state`
@@ -98,7 +99,7 @@ cargo run --locked -- execute saves/valeri.json \
   --command '{"SetHouseGovernance":{"governance":"FamilyPartnership"}}'
 ```
 
-`PlayerCommand` in `src/systems/commands.rs` is the authoritative command schema. It covers business capitalization and acquisition, operating policy, cash transfers, contracts, loans, property, civic actions, legal cases, family governance, ward adoption, focused family education, office nomination, crisis response, labor disputes, and notification acknowledgement.
+`PlayerCommand` in `src/systems/commands.rs` is the authoritative command schema. It covers business capitalization and acquisition, operating policy, cash transfers, contracts, private loans, municipal debt authorization, property, civic actions, legal cases, family governance, ward adoption, focused family education, office nomination, crisis response, labor disputes, and notification acknowledgement.
 
 Run `cargo run --locked -- --help` for CLI syntax.
 

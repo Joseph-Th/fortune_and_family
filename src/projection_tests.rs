@@ -1,7 +1,7 @@
 //! Projection completeness and HTML escaping tests for presentation adapters.
 
 use super::*;
-use crate::core::NewGameConfig;
+use crate::core::{CivicDebt, EnactedLaw, NewGameConfig};
 use crate::test_support::{
     make_test_campaign, make_test_campaign_with, rivergate_registry_for_test,
 };
@@ -96,6 +96,14 @@ mod coverage {
         );
         assert_eq!(
             projection
+                .civic_debts
+                .iter()
+                .map(|debt| debt.id)
+                .collect::<BTreeSet<_>>(),
+            state.civic_debts.keys().copied().collect()
+        );
+        assert_eq!(
+            projection
                 .properties
                 .iter()
                 .map(|property| property.id)
@@ -165,6 +173,87 @@ mod coverage {
             state.outbox.len().min(50),
             "notification projection must honor its 50-message cap"
         );
+    }
+
+    #[test]
+    fn summary_and_campaign_projection_share_the_same_read_model() {
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign();
+
+        let summary = build_state_summary(registry, &state);
+        let projection = build_campaign_projection(registry, &state);
+
+        assert_eq!(summary.scenario_name, projection.scenario.name);
+        assert_eq!(summary.year, projection.scenario.year);
+        assert_eq!(summary.day_of_year, projection.scenario.day_of_year);
+        assert_eq!(summary.elapsed_days, projection.scenario.elapsed_days);
+        assert_eq!(summary.phase, projection.scenario.phase);
+        assert_eq!(
+            summary.average_food_satisfaction_basis_points,
+            projection.scenario.average_food_satisfaction_basis_points
+        );
+        assert_eq!(summary.active_crises, projection.scenario.active_crises);
+        assert_eq!(summary.dynasty_name, projection.player.name);
+        assert_eq!(summary.dynasty_treasury, projection.player.treasury);
+        assert_eq!(summary.businesses, projection.player.businesses);
+    }
+
+    #[test]
+    fn summary_counts_defaulted_debt_as_outstanding_but_excludes_repaid_debt() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let creditor_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a creditor dynasty");
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::PublicDebtAuthorization,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                value: 10_000,
+                active: false,
+            },
+        );
+        let debt_id = state.next_ids.civic_debt();
+        state.civic_debts.insert(
+            debt_id,
+            CivicDebt {
+                id: debt_id,
+                creditor_dynasty_id,
+                authorizing_law_id: law_id,
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                principal: Money::from_copper(10_000),
+                balance: Money::from_copper(10_000),
+                weekly_payment: Money::from_copper(100),
+                interest_basis_points: 600,
+                issued_day: state.clock.day(),
+                next_due_day: state.clock.day().saturating_add(7),
+                missed_payments: 3,
+                status: CivicDebtStatus::Defaulted,
+            },
+        );
+
+        let summary = build_state_summary(registry, &state);
+        assert_eq!(summary.outstanding_civic_debts, 1);
+        assert_eq!(summary.civic_debt_balance, Money::from_copper(10_000));
+
+        let debt = state
+            .civic_debts
+            .get_mut(&debt_id)
+            .expect("civic debt must exist");
+        debt.balance = Money::ZERO;
+        debt.missed_payments = 0;
+        debt.status = CivicDebtStatus::Repaid;
+
+        let summary = build_state_summary(registry, &state);
+        assert_eq!(summary.outstanding_civic_debts, 0);
+        assert_eq!(summary.civic_debt_balance, Money::ZERO);
     }
 
     #[test]
@@ -287,6 +376,52 @@ mod coverage {
         assert_eq!(business.minimum_cash_reserve, Money::from_copper(1_234));
         assert_eq!(business.maintenance_basis_points, 2_345);
         assert_eq!(business.quality_target_basis_points, 8_765);
+    }
+
+    #[test]
+    fn exposes_attributed_contract_breaches() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let contract_id = *state
+            .contracts
+            .keys()
+            .next()
+            .expect("campaign must contain a contract");
+        let seller_business_id = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist")
+            .seller_business_id;
+        let seller_dynasty_id = state
+            .businesses
+            .get(seller_business_id)
+            .expect("seller business must exist")
+            .owner_dynasty_id();
+        let seller_name = state
+            .dynasties
+            .get(&seller_dynasty_id)
+            .expect("seller dynasty must exist")
+            .name()
+            .to_owned();
+        let contract = state
+            .contracts
+            .get_mut(&contract_id)
+            .expect("contract must exist");
+        contract.status = ContractStatus::Breached;
+        contract.breaching_dynasty_id = Some(seller_dynasty_id);
+
+        let projection = build_campaign_projection(registry, &state);
+        let contract = projection
+            .contracts
+            .iter()
+            .find(|contract| contract.id == contract_id)
+            .expect("contract must be projected");
+
+        assert_eq!(contract.breaching_dynasty_id, Some(seller_dynasty_id));
+        assert_eq!(
+            contract.breaching_dynasty.as_deref(),
+            Some(seller_name.as_str())
+        );
     }
 }
 

@@ -2,16 +2,17 @@
 
 use crate::core::{
     AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
-    ChronicleEntry, ChronicleKind, ContractStatus, Crisis, CrisisKind, CrisisStatus,
-    DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw, ExternalRoute,
-    FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance, InformationConfidence,
-    InformationReport, InstitutionRuntime, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus,
-    Loan, LoanStatus, ObjectiveKind, ObjectiveStatus, OfficePower, OutboxKind, OutboxMessage,
-    Property, PropertyKind, PublicWork, PublicWorkKind, PublicWorkStatus, RelationshipState,
-    SupplyContract,
+    ChronicleEntry, ChronicleKind, CivicDebtStatus, ContractStatus, Crisis, CrisisKind,
+    CrisisStatus, DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw,
+    ExternalRoute, FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance,
+    InformationConfidence, InformationReport, InstitutionRuntime, LawKind, LegalCase,
+    LegalCaseKind, LegalCaseStatus, Loan, LoanStatus, ObjectiveKind, ObjectiveStatus, OfficePower,
+    OutboxKind, OutboxMessage, Property, PropertyKind, PublicWork, PublicWorkKind,
+    PublicWorkStatus, RelationshipState, SupplyContract,
 };
 use crate::ids::{
-    BusinessId, CharacterId, DistrictId, DynastyId, EmploymentId, GoodId, HouseholdId, PropertyId,
+    BusinessId, CharacterId, CivicDebtId, DistrictId, DynastyId, EmploymentId, GoodId, HouseholdId,
+    InstitutionId, PropertyId,
 };
 use crate::money::{Money, Quantity, cost_for};
 use crate::registry::{InstitutionKind, Registry};
@@ -216,6 +217,14 @@ impl ContractSettlementState {
     const fn has_attributable_nonperformance(self) -> bool {
         !self.buyer.can_perform || !self.seller.can_perform
     }
+
+    const fn breaching_dynasty_id(self) -> Option<DynastyId> {
+        match (self.buyer.can_perform, self.seller.can_perform) {
+            (false, true) => Some(self.buyer.owner_id),
+            (true, false) => Some(self.seller.owner_id),
+            (false, false) | (true, true) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -227,6 +236,16 @@ struct DueLoan {
     balance: Money,
     interest_basis_points: u16,
     collateral_property_id: Option<PropertyId>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DueCivicDebt {
+    id: CivicDebtId,
+    creditor_dynasty_id: DynastyId,
+    sponsor_dynasty_id: Option<DynastyId>,
+    weekly_payment: Money,
+    balance: Money,
+    interest_basis_points: u16,
 }
 
 #[derive(Debug)]
@@ -290,6 +309,7 @@ fn commit_supply_contract(
             end_day,
             fulfilled_deliveries: 0,
             missed_deliveries: 0,
+            breaching_dynasty_id: None,
             status: ContractStatus::Active,
         },
     );
@@ -1531,7 +1551,7 @@ fn initialize_information(state: &mut AppState) {
             created_day: 0,
             expires_day: 90,
             source: "Household account books and market inspection".to_owned(),
-            summary: "Food prices are politically sensitive, the southern district lacks sanitation, and the treasury remains indebted after wall repairs.".to_owned(),
+            summary: "Food prices are politically sensitive, the southern district lacks sanitation, and the treasury remains strained after wall repairs.".to_owned(),
         },
     );
     push_outbox(
@@ -1716,6 +1736,7 @@ fn apply_banking_panic_losses(state: &mut AppState, severity: u16) {
 pub(crate) fn run_weekly_strategic_systems(registry: &Registry, state: &mut AppState) {
     settle_contracts(state);
     settle_loans(state);
+    settle_civic_debts(registry, state);
     settle_property_rents(state);
     settle_employment(registry, state);
     distribute_business_dividends(registry, state);
@@ -1829,6 +1850,11 @@ fn terminate_inactive_contract(
         .get_mut(&contract_id)
         .expect("contract must exist");
     contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
+    contract.breaching_dynasty_id = match (buyer_active, seller_active) {
+        (false, true) => Some(buyer_owner_id),
+        (true, false) => Some(seller_owner_id),
+        (false, false) | (true, true) => None,
+    };
     contract.status = ContractStatus::Breached;
     if buyer_owner_id != seller_owner_id {
         if !seller_active {
@@ -1876,14 +1902,19 @@ fn finalize_expired_contract(
     if !expired_active {
         return;
     }
-    state
+    let contract = state
         .contracts
         .get_mut(&due.id)
-        .expect("contract must exist")
-        .status = if fulfilled {
+        .expect("contract must exist");
+    contract.status = if fulfilled {
         ContractStatus::Fulfilled
     } else {
         ContractStatus::Breached
+    };
+    contract.breaching_dynasty_id = if fulfilled {
+        None
+    } else {
+        settlement.breaching_dynasty_id()
     };
     if settlement.buyer.owner_id != settlement.seller.owner_id {
         let memory = if fulfilled {
@@ -1980,6 +2011,7 @@ fn settle_failed_contract(
         contract.next_due_day = contract.next_due_day.saturating_add(7);
         if contract.missed_deliveries >= 3 {
             contract.status = ContractStatus::Breached;
+            contract.breaching_dynasty_id = settlement.breaching_dynasty_id();
         }
         contract.status == ContractStatus::Breached
     };
@@ -2105,6 +2137,249 @@ fn settle_loans(state: &mut AppState) {
         .collect();
     for due_loan in due {
         settle_due_loan(state, due_loan, interest_limit);
+    }
+}
+
+fn settle_civic_debts(registry: &Registry, state: &mut AppState) {
+    let Some(treasury_id) = registry.get_institution_id("treasury") else {
+        return;
+    };
+    let day = state.clock.day();
+    let interest_limit = active_interest_limit(state);
+    let due: Vec<_> = state
+        .civic_debts
+        .values()
+        .filter(|debt| {
+            matches!(
+                debt.status,
+                CivicDebtStatus::Current | CivicDebtStatus::Delinquent
+            ) && debt.next_due_day <= day
+        })
+        .map(|debt| DueCivicDebt {
+            id: debt.id,
+            creditor_dynasty_id: debt.creditor_dynasty_id,
+            sponsor_dynasty_id: debt.sponsor_dynasty_id,
+            weekly_payment: debt.weekly_payment,
+            balance: debt.balance,
+            interest_basis_points: debt.interest_basis_points,
+        })
+        .collect();
+    for due_debt in due {
+        settle_due_civic_debt(state, treasury_id, due_debt, interest_limit);
+    }
+}
+
+fn settle_due_civic_debt(
+    state: &mut AppState,
+    treasury_id: InstitutionId,
+    due: DueCivicDebt,
+    interest_limit: Option<u16>,
+) {
+    let effective_interest = interest_limit.map_or(due.interest_basis_points, |limit| {
+        due.interest_basis_points.min(limit)
+    });
+    let accrued_balance = due
+        .balance
+        .saturating_add(weekly_interest_due(due.balance, effective_interest));
+    let amount_due = due.weekly_payment.min(accrued_balance);
+    let creditor_headroom = state
+        .dynasties
+        .get(&due.creditor_dynasty_id)
+        .expect("civic debt creditor must exist")
+        .treasury()
+        .max_nonnegative_addend();
+    if creditor_headroom < amount_due {
+        state
+            .civic_debts
+            .get_mut(&due.id)
+            .expect("civic debt must exist")
+            .next_due_day = state.clock.day().saturating_add(7);
+        return;
+    }
+    state
+        .civic_debts
+        .get_mut(&due.id)
+        .expect("civic debt must exist")
+        .balance = accrued_balance;
+    let treasury_budget = state
+        .institutions
+        .get(&treasury_id)
+        .expect("civic treasury must exist")
+        .budget;
+    if treasury_budget >= amount_due {
+        settle_successful_civic_debt_payment(state, treasury_id, due, amount_due);
+    } else {
+        settle_missed_civic_debt_payment(state, treasury_id, due);
+    }
+}
+
+fn settle_successful_civic_debt_payment(
+    state: &mut AppState,
+    treasury_id: InstitutionId,
+    due: DueCivicDebt,
+    payment: Money,
+) {
+    {
+        let treasury = state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("civic treasury must exist");
+        treasury.budget = treasury.budget.saturating_sub(payment);
+    }
+    {
+        let creditor = state
+            .dynasties
+            .get_mut(&due.creditor_dynasty_id)
+            .expect("civic debt creditor must exist");
+        creditor.resources.treasury = creditor
+            .resources
+            .treasury
+            .checked_add(payment)
+            .expect("prevalidated civic debt payment must fit creditor treasury");
+    }
+    let repaid = {
+        let debt = state
+            .civic_debts
+            .get_mut(&due.id)
+            .expect("civic debt must exist");
+        debt.balance = debt.balance.saturating_sub(payment);
+        debt.next_due_day = debt.next_due_day.saturating_add(7);
+        debt.missed_payments = 0;
+        if debt.balance == Money::ZERO {
+            debt.status = CivicDebtStatus::Repaid;
+            true
+        } else {
+            debt.status = CivicDebtStatus::Current;
+            false
+        }
+    };
+    let treasury = state
+        .institutions
+        .get_mut(&treasury_id)
+        .expect("civic treasury must exist");
+    treasury.legitimacy_basis_points = treasury
+        .legitimacy_basis_points
+        .saturating_add(if repaid { 100 } else { 10 })
+        .min(10_000);
+    if let Some(sponsor_dynasty_id) = due.sponsor_dynasty_id {
+        adjust_dynasty_relationship(
+            state,
+            sponsor_dynasty_id,
+            due.creditor_dynasty_id,
+            RelationshipDelta::new(
+                if repaid { 30 } else { 3 },
+                10,
+                0,
+                -5,
+                if repaid { -1 } else { 0 },
+            ),
+        );
+        if repaid {
+            remember_dynasty_interaction(
+                state,
+                sponsor_dynasty_id,
+                due.creditor_dynasty_id,
+                &format!("Civic debt {} was repaid in full.", due.id),
+            );
+            record_counterparty_information(
+                state,
+                sponsor_dynasty_id,
+                due.creditor_dynasty_id,
+                "Completed municipal debt repayment records",
+            );
+        }
+    }
+    if repaid {
+        push_outbox(
+            state,
+            OutboxKind::Finance,
+            format!("Civic debt {} repaid", due.id),
+            format!(
+                "The city treasury repaid dynasty {} in full.",
+                due.creditor_dynasty_id
+            ),
+        );
+    }
+}
+
+fn settle_missed_civic_debt_payment(
+    state: &mut AppState,
+    treasury_id: InstitutionId,
+    due: DueCivicDebt,
+) {
+    let defaulted = {
+        let debt = state
+            .civic_debts
+            .get_mut(&due.id)
+            .expect("civic debt must exist");
+        debt.missed_payments = debt.missed_payments.saturating_add(1);
+        debt.next_due_day = debt.next_due_day.saturating_add(7);
+        debt.status = if debt.missed_payments >= 3 {
+            CivicDebtStatus::Defaulted
+        } else {
+            CivicDebtStatus::Delinquent
+        };
+        debt.status == CivicDebtStatus::Defaulted
+    };
+    let treasury = state
+        .institutions
+        .get_mut(&treasury_id)
+        .expect("civic treasury must exist");
+    treasury.legitimacy_basis_points = treasury
+        .legitimacy_basis_points
+        .saturating_sub(if defaulted { 500 } else { 100 });
+    for district in state.districts.values_mut() {
+        district.unrest_basis_points = district
+            .unrest_basis_points
+            .saturating_add(if defaulted { 200 } else { 25 })
+            .min(10_000);
+    }
+    if let Some(sponsor_dynasty_id) = due.sponsor_dynasty_id {
+        let sponsor = state
+            .dynasties
+            .get_mut(&sponsor_dynasty_id)
+            .expect("civic debt sponsor must exist");
+        sponsor.resources.legitimacy_basis_points = sponsor
+            .resources
+            .legitimacy_basis_points
+            .saturating_sub(if defaulted { 300 } else { 40 });
+        adjust_dynasty_relationship(
+            state,
+            sponsor_dynasty_id,
+            due.creditor_dynasty_id,
+            RelationshipDelta::new(
+                if defaulted { -180 } else { -30 },
+                if defaulted { -80 } else { -10 },
+                if defaulted { 40 } else { 0 },
+                if defaulted { 250 } else { 40 },
+                if defaulted { -1 } else { 0 },
+            ),
+        );
+        if defaulted {
+            remember_dynasty_interaction(
+                state,
+                sponsor_dynasty_id,
+                due.creditor_dynasty_id,
+                &format!("Civic debt {} defaulted.", due.id),
+            );
+            record_counterparty_information(
+                state,
+                sponsor_dynasty_id,
+                due.creditor_dynasty_id,
+                "Municipal debt default and civic treasury records",
+            );
+        }
+    }
+    if defaulted {
+        push_outbox(
+            state,
+            OutboxKind::Finance,
+            format!("Civic debt {} defaulted", due.id),
+            format!(
+                "The city treasury defaulted on its obligation to dynasty {}.",
+                due.creditor_dynasty_id
+            ),
+        );
     }
 }
 
@@ -3095,7 +3370,7 @@ pub(crate) fn remember_dynasty_interaction(
     relationship.last_interaction_day = day;
 }
 
-fn record_counterparty_information(
+pub(crate) fn record_counterparty_information(
     state: &mut AppState,
     first_dynasty_id: DynastyId,
     second_dynasty_id: DynastyId,
@@ -3624,15 +3899,10 @@ fn update_district_conditions(state: &mut AppState) {
             .flatten()
             .filter_map(|id| state.households.get(*id))
             .collect();
-        let satisfaction = if households.is_empty() {
-            5_000
-        } else {
-            let total: u64 = households
-                .iter()
-                .map(|household| u64::from(household.food_satisfaction_basis_points()))
-                .sum();
-            u16::try_from(total / households.len() as u64).unwrap_or(5_000)
-        };
+        let satisfaction = crate::core::population_weighted_food_satisfaction_basis_points(
+            households.iter().copied(),
+        )
+        .unwrap_or(5_000);
         let active_jobs: u32 = state
             .employment
             .values()
@@ -4345,16 +4615,10 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
             .get_good_id("bread")
             .and_then(|id| state.market.get_quote(id))
             .is_some_and(|quote| quote.stock() < Quantity::from_units(100));
-        let average_satisfaction = if state.households.records().is_empty() {
-            10_000
-        } else {
-            let total: u64 = state
-                .households
-                .iter()
-                .map(|household| u64::from(household.food_satisfaction_basis_points()))
-                .sum();
-            u16::try_from(total / state.households.records().len() as u64).unwrap_or(10_000)
-        };
+        let average_satisfaction = crate::core::population_weighted_food_satisfaction_basis_points(
+            state.households.iter(),
+        )
+        .unwrap_or(10_000);
         if bread_stock_low && average_satisfaction < 4_000 {
             insert_crisis(
                 state,
@@ -4369,7 +4633,14 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
         .loans
         .values()
         .filter(|loan| loan.status == LoanStatus::Defaulted)
-        .count();
+        .count()
+        .saturating_add(
+            state
+                .civic_debts
+                .values()
+                .filter(|debt| debt.status == CivicDebtStatus::Defaulted)
+                .count(),
+        );
     let active_panic = state
         .crises
         .values()

@@ -8,9 +8,9 @@ use super::{
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
     CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry,
-    ChronicleKind, CrisisStatus, EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind,
-    HouseGovernance, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus, OfficePower, OutboxKind,
-    PublicWork, PublicWorkKind, PublicWorkStatus,
+    ChronicleKind, CivicDebt, CivicDebtStatus, CrisisStatus, EmploymentStatus, EnactedLaw,
+    FamilyLink, FamilyLinkKind, HouseGovernance, LawKind, LegalCase, LegalCaseKind,
+    LegalCaseStatus, OfficePower, OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, CrisisId, DistrictId, DynastyId, EmploymentId, InstitutionId,
@@ -139,6 +139,9 @@ pub(crate) const LEGAL_CASE_FILING_COST: Money = Money::from_copper(300);
 pub(crate) const LAW_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const LAW_LEGITIMACY_REQUIREMENT: u16 = 3_000;
 pub(crate) const LAW_LEGITIMACY_COST: u16 = 250;
+pub(crate) const CIVIC_DEBT_INTEREST_BASIS_POINTS: u16 = 600;
+pub(crate) const CIVIC_DEBT_TERM_WEEKS: i64 = 104;
+pub(crate) const CIVIC_DEBT_CREDITOR_RESERVE: Money = Money::from_copper(10_000);
 pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
@@ -184,8 +187,12 @@ pub enum CommandError {
     InvalidLawValue { kind: LawKind, value: i64 },
     #[error("law {kind:?} is already active with value {value}")]
     UnchangedLaw { kind: LawKind, value: i64 },
-    #[error("law {kind:?} is not implemented by the current simulation")]
-    UnsupportedLaw { kind: LawKind },
+    #[error("the scenario does not define a civic treasury institution")]
+    MissingCivicTreasury,
+    #[error("no non-player dynasty can fund civic debt principal {required}")]
+    NoCivicDebtCreditor { required: Money },
+    #[error("civic treasury budget {current} cannot receive debt proceeds {incoming}")]
+    CivicTreasuryOverflow { current: Money, incoming: Money },
     #[error("the player dynasty must hold political office before sponsoring a law")]
     LawSponsorshipRequiresOffice,
     #[error("law {kind:?} requires an office with {required:?} power")]
@@ -320,6 +327,11 @@ pub enum CommandError {
     MissingEmployment { employment_id: EmploymentId },
     #[error("employment agreement {employment_id} is not a player labor dispute")]
     InvalidLaborDispute { employment_id: EmploymentId },
+    #[error("negotiating employment {employment_id} would overflow its weekly wage from {current}")]
+    LaborWageOverflow {
+        employment_id: EmploymentId,
+        current: Money,
+    },
     #[error(
         "district {district_id} has no replacement household able to supply {workers} workers for employment {employment_id}"
     )]
@@ -396,7 +408,7 @@ pub fn apply_player_command(
                 summary: format!("Acquired property {property_id}."),
             })
         }
-        PlayerCommand::EnactLaw { kind, value } => apply_law(state, kind, value),
+        PlayerCommand::EnactLaw { kind, value } => apply_law(registry, state, kind, value),
         PlayerCommand::StartPublicWork {
             district_id,
             kind,
@@ -694,14 +706,132 @@ fn ensure_player_loan_party(state: &AppState, terms: &LoanTerms) -> Result<(), C
     Ok(())
 }
 
-fn apply_law(
+#[derive(Clone, Copy, Debug)]
+struct ValidatedCivicDebtIssuance {
+    treasury_id: InstitutionId,
+    creditor_dynasty_id: DynastyId,
+    principal: Money,
+    creditor_treasury_after: Money,
+    treasury_budget_after: Money,
+    weekly_payment: Money,
+}
+
+fn validate_civic_debt_issuance(
+    registry: &Registry,
+    state: &AppState,
+    principal: Money,
+) -> Result<ValidatedCivicDebtIssuance, CommandError> {
+    let treasury_id = registry
+        .get_institution_id("treasury")
+        .ok_or(CommandError::MissingCivicTreasury)?;
+    let treasury = state
+        .institutions
+        .get(&treasury_id)
+        .ok_or(CommandError::MissingCivicTreasury)?;
+    let treasury_budget_after =
+        treasury
+            .budget
+            .checked_add(principal)
+            .ok_or(CommandError::CivicTreasuryOverflow {
+                current: treasury.budget,
+                incoming: principal,
+            })?;
+    let creditor = state
+        .dynasties
+        .values()
+        .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
+        .filter(|dynasty| {
+            dynasty
+                .treasury()
+                .saturating_sub(CIVIC_DEBT_CREDITOR_RESERVE)
+                >= principal
+        })
+        .max_by_key(|dynasty| (dynasty.treasury(), std::cmp::Reverse(dynasty.id())))
+        .ok_or(CommandError::NoCivicDebtCreditor {
+            required: principal,
+        })?;
+    let weekly_payment_copper = principal
+        .copper()
+        .saturating_add(CIVIC_DEBT_TERM_WEEKS.saturating_sub(1))
+        / CIVIC_DEBT_TERM_WEEKS;
+    Ok(ValidatedCivicDebtIssuance {
+        treasury_id,
+        creditor_dynasty_id: creditor.id(),
+        principal,
+        creditor_treasury_after: creditor.treasury().saturating_sub(principal),
+        treasury_budget_after,
+        weekly_payment: Money::from_copper(weekly_payment_copper.max(1)),
+    })
+}
+
+fn commit_civic_debt_issuance(
     state: &mut AppState,
+    law_id: crate::ids::LawId,
+    sponsor_dynasty_id: DynastyId,
+    issuance: ValidatedCivicDebtIssuance,
+) -> crate::ids::CivicDebtId {
+    state
+        .dynasties
+        .get_mut(&issuance.creditor_dynasty_id)
+        .expect("validated civic debt creditor must exist")
+        .resources
+        .treasury = issuance.creditor_treasury_after;
+    state
+        .institutions
+        .get_mut(&issuance.treasury_id)
+        .expect("validated civic treasury must exist")
+        .budget = issuance.treasury_budget_after;
+    let id = state.next_ids.civic_debt();
+    state.civic_debts.insert(
+        id,
+        CivicDebt {
+            id,
+            creditor_dynasty_id: issuance.creditor_dynasty_id,
+            authorizing_law_id: law_id,
+            sponsor_dynasty_id: Some(sponsor_dynasty_id),
+            principal: issuance.principal,
+            balance: issuance.principal,
+            weekly_payment: issuance.weekly_payment,
+            interest_basis_points: CIVIC_DEBT_INTEREST_BASIS_POINTS,
+            issued_day: state.clock.day(),
+            next_due_day: state.clock.day().saturating_add(7),
+            missed_payments: 0,
+            status: CivicDebtStatus::Current,
+        },
+    );
+    super::strategic::adjust_dynasty_relationship(
+        state,
+        sponsor_dynasty_id,
+        issuance.creditor_dynasty_id,
+        super::strategic::RelationshipDelta::new(40, 30, 0, -20, 1),
+    );
+    super::strategic::remember_dynasty_interaction(
+        state,
+        sponsor_dynasty_id,
+        issuance.creditor_dynasty_id,
+        &format!("Civic debt {id} financed the city treasury."),
+    );
+    super::strategic::record_counterparty_information(
+        state,
+        sponsor_dynasty_id,
+        issuance.creditor_dynasty_id,
+        "Municipal debt underwriting and treasury records",
+    );
+    id
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ValidatedLawSponsorship {
+    legitimacy: u16,
+    civic_debt_issuance: Option<ValidatedCivicDebtIssuance>,
+}
+
+fn validate_law_sponsorship(
+    registry: &Registry,
+    state: &AppState,
     kind: LawKind,
     value: i64,
-) -> Result<CommandOutcome, CommandError> {
-    if !kind.is_implemented() {
-        return Err(CommandError::UnsupportedLaw { kind });
-    }
+) -> Result<ValidatedLawSponsorship, CommandError> {
     if !kind.is_value_valid(value) {
         return Err(CommandError::InvalidLawValue { kind, value });
     }
@@ -755,6 +885,22 @@ fn apply_law(
             available_day,
         });
     }
+    let civic_debt_issuance = (kind == LawKind::PublicDebtAuthorization)
+        .then(|| validate_civic_debt_issuance(registry, state, Money::from_copper(value)))
+        .transpose()?;
+    Ok(ValidatedLawSponsorship {
+        legitimacy,
+        civic_debt_issuance,
+    })
+}
+
+fn apply_law(
+    registry: &Registry,
+    state: &mut AppState,
+    kind: LawKind,
+    value: i64,
+) -> Result<CommandOutcome, CommandError> {
+    let validation = validate_law_sponsorship(registry, state, kind, value)?;
     let cost = Money::from_copper(2_000);
     spend_player_treasury(state, cost)?;
     state
@@ -762,7 +908,7 @@ fn apply_law(
         .get_mut(&state.player_dynasty_id)
         .expect("player dynasty must exist")
         .resources
-        .legitimacy_basis_points = legitimacy.saturating_sub(LAW_LEGITIMACY_COST);
+        .legitimacy_basis_points = validation.legitimacy.saturating_sub(LAW_LEGITIMACY_COST);
     for law in state
         .laws
         .values_mut()
@@ -779,17 +925,30 @@ fn apply_law(
             enacted_day: state.clock.day(),
             sponsor_dynasty_id: Some(state.player_dynasty_id),
             value,
-            active: true,
+            active: kind.remains_active_after_enactment(),
         },
     );
+    let civic_debt_id = validation
+        .civic_debt_issuance
+        .map(|issuance| commit_civic_debt_issuance(state, id, state.player_dynasty_id, issuance));
     super::strategic::push_outbox(
         state,
         OutboxKind::Law,
         format!("Law {id} enacted"),
-        format!("The player dynasty sponsored {kind:?} with value {value}."),
+        civic_debt_id.map_or_else(
+            || format!("The player dynasty sponsored {kind:?} with value {value}."),
+            |debt_id| {
+                format!(
+                    "The player dynasty sponsored {kind:?}; civic debt {debt_id} issued {value} copper to the treasury."
+                )
+            },
+        ),
     );
     Ok(CommandOutcome {
-        summary: format!("Enacted law {id}: {kind:?}."),
+        summary: civic_debt_id.map_or_else(
+            || format!("Enacted law {id}: {kind:?}."),
+            |debt_id| format!("Enacted law {id}: {kind:?}, issuing civic debt {debt_id}."),
+        ),
     })
 }
 
@@ -1704,6 +1863,24 @@ fn adjust_district_unrest(
     };
 }
 
+fn validate_negotiated_weekly_wage(
+    agreement: &crate::core::EmploymentAgreement,
+    employment_id: EmploymentId,
+    response: LaborResponse,
+) -> Result<Option<Money>, CommandError> {
+    match response {
+        LaborResponse::Negotiate => agreement
+            .weekly_wage
+            .checked_mul_ratio(11, 10)
+            .map(Some)
+            .ok_or(CommandError::LaborWageOverflow {
+                employment_id,
+                current: agreement.weekly_wage,
+            }),
+        LaborResponse::ImproveConditions | LaborResponse::ReplaceWorkers => Ok(None),
+    }
+}
+
 fn apply_labor_response(
     state: &mut AppState,
     employment_id: EmploymentId,
@@ -1729,6 +1906,8 @@ fn apply_labor_response(
     if agreement.status != EmploymentStatus::Disputed {
         return Err(CommandError::InvalidLaborDispute { employment_id });
     }
+    let negotiated_weekly_wage =
+        validate_negotiated_weekly_wage(agreement, employment_id, response)?;
     match response {
         LaborResponse::ImproveConditions => {
             spend_business_cash(state, business_id, Money::from_copper(1_000))?;
@@ -1752,7 +1931,8 @@ fn apply_labor_response(
                 .employment
                 .get_mut(&employment_id)
                 .expect("validated employment must exist");
-            agreement.weekly_wage = agreement.weekly_wage.saturating_mul_ratio(11, 10);
+            agreement.weekly_wage =
+                negotiated_weekly_wage.expect("negotiated wage must be prevalidated");
             agreement.loyalty_basis_points = agreement.loyalty_basis_points.max(4_500);
             agreement.conditions_basis_points = agreement
                 .conditions_basis_points

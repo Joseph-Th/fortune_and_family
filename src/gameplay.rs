@@ -1,24 +1,25 @@
 //! Deterministic gameplay harness that drives the public player-command and simulation pipelines.
 
 use crate::core::{
-    AppState, AuditKind, BusinessStatus, CharacterStatus, ContractStatus, CrisisStatus,
-    EmploymentStatus, FamilyLinkKind, HouseGovernance, LawKind, LegalCaseKind, LegalCaseStatus,
-    LoanStatus, NewGameConfig, ObjectiveStatus, OfficePower, PublicWorkKind, PublicWorkStatus,
-    StartingBackground,
+    AppState, AuditKind, BusinessStatus, CharacterStatus, CivicDebtStatus, ContractStatus,
+    CrisisStatus, EmploymentStatus, FamilyLinkKind, HouseGovernance, LawKind, LegalCaseKind,
+    LegalCaseStatus, LoanStatus, NewGameConfig, ObjectiveStatus, OfficePower, PublicWorkKind,
+    PublicWorkStatus, StartingBackground,
 };
 use crate::ids::{BusinessId, DynastyId};
 use crate::money::{Money, Quantity, cost_for};
 use crate::registry::{GoodCategory, RecipeDef, Registry};
 use crate::systems::{
-    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CommandError, CrisisResponse, EducationFocus,
-    FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
-    LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS,
-    LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms,
-    MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, NewGameError,
-    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_INTERVAL_DAYS,
-    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, SimulationError, StrategicError, SupplyContractTerms,
-    WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE, CommandError,
+    CrisisResponse, EducationFocus, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
+    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
+    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
+    LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, NewGameError,
+    OFFICE_DUTY_COST_PER_POWER, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+    OFFICE_NOMINATION_INTERVAL_DAYS, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
+    SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
+    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT, advance_days,
     apply_player_command, available_household_workers, build_new_game,
     has_established_player_office_power, player_contract_deliveries, quote_business_acquisition,
@@ -72,10 +73,12 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 17;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 18;
 const COMMERCIAL_STANDING_REPUTATION_REQUIREMENT: u16 = 5_200;
 const NOTIFICATION_BATCH_THRESHOLD: usize = 8;
 const AGENT_LOAN_AMORTIZATION_WEEKS: i64 = 104;
+const AGENT_OFFICE_DUTY_RESERVE_MONTHS: i64 = 12;
+const AGENT_OFFICE_LIQUIDITY_BUFFER: Money = Money::from_copper(5_000);
 const AGENT_CONTRACT_DURATION_WEEKS: u16 = 104;
 const AGENT_CASH_REBALANCE_TRIGGER: Money = Money::from_copper(1_000);
 const AGENT_CASH_REBALANCE_BUFFER: Money = Money::from_copper(2_000);
@@ -391,6 +394,11 @@ pub struct GameplaySnapshot {
     pub defaulted_loans: u16,
     pub repaid_loans: u16,
     pub total_loan_balance: Money,
+    pub current_civic_debts: u16,
+    pub delinquent_civic_debts: u16,
+    pub defaulted_civic_debts: u16,
+    pub repaid_civic_debts: u16,
+    pub total_civic_debt_balance: Money,
     pub player_properties: u16,
     pub occupied_properties: u16,
     pub active_employment: u16,
@@ -533,6 +541,7 @@ struct StrategicSnapshotPart {
     defaulted_loans: u16,
     repaid_loans: u16,
     total_loan_balance: Money,
+    civic_debt: CivicDebtSnapshotPart,
     player_properties: u16,
     occupied_properties: u16,
     active_employment: u16,
@@ -546,6 +555,29 @@ struct StrategicSnapshotPart {
     average_relationship_resentment: u16,
     relationship_obligation_total: i64,
     relationship_memory_count: u16,
+}
+
+#[derive(Debug)]
+struct CivicDebtSnapshotPart {
+    current: u16,
+    delinquent: u16,
+    defaulted: u16,
+    repaid: u16,
+    total_balance: Money,
+}
+
+impl CivicDebtSnapshotPart {
+    fn capture(state: &AppState) -> Self {
+        Self {
+            current: count_civic_debt_status(state, CivicDebtStatus::Current),
+            delinquent: count_civic_debt_status(state, CivicDebtStatus::Delinquent),
+            defaulted: count_civic_debt_status(state, CivicDebtStatus::Defaulted),
+            repaid: count_civic_debt_status(state, CivicDebtStatus::Repaid),
+            total_balance: state.civic_debts.values().fold(Money::ZERO, |total, debt| {
+                total.saturating_add(debt.balance)
+            }),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -651,6 +683,7 @@ impl StrategicSnapshotPart {
             total_loan_balance: state.loans.values().fold(Money::ZERO, |total, loan| {
                 total.saturating_add(loan.balance)
             }),
+            civic_debt: CivicDebtSnapshotPart::capture(state),
             player_properties: usize_to_u16(
                 state
                     .properties
@@ -850,12 +883,11 @@ struct WorldSnapshotPart {
 impl WorldSnapshotPart {
     fn capture(state: &AppState) -> Self {
         Self {
-            average_food_satisfaction: average_u16(
-                state
-                    .households
-                    .iter()
-                    .map(crate::core::Household::food_satisfaction_basis_points),
-            ),
+            average_food_satisfaction:
+                crate::core::population_weighted_food_satisfaction_basis_points(
+                    state.households.iter(),
+                )
+                .unwrap_or(0),
             average_district_unrest: average_u16(
                 state
                     .districts
@@ -986,6 +1018,11 @@ impl GameplaySnapshot {
             defaulted_loans: strategic.defaulted_loans,
             repaid_loans: strategic.repaid_loans,
             total_loan_balance: strategic.total_loan_balance,
+            current_civic_debts: strategic.civic_debt.current,
+            delinquent_civic_debts: strategic.civic_debt.delinquent,
+            defaulted_civic_debts: strategic.civic_debt.defaulted,
+            repaid_civic_debts: strategic.civic_debt.repaid,
+            total_civic_debt_balance: strategic.civic_debt.total_balance,
             player_properties: strategic.player_properties,
             occupied_properties: strategic.occupied_properties,
             active_employment: strategic.active_employment,
@@ -2008,6 +2045,8 @@ fn ranked_candidates(
     generate_finance_candidates(state, persona, &mut candidates);
     generate_civic_candidates(registry, state, persona, &mut candidates);
     generate_family_candidates(state, persona, &mut candidates);
+    candidates
+        .retain(|candidate| candidate_preserves_office_duty_reserve(registry, state, candidate));
     for candidate in &mut candidates {
         candidate.score = candidate.score.saturating_add(rank_adjustment(
             candidate.kind,
@@ -2024,6 +2063,144 @@ fn ranked_candidates(
             .then_with(|| left.description.cmp(&right.description))
     });
     candidates
+}
+
+fn candidate_preserves_office_duty_reserve(
+    registry: &Registry,
+    state: &AppState,
+    candidate: &Candidate,
+) -> bool {
+    if candidate_is_emergency_spending(state, candidate) {
+        return true;
+    }
+    let additional_powers = match candidate.command {
+        PlayerCommand::NominateForOffice { institution_id, .. } => state
+            .institutions
+            .get(&institution_id)
+            .map_or(0, |institution| institution.powers.len()),
+        _ => 0,
+    };
+    let reserve = player_office_duty_reserve(state, additional_powers);
+    let reserve = if additional_powers > 0 && player_has_office_duty_forfeiture(state) {
+        reserve.saturating_mul(3)
+    } else {
+        reserve
+    };
+    if reserve == Money::ZERO {
+        return true;
+    }
+    let treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    let cost = candidate_player_treasury_cost(registry, state, candidate);
+    cost == Money::ZERO || treasury.saturating_sub(cost) >= reserve
+}
+
+fn player_has_office_duty_forfeiture(state: &AppState) -> bool {
+    let dynasty_marker = format!("dynasty:{}", state.player_dynasty_id.value());
+    state.audit_log.iter().any(|record| {
+        record.kind() == AuditKind::OfficeDutyForfeiture
+            && record.subject().contains(&dynasty_marker)
+    })
+}
+
+fn candidate_is_emergency_spending(state: &AppState, candidate: &Candidate) -> bool {
+    match candidate.command {
+        PlayerCommand::RespondToCrisis { crisis_id, .. } => {
+            state.crises.get(&crisis_id).is_some_and(|crisis| {
+                crisis.status == CrisisStatus::Escalated || crisis.severity_basis_points >= 8_000
+            })
+        }
+        PlayerCommand::InvestInBusiness { business_id, .. } => {
+            state.businesses.get(business_id).is_some_and(|business| {
+                matches!(
+                    business.status(),
+                    BusinessStatus::Distressed | BusinessStatus::Insolvent
+                ) || business.operations.condition_basis_points < 2_000
+            })
+        }
+        _ => false,
+    }
+}
+
+fn player_office_duty_reserve(state: &AppState, additional_powers: usize) -> Money {
+    let existing_powers = state
+        .institutions
+        .values()
+        .filter(|institution| {
+            institution.office_holder_id.is_some_and(|character_id| {
+                state
+                    .characters
+                    .get(character_id)
+                    .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+            })
+        })
+        .map(|institution| institution.powers.len())
+        .sum::<usize>();
+    let total_powers = existing_powers.saturating_add(additional_powers);
+    if total_powers == 0 {
+        return Money::ZERO;
+    }
+    let power_count = i64::try_from(total_powers).unwrap_or(i64::MAX);
+    OFFICE_DUTY_COST_PER_POWER
+        .saturating_mul(power_count)
+        .saturating_mul(AGENT_OFFICE_DUTY_RESERVE_MONTHS)
+        .saturating_add(AGENT_OFFICE_LIQUIDITY_BUFFER)
+}
+
+fn candidate_player_treasury_cost(
+    registry: &Registry,
+    state: &AppState,
+    candidate: &Candidate,
+) -> Money {
+    match &candidate.command {
+        PlayerCommand::AcquireBusiness {
+            business_id,
+            recapitalization,
+            ..
+        } => quote_business_acquisition(registry, state, state.player_dynasty_id, *business_id)
+            .map_or(Money::ZERO, |quote| {
+                quote.purchase_price.saturating_add(*recapitalization)
+            }),
+        PlayerCommand::InvestInBusiness { amount, .. } => *amount,
+        PlayerCommand::IssueLoan { terms }
+            if terms.lender_dynasty_id == state.player_dynasty_id =>
+        {
+            terms.principal
+        }
+        PlayerCommand::BuyProperty { property_id } => state
+            .properties
+            .get(property_id)
+            .map_or(Money::ZERO, |property| property.value),
+        PlayerCommand::EnactLaw { .. } => Money::from_copper(2_000),
+        PlayerCommand::StartPublicWork { budget, .. } => {
+            Money::from_copper((budget.copper() / 10).max(1)).min(*budget)
+        }
+        PlayerCommand::FileLegalCase { .. } => LEGAL_CASE_FILING_COST,
+        PlayerCommand::AdoptWard { .. } => WARD_ADOPTION_COST,
+        PlayerCommand::EducateFamilyMember { .. } => FAMILY_EDUCATION_COST,
+        PlayerCommand::NominateForOffice { .. } => Money::from_copper(300),
+        PlayerCommand::RespondToCrisis {
+            crisis_id,
+            response,
+        } => match response {
+            CrisisResponse::Relief => state.crises.get(crisis_id).map_or(Money::ZERO, |crisis| {
+                Money::from_copper(i64::from(crisis.severity_basis_points).saturating_mul(2))
+            }),
+            CrisisResponse::Reform => Money::from_copper(1_500),
+            CrisisResponse::Suppress => Money::from_copper(900),
+            CrisisResponse::Exploit => Money::ZERO,
+        },
+        PlayerCommand::TransferBusinessCash { .. }
+        | PlayerCommand::SetBusinessPolicy { .. }
+        | PlayerCommand::CreateSupplyContract { .. }
+        | PlayerCommand::IssueLoan { .. }
+        | PlayerCommand::SetHouseGovernance { .. }
+        | PlayerCommand::ResolveLaborDispute { .. }
+        | PlayerCommand::AcknowledgeNotification { .. } => Money::ZERO,
+    }
 }
 
 fn generate_reactive_candidates(
@@ -2580,16 +2757,8 @@ fn has_internal_cash_recovery(
 }
 
 fn average_household_food_satisfaction(state: &AppState) -> u16 {
-    if state.households.records().is_empty() {
-        return 10_000;
-    }
-    let total: u64 = state
-        .households
-        .iter()
-        .map(|household| u64::from(household.food_satisfaction_basis_points()))
-        .sum();
-    let count = u64::try_from(state.households.records().len()).unwrap_or(u64::MAX);
-    u16::try_from(total / count).unwrap_or(10_000)
+    crate::core::population_weighted_food_satisfaction_basis_points(state.households.iter())
+        .unwrap_or(10_000)
 }
 
 const fn recapitalization_dynasty_reserve(
@@ -3186,11 +3355,17 @@ fn add_borrow_candidate(
         .dynasties
         .get(&player_id)
         .expect("player dynasty must exist");
-    let borrowing_trigger = match persona {
+    let base_borrowing_trigger = match persona {
         GameplayPersona::Steward => Money::from_copper(4_000),
         GameplayPersona::Entrepreneur => Money::from_copper(12_000),
         GameplayPersona::PowerBroker => Money::from_copper(3_000),
         GameplayPersona::Opportunist => Money::from_copper(8_000),
+    };
+    let office_reserve = player_office_duty_reserve(state, 0);
+    let borrowing_trigger = if office_reserve > base_borrowing_trigger {
+        office_reserve
+    } else {
+        base_borrowing_trigger
     };
     if player.treasury() >= borrowing_trigger
         || state.loans.values().any(|loan| {
@@ -3388,13 +3563,13 @@ fn generate_law_candidates(
     }
 }
 
-fn law_candidates(registry: &Registry, state: &AppState) -> [(LawKind, i64); 7] {
+fn law_candidates(registry: &Registry, state: &AppState) -> Vec<(LawKind, i64)> {
     let bread_price = registry
         .get_good_id("bread")
         .and_then(|good_id| state.market.quotes.get(&good_id))
         .map_or(1, |quote| quote.price.copper())
         .max(1);
-    [
+    let mut candidates = vec![
         (LawKind::BreadPriceCeiling, bread_price),
         (LawKind::ForeignMerchantToll, 600),
         (LawKind::InterestLimit, 800),
@@ -3402,7 +3577,41 @@ fn law_candidates(registry: &Registry, state: &AppState) -> [(LawKind, i64); 7] 
         (LawKind::RentRestriction, 900),
         (LawKind::GuildEntryRestriction, 1_200),
         (LawKind::EmergencyImports, 250),
-    ]
+    ];
+    if let Some(principal) = civic_debt_candidate_principal(registry, state) {
+        candidates.push((LawKind::PublicDebtAuthorization, principal.copper()));
+    }
+    candidates
+}
+
+fn civic_debt_candidate_principal(registry: &Registry, state: &AppState) -> Option<Money> {
+    let treasury_id = registry.get_institution_id("treasury")?;
+    let treasury = state.institutions.get(&treasury_id)?;
+    let unsettled = state
+        .civic_debts
+        .values()
+        .filter(|debt| debt.status != CivicDebtStatus::Repaid)
+        .count();
+    if treasury.budget >= Money::from_copper(50_000) || unsettled >= 2 {
+        return None;
+    }
+    let principal = Money::from_copper(
+        Money::from_copper(50_000)
+            .saturating_sub(treasury.budget)
+            .copper()
+            .clamp(10_000, 100_000),
+    );
+    state
+        .dynasties
+        .values()
+        .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
+        .any(|dynasty| {
+            dynasty
+                .treasury()
+                .saturating_sub(CIVIC_DEBT_CREDITOR_RESERVE)
+                >= principal
+        })
+        .then_some(principal)
 }
 
 fn law_persona_bonus(persona: GameplayPersona, kind: LawKind) -> i64 {
@@ -3410,10 +3619,10 @@ fn law_persona_bonus(persona: GameplayPersona, kind: LawKind) -> i64 {
         GameplayPersona::Steward => match kind {
             LawKind::BreadPriceCeiling | LawKind::EmergencyImports => 220,
             LawKind::FireCode | LawKind::RentRestriction => 180,
+            LawKind::PublicDebtAuthorization => 100,
             LawKind::ForeignMerchantToll
             | LawKind::InterestLimit
-            | LawKind::GuildEntryRestriction
-            | LawKind::PublicDebtAuthorization => 0,
+            | LawKind::GuildEntryRestriction => 0,
         },
         GameplayPersona::Entrepreneur => match kind {
             LawKind::ForeignMerchantToll => 180,
@@ -3425,7 +3634,16 @@ fn law_persona_bonus(persona: GameplayPersona, kind: LawKind) -> i64 {
             | LawKind::EmergencyImports
             | LawKind::PublicDebtAuthorization => 0,
         },
-        GameplayPersona::PowerBroker => 120,
+        GameplayPersona::PowerBroker => match kind {
+            LawKind::PublicDebtAuthorization => 260,
+            LawKind::BreadPriceCeiling
+            | LawKind::ForeignMerchantToll
+            | LawKind::InterestLimit
+            | LawKind::FireCode
+            | LawKind::RentRestriction
+            | LawKind::GuildEntryRestriction
+            | LawKind::EmergencyImports => 120,
+        },
         GameplayPersona::Opportunist => match kind {
             LawKind::InterestLimit => -100,
             LawKind::ForeignMerchantToll => 160,
@@ -3633,32 +3851,15 @@ fn legal_grievance_kind(state: &AppState, defendant_id: DynastyId) -> Option<Leg
         .flatten()
         .copied()
         .collect();
-    let defendant_businesses: BTreeSet<_> = state
-        .businesses
-        .ids_for_owner(defendant_id)
-        .into_iter()
-        .flatten()
-        .copied()
-        .collect();
     if !already_litigated(LegalCaseKind::ContractBreach)
         && state.contracts.values().any(|contract| {
             contract.status == ContractStatus::Breached
-                && ((player_businesses.contains(&contract.buyer_business_id)
-                    && defendant_businesses.contains(&contract.seller_business_id))
-                    || (player_businesses.contains(&contract.seller_business_id)
-                        && defendant_businesses.contains(&contract.buyer_business_id)))
+                && contract.breaching_dynasty_id == Some(defendant_id)
+                && (player_businesses.contains(&contract.buyer_business_id)
+                    || player_businesses.contains(&contract.seller_business_id))
         })
     {
         return Some(LegalCaseKind::ContractBreach);
-    }
-    let pair = crate::core::DynastyPair::new(player_id, defendant_id);
-    if !already_litigated(LegalCaseKind::Fraud)
-        && state
-            .relationships
-            .get(&pair)
-            .is_some_and(|relationship| relationship.resentment_basis_points > 5_000)
-    {
-        return Some(LegalCaseKind::Fraud);
     }
     None
 }
@@ -3892,19 +4093,27 @@ const fn education_focus_order(persona: GameplayPersona) -> [EducationFocus; 4] 
 }
 
 const fn education_focus_persona_bonus(persona: GameplayPersona, focus: EducationFocus) -> i64 {
-    match (persona, focus) {
-        (GameplayPersona::Steward, EducationFocus::Administration)
-        | (
-            GameplayPersona::Entrepreneur | GameplayPersona::Opportunist,
-            EducationFocus::Commerce,
-        )
-        | (GameplayPersona::PowerBroker, EducationFocus::Social) => 260,
-        (GameplayPersona::Steward | GameplayPersona::Opportunist, EducationFocus::Social)
-        | (
-            GameplayPersona::Entrepreneur | GameplayPersona::PowerBroker,
-            EducationFocus::Administration,
-        ) => 140,
-        _ => 0,
+    match persona {
+        GameplayPersona::Steward => match focus {
+            EducationFocus::Administration => 260,
+            EducationFocus::Social => 140,
+            EducationFocus::Commerce | EducationFocus::Craft => 0,
+        },
+        GameplayPersona::Entrepreneur => match focus {
+            EducationFocus::Commerce => 260,
+            EducationFocus::Administration => 140,
+            EducationFocus::Social | EducationFocus::Craft => 0,
+        },
+        GameplayPersona::PowerBroker => match focus {
+            EducationFocus::Social => 260,
+            EducationFocus::Administration => 140,
+            EducationFocus::Commerce | EducationFocus::Craft => 0,
+        },
+        GameplayPersona::Opportunist => match focus {
+            EducationFocus::Commerce => 260,
+            EducationFocus::Social => 140,
+            EducationFocus::Administration | EducationFocus::Craft => 0,
+        },
     }
 }
 
@@ -3920,20 +4129,51 @@ const fn character_focus_value(character: &crate::core::Character, focus: Educat
 fn institution_power_bonus(persona: GameplayPersona, powers: &BTreeSet<OfficePower>) -> i64 {
     powers
         .iter()
-        .map(|power| match (persona, power) {
-            (GameplayPersona::Steward, OfficePower::PublicWorks)
-            | (GameplayPersona::Entrepreneur, OfficePower::MarketTolls)
-            | (GameplayPersona::PowerBroker, OfficePower::Taxation)
-            | (GameplayPersona::Opportunist, OfficePower::DebtEnforcement) => 500,
-            (GameplayPersona::Steward, OfficePower::EmergencyImports)
-            | (GameplayPersona::Entrepreneur, OfficePower::Licenses)
-            | (GameplayPersona::Opportunist, OfficePower::MarketTolls) => 420,
-            (GameplayPersona::Steward, OfficePower::Inspections) => 300,
-            (GameplayPersona::Entrepreneur, OfficePower::CityContracts)
-            | (GameplayPersona::Opportunist, OfficePower::WatchPriorities) => 360,
-            (GameplayPersona::PowerBroker, OfficePower::PublicWorks) => 440,
-            (GameplayPersona::PowerBroker, OfficePower::DebtEnforcement) => 400,
-            _ => 0,
+        .map(|power| match persona {
+            GameplayPersona::Steward => match power {
+                OfficePower::PublicWorks => 500,
+                OfficePower::EmergencyImports => 420,
+                OfficePower::Inspections => 300,
+                OfficePower::Licenses
+                | OfficePower::MarketTolls
+                | OfficePower::DebtEnforcement
+                | OfficePower::CityContracts
+                | OfficePower::WatchPriorities
+                | OfficePower::Taxation => 0,
+            },
+            GameplayPersona::Entrepreneur => match power {
+                OfficePower::MarketTolls => 500,
+                OfficePower::Licenses => 420,
+                OfficePower::CityContracts => 360,
+                OfficePower::Inspections
+                | OfficePower::DebtEnforcement
+                | OfficePower::PublicWorks
+                | OfficePower::WatchPriorities
+                | OfficePower::Taxation
+                | OfficePower::EmergencyImports => 0,
+            },
+            GameplayPersona::PowerBroker => match power {
+                OfficePower::Taxation => 500,
+                OfficePower::PublicWorks => 440,
+                OfficePower::DebtEnforcement => 400,
+                OfficePower::Licenses
+                | OfficePower::Inspections
+                | OfficePower::MarketTolls
+                | OfficePower::CityContracts
+                | OfficePower::WatchPriorities
+                | OfficePower::EmergencyImports => 0,
+            },
+            GameplayPersona::Opportunist => match power {
+                OfficePower::DebtEnforcement => 500,
+                OfficePower::MarketTolls => 420,
+                OfficePower::WatchPriorities => 360,
+                OfficePower::Licenses
+                | OfficePower::Inspections
+                | OfficePower::CityContracts
+                | OfficePower::PublicWorks
+                | OfficePower::Taxation
+                | OfficePower::EmergencyImports => 0,
+            },
         })
         .max()
         .unwrap_or(0)
@@ -4328,7 +4568,9 @@ fn command_error_category(error: &CommandError) -> String {
         CommandError::InvalidBusinessInvestment => "invalid business investment".to_owned(),
         CommandError::InvalidLawValue { .. } => "invalid law value".to_owned(),
         CommandError::UnchangedLaw { .. } => "unchanged law".to_owned(),
-        CommandError::UnsupportedLaw { .. } => "unsupported law".to_owned(),
+        CommandError::MissingCivicTreasury => "missing civic treasury".to_owned(),
+        CommandError::NoCivicDebtCreditor { .. } => "no civic debt creditor".to_owned(),
+        CommandError::CivicTreasuryOverflow { .. } => "civic treasury overflow".to_owned(),
         CommandError::LawSponsorshipRequiresOffice => "law sponsorship requires office".to_owned(),
         CommandError::LawSponsorshipRequiresPower { .. } => {
             "law sponsorship requires office power".to_owned()
@@ -4391,6 +4633,7 @@ fn command_error_category(error: &CommandError) -> String {
         CommandError::CrisisAlreadyAddressed { .. } => "crisis already addressed".to_owned(),
         CommandError::MissingEmployment { .. } => "missing employment".to_owned(),
         CommandError::InvalidLaborDispute { .. } => "invalid labor dispute".to_owned(),
+        CommandError::LaborWageOverflow { .. } => "labor wage overflow".to_owned(),
         CommandError::NoReplacementLaborAvailable { .. } => {
             "no replacement labor available".to_owned()
         }
@@ -5418,17 +5661,25 @@ fn add_economic_health_findings(
     }
     let defaults: u64 = campaigns
         .iter()
-        .map(|campaign| u64::from(campaign.end.defaulted_loans))
+        .map(|campaign| {
+            u64::from(campaign.end.defaulted_loans)
+                .saturating_add(u64::from(campaign.end.defaulted_civic_debts))
+        })
         .sum();
     let repaid: u64 = campaigns
         .iter()
-        .map(|campaign| u64::from(campaign.end.repaid_loans))
+        .map(|campaign| {
+            u64::from(campaign.end.repaid_loans)
+                .saturating_add(u64::from(campaign.end.repaid_civic_debts))
+        })
         .sum();
     if defaults > repaid && defaults > 0 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Credit defaults outnumber successful repayments".to_owned(),
-            evidence: format!("Observed {defaults} defaulted and {repaid} repaid loans."),
+            evidence: format!(
+                "Observed {defaults} defaulted and {repaid} repaid private or municipal obligations."
+            ),
         });
     }
     let disputed: u64 = campaigns
@@ -6390,6 +6641,8 @@ fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
     let mut breached_contracts = 0_u64;
     let mut repaid_loans = 0_u64;
     let mut defaulted_loans = 0_u64;
+    let mut repaid_civic_debts = 0_u64;
+    let mut defaulted_civic_debts = 0_u64;
     let mut completed_works = 0_u64;
     let mut suspended_works = 0_u64;
     for campaign in &report.campaigns {
@@ -6412,6 +6665,10 @@ fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
             breached_contracts.saturating_add(u64::from(campaign.end.player_breached_contracts));
         repaid_loans = repaid_loans.saturating_add(u64::from(campaign.end.repaid_loans));
         defaulted_loans = defaulted_loans.saturating_add(u64::from(campaign.end.defaulted_loans));
+        repaid_civic_debts =
+            repaid_civic_debts.saturating_add(u64::from(campaign.end.repaid_civic_debts));
+        defaulted_civic_debts =
+            defaulted_civic_debts.saturating_add(u64::from(campaign.end.defaulted_civic_debts));
         completed_works =
             completed_works.saturating_add(u64::from(campaign.end.completed_public_works));
         suspended_works =
@@ -6433,7 +6690,7 @@ fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
     );
     let _ = writeln!(
         output,
-        "  outcomes: player contracts {fulfilled_contracts} fulfilled / {breached_contracts} breached | loans {repaid_loans} repaid / {defaulted_loans} defaulted | public works {completed_works} completed / {suspended_works} suspended\n"
+        "  outcomes: player contracts {fulfilled_contracts} fulfilled / {breached_contracts} breached | private loans {repaid_loans} repaid / {defaulted_loans} defaulted | civic debts {repaid_civic_debts} repaid / {defaulted_civic_debts} defaulted | public works {completed_works} completed / {suspended_works} suspended\n"
     );
 }
 
@@ -6728,6 +6985,11 @@ fn compare_contracts_and_finance(
         || earlier.defaulted_loans != later.defaulted_loans
         || earlier.repaid_loans != later.repaid_loans
         || earlier.total_loan_balance != later.total_loan_balance
+        || earlier.current_civic_debts != later.current_civic_debts
+        || earlier.delinquent_civic_debts != later.delinquent_civic_debts
+        || earlier.defaulted_civic_debts != later.defaulted_civic_debts
+        || earlier.repaid_civic_debts != later.repaid_civic_debts
+        || earlier.total_civic_debt_balance != later.total_civic_debt_balance
     {
         domains.insert(GameplayDomain::Loans);
     }
@@ -6917,6 +7179,16 @@ fn count_loan_status(state: &AppState, status: LoanStatus) -> u16 {
             .loans
             .values()
             .filter(|loan| loan.status == status)
+            .count(),
+    )
+}
+
+fn count_civic_debt_status(state: &AppState, status: CivicDebtStatus) -> u16 {
+    usize_to_u16(
+        state
+            .civic_debts
+            .values()
+            .filter(|debt| debt.status == status)
             .count(),
     )
 }

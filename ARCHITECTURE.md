@@ -35,7 +35,7 @@ Dependency direction is one way:
 | Path | Responsibility |
 |---|---|
 | `src/core/records.rs` | Primary economic and population records. |
-| `src/core/extended.rs` | Strategic records such as laws, loans, property, institutions, relationships, crises, and family state. |
+| `src/core/extended.rs` | Strategic records such as laws, private loans, municipal debt, property, institutions, relationships, crises, and family state. |
 | `src/core/state.rs` | `AppState`, synchronized stores, ID allocation, clock, and public read access. |
 | `src/ids.rs` | Typed persistent identifiers. |
 | `src/money.rs` | Fixed-point `Money`, `Quantity`, cost, affordability, and ratio arithmetic. |
@@ -68,7 +68,7 @@ Registry data must not contain mutable campaign state. Runtime records refer to 
 
 - Clock, RNG state, schema version, and next-ID allocators.
 - Dynasties, characters, households, businesses, and institutions.
-- Market, contracts, loans, property, employment, laws, and relationships.
+- Market, contracts, private loans, municipal debt, property, employment, laws, and relationships.
 - Districts, public works, courts, routes, crises, information, and AI objectives.
 - Outbox, chronicle, and audit history.
 
@@ -162,7 +162,7 @@ Schema changes require a version increment, migration code, migration tests, rou
 
 ### Projection
 
-`build_campaign_projection` converts immutable registry and state data into adapter-safe views. `render_campaign_html` consumes the projection. Projection code may format or aggregate, but it must not mutate state or recreate business rules.
+`build_state_summary` and `build_campaign_projection` convert immutable registry and state data into adapter-safe views, including the municipal debt ledger. `render_campaign_html` consumes the campaign projection. Projection code may format or aggregate, but it must not mutate state or recreate business rules.
 
 ## Determinism contract
 
@@ -231,6 +231,7 @@ Primary entry points:
 - `advance_days`
 - `apply_player_command`
 - `quote_business_acquisition`
+- `build_state_summary`
 - `build_campaign_projection`
 - `render_campaign_html`
 - `save_state` and `load_state`

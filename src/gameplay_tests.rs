@@ -783,6 +783,143 @@ mod candidates {
     }
 
     #[test]
+    fn underfunded_civic_treasury_offers_public_debt_when_credit_is_available() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define a treasury");
+        state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget = Money::ZERO;
+        state
+            .dynasties
+            .values_mut()
+            .find(|dynasty| dynasty.id() != state.player_dynasty_id)
+            .expect("campaign must contain a creditor dynasty")
+            .resources
+            .treasury = Money::from_copper(200_000);
+
+        let candidates = law_candidates(registry, &state);
+
+        assert!(candidates.iter().any(|(kind, value)| {
+            *kind == LawKind::PublicDebtAuthorization && (10_000..=100_000).contains(value)
+        }));
+    }
+
+    #[test]
+    fn officeholders_defer_discretionary_spending_that_consumes_term_reserves() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let reserve = player_office_duty_reserve(&state, 0);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = reserve;
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| property.owner_dynasty_id.is_none())
+            .expect("campaign must contain an unowned property")
+            .id;
+        let candidate = Candidate {
+            kind: GameplayCommandKind::BuyProperty,
+            command: PlayerCommand::BuyProperty { property_id },
+            description: "buy property without preserving office duties".to_owned(),
+            score: 0,
+        };
+
+        assert!(!candidate_preserves_office_duty_reserve(
+            registry, &state, &candidate
+        ));
+    }
+
+    #[test]
+    fn office_reserves_do_not_block_emergency_business_rehabilitation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("player business must exist")
+            .operations
+            .status = BusinessStatus::Distressed;
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(1_000);
+        let candidate = Candidate {
+            kind: GameplayCommandKind::InvestInBusiness,
+            command: PlayerCommand::InvestInBusiness {
+                business_id,
+                amount: Money::from_copper(1_000),
+            },
+            description: "emergency business rehabilitation".to_owned(),
+            score: 0,
+        };
+
+        assert!(candidate_preserves_office_duty_reserve(
+            registry, &state, &candidate
+        ));
+    }
+
+    #[test]
+    fn ordinary_crisis_spending_preserves_office_reserves_but_escalation_can_override_them() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        add_active_crisis(&mut state);
+        let crisis_id = *state
+            .crises
+            .keys()
+            .next_back()
+            .expect("test crisis must exist");
+        let reserve = player_office_duty_reserve(&state, 0);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = reserve;
+        let candidate = Candidate {
+            kind: GameplayCommandKind::RespondToCrisis,
+            command: PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Suppress,
+            },
+            description: "suppress a crisis".to_owned(),
+            score: 0,
+        };
+
+        assert!(!candidate_preserves_office_duty_reserve(
+            registry, &state, &candidate
+        ));
+
+        let crisis = state
+            .crises
+            .get_mut(&crisis_id)
+            .expect("test crisis must exist");
+        crisis.severity_basis_points = 8_000;
+        crisis.status = CrisisStatus::Escalated;
+        assert!(candidate_preserves_office_duty_reserve(
+            registry, &state, &candidate
+        ));
+    }
+
+    #[test]
     fn severe_business_rehabilitation_can_use_treasury_above_household_emergency_reserve() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -840,7 +977,35 @@ mod candidates {
         generate_legal_candidates(&state, GameplayPersona::PowerBroker, &mut candidates);
         assert!(
             candidates.is_empty(),
-            "agents must not manufacture quarterly lawsuits without a debt, breach, or hostile relationship"
+            "agents must not manufacture quarterly lawsuits without a default or attributable breach"
+        );
+
+        let unattributed_contract_id = state
+            .contracts
+            .values()
+            .find(|contract| {
+                state
+                    .businesses
+                    .get(contract.buyer_business_id)
+                    .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+                    || state
+                        .businesses
+                        .get(contract.seller_business_id)
+                        .is_some_and(|business| {
+                            business.owner_dynasty_id() == state.player_dynasty_id
+                        })
+            })
+            .expect("campaign must contain a player contract")
+            .id;
+        state
+            .contracts
+            .get_mut(&unattributed_contract_id)
+            .expect("player contract must exist")
+            .status = ContractStatus::Breached;
+        generate_legal_candidates(&state, GameplayPersona::PowerBroker, &mut candidates);
+        assert!(
+            candidates.is_empty(),
+            "an unattributed breach must not cause the agent to accuse an arbitrary counterparty"
         );
 
         let defendant_id = make_player_contract_breached(&mut state);
@@ -967,6 +1132,16 @@ mod metrics {
         assert!(domains.contains(&GameplayDomain::Dynasty));
         assert!(domains.contains(&GameplayDomain::Law));
         assert!(domains.contains(&GameplayDomain::Districts));
+
+        let mut debt_change = earlier.clone();
+        debt_change.current_civic_debts += 1;
+        debt_change.total_civic_debt_balance = Money::from_copper(10_000);
+        assert!(
+            earlier
+                .changed_domains(&debt_change)
+                .contains(&GameplayDomain::Loans),
+            "municipal debt changes must be attributed to the finance domain"
+        );
     }
 
     #[test]
@@ -2192,5 +2367,10 @@ fn make_player_contract_breached(state: &mut AppState) -> DynastyId {
         .get_mut(&contract_id)
         .expect("selected contract must exist")
         .status = ContractStatus::Breached;
+    state
+        .contracts
+        .get_mut(&contract_id)
+        .expect("selected contract must exist")
+        .breaching_dynasty_id = Some(defendant_id);
     defendant_id
 }

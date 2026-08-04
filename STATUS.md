@@ -22,9 +22,9 @@ The engine supports multi-generation campaigns and preserves all consequential s
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 9 |
-| Supported save migrations | Versions 0 through 8 |
-| Gameplay report schema | 17 |
+| Save schema | 11 |
+| Supported save migrations | Versions 0 through 10 |
+| Gameplay report schema | 18 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |
@@ -47,8 +47,9 @@ The engine supports multi-generation campaigns and preserves all consequential s
 
 ### Contracts, finance, property, and labor
 
-- Supply contracts with scheduled delivery, payment, penalties, fulfillment, breach, and termination.
+- Supply contracts with scheduled delivery, payment, penalties, fulfillment, durable breach attribution, and termination.
 - Loans with interest, repayment, delinquency, default, collateral, seizure, and repayment.
+- Municipal debt with explicit authorizing laws, concrete dynasty creditors, treasury proceeds, scheduled interest and repayment, delinquency, default, and civic consequences.
 - Property ownership, tenancy, occupancy, rent, value, purchase, and collateral relationships.
 - Employment agreements with worker capacity, wages, loyalty, conditions, disputes, suspension, recovery, and player responses.
 
@@ -57,7 +58,7 @@ The engine supports multi-generation campaigns and preserves all consequential s
 - Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions.
 - Membership, officeholders, budgets, legitimacy, powers, terms, institution-specific electoral competence, and deterministic elections.
 - Monthly office duties funded from the officeholder dynasty, administrative strain from public service, standing penalties for shortfalls, and forced forfeiture after repeated failure.
-- Laws affecting prices, imports, interest, tolls, fire safety, rents, and guild conditions.
+- Laws affecting prices, imports, interest, tolls, fire safety, rents, guild conditions, and municipal borrowing.
 - District employment, sanitation, safety, rent pressure, food satisfaction, unrest, and political support.
 - Public works with budgets, spending, progress, completion, and persistent district effects.
 - Legal cases with evidence, hearings, judgments, and damages.
@@ -88,6 +89,7 @@ The supported library facade is exported from `src/lib.rs`:
 - `advance_days`
 - `apply_player_command`
 - `quote_business_acquisition`
+- `build_state_summary`
 - `build_campaign_projection`
 - `render_campaign_html`
 - `save_state` and `load_state`
@@ -101,7 +103,7 @@ The authoritative player command schema is `PlayerCommand` in `src/systems/comma
 Save and load support:
 
 - Exact state round trips for the current schema.
-- Deterministic migrations from schema versions 0 through 8.
+- Deterministic migrations from schema versions 0 through 10.
 - Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, and ID allocation.
 - Preservation of RNG state and all generated records required for deterministic continuation.
 - Same-directory temporary writes, synchronization, and atomic replacement.
@@ -126,7 +128,6 @@ The current architecture enforces:
 
 The following areas are outside the implemented contract or remain reserved for later expansion:
 
-- `PublicDebtAuthorization` has no civic debt ledger and is rejected as an active law.
 - External powers are represented through routes, demands, and crises rather than a full diplomatic simulation.
 - Religion and charity are institutionally represented but do not yet implement the full doctrinal and faction scope described in `DESIGN.md`.
 - The repository has no interactive graphical client. Current clients are the CLI, JSON projection, and HTML dashboard.
@@ -137,13 +138,15 @@ The following areas are outside the implemented contract or remain reserved for 
 
 Verified on August 4, 2026:
 
-- 286 non-ignored library tests pass.
+- 308 non-ignored library tests pass.
 - 2 deterministic long-horizon soak tests pass.
 - Documentation tests pass.
 - Release-mode library tests pass.
 - CLI creation, simulation, command execution, summary, inspection, dashboard, validation, playtest, and invalid-input smoke checks pass.
 - Strict Clippy and rustdoc warning gates pass.
 - The locked dependency graph contains 42 packages, no duplicate versions, and no RustSec advisories.
+- The release gameplay matrix covers 144 campaigns and 155,520 simulated days with no warning or critical findings.
+- An additional ten-year matrix covers 36 campaigns and 129,600 simulated days, exercises event-driven legal cases, and reports no warning or critical findings.
 
 The authoritative release gate is documented in `TESTING.md`.
 
@@ -154,7 +157,6 @@ Expansion should add new institutional interactions rather than parallel systems
 - Additional Rivergate content and authored strategic variation
 - New constitutions and office structures
 - Deeper religion, charity, and legitimacy conflicts
-- Municipal debt with a single explicit ledger
 - Additional regional trade and external-power behavior
 - New read-only or interactive clients built on the existing command and projection APIs
 - New scenarios using the same Registry / AppState / System architecture

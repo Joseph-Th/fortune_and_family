@@ -266,7 +266,7 @@ Credit should include:
 - Delinquency, restructuring, default, seizure, and reputation consequences.
 - Lending as a source of information, dependency, and political leverage.
 
-Municipal debt is valid expansion scope only when represented by one explicit civic ledger with concrete creditors, obligations, and policy effects.
+Municipal debt uses one explicit civic ledger with concrete dynasty creditors, authorizing laws, repayment obligations, and policy effects. It must not be duplicated as an unrelated treasury aggregate.
 
 ### Property and urban development
 

@@ -1169,9 +1169,140 @@ mod laws {
     }
 
     #[test]
-    fn reject_unsupported_kind_without_spending_or_mutation() {
+    fn public_debt_authorization_funds_the_civic_treasury_and_creates_an_obligation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
+        grant_player_office_with_power_for_test(&mut state, OfficePower::Taxation);
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define the civic treasury");
+        let civic_budget_before = state
+            .institutions
+            .get(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget;
+        let player_treasury_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
+        let creditor_treasuries_before = state
+            .dynasties
+            .iter()
+            .filter(|(dynasty_id, _)| **dynasty_id != state.player_dynasty_id)
+            .map(|(dynasty_id, dynasty)| (*dynasty_id, dynasty.treasury()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EnactLaw {
+                kind: LawKind::PublicDebtAuthorization,
+                value: 10_000,
+            },
+        )
+        .expect("public debt authorization must issue a civic obligation");
+        validate_invariants(registry, &state);
+
+        let debt = state
+            .civic_debts
+            .values()
+            .next()
+            .expect("debt authorization must create a civic debt record");
+        let law = state
+            .laws
+            .get(&debt.authorizing_law_id)
+            .expect("civic debt must reference its authorizing law");
+        assert_eq!(law.kind, LawKind::PublicDebtAuthorization);
+        assert!(
+            !law.active,
+            "a one-time borrowing authorization must be consumed when the debt is issued"
+        );
+        assert_eq!(debt.principal, Money::from_copper(10_000));
+        assert_eq!(debt.balance, debt.principal);
+        assert_eq!(debt.sponsor_dynasty_id, Some(state.player_dynasty_id));
+        assert_eq!(
+            state
+                .institutions
+                .get(&treasury_id)
+                .expect("treasury runtime must exist")
+                .budget,
+            civic_budget_before.saturating_add(debt.principal),
+            "debt proceeds must enter the civic treasury"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&debt.creditor_dynasty_id)
+                .expect("creditor dynasty must exist")
+                .treasury(),
+            creditor_treasuries_before[&debt.creditor_dynasty_id].saturating_sub(debt.principal),
+            "the creditor must fund the principal"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            player_treasury_before.saturating_sub(Money::from_copper(2_000)),
+            "the sponsor must still pay the law-enactment cost"
+        );
+        assert!(state.information_reports.values().any(|report| {
+            report.owner_dynasty_id == state.player_dynasty_id
+                && report.source == "Municipal debt underwriting and treasury records"
+        }));
+    }
+
+    #[test]
+    fn consumed_public_debt_authorization_can_be_reissued_at_the_same_amount() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_with_power_for_test(&mut state, OfficePower::Taxation);
+        let command = PlayerCommand::EnactLaw {
+            kind: LawKind::PublicDebtAuthorization,
+            value: 10_000,
+        };
+
+        apply_player_command(registry, &mut state, command.clone())
+            .expect("first public debt authorization must succeed");
+        for _ in 0..LAW_SPONSORSHIP_INTERVAL_DAYS {
+            state.clock.advance_one_day();
+        }
+        apply_player_command(registry, &mut state, command)
+            .expect("a consumed authorization must not block a later issuance at the same amount");
+
+        assert_eq!(state.civic_debts.len(), 2);
+        assert_eq!(
+            state
+                .laws
+                .values()
+                .filter(|law| law.kind == LawKind::PublicDebtAuthorization)
+                .count(),
+            2
+        );
+        assert!(
+            state
+                .laws
+                .values()
+                .filter(|law| law.kind == LawKind::PublicDebtAuthorization)
+                .all(|law| !law.active)
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn public_debt_authorization_rejects_missing_credit_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_with_power_for_test(&mut state, OfficePower::Taxation);
+        for dynasty in state
+            .dynasties
+            .values_mut()
+            .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
+        {
+            dynasty.resources.treasury = Money::from_copper(10_000);
+        }
         let before = state.clone();
 
         let result = apply_player_command(
@@ -1185,14 +1316,14 @@ mod laws {
 
         assert_eq!(
             result,
-            Err(CommandError::UnsupportedLaw {
-                kind: LawKind::PublicDebtAuthorization,
+            Err(CommandError::NoCivicDebtCreditor {
+                required: Money::from_copper(10_000),
             })
         );
         assert_state_unchanged(
             &before,
             &state,
-            "unsupported laws must fail before charging or mutating state",
+            "failed civic debt underwriting must not charge or mutate any record",
         );
     }
 
@@ -1203,9 +1334,9 @@ mod laws {
         let (kind, value) = state
             .laws
             .values()
-            .find(|law| law.active && law.kind.is_implemented())
+            .find(|law| law.active)
             .map(|law| (law.kind, law.value))
-            .expect("campaign must contain an active implemented law");
+            .expect("campaign must contain an active law");
         let before = state.clone();
 
         let result = apply_player_command(
@@ -2472,6 +2603,47 @@ mod labor {
         assert!(agreement.loyalty_basis_points >= 4_500);
         assert!(
             agreement.conditions_basis_points >= crate::systems::EMPLOYMENT_RECOVERY_BASIS_POINTS
+        );
+    }
+
+    #[test]
+    fn negotiation_rejects_wage_overflow_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (employment_id, business_id) = disputed_player_employment(&mut state);
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("employment business must exist")
+            .finance
+            .cash = Money::from_copper(2_000);
+        state
+            .employment
+            .get_mut(&employment_id)
+            .expect("employment must exist")
+            .weekly_wage = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::ResolveLaborDispute {
+                employment_id,
+                response: LaborResponse::Negotiate,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::LaborWageOverflow {
+                employment_id,
+                current: Money::from_copper(i64::MAX),
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing wage negotiations must fail before charging the business or changing employment",
         );
     }
 

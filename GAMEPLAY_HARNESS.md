@@ -102,7 +102,7 @@ Candidate generation covers the exposed player command surface:
 
 - Dynasty capitalization, business acquisition, cash transfer, and operating policy
 - Input supply, output sale, borrowing, lending, and property acquisition
-- Laws and public works authorized by the powers of offices actually held
+- Laws, municipal debt issuance, and public works authorized by the powers of offices actually held
 - Legal cases, governance, ward adoption, family education, and persona-specific office nomination
 - Crisis response, labor-dispute response, and notification acknowledgement
 

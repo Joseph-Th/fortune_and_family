@@ -5,12 +5,13 @@ mod records;
 mod state;
 
 pub use extended::{
-    AiObjective, ContractStatus, Crisis, CrisisKind, CrisisStatus, DistrictRuntime, DynastyPair,
-    EmploymentAgreement, EmploymentStatus, EnactedLaw, ExternalRoute, FamilyCouncilState,
-    FamilyLink, FamilyLinkKind, HouseGovernance, InformationConfidence, InformationReport,
-    InstitutionRuntime, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus, Loan, LoanStatus,
-    ObjectiveKind, ObjectiveStatus, OfficePower, OutboxKind, OutboxMessage, Property, PropertyKind,
-    PublicWork, PublicWorkKind, PublicWorkStatus, RelationshipState, SupplyContract,
+    AiObjective, CivicDebt, CivicDebtStatus, ContractStatus, Crisis, CrisisKind, CrisisStatus,
+    DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw, ExternalRoute,
+    FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance, InformationConfidence,
+    InformationReport, InstitutionRuntime, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus,
+    Loan, LoanStatus, ObjectiveKind, ObjectiveStatus, OfficePower, OutboxKind, OutboxMessage,
+    Property, PropertyKind, PublicWork, PublicWorkKind, PublicWorkStatus, RelationshipState,
+    SupplyContract,
 };
 
 pub use records::{
@@ -23,8 +24,8 @@ pub(crate) use records::{
     CharacterIdentity, CharacterRuntime, DynastyIdentity, DynastyRelationships, DynastyResources,
     DynastyRuntime,
 };
-pub(crate) use state::NextIds;
 pub use state::{
     AppState, BusinessStore, CURRENT_SCHEMA_VERSION, CharacterStore, HouseholdStore, NewGameConfig,
-    SimulationClock, StateSummary,
+    SimulationClock,
 };
+pub(crate) use state::{NextIds, population_weighted_food_satisfaction_basis_points};

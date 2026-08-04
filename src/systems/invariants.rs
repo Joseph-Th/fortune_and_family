@@ -1,8 +1,9 @@
 //! Debug-only assertions for registry, reference, index, lifecycle, and value invariants.
 
 use crate::core::{
-    AppState, Business, CharacterStatus, ContractStatus, CrisisStatus, EmploymentStatus,
-    FamilyLinkKind, LegalCaseStatus, LoanStatus, ObjectiveStatus, PublicWorkStatus,
+    AppState, Business, CharacterStatus, CivicDebtStatus, ContractStatus, CrisisStatus,
+    EmploymentStatus, FamilyLinkKind, LegalCaseStatus, LoanStatus, ObjectiveStatus,
+    PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, DistrictId, DynastyId, GoodId, HouseholdId, InstitutionId, RecipeId,
@@ -473,6 +474,7 @@ fn validate_institutions(state: &AppState, ids: &RegistryIds) {
 fn validate_strategic_state(registry: &Registry, state: &AppState, ids: &RegistryIds) {
     validate_contracts(registry, state, ids);
     validate_loans_and_properties(state, ids);
+    validate_civic_debts(state);
     validate_employment(state);
     validate_family_state(state);
     validate_laws_and_relationships(state);
@@ -522,6 +524,13 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
         debug_assert!(
             contract.next_due_day <= contract.end_day || contract.status != ContractStatus::Active,
             "Lifecycle Validity: active contract due date exceeds its term"
+        );
+        debug_assert!(
+            contract.breaching_dynasty_id.is_none_or(|dynasty_id| {
+                contract.status == ContractStatus::Breached
+                    && state.dynasties.contains_key(&dynasty_id)
+            }),
+            "Lifecycle Validity: contract breach attribution is inconsistent with its parties"
         );
         if let Some(seller) = seller {
             let recipe = registry
@@ -722,6 +731,76 @@ fn validate_loans(state: &AppState) {
     }
 }
 
+fn validate_civic_debts(state: &AppState) {
+    for (debt_id, debt) in &state.civic_debts {
+        debug_assert_eq!(
+            *debt_id, debt.id,
+            "Derived Data Consistency: civic debt key and record ID differ"
+        );
+        debug_assert!(
+            state.dynasties.contains_key(&debt.creditor_dynasty_id),
+            "Record Reference Validity: civic debt creditor dynasty does not exist"
+        );
+        debug_assert_ne!(
+            debt.sponsor_dynasty_id,
+            Some(debt.creditor_dynasty_id),
+            "Ownership Exclusivity: civic debt sponsor cannot also be its creditor"
+        );
+        let authorizing_law = state.laws.get(&debt.authorizing_law_id);
+        debug_assert!(
+            authorizing_law.is_some_and(|law| {
+                law.kind == crate::core::LawKind::PublicDebtAuthorization
+                    && law.sponsor_dynasty_id == debt.sponsor_dynasty_id
+                    && law.value == debt.principal.copper()
+            }),
+            "Record Reference Validity: civic debt authorization is missing or inconsistent"
+        );
+        debug_assert!(
+            debt.sponsor_dynasty_id
+                .is_none_or(|dynasty_id| state.dynasties.contains_key(&dynasty_id)),
+            "Record Reference Validity: civic debt sponsor dynasty does not exist"
+        );
+        debug_assert!(
+            debt.principal > crate::money::Money::ZERO
+                && debt.weekly_payment > crate::money::Money::ZERO,
+            "Lifecycle Validity: civic debt principal and payment must remain positive"
+        );
+        debug_assert!(
+            !debt.balance.is_negative() && debt.interest_basis_points <= 10_000,
+            "Lifecycle Validity: civic debt balance or interest is invalid"
+        );
+        debug_assert!(
+            debt.issued_day <= state.clock.day() && debt.next_due_day >= debt.issued_day,
+            "Lifecycle Validity: civic debt dates are invalid"
+        );
+        match debt.status {
+            CivicDebtStatus::Current => debug_assert!(
+                debt.balance > crate::money::Money::ZERO && debt.missed_payments == 0,
+                "Lifecycle Validity: current civic debt has invalid balance or arrears"
+            ),
+            CivicDebtStatus::Delinquent => debug_assert!(
+                debt.balance > crate::money::Money::ZERO && (1..3).contains(&debt.missed_payments),
+                "Lifecycle Validity: delinquent civic debt has invalid balance or arrears"
+            ),
+            CivicDebtStatus::Defaulted => debug_assert!(
+                debt.balance > crate::money::Money::ZERO && debt.missed_payments >= 3,
+                "Lifecycle Validity: defaulted civic debt has invalid balance or arrears"
+            ),
+            CivicDebtStatus::Repaid => {
+                debug_assert_eq!(
+                    debt.balance,
+                    crate::money::Money::ZERO,
+                    "Lifecycle Validity: repaid civic debt retains a balance"
+                );
+                debug_assert_eq!(
+                    debt.missed_payments, 0,
+                    "Lifecycle Validity: repaid civic debt retains arrears"
+                );
+            }
+        }
+    }
+}
+
 fn validate_employment(state: &AppState) {
     let mut workers_by_business: BTreeMap<BusinessId, u32> = BTreeMap::new();
     let mut workers_by_household: BTreeMap<HouseholdId, u32> = BTreeMap::new();
@@ -894,12 +973,12 @@ fn validate_laws_and_relationships(state: &AppState) {
             "No Lost Runtime State: law is enacted after current simulation time"
         );
         debug_assert!(
-            !law.active || law.kind.is_implemented(),
-            "Lifecycle Validity: active law kind is not implemented"
-        );
-        debug_assert!(
             law.kind.is_value_valid(law.value),
             "Lifecycle Validity: law value is invalid for its kind"
+        );
+        debug_assert!(
+            !law.active || law.kind.remains_active_after_enactment(),
+            "Lifecycle Validity: one-time law authorization remains active after enactment"
         );
         if law.active {
             debug_assert!(

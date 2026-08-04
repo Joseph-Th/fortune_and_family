@@ -1,19 +1,142 @@
 //! Read-only causal projections and a self-contained HTML campaign dashboard.
 
 use crate::core::{
-    AppState, BusinessStatus, CampaignPhase, ContractStatus, CrisisKind, CrisisStatus,
-    InformationConfidence, LawKind, LegalCaseStatus, LoanStatus, MarketCause, ObjectiveKind,
-    ObjectiveStatus, OutboxKind, PublicWorkKind, PublicWorkStatus,
+    AppState, BusinessStatus, CampaignPhase, CivicDebtStatus, ContractStatus, CrisisKind,
+    CrisisStatus, InformationConfidence, LawKind, LegalCaseStatus, LoanStatus, MarketCause,
+    ObjectiveKind, ObjectiveStatus, OutboxKind, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
-    BusinessId, ContractId, CrisisId, DistrictId, DynastyId, InstitutionId, LawId, LegalCaseId,
-    LoanId, PropertyId, PublicWorkId,
+    BusinessId, CivicDebtId, ContractId, CrisisId, DistrictId, DynastyId, InstitutionId, LawId,
+    LegalCaseId, LoanId, PropertyId, PublicWorkId,
 };
 use crate::money::{Money, Quantity};
 use crate::registry::Registry;
 use crate::systems::{dynasty_office_administrative_load, quote_business_acquisition};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSummary {
+    pub scenario_name: String,
+    pub year: i32,
+    pub day_of_year: u16,
+    pub elapsed_days: i64,
+    pub dynasty_name: String,
+    pub phase: CampaignPhase,
+    pub dynasty_treasury: Money,
+    pub business_cash: Money,
+    pub businesses: usize,
+    pub active_businesses: usize,
+    pub population_groups: usize,
+    pub average_food_satisfaction_basis_points: u16,
+    pub chronicle_entries: usize,
+    pub active_contracts: usize,
+    pub current_loans: usize,
+    pub outstanding_civic_debts: usize,
+    pub civic_debt_balance: Money,
+    pub properties: usize,
+    pub active_crises: usize,
+    pub unread_notifications: usize,
+}
+
+/// Builds the compact read-only summary used by user-interface adapters.
+///
+/// # Panics
+///
+/// Panics when the player dynasty reference or a derived numeric invariant is corrupt.
+#[must_use]
+pub fn build_state_summary(registry: &Registry, state: &AppState) -> StateSummary {
+    let dynasty = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    let business_ids = state
+        .businesses
+        .ids_for_owner(state.player_dynasty_id)
+        .map_or(0, std::collections::BTreeSet::len);
+    let active_businesses = state
+        .businesses
+        .ids_for_owner(state.player_dynasty_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.businesses.get(*id))
+        .filter(|business| business.status() == BusinessStatus::Active)
+        .count();
+    let business_cash = state
+        .businesses
+        .ids_for_owner(state.player_dynasty_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.businesses.get(*id))
+        .fold(Money::ZERO, |total, business| {
+            total.saturating_add(business.cash())
+        });
+    let average_food_satisfaction_basis_points =
+        crate::core::population_weighted_food_satisfaction_basis_points(state.households.iter())
+            .unwrap_or(0);
+
+    StateSummary {
+        scenario_name: registry.scenario().name().to_owned(),
+        year: state.clock.year(registry.scenario().start_year()),
+        day_of_year: state.clock.day_of_year(),
+        elapsed_days: state.clock.day(),
+        dynasty_name: dynasty.name().to_owned(),
+        phase: dynasty.phase(),
+        dynasty_treasury: dynasty.treasury(),
+        business_cash,
+        businesses: business_ids,
+        active_businesses,
+        population_groups: state.households.records().len(),
+        average_food_satisfaction_basis_points,
+        chronicle_entries: state.chronicle.len(),
+        active_contracts: state
+            .contracts
+            .values()
+            .filter(|contract| contract.status() == ContractStatus::Active)
+            .count(),
+        current_loans: state
+            .loans
+            .values()
+            .filter(|loan| {
+                matches!(
+                    loan.status(),
+                    LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
+                )
+            })
+            .count(),
+        outstanding_civic_debts: state
+            .civic_debts
+            .values()
+            .filter(|debt| debt.status != CivicDebtStatus::Repaid)
+            .count(),
+        civic_debt_balance: state
+            .civic_debts
+            .values()
+            .filter(|debt| debt.status != CivicDebtStatus::Repaid)
+            .fold(Money::ZERO, |total, debt| {
+                total.saturating_add(debt.balance)
+            }),
+        properties: state.properties.len(),
+        active_crises: state
+            .crises
+            .values()
+            .filter(|crisis| crisis.status.is_active())
+            .count(),
+        unread_notifications: state
+            .outbox
+            .iter()
+            .filter(|message| !message.acknowledged)
+            .count(),
+    }
+}
+
+impl AppState {
+    /// Builds the compact read-only summary used by user-interface adapters.
+    #[must_use]
+    pub fn summary(&self, registry: &Registry) -> StateSummary {
+        build_state_summary(registry, self)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CampaignProjection {
@@ -25,6 +148,7 @@ pub struct CampaignProjection {
     pub market: Vec<MarketProjection>,
     pub contracts: Vec<ContractProjection>,
     pub loans: Vec<LoanProjection>,
+    pub civic_debts: Vec<CivicDebtProjection>,
     pub properties: Vec<PropertyProjection>,
     pub institutions: Vec<InstitutionProjection>,
     pub laws: Vec<LawProjection>,
@@ -153,6 +277,8 @@ pub struct ContractProjection {
     pub status: ContractStatus,
     pub fulfilled_deliveries: u16,
     pub missed_deliveries: u16,
+    pub breaching_dynasty_id: Option<DynastyId>,
+    pub breaching_dynasty: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -166,6 +292,23 @@ pub struct LoanProjection {
     pub interest_basis_points: u16,
     pub status: LoanStatus,
     pub collateral_property_id: Option<PropertyId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CivicDebtProjection {
+    pub id: CivicDebtId,
+    pub creditor_dynasty_id: DynastyId,
+    pub creditor: String,
+    pub sponsor: Option<String>,
+    pub authorizing_law_id: LawId,
+    pub principal: Money,
+    pub balance: Money,
+    pub weekly_payment: Money,
+    pub interest_basis_points: u16,
+    pub issued_day: i64,
+    pub next_due_day: i64,
+    pub missed_payments: u8,
+    pub status: CivicDebtStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -276,7 +419,7 @@ pub struct NotificationProjection {
 /// Panics when runtime references violate the invariants required by the projection.
 #[must_use]
 pub fn build_campaign_projection(registry: &Registry, state: &AppState) -> CampaignProjection {
-    let summary = state.summary(registry);
+    let summary = build_state_summary(registry, state);
     let dynasties = state
         .dynasties
         .values()
@@ -304,6 +447,7 @@ pub fn build_campaign_projection(registry: &Registry, state: &AppState) -> Campa
         market: build_market_projections(registry, state),
         contracts: build_contract_projections(registry, state),
         loans: build_loan_projections(state),
+        civic_debts: build_civic_debt_projections(state),
         properties: build_property_projections(registry, state),
         institutions: build_institution_projections(registry, state),
         laws: build_law_projections(state),
@@ -465,15 +609,10 @@ fn build_district_projections(registry: &Registry, state: &AppState) -> Vec<Dist
                 .flatten()
                 .filter_map(|id| state.households.get(*id))
                 .collect::<Vec<_>>();
-            let food = if households.is_empty() {
-                0
-            } else {
-                let total: u64 = households
-                    .iter()
-                    .map(|household| u64::from(household.food_satisfaction_basis_points()))
-                    .sum();
-                u16::try_from(total / households.len() as u64).unwrap_or(0)
-            };
+            let food = crate::core::population_weighted_food_satisfaction_basis_points(
+                households.iter().copied(),
+            )
+            .unwrap_or(0);
             DistrictProjection {
                 id: definition.id(),
                 name: definition.name().to_owned(),
@@ -638,6 +777,15 @@ fn build_contract_projections(registry: &Registry, state: &AppState) -> Vec<Cont
             status: contract.status,
             fulfilled_deliveries: contract.fulfilled_deliveries,
             missed_deliveries: contract.missed_deliveries,
+            breaching_dynasty_id: contract.breaching_dynasty_id,
+            breaching_dynasty: contract.breaching_dynasty_id.map(|dynasty_id| {
+                state
+                    .dynasties
+                    .get(&dynasty_id)
+                    .expect("contract breaching dynasty must exist")
+                    .name()
+                    .to_owned()
+            }),
         })
         .collect()
 }
@@ -666,6 +814,40 @@ fn build_loan_projections(state: &AppState) -> Vec<LoanProjection> {
             interest_basis_points: loan.interest_basis_points,
             status: loan.status,
             collateral_property_id: loan.collateral_property_id,
+        })
+        .collect()
+}
+
+fn build_civic_debt_projections(state: &AppState) -> Vec<CivicDebtProjection> {
+    state
+        .civic_debts
+        .values()
+        .map(|debt| CivicDebtProjection {
+            id: debt.id,
+            creditor_dynasty_id: debt.creditor_dynasty_id,
+            creditor: state
+                .dynasties
+                .get(&debt.creditor_dynasty_id)
+                .expect("civic debt creditor must exist")
+                .name()
+                .to_owned(),
+            sponsor: debt.sponsor_dynasty_id.map(|dynasty_id| {
+                state
+                    .dynasties
+                    .get(&dynasty_id)
+                    .expect("civic debt sponsor must exist")
+                    .name()
+                    .to_owned()
+            }),
+            authorizing_law_id: debt.authorizing_law_id,
+            principal: debt.principal,
+            balance: debt.balance,
+            weekly_payment: debt.weekly_payment,
+            interest_basis_points: debt.interest_basis_points,
+            issued_day: debt.issued_day,
+            next_due_day: debt.next_due_day,
+            missed_payments: debt.missed_payments,
+            status: debt.status,
         })
         .collect()
 }
@@ -852,6 +1034,7 @@ pub fn render_campaign_html(
     let district_rows = render_district_rows(&projection.districts);
     let business_rows = render_business_rows(&projection.businesses);
     let market_rows = render_market_rows(&projection.market);
+    let civic_debt_rows = render_civic_debt_rows(&projection.civic_debts);
     let relationship_rows = render_relationship_rows(&projection.relationships);
     let alerts = render_notifications(&projection.notifications);
     Ok(format!(
@@ -872,11 +1055,13 @@ pub fn render_campaign_html(
 <div class="grid">
 <section><small>Player dynasty</small><h2>House {player}</h2><div class="metric">{treasury}</div><p>Administrative load {load}/{capacity}, including {office_load} from offices</p><p>{contributions} in civic duties · {unmet_duties} unmet duties</p></section>
 <section><small>Commercial position</small><div class="metric">{businesses} businesses</div><p>{properties} properties · {loans} current borrowing relationships</p></section>
+<section><small>Municipal finance</small><div class="metric">{civic_debt_balance}</div><p>{civic_debts} outstanding civic obligations</p></section>
 <section><small>Civic condition</small><div class="metric">{food:.1}% food satisfaction</div><p>{crises} active crises</p></section>
 </div>
 <h2>Businesses</h2><section class="scroll"><table><thead><tr><th>Business</th><th>Owner</th><th>Status</th><th>Cash</th><th>Condition</th><th>Policy</th><th>Manager</th><th>Acquisition</th></tr></thead><tbody>{business_rows}</tbody></table></section>
 <h2>Districts</h2><section class="scroll"><table><thead><tr><th>District</th><th>Food</th><th>Employment</th><th>Sanitation</th><th>Unrest</th><th>Causes</th></tr></thead><tbody>{district_rows}</tbody></table></section>
 <h2>Market</h2><section class="scroll"><table><thead><tr><th>Good</th><th>Price</th><th>Stock</th><th>Causes</th></tr></thead><tbody>{market_rows}</tbody></table></section>
+<h2>Municipal debt</h2><section class="scroll"><table><thead><tr><th>Creditor</th><th>Principal</th><th>Balance</th><th>Weekly payment</th><th>Interest</th><th>Status</th><th>Next due</th></tr></thead><tbody>{civic_debt_rows}</tbody></table></section>
 <h2>Dynasty relationships</h2><section class="scroll"><table><thead><tr><th>House</th><th>Trust</th><th>Respect</th><th>Fear</th><th>Resentment</th><th>Obligation</th><th>Last interaction</th></tr></thead><tbody>{relationship_rows}</tbody></table></section>
 <h2>Recent notices</h2><div class="grid">{alerts}</div>
 <h2>Embedded projection</h2><section><pre id="data"></pre></section>
@@ -899,9 +1084,48 @@ pub fn render_campaign_html(
         businesses = player.businesses,
         properties = player.properties,
         loans = player.current_loans_as_borrower,
+        civic_debts = projection
+            .civic_debts
+            .iter()
+            .filter(|debt| debt.status != CivicDebtStatus::Repaid)
+            .count(),
+        civic_debt_balance = projection
+            .civic_debts
+            .iter()
+            .filter(|debt| debt.status != CivicDebtStatus::Repaid)
+            .fold(Money::ZERO, |total, debt| total
+                .saturating_add(debt.balance)),
         food = f64::from(projection.scenario.average_food_satisfaction_basis_points) / 100.0,
         crises = projection.scenario.active_crises,
     ))
+}
+
+fn render_civic_debt_rows(debts: &[CivicDebtProjection]) -> String {
+    if debts.is_empty() {
+        return "<tr><td colspan=\"7\">No municipal debt has been issued.</td></tr>".to_owned();
+    }
+    let mut rows = String::new();
+    for debt in debts {
+        let next_due = match debt.status {
+            CivicDebtStatus::Current | CivicDebtStatus::Delinquent => {
+                format!("day {}", debt.next_due_day)
+            }
+            CivicDebtStatus::Defaulted | CivicDebtStatus::Repaid => "none".to_owned(),
+        };
+        write!(
+            rows,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.1}%</td><td>{:?}</td><td>{}</td></tr>",
+            escape_html(&debt.creditor),
+            debt.principal,
+            debt.balance,
+            debt.weekly_payment,
+            f64::from(debt.interest_basis_points) / 100.0,
+            debt.status,
+            next_due,
+        )
+        .expect("writing HTML into a String cannot fail");
+    }
+    rows
 }
 
 fn render_relationship_rows(relationships: &[RelationshipProjection]) -> String {

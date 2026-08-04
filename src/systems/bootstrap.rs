@@ -165,6 +165,7 @@ fn empty_state(registry: &Registry, seed: u64) -> AppState {
         market,
         contracts: BTreeMap::new(),
         loans: BTreeMap::new(),
+        civic_debts: BTreeMap::new(),
         properties: BTreeMap::new(),
         employment: BTreeMap::new(),
         family_links: BTreeMap::new(),

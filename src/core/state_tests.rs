@@ -6,6 +6,55 @@ use crate::test_support::{
     assert_state_eq, make_test_campaign, make_test_campaign_with, rivergate_registry_for_test,
 };
 
+mod aggregates {
+    use super::*;
+
+    #[test]
+    fn food_satisfaction_is_weighted_by_household_population() {
+        let mut state = make_test_campaign();
+        let household_ids = state
+            .households
+            .iter()
+            .take(2)
+            .map(Household::id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            household_ids.len(),
+            2,
+            "campaign must contain two households"
+        );
+        {
+            let first = state
+                .households
+                .get_mut(household_ids[0])
+                .expect("first household must exist");
+            first.members = 1;
+            first.food_satisfaction_basis_points = 0;
+        }
+        {
+            let second = state
+                .households
+                .get_mut(household_ids[1])
+                .expect("second household must exist");
+            second.members = 9;
+            second.food_satisfaction_basis_points = 10_000;
+        }
+
+        let satisfaction = population_weighted_food_satisfaction_basis_points([
+            state
+                .households
+                .get(household_ids[0])
+                .expect("first household must exist"),
+            state
+                .households
+                .get(household_ids[1])
+                .expect("second household must exist"),
+        ]);
+
+        assert_eq!(satisfaction, Some(9_000));
+    }
+}
+
 mod determinism {
     use super::*;
 

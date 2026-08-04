@@ -1,7 +1,7 @@
 //! Persistence round-trip, migration, and release-mode validation tests.
 
 use super::*;
-use crate::core::FamilyLinkKind;
+use crate::core::{CivicDebt, CivicDebtStatus, EnactedLaw, FamilyLinkKind, LawKind};
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
 use crate::money::Money;
 use crate::registry::Registry;
@@ -108,6 +108,58 @@ mod round_trip {
             &state,
             &loaded,
             "save/load round-trip must preserve the complete deterministic state",
+        );
+    }
+
+    #[test]
+    fn preserves_authorized_civic_debt() {
+        let mut state = make_test_campaign();
+        let creditor_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a non-player dynasty");
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::PublicDebtAuthorization,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                value: 10_000,
+                active: false,
+            },
+        );
+        let debt_id = state.next_ids.civic_debt();
+        state.civic_debts.insert(
+            debt_id,
+            CivicDebt {
+                id: debt_id,
+                creditor_dynasty_id,
+                authorizing_law_id: law_id,
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                principal: Money::from_copper(10_000),
+                balance: Money::from_copper(9_500),
+                weekly_payment: Money::from_copper(100),
+                interest_basis_points: 600,
+                issued_day: state.clock.day(),
+                next_due_day: state.clock.day().saturating_add(7),
+                missed_payments: 0,
+                status: CivicDebtStatus::Current,
+            },
+        );
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("civic-debt-campaign.json");
+
+        save_state(&path, &state).expect("civic debt state must save");
+        let loaded = load_state(&path).expect("civic debt state must load");
+
+        assert_state_eq(
+            &state,
+            &loaded,
+            "save/load must preserve municipal debt authorization and payment state",
         );
     }
 
@@ -521,6 +573,91 @@ mod migrations {
             dynasty.civic_contributions() == Money::ZERO && dynasty.unmet_office_duties() == 0
         }));
         validate_state(&loaded).expect("version-eight campaign must remain valid");
+    }
+
+    #[test]
+    fn v9_adds_the_civic_debt_ledger_and_allocator() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(9);
+        value
+            .as_object_mut()
+            .expect("state JSON must be an object")
+            .remove("civic_debts");
+        value["next_ids"]
+            .as_object_mut()
+            .expect("next IDs must be an object")
+            .remove("civic_debt");
+        for contract in value["contracts"]
+            .as_object_mut()
+            .expect("contracts must be an object")
+            .values_mut()
+        {
+            contract
+                .as_object_mut()
+                .expect("contract must be an object")
+                .remove("breaching_dynasty_id");
+        }
+
+        let migrated =
+            migrate_to_current(value, Path::new("memory.json")).expect("version nine must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        assert!(loaded.civic_debts.is_empty());
+        validate_state(&loaded).expect("version-nine campaign must remain valid");
+    }
+
+    #[test]
+    fn v10_adds_contract_breach_attribution() {
+        let mut state = make_test_campaign();
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::PublicDebtAuthorization,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                value: 10_000,
+                active: true,
+            },
+        );
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(10);
+        for contract in value["contracts"]
+            .as_object_mut()
+            .expect("contracts must be an object")
+            .values_mut()
+        {
+            contract
+                .as_object_mut()
+                .expect("contract must be an object")
+                .remove("breaching_dynasty_id");
+        }
+
+        let migrated =
+            migrate_to_current(value, Path::new("memory.json")).expect("version ten must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        assert!(
+            loaded
+                .contracts
+                .values()
+                .all(|contract| contract.breaching_dynasty_id.is_none())
+        );
+        assert!(
+            loaded
+                .laws
+                .values()
+                .filter(|law| law.kind == LawKind::PublicDebtAuthorization)
+                .all(|law| !law.active),
+            "version-ten debt authorizations must migrate to consumed one-time laws"
+        );
+        validate_state(&loaded).expect("version-ten campaign must remain valid");
     }
 
     #[test]
@@ -1055,22 +1192,148 @@ mod validation {
     }
 
     #[test]
-    fn rejects_active_unimplemented_law() {
-        let state = make_test_campaign();
-        let mut value = serde_json::to_value(state).expect("state must serialize");
-        let law = value["laws"]
-            .as_object_mut()
-            .and_then(|laws| laws.values_mut().next())
-            .expect("serialized state must contain a law");
-        law["kind"] = Value::String("PublicDebtAuthorization".to_owned());
-        law["value"] = Value::from(1);
-        law["active"] = Value::Bool(true);
-        let (_directory, path) = write_test_json_fixture("unsupported-active-law.json", &value);
+    fn rejects_contract_breach_attribution_on_an_active_contract() {
+        let mut state = make_test_campaign();
+        let contract_id = state
+            .contracts
+            .values()
+            .find(|contract| contract.status == crate::core::ContractStatus::Active)
+            .expect("campaign must contain an active contract")
+            .id;
+        let seller_business_id = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist")
+            .seller_business_id;
+        let seller_dynasty_id = state
+            .businesses
+            .get(seller_business_id)
+            .expect("contract seller must exist")
+            .owner_dynasty_id();
+        state
+            .contracts
+            .get_mut(&contract_id)
+            .expect("contract must exist")
+            .breaching_dynasty_id = Some(seller_dynasty_id);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("active-contract-breacher.json", &value);
 
         assert_invalid_state(
             load_state(&path),
             StateValidationKind::StrategicRecords,
-            "is not implemented",
+            "incompatible with its parties or term",
+        );
+    }
+
+    #[test]
+    fn rejects_civic_debt_with_missing_creditor() {
+        let mut state = make_test_campaign();
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::PublicDebtAuthorization,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                value: 10_000,
+                active: false,
+            },
+        );
+        let debt_id = state.next_ids.civic_debt();
+        state.civic_debts.insert(
+            debt_id,
+            CivicDebt {
+                id: debt_id,
+                creditor_dynasty_id: DynastyId::new(u32::MAX),
+                authorizing_law_id: law_id,
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                principal: Money::from_copper(10_000),
+                balance: Money::from_copper(10_000),
+                weekly_payment: Money::from_copper(100),
+                interest_basis_points: 600,
+                issued_day: state.clock.day(),
+                next_due_day: state.clock.day().saturating_add(7),
+                missed_payments: 0,
+                status: CivicDebtStatus::Current,
+            },
+        );
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("missing-civic-creditor.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "invalid identity or authorization reference",
+        );
+    }
+
+    #[test]
+    fn rejects_civic_debt_funded_by_its_own_sponsor() {
+        let mut state = make_test_campaign();
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::PublicDebtAuthorization,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                value: 10_000,
+                active: false,
+            },
+        );
+        let debt_id = state.next_ids.civic_debt();
+        state.civic_debts.insert(
+            debt_id,
+            CivicDebt {
+                id: debt_id,
+                creditor_dynasty_id: state.player_dynasty_id,
+                authorizing_law_id: law_id,
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                principal: Money::from_copper(10_000),
+                balance: Money::from_copper(10_000),
+                weekly_payment: Money::from_copper(100),
+                interest_basis_points: 600,
+                issued_day: state.clock.day(),
+                next_due_day: state.clock.day().saturating_add(7),
+                missed_payments: 0,
+                status: CivicDebtStatus::Current,
+            },
+        );
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("self-funded-civic-debt.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "invalid identity or authorization reference",
+        );
+    }
+
+    #[test]
+    fn rejects_active_consumed_public_debt_authorization() {
+        let mut state = make_test_campaign();
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::PublicDebtAuthorization,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                value: 10_000,
+                active: true,
+            },
+        );
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("active-consumed-debt-authorization.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "consumed one-time authorization",
         );
     }
 

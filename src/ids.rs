@@ -42,6 +42,7 @@ define_id!(BusinessId);
 define_id!(ContractId);
 define_id!(PropertyId);
 define_id!(LoanId);
+define_id!(CivicDebtId);
 define_id!(EmploymentId);
 define_id!(FamilyLinkId);
 define_id!(LawId);

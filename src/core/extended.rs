@@ -1,9 +1,9 @@
 //! Strategic runtime records spanning contracts, finance, property, institutions, law, and civic life.
 
 use crate::ids::{
-    BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId,
-    ExternalRouteId, FamilyLinkId, GoodId, InformationReportId, InstitutionId, LawId, LegalCaseId,
-    LoanId, ObjectiveId, OutboxMessageId, PropertyId, PublicWorkId,
+    BusinessId, CharacterId, CivicDebtId, ContractId, CrisisId, DistrictId, DynastyId,
+    EmploymentId, ExternalRouteId, FamilyLinkId, GoodId, InformationReportId, InstitutionId, LawId,
+    LegalCaseId, LoanId, ObjectiveId, OutboxMessageId, PropertyId, PublicWorkId,
 };
 use crate::money::{Money, Quantity};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ pub struct SupplyContract {
     pub(crate) end_day: i64,
     pub(crate) fulfilled_deliveries: u16,
     pub(crate) missed_deliveries: u16,
+    pub(crate) breaching_dynasty_id: Option<DynastyId>,
     pub(crate) status: ContractStatus,
 }
 
@@ -271,14 +272,15 @@ pub enum LawKind {
 
 impl LawKind {
     #[must_use]
-    pub const fn is_implemented(self) -> bool {
+    pub const fn remains_active_after_enactment(self) -> bool {
         !matches!(self, Self::PublicDebtAuthorization)
     }
 
     #[must_use]
     pub const fn is_value_valid(self, value: i64) -> bool {
         match self {
-            Self::BreadPriceCeiling | Self::PublicDebtAuthorization => value > 0,
+            Self::BreadPriceCeiling => value > 0,
+            Self::PublicDebtAuthorization => value > 0 && value <= 1_000_000,
             Self::ForeignMerchantToll
             | Self::InterestLimit
             | Self::FireCode
@@ -286,6 +288,52 @@ impl LawKind {
             | Self::GuildEntryRestriction
             | Self::EmergencyImports => value >= 0 && value <= 10_000,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CivicDebtStatus {
+    Current,
+    Delinquent,
+    Defaulted,
+    Repaid,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CivicDebt {
+    pub(crate) id: CivicDebtId,
+    pub(crate) creditor_dynasty_id: DynastyId,
+    pub(crate) authorizing_law_id: LawId,
+    pub(crate) sponsor_dynasty_id: Option<DynastyId>,
+    pub(crate) principal: Money,
+    pub(crate) balance: Money,
+    pub(crate) weekly_payment: Money,
+    pub(crate) interest_basis_points: u16,
+    pub(crate) issued_day: i64,
+    pub(crate) next_due_day: i64,
+    pub(crate) missed_payments: u8,
+    pub(crate) status: CivicDebtStatus,
+}
+
+impl CivicDebt {
+    #[must_use]
+    pub const fn id(&self) -> CivicDebtId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn creditor_dynasty_id(&self) -> DynastyId {
+        self.creditor_dynasty_id
+    }
+
+    #[must_use]
+    pub const fn balance(&self) -> Money {
+        self.balance
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> CivicDebtStatus {
+        self.status
     }
 }
 
