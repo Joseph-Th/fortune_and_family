@@ -2106,6 +2106,154 @@ mod property_liquidation {
     }
 
     #[test]
+    fn collateral_lender_can_buy_the_property_at_maximum_treasury() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let seller_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != seller_id)
+            .expect("campaign must contain a lender");
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(seller_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("campaign must contain an unpledged player property")
+            .id;
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        let unencumbered_quote =
+            quote_property_liquidation(registry, &state, seller_id, lender_id, property_id)
+                .expect("selected property must be liquidatable before adding the lien");
+        let balance = unencumbered_quote
+            .price
+            .saturating_mul_ratio(1, 2)
+            .max(Money::from_copper(1));
+        let loan_id =
+            add_test_property_lien(&mut state, lender_id, seller_id, property_id, balance);
+        let seller_before = state
+            .dynasties
+            .get(&seller_id)
+            .expect("seller must exist")
+            .treasury();
+        let lender_before = state
+            .dynasties
+            .get(&lender_id)
+            .expect("lender must exist")
+            .treasury();
+
+        let quote = sell_owned_property(registry, &mut state, seller_id, lender_id, property_id)
+            .expect("purchase debit must create room for the lender's lien payoff");
+
+        assert_eq!(quote.lien_payoff, balance);
+        assert_eq!(quote.buyer_contribution, quote.price);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&lender_id)
+                .expect("lender must exist")
+                .treasury(),
+            lender_before
+                .saturating_sub(quote.buyer_contribution)
+                .saturating_add(quote.lien_payoff)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&seller_id)
+                .expect("seller must exist")
+                .treasury(),
+            seller_before.saturating_add(quote.seller_proceeds)
+        );
+        assert_eq!(
+            state
+                .properties
+                .get(&property_id)
+                .expect("property must remain present")
+                .owner_dynasty_id,
+            Some(lender_id)
+        );
+        assert_eq!(
+            state.loans.get(&loan_id).expect("loan must remain").status,
+            LoanStatus::Repaid
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn distinct_lender_overflow_rejects_property_sale_atomically() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let seller_id = state.player_dynasty_id;
+        let mut counterparties = state
+            .dynasties
+            .keys()
+            .copied()
+            .filter(|dynasty_id| *dynasty_id != seller_id);
+        let buyer_id = counterparties
+            .next()
+            .expect("campaign must contain a buyer");
+        let lender_id = counterparties
+            .next()
+            .expect("campaign must contain a lender");
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(seller_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("campaign must contain an unpledged player property")
+            .id;
+        state
+            .dynasties
+            .get_mut(&buyer_id)
+            .expect("buyer must exist")
+            .resources
+            .treasury = Money::from_copper(1_000_000);
+        let unencumbered_quote =
+            quote_property_liquidation(registry, &state, seller_id, buyer_id, property_id)
+                .expect("selected property must be liquidatable before adding the lien");
+        let balance = unencumbered_quote
+            .price
+            .saturating_mul_ratio(1, 2)
+            .max(Money::from_copper(1));
+        add_test_property_lien(&mut state, lender_id, seller_id, property_id, balance);
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id);
+
+        assert_eq!(
+            result,
+            Err(StrategicError::DynastyTreasuryOverflow {
+                dynasty_id: lender_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: balance,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a lien payoff that cannot be credited must reject the entire property sale",
+        );
+    }
+
+    #[test]
     fn civic_treasury_can_guarantee_a_distressed_property_auction() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

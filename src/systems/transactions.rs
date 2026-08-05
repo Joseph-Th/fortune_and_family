@@ -79,7 +79,11 @@ impl ValidatedCashTransfer {
                 .businesses
                 .get_mut(from_business_id)
                 .expect("validated transfer source must exist");
-            source.finance.cash = source.finance.cash.saturating_sub(amount);
+            source.finance.cash = source
+                .finance
+                .cash
+                .checked_sub(amount)
+                .expect("revalidated transfer source must cover the amount");
             source.finance.version = source.finance.version.saturating_add(1);
         }
         {

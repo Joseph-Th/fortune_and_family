@@ -57,6 +57,14 @@ impl Money {
     }
 
     #[must_use]
+    pub const fn checked_sub(self, other: Self) -> Option<Self> {
+        match self.0.checked_sub(other.0) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    #[must_use]
     pub const fn saturating_mul(self, factor: i64) -> Self {
         Self(self.0.saturating_mul(factor))
     }
@@ -198,6 +206,14 @@ impl Quantity {
     #[must_use]
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
+    }
+
+    #[must_use]
+    pub const fn checked_sub(self, other: Self) -> Option<Self> {
+        match self.0.checked_sub(other.0) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 
     #[must_use]
@@ -391,6 +407,26 @@ mod tests {
         assert_eq!(
             quantity.checked_add(quantity.max_nonnegative_addend()),
             Some(Quantity::from_milliunits(i64::MAX))
+        );
+    }
+
+    #[test]
+    fn checked_subtraction_preserves_exact_results_and_rejects_overflow() {
+        assert_eq!(
+            Money::from_copper(11).checked_sub(Money::from_copper(7)),
+            Some(Money::from_copper(4))
+        );
+        assert_eq!(
+            Quantity::from_milliunits(11).checked_sub(Quantity::from_milliunits(7)),
+            Some(Quantity::from_milliunits(4))
+        );
+        assert_eq!(
+            Money::from_copper(i64::MIN).checked_sub(Money::from_copper(1)),
+            None
+        );
+        assert_eq!(
+            Quantity::from_milliunits(i64::MAX).checked_sub(Quantity::from_milliunits(-1)),
+            None
         );
     }
 }

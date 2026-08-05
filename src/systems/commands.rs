@@ -8,17 +8,19 @@ use super::{
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
     CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry,
-    ChronicleKind, CivicDebt, CivicDebtStatus, CrisisStatus, EmploymentStatus, EnactedLaw,
-    FamilyLink, FamilyLinkKind, HouseGovernance, LawKind, LegalCase, LegalCaseKind,
-    LegalCaseStatus, OfficePower, OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
+    ChronicleKind, CivicDebt, CivicDebtStatus, CrisisStatus, DynastyPair, EmploymentStatus,
+    EnactedLaw, FamilyLink, FamilyLinkKind, HouseGovernance, InformationConfidence,
+    InformationReport, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus, OfficePower, OutboxKind,
+    PublicWork, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
-    BusinessId, CharacterId, CrisisId, DistrictId, DynastyId, EmploymentId, InstitutionId,
+    BusinessId, CharacterId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId, InstitutionId,
     OutboxMessageId, PropertyId,
 };
 use crate::money::Money;
 use crate::registry::Registry;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +44,13 @@ pub enum EducationFocus {
     Commerce,
     Social,
     Craft,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InformationFocus {
+    Market { good_id: GoodId },
+    Counterparty { dynasty_id: DynastyId },
+    District { district_id: DistrictId },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +115,10 @@ pub enum PlayerCommand {
         character_id: CharacterId,
         focus: EducationFocus,
     },
+    CultivateInstitutionSupport {
+        institution_id: InstitutionId,
+        character_id: CharacterId,
+    },
     NominateForOffice {
         institution_id: InstitutionId,
         character_id: CharacterId,
@@ -121,6 +134,9 @@ pub enum PlayerCommand {
     ResolveLaborDispute {
         employment_id: EmploymentId,
         response: LaborResponse,
+    },
+    CommissionInformation {
+        focus: InformationFocus,
     },
     AcknowledgeNotification {
         message_id: OutboxMessageId,
@@ -154,6 +170,11 @@ pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
 pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_800;
+pub(crate) const INSTITUTION_SUPPORT_INTERVAL_DAYS: i64 = 360;
+pub(crate) const INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS: i64 = 90;
+pub(crate) const INSTITUTION_SUPPORT_COST: Money = Money::from_copper(1_200);
+pub(crate) const INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT: u16 = 5_500;
+pub(crate) const INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT: u32 = 104;
 pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
 pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 104;
@@ -165,6 +186,10 @@ pub(crate) const WARD_ADOPTION_DELIVERY_REQUIREMENT: u32 = 52;
 pub(crate) const MAX_ACTIVE_WARDS: usize = 4;
 pub(crate) const FAMILY_EDUCATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const FAMILY_EDUCATION_COST: Money = Money::from_copper(2_000);
+pub(crate) const INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 360;
+pub(crate) const INFORMATION_COMMISSION_COST: Money = Money::from_copper(600);
+const INFORMATION_REPORT_LIFETIME_DAYS: i64 = 540;
+pub(crate) const COMMISSIONED_INFORMATION_SOURCE: &str = "Commissioned intelligence";
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum CommandError {
@@ -313,8 +338,50 @@ pub enum CommandError {
     FamilyEducationCooldown { next_education_day: i64 },
     #[error("institution {institution_id} does not exist")]
     MissingInstitution { institution_id: InstitutionId },
+    #[error(
+        "institutional support requires reputation {required}, but quality is {quality} and reliability is {reliability}"
+    )]
+    InsufficientInstitutionSupportReputation {
+        quality: u16,
+        reliability: u16,
+        required: u16,
+    },
+    #[error(
+        "institutional support requires {required} completed contract deliveries, but dynasty has {delivered}"
+    )]
+    InsufficientInstitutionSupportCommercialRecord { delivered: u32, required: u32 },
+    #[error(
+        "character {character_id} already has cultivated support in institution {institution_id}"
+    )]
+    InstitutionSupportAlreadyEstablished {
+        institution_id: InstitutionId,
+        character_id: CharacterId,
+    },
+    #[error(
+        "the dynasty cannot cultivate support in another institution before day {next_support_day}"
+    )]
+    InstitutionSupportCooldown { next_support_day: i64 },
+    #[error("institution {institution_id} budget {current} cannot receive patronage {incoming}")]
+    InstitutionBudgetOverflow {
+        institution_id: InstitutionId,
+        current: Money,
+        incoming: Money,
+    },
     #[error("character {character_id} is not an active member of the player dynasty")]
     InvalidNominee { character_id: CharacterId },
+    #[error("character {character_id} has not cultivated support in institution {institution_id}")]
+    MissingInstitutionSupport {
+        institution_id: InstitutionId,
+        character_id: CharacterId,
+    },
+    #[error(
+        "character {character_id}'s support in institution {institution_id} is not established until day {available_day}"
+    )]
+    InstitutionSupportNotEstablished {
+        institution_id: InstitutionId,
+        character_id: CharacterId,
+        available_day: i64,
+    },
     #[error("character {character_id} already holds office in institution {institution_id}")]
     NomineeAlreadyHoldsOffice {
         character_id: CharacterId,
@@ -348,6 +415,16 @@ pub enum CommandError {
         district_id: DistrictId,
         workers: u16,
     },
+    #[error("good {good_id} does not exist")]
+    MissingGood { good_id: GoodId },
+    #[error("market quote for good {good_id} does not exist")]
+    MissingMarketQuote { good_id: GoodId },
+    #[error("commissioned counterparty intelligence cannot target the player dynasty")]
+    InformationCannotTargetPlayer,
+    #[error(
+        "the dynasty cannot commission another intelligence report before day {next_commission_day}"
+    )]
+    InformationCommissionCooldown { next_commission_day: i64 },
     #[error("notification {message_id} does not exist")]
     MissingNotification { message_id: OutboxMessageId },
 }
@@ -359,6 +436,28 @@ pub enum CommandError {
 /// Returns a dedicated error when a command references missing records, violates ownership,
 /// exceeds available funds, or supplies invalid terms. Failed commands leave state unchanged.
 pub fn apply_player_command(
+    registry: &Registry,
+    state: &mut AppState,
+    command: PlayerCommand,
+) -> Result<CommandOutcome, CommandError> {
+    #[cfg(debug_assertions)]
+    let state_before = state.clone();
+
+    let result = dispatch_player_command(registry, state, command);
+
+    #[cfg(debug_assertions)]
+    match &result {
+        Ok(_) => super::validate_invariants(registry, state),
+        Err(_) => debug_assert_eq!(
+            state, &state_before,
+            "Canonical Mutation: rejected player command changed campaign state"
+        ),
+    }
+
+    result
+}
+
+fn dispatch_player_command(
     registry: &Registry,
     state: &mut AppState,
     command: PlayerCommand,
@@ -431,6 +530,10 @@ pub fn apply_player_command(
             character_id,
             focus,
         } => apply_family_education(state, character_id, focus),
+        PlayerCommand::CultivateInstitutionSupport {
+            institution_id,
+            character_id,
+        } => apply_institution_support(state, institution_id, character_id),
         PlayerCommand::NominateForOffice {
             institution_id,
             character_id,
@@ -447,6 +550,9 @@ pub fn apply_player_command(
             employment_id,
             response,
         } => apply_labor_response(state, employment_id, response),
+        PlayerCommand::CommissionInformation { focus } => {
+            apply_information_commission(registry, state, focus)
+        }
         PlayerCommand::AcknowledgeNotification { message_id } => {
             apply_acknowledgement(state, message_id)
         }
@@ -868,7 +974,10 @@ fn validate_civic_debt_issuance(
         treasury_id,
         creditor_dynasty_id: creditor.id(),
         principal,
-        creditor_treasury_after: creditor.treasury().saturating_sub(principal),
+        creditor_treasury_after: creditor
+            .treasury()
+            .checked_sub(principal)
+            .expect("validated civic debt creditor must cover the principal"),
         treasury_budget_after,
         weekly_payment: Money::from_copper(weekly_payment_copper.max(1)),
     })
@@ -1678,6 +1787,171 @@ fn apply_education_focus(capabilities: &mut CharacterCapabilities, focus: Educat
     }
 }
 
+fn apply_institution_support(
+    state: &mut AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> Result<CommandOutcome, CommandError> {
+    let character = state
+        .characters
+        .get(character_id)
+        .ok_or(CommandError::InvalidNominee { character_id })?;
+    if character.dynasty_id() != state.player_dynasty_id
+        || character.status() != CharacterStatus::Active
+    {
+        return Err(CommandError::InvalidNominee { character_id });
+    }
+    validate_institution_support_standing(state)?;
+    let subject = institution_support_subject(institution_id, character_id);
+    if state.audit_log.iter().any(|record| {
+        record.kind() == AuditKind::InstitutionPatronage && record.subject() == subject
+    }) {
+        return Err(CommandError::InstitutionSupportAlreadyEstablished {
+            institution_id,
+            character_id,
+        });
+    }
+    if let Some(last_support_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::InstitutionPatronage)
+        .map(AuditRecord::day)
+    {
+        let next_support_day = last_support_day.saturating_add(INSTITUTION_SUPPORT_INTERVAL_DAYS);
+        if state.clock.day() < next_support_day {
+            return Err(CommandError::InstitutionSupportCooldown { next_support_day });
+        }
+    }
+    let institution = state
+        .institutions
+        .get(&institution_id)
+        .ok_or(CommandError::MissingInstitution { institution_id })?;
+    let budget_after = institution
+        .budget
+        .checked_add(INSTITUTION_SUPPORT_COST)
+        .ok_or(CommandError::InstitutionBudgetOverflow {
+            institution_id,
+            current: institution.budget,
+            incoming: INSTITUTION_SUPPORT_COST,
+        })?;
+    let member_dynasties: BTreeSet<_> = institution
+        .members
+        .iter()
+        .filter_map(|member_id| state.characters.get(*member_id))
+        .map(Character::dynasty_id)
+        .filter(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+        .collect();
+    spend_player_treasury(state, INSTITUTION_SUPPORT_COST)?;
+    let institution = state
+        .institutions
+        .get_mut(&institution_id)
+        .expect("validated institution must exist");
+    institution.budget = budget_after;
+    institution.members.insert(character_id);
+    let dynasty = state
+        .dynasties
+        .get_mut(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    dynasty.resources.legitimacy_basis_points = dynasty
+        .resources
+        .legitimacy_basis_points
+        .saturating_add(250)
+        .min(10_000);
+    record_institution_patronage_relationships(
+        state,
+        institution_id,
+        character_id,
+        member_dynasties,
+    );
+    Ok(finish_institution_patronage(
+        state,
+        institution_id,
+        character_id,
+        subject,
+    ))
+}
+
+fn record_institution_patronage_relationships(
+    state: &mut AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+    member_dynasties: BTreeSet<DynastyId>,
+) {
+    let player_dynasty_id = state.player_dynasty_id;
+    for member_dynasty_id in member_dynasties {
+        super::strategic::adjust_dynasty_relationship(
+            state,
+            player_dynasty_id,
+            member_dynasty_id,
+            super::strategic::RelationshipDelta::new(180, 260, 0, -60, 75),
+        );
+        super::strategic::remember_dynasty_interaction(
+            state,
+            player_dynasty_id,
+            member_dynasty_id,
+            &format!(
+                "the player dynasty patronized institution {institution_id} for character {character_id}"
+            ),
+        );
+    }
+}
+
+fn finish_institution_patronage(
+    state: &mut AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+    subject: String,
+) -> CommandOutcome {
+    let day = state.clock.day();
+    state.audit_log.push(AuditRecord {
+        day,
+        kind: AuditKind::InstitutionPatronage,
+        subject,
+        detail: format!("contribution={}", INSTITUTION_SUPPORT_COST.copper()),
+    });
+    let established_day = day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS);
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Politics,
+        format!("Institutional support cultivated for character {character_id}"),
+        format!(
+            "The dynasty patronized institution {institution_id}; character {character_id}'s support will be established by day {established_day}."
+        ),
+    );
+    CommandOutcome {
+        summary: format!(
+            "Cultivated support for character {character_id} in institution {institution_id}."
+        ),
+    }
+}
+
+fn validate_institution_support_standing(state: &AppState) -> Result<(), CommandError> {
+    let player = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    let quality = player.resources.reputation_quality_basis_points;
+    let reliability = player.resources.reputation_reliability_basis_points;
+    if quality.max(reliability) < INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT {
+        return Err(CommandError::InsufficientInstitutionSupportReputation {
+            quality,
+            reliability,
+            required: INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
+        });
+    }
+    let delivered = player_contract_deliveries(state);
+    if delivered < INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT {
+        return Err(
+            CommandError::InsufficientInstitutionSupportCommercialRecord {
+                delivered,
+                required: INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+            },
+        );
+    }
+    Ok(())
+}
+
 fn apply_office_nomination(
     state: &mut AppState,
     institution_id: InstitutionId,
@@ -1703,11 +1977,31 @@ fn apply_office_nomination(
             institution_id: existing_institution_id,
         });
     }
-    state
+    validate_office_nomination_standing(state)?;
+    let institution = state
         .institutions
         .get(&institution_id)
         .ok_or(CommandError::MissingInstitution { institution_id })?;
-    validate_office_nomination_standing(state)?;
+    if !institution.members.contains(&character_id) {
+        return Err(CommandError::MissingInstitutionSupport {
+            institution_id,
+            character_id,
+        });
+    }
+    let support_day = institution_support_day(state, institution_id, character_id).ok_or(
+        CommandError::MissingInstitutionSupport {
+            institution_id,
+            character_id,
+        },
+    )?;
+    let available_day = support_day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS);
+    if state.clock.day() < available_day {
+        return Err(CommandError::InstitutionSupportNotEstablished {
+            institution_id,
+            character_id,
+            available_day,
+        });
+    }
     if let Some(last_nomination_day) = state
         .audit_log
         .iter()
@@ -1790,6 +2084,29 @@ pub(super) fn office_nomination_subject(
     character_id: CharacterId,
 ) -> String {
     format!("institution:{institution_id}:character:{character_id}")
+}
+
+pub(crate) fn institution_support_subject(
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> String {
+    format!("institution:{institution_id}:character:{character_id}")
+}
+
+pub(crate) fn institution_support_day(
+    state: &AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> Option<i64> {
+    let subject = institution_support_subject(institution_id, character_id);
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::InstitutionPatronage && record.subject() == subject
+        })
+        .map(AuditRecord::day)
 }
 
 pub(crate) fn player_contract_deliveries(state: &AppState) -> u32 {
@@ -2102,7 +2419,9 @@ fn spend_business_cash(
         .businesses
         .get_mut(business_id)
         .expect("validated business must exist");
-    business.finance.cash = cash.saturating_sub(amount);
+    business.finance.cash = cash
+        .checked_sub(amount)
+        .expect("validated business spend must fit available cash");
     business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(amount);
     business.finance.version = business.finance.version.saturating_add(1);
     Ok(())
@@ -2125,8 +2444,195 @@ fn spend_player_treasury(state: &mut AppState, amount: Money) -> Result<(), Comm
         .get_mut(&state.player_dynasty_id)
         .expect("player dynasty must exist")
         .resources
-        .treasury = treasury.saturating_sub(amount);
+        .treasury = treasury
+        .checked_sub(amount)
+        .expect("validated dynasty spend must fit available treasury");
     Ok(())
+}
+
+#[derive(Debug)]
+struct InformationCommissionPlan {
+    subject: String,
+    summary: String,
+}
+
+fn apply_information_commission(
+    registry: &Registry,
+    state: &mut AppState,
+    focus: InformationFocus,
+) -> Result<CommandOutcome, CommandError> {
+    let plan = resolve_information_commission(registry, state, focus)?;
+    spend_player_treasury(state, INFORMATION_COMMISSION_COST)?;
+    state.information_reports.retain(|_, report| {
+        report.owner_dynasty_id != state.player_dynasty_id || report.subject != plan.subject
+    });
+    let id = state.next_ids.information_report();
+    let day = state.clock.day();
+    state.information_reports.insert(
+        id,
+        InformationReport {
+            id,
+            owner_dynasty_id: state.player_dynasty_id,
+            subject: plan.subject.clone(),
+            confidence: InformationConfidence::Confirmed,
+            created_day: day,
+            expires_day: day.saturating_add(INFORMATION_REPORT_LIFETIME_DAYS),
+            source: COMMISSIONED_INFORMATION_SOURCE.to_owned(),
+            summary: plan.summary,
+        },
+    );
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Information,
+        "Commissioned intelligence delivered".to_owned(),
+        format!("{} is now available to the dynasty.", plan.subject),
+    );
+    Ok(CommandOutcome {
+        summary: format!("Commissioned intelligence report {id}: {}.", plan.subject),
+    })
+}
+
+fn resolve_information_commission(
+    registry: &Registry,
+    state: &AppState,
+    focus: InformationFocus,
+) -> Result<InformationCommissionPlan, CommandError> {
+    if let Some(last_commission_day) = state
+        .information_reports
+        .values()
+        .filter(|report| {
+            report.owner_dynasty_id == state.player_dynasty_id
+                && report.source == COMMISSIONED_INFORMATION_SOURCE
+        })
+        .map(|report| report.created_day)
+        .max()
+    {
+        let next_commission_day =
+            last_commission_day.saturating_add(INFORMATION_COMMISSION_INTERVAL_DAYS);
+        if state.clock.day() < next_commission_day {
+            return Err(CommandError::InformationCommissionCooldown {
+                next_commission_day,
+            });
+        }
+    }
+    let treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    if treasury < INFORMATION_COMMISSION_COST {
+        return Err(CommandError::InsufficientPlayerFunds {
+            available: treasury,
+            required: INFORMATION_COMMISSION_COST,
+        });
+    }
+    match focus {
+        InformationFocus::Market { good_id } => {
+            resolve_market_information(registry, state, good_id)
+        }
+        InformationFocus::Counterparty { dynasty_id } => {
+            resolve_counterparty_information(state, dynasty_id)
+        }
+        InformationFocus::District { district_id } => {
+            resolve_district_information(registry, state, district_id)
+        }
+    }
+}
+
+fn resolve_market_information(
+    registry: &Registry,
+    state: &AppState,
+    good_id: GoodId,
+) -> Result<InformationCommissionPlan, CommandError> {
+    let good = registry
+        .get_good(good_id)
+        .ok_or(CommandError::MissingGood { good_id })?;
+    let quote = state
+        .market
+        .quotes
+        .get(&good_id)
+        .ok_or(CommandError::MissingMarketQuote { good_id })?;
+    Ok(InformationCommissionPlan {
+        subject: format!("Commissioned market brief: {}", good.name()),
+        summary: format!(
+            "Price {}; previous price {}; stock {}; target stock {}; today's demand {}; today's supply {}; recorded causes {:?}.",
+            quote.price,
+            quote.previous_price,
+            quote.stock,
+            quote.target_stock,
+            quote.demand_today,
+            quote.supply_today,
+            quote.causes
+        ),
+    })
+}
+
+fn resolve_counterparty_information(
+    state: &AppState,
+    dynasty_id: DynastyId,
+) -> Result<InformationCommissionPlan, CommandError> {
+    if dynasty_id == state.player_dynasty_id {
+        return Err(CommandError::InformationCannotTargetPlayer);
+    }
+    let dynasty = state
+        .dynasties
+        .get(&dynasty_id)
+        .ok_or(CommandError::MissingDynasty { dynasty_id })?;
+    let relationship = state
+        .relationships
+        .get(&DynastyPair::new(state.player_dynasty_id, dynasty_id))
+        .expect("every dynasty pair must have a relationship record");
+    let unsettled_credit = state
+        .loans
+        .values()
+        .filter(|loan| {
+            ((loan.lender_dynasty_id == state.player_dynasty_id
+                && loan.borrower_dynasty_id == dynasty_id)
+                || (loan.lender_dynasty_id == dynasty_id
+                    && loan.borrower_dynasty_id == state.player_dynasty_id))
+                && !matches!(loan.status, crate::core::LoanStatus::Repaid)
+        })
+        .count();
+    Ok(InformationCommissionPlan {
+        subject: format!("Commissioned house brief: House {}", dynasty.name()),
+        summary: format!(
+            "Treasury {}; reliability {} bp; trust {} bp; respect {} bp; fear {} bp; resentment {} bp; obligation {}; unsettled bilateral credit {}.",
+            dynasty.treasury(),
+            dynasty.resources.reputation_reliability_basis_points,
+            relationship.trust_basis_points,
+            relationship.respect_basis_points,
+            relationship.fear_basis_points,
+            relationship.resentment_basis_points,
+            relationship.obligation,
+            unsettled_credit
+        ),
+    })
+}
+
+fn resolve_district_information(
+    registry: &Registry,
+    state: &AppState,
+    district_id: DistrictId,
+) -> Result<InformationCommissionPlan, CommandError> {
+    let district = registry
+        .get_district(district_id)
+        .ok_or(CommandError::MissingDistrict { district_id })?;
+    let runtime = state
+        .districts
+        .get(&district_id)
+        .ok_or(CommandError::MissingDistrict { district_id })?;
+    Ok(InformationCommissionPlan {
+        subject: format!("Commissioned district brief: {}", district.name()),
+        summary: format!(
+            "Rent index {} bp; employment {} bp; sanitation {} bp; safety {} bp; unrest {} bp; population {}.",
+            runtime.rent_index_basis_points,
+            runtime.employment_basis_points,
+            runtime.sanitation_basis_points,
+            runtime.safety_basis_points,
+            runtime.unrest_basis_points,
+            district.population()
+        ),
+    })
 }
 
 fn apply_acknowledgement(

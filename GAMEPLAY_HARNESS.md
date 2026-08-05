@@ -86,9 +86,9 @@ The harness uses four deterministic priority models:
 | Persona | Primary bias |
 |---|---|
 | `steward` | Continuity, worker conditions, relief, administration, reform, and public works. |
-| `entrepreneur` | Business policy, contracts, property, commercial education, credit, and expansion. |
-| `power-broker` | Family capacity, taxation, laws, courts, public works, and governance. |
-| `opportunist` | Leverage, acquisition, legal pressure, crisis exploitation, and replacement labor. |
+| `entrepreneur` | Business policy, contracts, property, commercial education, market intelligence, credit, and expansion. |
+| `power-broker` | Family capacity, house intelligence, taxation, laws, courts, public works, and governance. |
+| `opportunist` | Leverage, acquisition, counterparty intelligence, legal pressure, crisis exploitation, and replacement labor. |
 
 Personas are diagnostic policies, not optimal strategies. Their purpose is to expose whether the command surface supports distinct priorities and outcomes.
 
@@ -115,15 +115,31 @@ The harness records separate fantasy milestones:
 
 - Reputation standing
 - Earned commercial standing
+- First institutional support campaign
 - First office campaign
 - First office
 - First city-shaping action
 - First player labor dispute
 - First succession
 
-Political eligibility requires established reputation and 104 credited contract deliveries. Office powers become available after an establishment period. Officeholders then face recurring duties, administrative load, and possible forfeiture.
+Institutional patronage becomes available after full commercial standing: established reputation and 104 credited contract deliveries. Patronage transfers treasury into an institution, creates membership, improves support among member houses, and must mature for 90 days. Office nomination then requires established support in the target institution. Office powers become available after a separate 180-day establishment period. Officeholders then face recurring duties, administrative load, and possible forfeiture.
 
 Family growth remains player-directed through governance, ward adoption, and focused education. Commercial maturity gates the advanced family routes.
+
+Established dynasties may also commission annual intelligence reports. The focus is persona-specific in automated runs: markets for entrepreneurs, district conditions for stewards, and rival-house conditions for political or opportunistic agents.
+
+## Phase quality
+
+The harness classifies each decision cycle by the furthest reached fantasy milestone:
+
+| Phase | Begins when |
+|---|---|
+| Foundation | Campaign start. |
+| Establishment | Reputation standing is reached. |
+| Institutional ascent | The first institutional support campaign is launched. |
+| Dynastic governance | The first city-shaping law or public work is sponsored. |
+
+Each phase records action share, quiet and blocked cycles, viable command-family breadth, and multi-family choice frequency. Findings use these counters so a strong aggregate score cannot hide a passive establishment period or a strategically narrow governance phase.
 
 ## Recovery routes
 
@@ -216,6 +232,7 @@ The JSON report contains:
 - `schema_version`
 - Harness configuration
 - Aggregate counters, scores, command statistics, and interaction edges
+- Per-phase actionability and command-family breadth
 - Per-campaign start and end snapshots
 - Fantasy-arc milestones
 - Findings and limitations

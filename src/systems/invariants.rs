@@ -1,7 +1,7 @@
 //! Debug-only assertions for registry, reference, index, lifecycle, and value invariants.
 
 use crate::core::{
-    AppState, Business, CharacterStatus, CivicDebtStatus, ContractStatus, CrisisStatus,
+    AppState, AuditKind, Business, CharacterStatus, CivicDebtStatus, ContractStatus, CrisisStatus,
     EmploymentStatus, FamilyLinkKind, LegalCaseStatus, LoanStatus, ObjectiveStatus,
     PublicWorkStatus,
 };
@@ -450,6 +450,21 @@ fn validate_institutions(state: &AppState, ids: &RegistryIds) {
                     .is_some_and(|character| character.status() == CharacterStatus::Active),
                 "Lifecycle Validity: institution member must exist and be active"
             );
+            if state
+                .characters
+                .get(*member_id)
+                .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+                && institution.office_holder_id != Some(*member_id)
+            {
+                let subject = format!("institution:{institution_id}:character:{member_id}");
+                debug_assert!(
+                    state.audit_log.iter().any(|record| {
+                        record.kind() == AuditKind::InstitutionPatronage
+                            && record.subject() == subject
+                    }),
+                    "Canonical Mutation: player institution membership requires cultivated support"
+                );
+            }
         }
         if let Some(holder_id) = institution.office_holder_id {
             debug_assert!(

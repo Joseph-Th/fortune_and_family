@@ -140,7 +140,7 @@ Property connects wealth to districts, rent, tenancy, occupancy, collateral, pub
 
 ### Institutions and politics
 
-Institutions have members, offices, budgets, legitimacy, powers, and selection rules. Political power must control concrete outcomes such as laws, debt, public works, courts, licensing, trade, or enforcement.
+Institutions have earned membership, offices, budgets, legitimacy, powers, and selection rules. Commercial standing opens patronage, patronage creates membership and coalition support, and established support opens candidacy. Political power must control concrete outcomes such as laws, debt, public works, courts, licensing, trade, or enforcement.
 
 Officeholding is not a permanent upgrade. It consumes administrative capacity, creates recurring duties, and can be lost through failure.
 

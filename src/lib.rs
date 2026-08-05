@@ -27,8 +27,8 @@ pub use gameplay::{
     GameplayCandidateRanking, GameplayCommandKind, GameplayCommandStats, GameplayDomain,
     GameplayFantasyArc, GameplayFinding, GameplayFindingSeverity, GameplayHarnessConfig,
     GameplayHarnessError, GameplayHarnessReport, GameplayInteractionEdge, GameplayPersona,
-    GameplayScores, GameplaySnapshot, GameplayTraceStep, render_gameplay_report,
-    run_gameplay_harness,
+    GameplayPhase, GameplayPhaseStats, GameplayScores, GameplaySnapshot, GameplayTraceStep,
+    render_gameplay_report, run_gameplay_harness,
 };
 pub use persistence::{PersistenceError, StateValidationKind, load_state, save_state};
 pub use projection::{
@@ -38,9 +38,9 @@ pub use projection::{
 pub use registry::{Registry, build_rivergate_registry};
 pub use systems::{
     BusinessAcquisitionQuote, CommandError, CommandOutcome, CrisisResponse, EducationFocus,
-    LaborResponse, NewGameError, PlayerCommand, PropertyLiquidationQuote, SimulationError,
-    advance_days, apply_player_command, build_new_game, quote_business_acquisition,
-    quote_property_liquidation, validate_invariants,
+    InformationFocus, LaborResponse, NewGameError, PlayerCommand, PropertyLiquidationQuote,
+    SimulationError, advance_days, apply_player_command, build_new_game,
+    quote_business_acquisition, quote_property_liquidation, validate_invariants,
 };
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! JSON persistence adapter with explicit schema migration and contextual errors.
 
-use crate::core::{AppState, CURRENT_SCHEMA_VERSION, FamilyLinkKind};
+use crate::core::{AppState, AuditKind, CURRENT_SCHEMA_VERSION, FamilyLinkKind};
 use crate::ids::{BusinessId, HouseholdId};
 use crate::money::{Money, Quantity};
 use serde_json::Value;
@@ -1186,6 +1186,20 @@ fn validate_family_records(state: &AppState) -> Result<(), String> {
 fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String> {
     let mut officeholders = BTreeSet::new();
     for (institution_id, institution) in &state.institutions {
+        let unsupported_player_member = institution.members.iter().any(|character_id| {
+            state
+                .characters
+                .get(*character_id)
+                .is_some_and(|character| {
+                    character.dynasty_id() == state.player_dynasty_id
+                        && institution.office_holder_id != Some(*character_id)
+                })
+                && !state.audit_log.iter().any(|record| {
+                    record.kind() == AuditKind::InstitutionPatronage
+                        && record.subject()
+                            == format!("institution:{institution_id}:character:{character_id}")
+                })
+        });
         if institution.institution_id != *institution_id
             || institution.members.iter().any(|character_id| {
                 !state
@@ -1198,6 +1212,7 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
             || institution
                 .office_holder_id
                 .is_some_and(|holder| !institution.members.contains(&holder))
+            || unsupported_player_member
         {
             return Err(format!(
                 "institution {institution_id} has inconsistent runtime state"
@@ -1428,6 +1443,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             9 => migrate_v9_to_v10(value)?,
             10 => migrate_v10_to_v11(value)?,
             11 => migrate_v11_to_v12(value)?,
+            12 => migrate_v12_to_v13(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -1968,6 +1984,253 @@ fn migrate_v11_to_v12(mut value: Value) -> Result<Value, PersistenceError> {
     }
     object.insert("schema_version".to_owned(), Value::from(12));
     Ok(value)
+}
+
+fn migrate_v12_to_v13(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 12,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let player_dynasty_id = object
+        .get("player_dynasty_id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 12,
+            reason: "save has an invalid player dynasty".to_owned(),
+        })?;
+    let player_character_ids = v12_player_character_ids(object, player_dynasty_id)?;
+    let mut supported_subjects = v12_nominated_support(object, &player_character_ids)?;
+    migrate_v12_institution_memberships(object, &player_character_ids, &mut supported_subjects)?;
+    append_migrated_patronage_records(object, supported_subjects);
+    object.insert("schema_version".to_owned(), Value::from(13));
+    Ok(value)
+}
+
+fn v12_nominated_support(
+    object: &serde_json::Map<String, Value>,
+    player_character_ids: &BTreeSet<u64>,
+) -> Result<BTreeMap<String, i64>, PersistenceError> {
+    let audit_log = object
+        .get("audit_log")
+        .and_then(Value::as_array)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 12,
+            reason: "save audit_log must be an array".to_owned(),
+        })?;
+    let mut supported_subjects = BTreeMap::new();
+    for record in audit_log {
+        let record = record
+            .as_object()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 12,
+                reason: "save audit record must be an object".to_owned(),
+            })?;
+        if record.get("kind").and_then(Value::as_str) != Some("OfficeNomination") {
+            continue;
+        }
+        let subject = record
+            .get("subject")
+            .and_then(Value::as_str)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 12,
+                reason: "office nomination audit has an invalid subject".to_owned(),
+            })?;
+        let Some((_, character_id)) = parse_institution_character_subject(subject) else {
+            return Err(PersistenceError::Migration {
+                version: 12,
+                reason: format!("office nomination has malformed subject {subject}"),
+            });
+        };
+        if player_character_ids.contains(&character_id) {
+            let day = record.get("day").and_then(Value::as_i64).ok_or_else(|| {
+                PersistenceError::Migration {
+                    version: 12,
+                    reason: "office nomination audit has an invalid day".to_owned(),
+                }
+            })?;
+            supported_subjects
+                .entry(subject.to_owned())
+                .or_insert(day.saturating_sub(90).max(0));
+        }
+    }
+    Ok(supported_subjects)
+}
+
+fn migrate_v12_institution_memberships(
+    object: &mut serde_json::Map<String, Value>,
+    player_character_ids: &BTreeSet<u64>,
+    supported_subjects: &mut BTreeMap<String, i64>,
+) -> Result<(), PersistenceError> {
+    let institutions = object
+        .get_mut("institutions")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 12,
+            reason: "save institutions must be an object".to_owned(),
+        })?;
+    for (institution_key, institution) in institutions {
+        migrate_v12_institution(
+            institution_key,
+            institution,
+            player_character_ids,
+            supported_subjects,
+        )?;
+    }
+    Ok(())
+}
+
+fn migrate_v12_institution(
+    institution_key: &str,
+    institution: &mut Value,
+    player_character_ids: &BTreeSet<u64>,
+    supported_subjects: &mut BTreeMap<String, i64>,
+) -> Result<(), PersistenceError> {
+    let institution = institution
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 12,
+            reason: "save institution must be an object".to_owned(),
+        })?;
+    let institution_id = institution
+        .get("institution_id")
+        .and_then(Value::as_u64)
+        .or_else(|| institution_key.parse().ok())
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 12,
+            reason: format!("institution {institution_key} has an invalid ID"),
+        })?;
+    let office_holder_id = institution.get("office_holder_id").and_then(Value::as_u64);
+    if let Some(character_id) = office_holder_id
+        && player_character_ids.contains(&character_id)
+    {
+        let subject = format!("institution:{institution_id}:character:{character_id}");
+        let term_day = institution
+            .get("term_started_day")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        supported_subjects
+            .entry(subject)
+            .or_insert(term_day.saturating_sub(90).max(0));
+    }
+    let members = institution
+        .get_mut("members")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 12,
+            reason: format!("institution {institution_id} members must be an array"),
+        })?;
+    members.retain(|member| {
+        member.as_u64().is_some_and(|character_id| {
+            !player_character_ids.contains(&character_id)
+                || supported_subjects.contains_key(&format!(
+                    "institution:{institution_id}:character:{character_id}"
+                ))
+        })
+    });
+    if let Some(character_id) = office_holder_id
+        && player_character_ids.contains(&character_id)
+        && !members
+            .iter()
+            .any(|member| member.as_u64() == Some(character_id))
+    {
+        members.push(Value::from(character_id));
+    }
+    Ok(())
+}
+
+fn append_migrated_patronage_records(
+    object: &mut serde_json::Map<String, Value>,
+    supported_subjects: BTreeMap<String, i64>,
+) {
+    let audit_log = object
+        .get_mut("audit_log")
+        .and_then(Value::as_array_mut)
+        .expect("validated audit log must remain an array");
+    for (subject, day) in supported_subjects {
+        audit_log.push(serde_json::json!({
+            "day": day,
+            "kind": "InstitutionPatronage",
+            "subject": subject,
+            "detail": "migrated_from_version_12=true"
+        }));
+    }
+    audit_log.sort_by(compare_migrated_audit_records);
+}
+
+fn compare_migrated_audit_records(left: &Value, right: &Value) -> std::cmp::Ordering {
+    let day = |value: &Value| value.get("day").and_then(Value::as_i64).unwrap_or(i64::MAX);
+    let left_kind = left.get("kind").and_then(Value::as_str).unwrap_or_default();
+    let right_kind = right
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    day(left)
+        .cmp(&day(right))
+        .then_with(|| {
+            audit_migration_priority(left_kind).cmp(&audit_migration_priority(right_kind))
+        })
+        .then_with(|| {
+            left.get("subject")
+                .and_then(Value::as_str)
+                .cmp(&right.get("subject").and_then(Value::as_str))
+        })
+}
+
+fn v12_player_character_ids(
+    object: &serde_json::Map<String, Value>,
+    player_dynasty_id: u64,
+) -> Result<BTreeSet<u64>, PersistenceError> {
+    let records = object
+        .get("characters")
+        .and_then(Value::as_object)
+        .and_then(|characters| characters.get("records"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 12,
+            reason: "save characters.records must be an object".to_owned(),
+        })?;
+    let mut ids = BTreeSet::new();
+    for character in records.values() {
+        let identity = character
+            .get("identity")
+            .and_then(Value::as_object)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 12,
+                reason: "save character has an invalid identity".to_owned(),
+            })?;
+        if identity.get("dynasty_id").and_then(Value::as_u64) == Some(player_dynasty_id) {
+            let character_id = identity.get("id").and_then(Value::as_u64).ok_or_else(|| {
+                PersistenceError::Migration {
+                    version: 12,
+                    reason: "player character has an invalid ID".to_owned(),
+                }
+            })?;
+            ids.insert(character_id);
+        }
+    }
+    Ok(ids)
+}
+
+fn parse_institution_character_subject(subject: &str) -> Option<(u64, u64)> {
+    let mut parts = subject.split(':');
+    if parts.next()? != "institution" {
+        return None;
+    }
+    let institution_id = parts.next()?.parse().ok()?;
+    if parts.next()? != "character" {
+        return None;
+    }
+    let character_id = parts.next()?.parse().ok()?;
+    parts
+        .next()
+        .is_none()
+        .then_some((institution_id, character_id))
+}
+
+fn audit_migration_priority(kind: &str) -> u8 {
+    u8::from(kind != "InstitutionPatronage")
 }
 
 fn v11_business_owners(

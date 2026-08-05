@@ -1,7 +1,7 @@
 //! Persistence round-trip, migration, and release-mode validation tests.
 
 use super::*;
-use crate::core::{CivicDebt, CivicDebtStatus, EnactedLaw, FamilyLinkKind, LawKind};
+use crate::core::{AuditKind, CivicDebt, CivicDebtStatus, EnactedLaw, FamilyLinkKind, LawKind};
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
 use crate::money::Money;
 use crate::registry::Registry;
@@ -731,6 +731,75 @@ mod migrations {
         );
         assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
         validate_state(&loaded).expect("version-eleven campaign must remain valid");
+    }
+
+    #[test]
+    fn v12_removes_unearned_memberships_and_preserves_nominated_support() {
+        let state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let character_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(12);
+        let institutions = value["institutions"]
+            .as_object_mut()
+            .expect("institutions must be an object");
+        let mut institution_ids: Vec<u64> = institutions
+            .values()
+            .map(|institution| {
+                institution["institution_id"]
+                    .as_u64()
+                    .expect("institution ID must be numeric")
+            })
+            .collect();
+        institution_ids.sort_unstable();
+        let supported_institution_id = *institution_ids
+            .first()
+            .expect("campaign must contain institutions");
+        for institution in institutions.values_mut() {
+            institution["members"]
+                .as_array_mut()
+                .expect("members must be an array")
+                .push(Value::from(character_id.value()));
+        }
+        value["audit_log"]
+            .as_array_mut()
+            .expect("audit log must be an array")
+            .push(serde_json::json!({
+                "day": 0,
+                "kind": "OfficeNomination",
+                "subject": format!(
+                    "institution:{supported_institution_id}:character:{character_id}"
+                ),
+                "detail": "campaign_cost=300"
+            }));
+
+        let migrated = migrate_to_current(value, Path::new("memory.json"))
+            .expect("version twelve must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        for (institution_id, institution) in &loaded.institutions {
+            assert_eq!(
+                institution.members.contains(&character_id),
+                *institution_id
+                    == InstitutionId::new(
+                        u32::try_from(supported_institution_id)
+                            .expect("test institution ID must fit u32")
+                    ),
+                "migration must retain only institution access backed by prior political activity"
+            );
+        }
+        let support_subject =
+            format!("institution:{supported_institution_id}:character:{character_id}");
+        assert!(loaded.audit_log.iter().any(|record| {
+            record.kind() == AuditKind::InstitutionPatronage && record.subject() == support_subject
+        }));
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        validate_state(&loaded).expect("version-twelve campaign must remain valid");
     }
 
     #[test]

@@ -12,7 +12,7 @@ pub(crate) const EMPLOYMENT_RECOVERY_BASIS_POINTS: u16 = 3_000;
 pub(crate) const MIN_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 7_000;
 pub(crate) const MAX_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 14_000;
 pub(crate) const OFFICE_TERM_DAYS: i64 = 360;
-pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 60;
+pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 180;
 
 pub(crate) fn supported_worker_capacity(business: &crate::core::Business) -> u32 {
     u32::from(business.operations.capacity_batches_per_day)
@@ -92,19 +92,24 @@ pub(crate) fn synchronize_employment_for_business_status(
 
 pub use bootstrap::{NewGameError, build_new_game};
 pub(crate) use commands::{
-    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE, FAMILY_EDUCATION_COST,
-    FAMILY_EDUCATION_INTERVAL_DAYS, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, LABOR_REPLACEMENT_COST,
-    LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST,
-    LEGAL_CASE_FILING_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
-    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_INTERVAL_DAYS,
+    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
+    COMMISSIONED_INFORMATION_SOURCE, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
+    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST,
+    INFORMATION_COMMISSION_INTERVAL_DAYS, INSTITUTION_SUPPORT_COST,
+    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
+    INSTITUTION_SUPPORT_INTERVAL_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
+    LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS,
+    LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+    MAX_ACTIVE_WARDS, OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_INTERVAL_DAYS,
     OFFICE_NOMINATION_REPUTATION_REQUIREMENT, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS,
     WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT,
-    has_established_player_office_power, player_contract_deliveries, required_office_power_for_law,
+    has_established_player_office_power, institution_support_day, player_contract_deliveries,
+    required_office_power_for_law,
 };
 pub use commands::{
-    CommandError, CommandOutcome, CrisisResponse, EducationFocus, LaborResponse, PlayerCommand,
-    apply_player_command,
+    CommandError, CommandOutcome, CrisisResponse, EducationFocus, InformationFocus, LaborResponse,
+    PlayerCommand, apply_player_command,
 };
 pub use invariants::validate_invariants;
 pub use simulation::advance_days;
@@ -117,7 +122,7 @@ pub use strategic::{
 pub(crate) use strategic::{
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, OFFICE_DUTY_COST_PER_POWER,
     STANDARD_CONTRACT_BATCHES_PER_WEEK, dynasty_office_administrative_load,
-    initialize_strategic_state,
+    initialize_strategic_state, institution_capability_score,
 };
 pub use transactions::{
     SimulationError, ValidatedCashTransfer, transfer_business_cash, validate_business_cash_transfer,

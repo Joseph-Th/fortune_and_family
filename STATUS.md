@@ -11,9 +11,9 @@ Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code own
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 12 |
-| Supported save migrations | Versions 0 through 11 |
-| Gameplay report schema | 20 |
+| Save schema | 13 |
+| Supported save migrations | Versions 0 through 12 |
+| Gameplay report schema | 22 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |
@@ -44,11 +44,11 @@ The Rivergate campaign supports multi-generation deterministic continuation.
 | Municipal finance | Authorizing laws, dynasty creditors, treasury proceeds, scheduled service, delinquency, default, and civic consequences. |
 | Property | Ownership, value, tenancy, occupancy, rent, purchase, collateral, voluntary liquidation, lien settlement, and distressed civic guarantees. |
 | Labor | Employment agreements, wages, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. |
-| Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with membership, budgets, legitimacy, powers, terms, and deterministic selection. |
-| Political office | Nomination, commercial eligibility, office-specific competence, established powers, recurring duties, administrative load, voluntary withdrawal, forfeiture, and re-election limits. |
+| Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with earned patronage-based membership, budgets, legitimacy, powers, terms, and deterministic selection. |
+| Political office | Commercial eligibility, paid institutional patronage, a 90-day support-establishment period, nomination, office-specific competence, a 180-day power-establishment period, recurring duties, administrative load, voluntary withdrawal, forfeiture, and re-election limits. |
 | Civic systems | Laws, public works, district conditions, legal cases, crisis response, and municipal debt. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
-| Information | Source, confidence, summary, creation, expiry, and player-facing reports. |
+| Information | Source, confidence, summary, creation, expiry, passive reports, and paid player-directed market, district, and counterparty intelligence. |
 | AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure. |
 | Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, response, effects, and resolution. |
 | Observability | Summary, projection, HTML dashboard, outbox, chronicle, audit history, validation, and gameplay reports. |
@@ -62,8 +62,9 @@ The Rivergate campaign supports multi-generation deterministic continuation.
 - Property purchase and sale
 - Laws, public works, and legal cases
 - House governance, ward adoption, and family education
-- Office nomination and institutional withdrawal
+- Institutional patronage, office nomination, and institutional withdrawal
 - Crisis and labor-dispute responses
+- Commissioned market, district, and counterparty intelligence
 - Notification acknowledgement
 
 Commands use the same canonical validation and mutation paths from the library, CLI, tests, and gameplay harness.

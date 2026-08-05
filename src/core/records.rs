@@ -580,6 +580,7 @@ pub enum AuditKind {
     BusinessDividend,
     PublicWorkStarted,
     CrisisResponse,
+    InstitutionPatronage,
     OfficeNomination,
     OfficeDutyShortfall,
     OfficeDutyForfeiture,

@@ -222,6 +222,45 @@ mod harness {
         make_institution_withdrawal_available_for_test(&mut withdrawal_state);
         kinds.extend(candidate_kinds_for_test(registry, &withdrawal_state));
 
+        let mut information_state = make_test_candidate_coverage_state(registry);
+        for _ in 0..360 {
+            information_state.clock.advance_one_day();
+        }
+        kinds.extend(candidate_kinds_for_test(registry, &information_state));
+
+        let mut support_state = make_test_candidate_coverage_state(registry);
+        for _ in 0..INSTITUTION_SUPPORT_INTERVAL_DAYS {
+            support_state.clock.advance_one_day();
+        }
+        let player_character_ids: BTreeSet<_> = support_state
+            .characters
+            .iter()
+            .filter(|character| character.dynasty_id() == support_state.player_dynasty_id)
+            .map(crate::core::Character::id)
+            .collect();
+        let support_institution_id = support_state
+            .institutions
+            .values()
+            .find(|institution| {
+                institution
+                    .office_holder_id
+                    .is_none_or(|holder_id| !player_character_ids.contains(&holder_id))
+            })
+            .expect("fixture must contain an institution without a player officeholder")
+            .institution_id;
+        support_state
+            .institutions
+            .get_mut(&support_institution_id)
+            .expect("support institution must exist")
+            .members
+            .retain(|character_id| !player_character_ids.contains(character_id));
+        let subject_prefix = format!("institution:{support_institution_id}:");
+        support_state.audit_log.retain(|record| {
+            record.kind() != AuditKind::InstitutionPatronage
+                || !record.subject().starts_with(&subject_prefix)
+        });
+        kinds.extend(candidate_kinds_for_test(registry, &support_state));
+
         assert_set_eq(
             &ALL_COMMAND_KINDS.into_iter().collect(),
             &kinds,
@@ -382,6 +421,7 @@ mod candidates {
 
     #[test]
     fn office_candidates_include_existing_institution_members_after_cooldown() {
+        let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         grant_office_nomination_record_for_test(&mut state);
         let player_character_ids: Vec<_> = state
@@ -412,7 +452,12 @@ mod candidates {
         player.resources.treasury = Money::from_copper(10_000);
         let mut candidates = Vec::new();
 
-        generate_family_candidates(&state, GameplayPersona::PowerBroker, &mut candidates);
+        generate_family_candidates(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut candidates,
+        );
 
         let nominations: Vec<_> = candidates
             .iter()
@@ -459,7 +504,7 @@ mod candidates {
         );
         let mut candidates = Vec::new();
 
-        generate_family_candidates(&state, GameplayPersona::Steward, &mut candidates);
+        generate_family_candidates(registry, &state, GameplayPersona::Steward, &mut candidates);
 
         let candidate = candidates
             .iter()
@@ -1450,6 +1495,84 @@ mod candidates {
             "the filing route should become available at the exact cost boundary"
         );
     }
+
+    #[test]
+    fn establishment_agents_can_commission_executable_persona_specific_intelligence() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let mut candidates = Vec::new();
+
+        generate_information_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+        assert!(
+            candidates.is_empty(),
+            "commissioned intelligence should enter the agent loop after the foundation year"
+        );
+        for _ in 0..360 {
+            state.clock.advance_one_day();
+        }
+
+        generate_information_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::CommissionInformation)
+            .expect("an established dynasty must be offered commissioned intelligence")
+            .clone();
+        assert!(matches!(
+            candidate.command,
+            PlayerCommand::CommissionInformation {
+                focus: InformationFocus::Market { .. }
+            }
+        ));
+        apply_player_command(registry, &mut state, candidate.command)
+            .expect("generated intelligence commission must be executable");
+        assert!(state.information_reports.values().any(|report| {
+            report.owner_dynasty_id == state.player_dynasty_id
+                && report.source == COMMISSIONED_INFORMATION_SOURCE
+        }));
+
+        candidates.clear();
+        generate_information_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+        assert!(
+            candidates.is_empty(),
+            "the annual commission interval must prevent repetitive intelligence housekeeping"
+        );
+    }
+
+    #[test]
+    fn power_broker_preserves_political_reserves_before_extending_credit() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(49_999);
+        let mut candidates = Vec::new();
+
+        add_lend_candidate(&state, GameplayPersona::PowerBroker, &mut candidates);
+
+        assert!(
+            candidates.is_empty(),
+            "a power broker must not sacrifice campaign and office reserves to habitual lending"
+        );
+    }
 }
 
 mod metrics {
@@ -1563,8 +1686,9 @@ mod metrics {
         let mut state = make_test_campaign();
         state.outbox.clear();
         for index in 1..NOTIFICATION_BATCH_THRESHOLD {
+            let message_id = state.next_ids.outbox();
             state.outbox.push(OutboxMessage {
-                id: OutboxMessageId::new(u32::try_from(index).expect("test index fits u32")),
+                id: message_id,
                 day: 0,
                 kind: OutboxKind::Information,
                 subject: format!("message {index}"),
@@ -1584,8 +1708,9 @@ mod metrics {
         );
 
         let index = NOTIFICATION_BATCH_THRESHOLD;
+        let message_id = state.next_ids.outbox();
         state.outbox.push(OutboxMessage {
-            id: OutboxMessageId::new(u32::try_from(index).expect("test index fits u32")),
+            id: message_id,
             day: 0,
             kind: OutboxKind::Information,
             subject: format!("message {index}"),
@@ -1612,8 +1737,9 @@ mod metrics {
         let mut state = make_test_campaign();
         state.outbox.clear();
         for index in 1..=NOTIFICATION_BATCH_THRESHOLD {
+            let message_id = state.next_ids.outbox();
             state.outbox.push(OutboxMessage {
-                id: OutboxMessageId::new(u32::try_from(index).expect("test index fits u32")),
+                id: message_id,
                 day: 0,
                 kind: OutboxKind::Information,
                 subject: format!("message {index}"),
@@ -1629,7 +1755,7 @@ mod metrics {
             .expect("notification backlog must create a housekeeping candidate");
         acknowledgement.score = 10_000;
         let mut family = Vec::new();
-        generate_family_candidates(&state, GameplayPersona::Steward, &mut family);
+        generate_family_candidates(registry, &state, GameplayPersona::Steward, &mut family);
         let mut governance = family
             .into_iter()
             .find(|candidate| candidate.kind == GameplayCommandKind::SetHouseGovernance)
@@ -1657,6 +1783,48 @@ mod metrics {
             selected.expect("a candidate must be selected").kind,
             GameplayCommandKind::SetHouseGovernance,
             "housekeeping may be a fallback but must not consume a strategic decision cycle"
+        );
+    }
+
+    #[test]
+    fn automatic_notification_housekeeping_clears_backlog_without_advancing_the_campaign() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state.outbox.clear();
+        for index in 1..=NOTIFICATION_BATCH_THRESHOLD {
+            let message_id = state.next_ids.outbox();
+            state.outbox.push(OutboxMessage {
+                id: message_id,
+                day: 0,
+                kind: OutboxKind::Information,
+                subject: format!("message {index}"),
+                body: "test".to_owned(),
+                acknowledged: false,
+            });
+        }
+        let day_before = state.clock.day();
+        let mut accumulator = CampaignAccumulator::new();
+
+        apply_notification_housekeeping(registry, &mut state, &mut accumulator)
+            .expect("automatic housekeeping must succeed");
+
+        assert_eq!(state.clock.day(), day_before);
+        assert!(state.outbox.iter().all(|message| message.acknowledged));
+        let command_stats = accumulator
+            .commands
+            .get(&GameplayCommandKind::AcknowledgeNotification)
+            .expect("acknowledgement statistics must exist");
+        assert_eq!(command_stats.executed, 1);
+        assert_eq!(command_stats.actions_with_persistent_consequences, 1);
+        assert!(
+            command_stats
+                .changed_domains
+                .contains(&GameplayDomain::Feedback)
+        );
+        assert!(
+            ranked_candidates(registry, &state, GameplayPersona::Steward, &accumulator,)
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::SetHouseGovernance)
         );
     }
 
@@ -1928,6 +2096,8 @@ mod metrics {
         snapshot.quality_reputation = COMMERCIAL_STANDING_REPUTATION_REQUIREMENT;
         accumulator.observe_snapshot(&snapshot);
 
+        accumulator.record_executed_command(GameplayCommandKind::CultivateInstitutionSupport, 180);
+
         snapshot.day = 360;
         snapshot.player_contract_deliveries = OFFICE_NOMINATION_DELIVERY_REQUIREMENT;
         accumulator.observe_snapshot(&snapshot);
@@ -1951,6 +2121,7 @@ mod metrics {
             GameplayFantasyArc {
                 first_reputation_standing_day: Some(70),
                 first_commercial_standing_day: Some(360),
+                first_institution_support_day: Some(180),
                 first_office_campaign_day: Some(377),
                 first_office_day: Some(440),
                 first_city_shaping_action_day: Some(454),
@@ -1998,6 +2169,7 @@ mod findings {
             let mut campaign = baseline.clone();
             campaign.persona = persona;
             campaign.fantasy_arc.first_commercial_standing_day = Some(70);
+            campaign.fantasy_arc.first_institution_support_day = Some(70);
             campaign.fantasy_arc.first_office_campaign_day = Some(70);
             campaign.fantasy_arc.first_office_day = Some(154);
             campaign.fantasy_arc.first_city_shaping_action_day = Some(154);
@@ -2083,6 +2255,7 @@ mod findings {
             .expect("focused configuration must produce one campaign");
         campaign.simulated_days = 720;
         campaign.fantasy_arc.first_commercial_standing_day = Some(70);
+        campaign.fantasy_arc.first_institution_support_day = Some(70);
         campaign.fantasy_arc.first_office_campaign_day = Some(70);
         campaign.fantasy_arc.first_office_day = Some(140);
         campaign.fantasy_arc.first_city_shaping_action_day = Some(147);
@@ -2091,7 +2264,7 @@ mod findings {
 
         finding_with_title(
             &findings,
-            "Commercial standing immediately becomes political access",
+            "Institutional support immediately becomes candidacy",
         );
         finding_with_title(
             &findings,
@@ -2185,6 +2358,7 @@ mod findings {
             .expect("focused configuration must produce one campaign");
         campaign.simulated_days = 720;
         campaign.fantasy_arc.first_commercial_standing_day = Some(70);
+        campaign.fantasy_arc.first_institution_support_day = Some(100);
         campaign.fantasy_arc.first_office_campaign_day = Some(140);
         campaign.fantasy_arc.first_city_shaping_action_day = Some(420);
 
@@ -2696,6 +2870,34 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
     contract
         .fulfilled_deliveries_by_dynasty
         .insert(state.player_dynasty_id, deliveries);
+    let support_day = state
+        .clock
+        .day()
+        .saturating_sub(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS);
+    let player_character_ids: Vec<_> = state
+        .characters
+        .iter()
+        .filter(|character| character.dynasty_id() == state.player_dynasty_id)
+        .map(crate::core::Character::id)
+        .collect();
+    let institution_ids: Vec<_> = state.institutions.keys().copied().collect();
+    for institution_id in institution_ids {
+        for character_id in &player_character_ids {
+            state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("institution must exist")
+                .members
+                .insert(*character_id);
+            state.audit_log.push(AuditRecord {
+                day: support_day,
+                kind: AuditKind::InstitutionPatronage,
+                subject: format!("institution:{institution_id}:character:{character_id}"),
+                detail: "test support".to_owned(),
+            });
+        }
+    }
+    state.audit_log.sort_by_key(AuditRecord::day);
 }
 
 fn make_supply_security_and_borrowing_available(state: &mut AppState) {

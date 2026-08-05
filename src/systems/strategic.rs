@@ -446,7 +446,11 @@ fn commit_loan(
         .dynasties
         .get_mut(&lender_dynasty_id)
         .expect("validated lender must exist");
-    lender.resources.treasury = lender.resources.treasury.saturating_sub(principal);
+    lender.resources.treasury = lender
+        .resources
+        .treasury
+        .checked_sub(principal)
+        .expect("revalidated lender treasury must cover the principal");
     let borrower = state
         .dynasties
         .get_mut(&borrower_dynasty_id)
@@ -834,7 +838,10 @@ pub fn buy_unowned_property(
         .get_mut(&buyer_dynasty_id)
         .expect("validated buyer must exist")
         .resources
-        .treasury = buyer.treasury().saturating_sub(price);
+        .treasury = buyer
+        .treasury()
+        .checked_sub(price)
+        .expect("validated property buyer must cover the purchase price");
     state
         .properties
         .get_mut(&property_id)
@@ -879,20 +886,12 @@ fn property_liquidation_lien(
             balance: loan.balance,
         });
     }
-    let lender =
-        state
-            .dynasties
-            .get(&loan.lender_dynasty_id)
-            .ok_or(StrategicError::MissingDynasty {
-                dynasty_id: loan.lender_dynasty_id,
-            })?;
-    if lender.treasury().checked_add(loan.balance).is_none() {
-        return Err(StrategicError::DynastyTreasuryOverflow {
+    state
+        .dynasties
+        .get(&loan.lender_dynasty_id)
+        .ok_or(StrategicError::MissingDynasty {
             dynasty_id: loan.lender_dynasty_id,
-            current: lender.treasury(),
-            incoming: loan.balance,
-        });
-    }
+        })?;
     Ok(Some(PropertyLienSettlement {
         loan_id,
         lender_dynasty_id: loan.lender_dynasty_id,
@@ -1003,6 +1002,26 @@ pub fn quote_property_liquidation(
     let seller_proceeds = price.saturating_sub(lien_payoff);
     let (buyer_contribution, civic_guarantee) =
         property_auction_funding(registry, state, seller_dynasty_id, buyer_dynasty_id, price)?;
+    // A lender buying the collateral is debited before receiving the payoff. Because the payoff
+    // cannot exceed the price, that combined balance transition cannot overflow.
+    if let Some(lien) = lien
+        && lien.lender_dynasty_id != buyer_dynasty_id
+    {
+        let lender =
+            state
+                .dynasties
+                .get(&lien.lender_dynasty_id)
+                .ok_or(StrategicError::MissingDynasty {
+                    dynasty_id: lien.lender_dynasty_id,
+                })?;
+        if lender.treasury().checked_add(lien.payoff).is_none() {
+            return Err(StrategicError::DynastyTreasuryOverflow {
+                dynasty_id: lien.lender_dynasty_id,
+                current: lender.treasury(),
+                incoming: lien.payoff,
+            });
+        }
+    }
     if seller.treasury().checked_add(seller_proceeds).is_none() {
         return Err(StrategicError::DynastyTreasuryOverflow {
             dynasty_id: seller_dynasty_id,
@@ -1034,7 +1053,8 @@ fn settle_property_sale_finances(
     buyer.resources.treasury = buyer
         .resources
         .treasury
-        .saturating_sub(quote.buyer_contribution);
+        .checked_sub(quote.buyer_contribution)
+        .expect("validated property buyer must cover its contribution");
     if quote.civic_guarantee > Money::ZERO {
         let treasury_id = registry
             .get_institution_id("treasury")
@@ -1043,7 +1063,10 @@ fn settle_property_sale_finances(
             .institutions
             .get_mut(&treasury_id)
             .expect("validated civic treasury runtime must exist");
-        treasury.budget = treasury.budget.saturating_sub(quote.civic_guarantee);
+        treasury.budget = treasury
+            .budget
+            .checked_sub(quote.civic_guarantee)
+            .expect("validated civic treasury must cover the guarantee");
     }
     if let Some(lien) = lien {
         let lender = state
@@ -1446,7 +1469,8 @@ fn commit_business_acquisition(
         .resources
         .treasury = validated
         .buyer_treasury
-        .saturating_sub(validated.total_required);
+        .checked_sub(validated.total_required)
+        .expect("validated acquisition buyer must cover the total cost");
     let seller = state
         .dynasties
         .get_mut(&quote.seller_dynasty_id)
@@ -1624,7 +1648,9 @@ fn initialize_institutions(registry: &Registry, state: &mut AppState) {
     for definition in registry.institutions() {
         let mut members = BTreeSet::new();
         for dynasty in state.dynasties.values() {
-            members.insert(dynasty.head_id());
+            if dynasty.id() != state.player_dynasty_id {
+                members.insert(dynasty.head_id());
+            }
         }
         let office_holder_id = if definition.key() == "city_council" {
             state
@@ -4544,7 +4570,7 @@ fn resolve_institution_selections(registry: &Registry, state: &mut AppState) {
     }
 }
 
-fn institution_capability_score(
+pub(crate) fn institution_capability_score(
     character: &crate::core::Character,
     institution_kind: InstitutionKind,
 ) -> u32 {
