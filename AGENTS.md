@@ -1,244 +1,182 @@
 # Agent Guide
 
-This file defines how to work in the repository. Product intent is in `DESIGN.md`; implementation structure is in `ARCHITECTURE.md`; current coverage is in `STATUS.md`.
+This file defines how to change the repository safely. It is an execution contract, not a product specification.
 
-## Cold-start sequence
+Read `README.md` first. Use `ARCHITECTURE.md` for ownership and flow, `DESIGN.md` for product intent, `STATUS.md` for current capability, and `TESTING.md` for validation.
+
+## Cold start
 
 Before editing:
 
-1. Run `git status --short` and preserve unrelated working-tree changes.
-2. Read `README.md`, `ARCHITECTURE.md`, and the relevant section of `STATUS.md`.
-3. Locate the owning module and its sibling `*_tests.rs` file.
-4. Run a focused test before changing behavior.
-5. Trace the canonical path from public entry point to mutation and invariant validation.
+1. Run `git status --short` and preserve unrelated changes.
+2. Identify the owning module and sibling test suite.
+3. Read the relevant architecture and status sections.
+4. Trace the canonical path from public entry point to mutation and invariant validation.
+5. Run the narrowest relevant test.
 
-For cross-domain work, start from these entry points:
+Primary entry points:
 
-- New campaign: `build_new_game` in `src/systems/bootstrap.rs`
-- Player mutation: `apply_player_command` in `src/systems/commands.rs`
-- Time advancement: `advance_days` in `src/systems/simulation.rs`
-- Strategic cadence: `src/systems/strategic.rs`
-- Save/load: `src/persistence.rs`
-- Read-only output: `src/projection.rs`
-- Gameplay evaluation: `src/gameplay.rs`
+| Concern | Entry point |
+|---|---|
+| New campaign | `build_new_game` in `src/systems/bootstrap.rs` |
+| Player command | `apply_player_command` in `src/systems/commands.rs` |
+| Time advancement | `advance_days` in `src/systems/simulation.rs` |
+| Scheduled systems | `src/systems/strategic.rs` |
+| Persistence | `src/persistence.rs` |
+| Read models and HTML | `src/projection.rs` |
+| Gameplay analysis | `src/gameplay.rs` |
 
-## Non-negotiable rules
+## Core rules
 
-### Explicit ownership
+### Ownership
 
-- `Registry` owns immutable definitions.
+- `Registry` owns immutable scenario definitions.
 - `AppState` owns mutable, serializable campaign state.
-- Records own identity and local lifecycle data.
-- Systems own validation, decisions, mutation, and invariant preservation.
-- Adapters own input/output translation only.
+- Records own identity, references, local values, and lifecycle state.
+- Systems own validation and mutation.
+- Adapters translate external input and output only.
 
-Do not place mutable runtime values in registry definitions. Do not place business rules in CLI, persistence, projection, rendering, or tests.
+Do not place mutable runtime state in the registry. Do not place business rules in CLI, persistence, projections, rendering, tests, or gameplay-report formatting.
 
-### One mutation path
+### Canonical mutation
 
-Each operation has one canonical path:
+Every operation follows one path:
 
 ```text
 input -> validation -> resolution -> atomic commit -> durable feedback -> invariant check
 ```
 
-Tests, migrations, AI, CLI commands, and administrative code must not create parallel mutation semantics.
+CLI commands, AI, migrations, tests, and administrative utilities must not create parallel mutation semantics.
 
-### Validate before mutation
+Validate every reference, ownership claim, permission, lifecycle state, range, capacity, and arithmetic result before mutation. A failed operation must leave state unchanged.
 
-Validate all references, lifecycle states, permissions, ownership, capacities, ranges, and arithmetic results before changing state.
-
-A failed operation leaves state unchanged. For multi-record operations, calculate every resulting value first and then commit all changes together.
-
-Use a consumed `Validated*` token when validation and commit can be separated. The token must revalidate state at commit time.
+For multi-record operations, calculate all resulting values before committing any change. Use a consumed `Validated*` token when validation and commit are separated; commit must revalidate current state.
 
 ### Determinism
 
-The same registry, state, seed, input sequence, and day count must produce identical state.
+The same registry, state, seed, command sequence, and day count must produce identical state.
 
-- Use only the state-owned RNG for simulation randomness.
-- Use `BTreeMap`, `BTreeSet`, explicit sorting, or another stable order for result-affecting iteration.
-- Use typed IDs as stable tie-breakers.
-- Do not use wall-clock time, unordered filesystem enumeration, environment-dependent values, sleeps, or external services in core systems.
+- Use the state-owned RNG for simulation randomness.
+- Use ordered collections, explicit sorting, and typed-ID tie-breakers for result-affecting iteration.
+- Do not use wall-clock time, environment-dependent values, unordered filesystem enumeration, sleeps, or external services in core systems.
 
-### Fixed-point arithmetic
+### Arithmetic
 
-Economic values use `Money` and `Quantity` from `src/money.rs`.
+Economic state uses `Money` and `Quantity` from `src/money.rs`.
 
-- Do not introduce floating-point economic state.
-- Use the shared cost, affordability, and ratio helpers.
-- For multiply-then-divide calculations, use a wide intermediate and saturate only the final result.
-- Reject overflow before player-initiated or cross-record transfers.
-- Saturation is not a substitute for a domain bound check.
+- Do not use floating point for economic state.
+- Use shared cost, affordability, and ratio helpers.
+- Use wide intermediates for multiply-then-divide calculations.
+- Reject overflow before player-initiated and cross-record transfers.
+- Saturation does not replace a domain bound check.
 
-### References and IDs
+### Identity and references
 
 - Persistent references use typed IDs from `src/ids.rs`.
-- New generated records use `NextIds` owned by `AppState`.
-- Load and save validation must reject missing references, stale indexes, and exhausted allocators.
-- Optional references are represented with `Option`.
-- Raw strings are for authored keys or user-facing text, not internal record identity.
+- Generated records use `NextIds` owned by `AppState`.
+- Optional references use `Option`.
+- Raw strings are for authored keys and user-facing text, not runtime identity.
+- Save validation must reject missing references, stale indexes, duplicate ownership, and exhausted allocators.
 
-### Derived data
+### Derived state and lifecycle
 
-Derived indexes and counters have one owner. Update source records and all owned derived structures atomically.
+Derived indexes and counters have one authoritative source. Update source records and every owned derived structure in the same atomic operation.
 
-If a value is persisted, either make it authoritative or validate that it exactly matches its source data. Do not allow two independent sources of truth.
+Related records must agree on lifecycle. Closure, default, repayment, sale, office turnover, employment change, occupancy change, and succession must update all dependent records together.
 
-### Lifecycle consistency
+### Boundaries
 
-Related records must agree about active, disputed, suspended, insolvent, closed, completed, defaulted, or resolved state.
+Core systems perform no implicit IO. Persistence, CLI, projection, rendering, and gameplay reporting are boundary layers. Durable external work must be represented in state before an adapter acts on it.
 
-A lifecycle change must update every dependent record in the same canonical operation. Examples include employment after business closure, collateral after repayment or default, occupancy after ownership transfer, and officeholding after elections.
-
-### External boundaries
-
-Core systems perform no implicit IO. Persistence, CLI, and rendering are adapters. Durable external work must be represented in state before an adapter acts on it.
-
-## Change recipes
+## Change procedures
 
 ### Add persistent state
 
-1. Define or extend a record in `src/core/records.rs` or `src/core/extended.rs`.
+1. Add or extend a record in `src/core/records.rs` or `src/core/extended.rs`.
 2. Add ownership to `AppState` or an existing synchronized store.
-3. Add typed IDs and allocation when needed.
-4. Add getters required by public read paths.
-5. Update bootstrap or migration construction.
-6. Update persistence validation.
-7. Add debug invariants.
-8. Add projection fields when the player or adapter must observe it.
-9. Add round-trip, invalid-state, and behavioral tests.
-10. Increment the save schema when serialized compatibility changes.
+3. Add typed IDs and allocation if required.
+4. Update bootstrap or migration construction.
+5. Update persistence validation and runtime invariants.
+6. Expose the state through projections when users or adapters need it.
+7. Add behavioral, invalid-state, and round-trip tests.
+8. Increment the save schema when serialized compatibility changes.
 
 ### Add a player command
 
 1. Add an exhaustive `PlayerCommand` variant.
-2. Add dedicated input fields and a dedicated error variant for each new precondition class.
-3. Validate the full operation before mutation.
-4. Commit through `apply_player_command` or a canonical owned subsystem function.
-5. Add audit and player-facing feedback when the action is consequential.
-6. Add rollback, success, serialization, and boundary tests.
-7. Expose required state in projections.
-8. Add gameplay-harness candidates, snapshots, attribution, and coverage.
-9. Extend CLI smoke coverage when syntax or output changes.
+2. Add typed errors for each precondition class.
+3. Validate the complete operation before mutation.
+4. Commit through `apply_player_command` or a canonical subsystem function.
+5. Add durable audit, chronicle, or outbox feedback when consequential.
+6. Add success, rejection, atomicity, serialization, and boundary tests.
+7. Update projections if the result must be observable.
+8. Update gameplay candidates, classification, snapshots, attribution, and coverage.
+9. Update CLI smoke coverage when syntax or output changes.
 
 ### Add simulation behavior
 
-1. Decide whether the behavior is daily, weekly, monthly, or annual.
-2. Put it in `simulation.rs` for the daily economic pipeline or `strategic.rs` for scheduled cross-domain systems.
-3. Separate broad read-only calculation from narrow mutation when useful.
-4. Preserve the documented execution order or update it explicitly with causal tests.
+1. Assign an explicit cadence: daily, weekly, monthly, or annual.
+2. Use `simulation.rs` for the daily economic pipeline and `strategic.rs` for scheduled cross-domain systems.
+3. Keep read-only planning separate from narrow mutation when useful.
+4. Preserve the documented execution order or update it with causal tests.
 5. Add durable feedback for player-relevant delayed outcomes.
-6. Add invariants for every new cross-record requirement.
-7. Add focused tests plus soak coverage when the behavior accumulates over time.
+6. Add invariants and focused tests; add soak coverage for accumulating behavior.
 
 ### Change persistence
 
-1. Increment `CURRENT_SCHEMA_VERSION` for a serialized contract change.
-2. Add a deterministic migration from the previous version.
+1. Increment `CURRENT_SCHEMA_VERSION` for serialized contract changes.
+2. Add one deterministic migration from the previous version.
 3. Keep migrations explicit and version-by-version.
-4. Add migration fixtures and exact post-migration assertions.
-5. Validate loaded and saved state in release mode.
-6. Preserve atomic same-directory replacement.
-7. Update `STATUS.md` and public documentation.
+4. Add migration input, exact post-migration assertions, and current-schema round-trip coverage.
+5. Preserve release-mode validation and atomic same-directory replacement.
+6. Update `STATUS.md`.
 
-### Add a projection or adapter field
+### Extend projections or gameplay reports
 
-Read from immutable registry/state data. Do not infer new business rules in the projection. Add coverage proving each primary record appears once and rendered output remains escaped and script-safe.
+Projection code reads immutable state and may format or aggregate. It must not recreate domain rules.
 
-### Extend the gameplay harness
+For gameplay-report changes, update candidate generation, command classification, snapshots, attribution, findings, traces, schema version, tests, and `GAMEPLAY_HARNESS.md` together.
 
-Update all relevant parts together:
+## Code conventions
 
-- Candidate generation and ranking
-- Command-family and strategic-direction classification
-- Snapshot fields
-- Immediate and delayed comparison
-- Findings and scores
-- Trace rendering
-- Schema version
-- Harness tests and `GAMEPLAY_HARNESS.md`
-
-## Naming
-
-- Direct keyed lookup: `get_*`
-- Conditional scan: `find_*`
-- Derive a final value: `resolve_*`
-- Plain accessor: noun form such as `status()`
-- Plain constructor: `new()`
-- Aggregate construction: `build_*`
-- Collection insertion: `insert_*`
-- Registry definition insertion: `register_*`
-- Removal from state: `remove_*`
-- Boolean predicate: `is_*`, `has_*`, or `can_*`
-- Read-only decision: `decide_*`, returning a `Plan`, `Outcome`, or `Delta`
-- Mutation of a decided value: `apply_*`
-- Preconditions for a deferred commit: `validate_*`, returning `Validated*`
-
-Do not add new `create_*`, `make_*`, `execute_*`, `perform_*`, or `attempt_*` names unless an external API requires the term. Test fixtures use `make_test_*`.
-
-## Structural rules
-
-- Project-owned enum matches are exhaustive. Do not use wildcard arms.
-- Consequential fields stay private and are changed through systems.
+- Match project-owned enums exhaustively; do not use wildcard arms.
+- Keep consequential fields private and mutate them through systems.
 - Prefer concrete records and functions over dynamic dispatch in core domains.
-- Large structs should group related fields into explicit profiles.
-- Struct-to-struct mappings name every field or profile intentionally.
-- Pass the narrowest mutable context a phase needs.
-- Keep top-level execution order visible in one place.
-- Delete replaced paths rather than preserving unused compatibility shims.
-- Every source file has a concise `//!` module description.
+- Keep top-level execution order visible.
+- Pass the narrowest mutable context required.
+- Delete replaced paths instead of retaining unused compatibility layers.
+- Give every source file a concise `//!` module description.
+- Use dedicated error enums with contextual variants; do not return stringly typed errors.
 
-Internal `expect` and assertions are acceptable only after the code has already established the invariant. External or persisted input must return a typed error rather than panic.
+Naming:
 
-## Errors
+| Intent | Prefix or form |
+|---|---|
+| Keyed lookup | `get_*` |
+| Conditional scan | `find_*` |
+| Final derivation | `resolve_*` |
+| Aggregate construction | `build_*` |
+| Collection insertion | `insert_*` |
+| Registry definition insertion | `register_*` |
+| Removal | `remove_*` |
+| Predicate | `is_*`, `has_*`, `can_*` |
+| Read-only decision | `decide_*` |
+| Apply decided mutation | `apply_*` |
+| Deferred precondition check | `validate_*` returning `Validated*` |
 
-New fallible operations use dedicated error enums with contextual variants. Do not add stringly typed `Result` errors. Callers should not need to parse error text to identify a failed precondition.
+Test fixtures may use `make_test_*`. Avoid new `create_*`, `execute_*`, `perform_*`, or `attempt_*` names unless required by an external interface.
 
-Error variants should include relevant IDs, available values, required values, or lifecycle states.
+## Tests and documentation
 
-## Tests
+Use sibling `*_tests.rs` files for large suites. Test canonical behavior, not helper reachability. Consequential mutations normally require success, rejection with unchanged state, arithmetic or capacity boundaries, stale-token coverage when applicable, persistence coverage when serialized, and deterministic replay when ordering or randomness matters.
 
-Use sibling test modules for large suites:
+`TESTING.md` is authoritative for commands and test design.
 
-- `src/systems/bootstrap_tests.rs`
-- `src/systems/commands_tests.rs`
-- `src/systems/simulation_tests.rs`
-- `src/systems/strategic_tests.rs`
-- `src/persistence_tests.rs`
-- `src/projection_tests.rs`
-- `src/gameplay_tests.rs`
-- `src/core/state_tests.rs`
-
-Test through canonical public or subsystem paths. Helper-only tests must not make unreachable production behavior appear integrated.
-
-Required coverage for consequential mutations:
-
-- Successful state transition
-- Rejected precondition with unchanged state
-- Arithmetic and capacity boundaries
-- Stale validated token when applicable
-- Serialization or migration when persistent
-- Deterministic replay when ordering or randomness is involved
-
-See `TESTING.md` for commands and tier selection.
-
-## Documentation
-
-Update documentation in the same change when behavior, architecture, commands, save schema, public API, test workflow, or deliberate scope changes.
-
-Keep documents forward-facing:
-
-- Describe the current contract and intended extension points.
-- Do not maintain audit diaries, repair histories, or chronological implementation narratives.
-- Put product intent in `DESIGN.md`.
-- Put implementation structure in `ARCHITECTURE.md`.
-- Put current coverage and known boundaries in `STATUS.md`.
-- Put operational commands in `README.md`, `TESTING.md`, or `GAMEPLAY_HARNESS.md`.
+Update documentation in the same change when architecture, behavior, commands, schemas, public APIs, test workflows, or deliberate scope changes. Keep documentation current-state and forward-facing. Do not add implementation diaries, repair histories, or dated verification narratives.
 
 ## Completion gate
 
-Run the narrowest relevant tests during development. Before finishing a cross-cutting change, run:
+Run focused checks during development. Before finishing cross-cutting work, run:
 
 ```bash
 cargo fmt --all -- --check
@@ -251,12 +189,4 @@ cargo audit
 git diff --check
 ```
 
-Confirm that:
-
-- No unrelated working-tree changes were reverted.
-- Failed operations remain atomic.
-- Deterministic ordering is explicit.
-- Persistent state is complete and migratable.
-- New invariants are enforced in debug and persistence validation where applicable.
-- Public behavior is observable through projections or durable feedback.
-- Documentation matches the resulting code.
+Confirm that failed operations remain atomic, deterministic ordering is explicit, persistent state is complete and migratable, public consequences are observable, and documentation matches the resulting code.

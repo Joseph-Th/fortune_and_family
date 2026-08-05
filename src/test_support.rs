@@ -5,6 +5,7 @@ use crate::registry::{Registry, build_rivergate_registry};
 use crate::systems::build_new_game;
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::fmt::Debug;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -50,6 +51,19 @@ pub(crate) fn assert_state_eq(expected: &AppState, actual: &AppState, context: &
 #[track_caller]
 pub(crate) fn assert_state_unchanged(before: &AppState, after: &AppState, context: &str) {
     assert_state_eq(before, after, context);
+}
+
+#[track_caller]
+pub(crate) fn assert_set_eq<T>(expected: &BTreeSet<T>, actual: &BTreeSet<T>, context: &str)
+where
+    T: Debug + Ord,
+{
+    let missing: Vec<_> = expected.difference(actual).collect();
+    let unexpected: Vec<_> = actual.difference(expected).collect();
+    if missing.is_empty() && unexpected.is_empty() {
+        return;
+    }
+    panic!("{context}; missing members: {missing:#?}; unexpected members: {unexpected:#?}");
 }
 
 fn display_json(value: &Value) -> String {

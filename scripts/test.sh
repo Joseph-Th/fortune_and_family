@@ -11,8 +11,10 @@ usage() {
 usage:
   $0 fast [filter]       run non-ignored library tests
   $0 exact <test-name>   run one fully qualified library test
+  $0 debug <test-name>   run one exact test with captured output disabled
   $0 list [filter]       list matching library tests
   $0 soak                run ignored deterministic soak tests
+  $0 docs                run documentation consistency and doctests
   $0 cli                 run CLI smoke tests
   $0 all                 run syntax, library, doc, soak, and CLI tests
 EOF
@@ -58,11 +60,12 @@ run_test_step() {
   printf '\n==> %s\n' "$label"
 
   set +e
-  "$@" 2>&1 | tee "$output_file"
-  status=${PIPESTATUS[0]}
+  "$@" >"$output_file" 2>&1
+  status=$?
   set -e
 
   if ((status != 0)); then
+    cat "$output_file" >&2
     rm -f "$output_file"
     printf '<== %s FAILED in %s\n' "$label" "$(format_duration "$((SECONDS - started))")" >&2
     return "$status"
@@ -76,6 +79,11 @@ run_test_step() {
     return 2
   fi
 
+  local summaries
+  summaries=$(grep -E '^(running [0-9]+ tests?|test result:)' "$output_file" || true)
+  if [[ -n "$summaries" ]]; then
+    printf '%s\n' "$summaries" | sed 's/^/    /'
+  fi
   rm -f "$output_file"
   printf '<== %s passed in %s\n' "$label" "$(format_duration "$((SECONDS - started))")"
 }
@@ -107,6 +115,12 @@ run_exact() {
     cargo test --quiet --locked --lib "$test_name" -- --exact --include-ignored
 }
 
+run_debug() {
+  local test_name=$1
+  run_step "Debug library test '$test_name'" \
+    cargo test --locked --lib "$test_name" -- --exact --include-ignored --nocapture
+}
+
 list_tests() {
   local filter=${1:-}
   local output
@@ -129,6 +143,20 @@ run_soak() {
     cargo test --quiet --locked --lib '::soak::' -- --ignored --test-threads=1
 }
 
+run_docs() {
+  local python_command
+  if python3 --version >/dev/null 2>&1; then
+    python_command=python3
+  elif python --version >/dev/null 2>&1; then
+    python_command=python
+  else
+    printf 'Python is required for documentation consistency checks\n' >&2
+    return 1
+  fi
+  run_step 'Documentation consistency' "$python_command" scripts/check_docs.py
+  run_step 'Documentation tests' cargo test --quiet --locked --doc
+}
+
 case "$mode" in
   fast)
     [[ $# -le 2 ]] || usage
@@ -138,6 +166,10 @@ case "$mode" in
     [[ $# -eq 2 ]] || usage
     run_exact "$2"
     ;;
+  debug)
+    [[ $# -eq 2 ]] || usage
+    run_debug "$2"
+    ;;
   list)
     [[ $# -le 2 ]] || usage
     list_tests "${2:-}"
@@ -145,6 +177,10 @@ case "$mode" in
   soak)
     [[ $# -eq 1 ]] || usage
     run_soak
+    ;;
+  docs)
+    [[ $# -eq 1 ]] || usage
+    run_docs
     ;;
   cli)
     [[ $# -eq 1 ]] || usage
@@ -154,7 +190,7 @@ case "$mode" in
     [[ $# -eq 1 ]] || usage
     run_step 'Shell syntax checks' bash -n scripts/test.sh scripts/verify_cli.sh
     run_fast
-    run_step 'Documentation tests' cargo test --quiet --locked --doc
+    run_docs
     run_soak
     run_step 'CLI smoke tests' bash scripts/verify_cli.sh
     ;;

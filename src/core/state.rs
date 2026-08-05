@@ -16,7 +16,7 @@ use crate::rng::DeterministicRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 11;
+pub const CURRENT_SCHEMA_VERSION: u32 = 12;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGameConfig {
@@ -112,15 +112,23 @@ impl CharacterStore {
         let character_id = character.id();
         let dynasty_id = character.dynasty_id();
         assert!(
-            self.records.insert(character_id, character).is_none(),
+            !self.records.contains_key(&character_id),
             "duplicate character ID {character_id}"
         );
+        assert!(
+            !self
+                .by_dynasty
+                .values()
+                .any(|characters| characters.contains(&character_id)),
+            "duplicate character index entry {character_id}"
+        );
+        self.records.insert(character_id, character);
         let inserted = self
             .by_dynasty
             .entry(dynasty_id)
             .or_default()
             .insert(character_id);
-        assert!(inserted, "duplicate character index entry {character_id}");
+        debug_assert!(inserted);
     }
 
     #[must_use]
@@ -184,23 +192,35 @@ impl BusinessStore {
         let owner_id = business.owner_dynasty_id();
         let district_id = business.district_id();
         assert!(
-            self.records.insert(business_id, business).is_none(),
+            !self.records.contains_key(&business_id),
             "duplicate business ID {business_id}"
         );
         assert!(
-            self.by_owner
-                .entry(owner_id)
-                .or_default()
-                .insert(business_id),
+            !self
+                .by_owner
+                .values()
+                .any(|businesses| businesses.contains(&business_id)),
             "duplicate owner index entry {business_id}"
         );
         assert!(
-            self.by_district
-                .entry(district_id)
-                .or_default()
-                .insert(business_id),
+            !self
+                .by_district
+                .values()
+                .any(|businesses| businesses.contains(&business_id)),
             "duplicate district index entry {business_id}"
         );
+        self.records.insert(business_id, business);
+        let owner_inserted = self
+            .by_owner
+            .entry(owner_id)
+            .or_default()
+            .insert(business_id);
+        let district_inserted = self
+            .by_district
+            .entry(district_id)
+            .or_default()
+            .insert(business_id);
+        debug_assert!(owner_inserted && district_inserted);
     }
 
     #[must_use]
@@ -218,33 +238,65 @@ impl BusinessStore {
         new_owner_id: DynastyId,
         new_manager_id: CharacterId,
     ) -> Option<DynastyId> {
-        let business = self.records.get_mut(&business_id)?;
+        let business = self.records.get(&business_id)?;
         let prior_owner_id = business.identity.owner_dynasty_id;
+        let district_id = business.identity.district_id;
+        assert!(
+            self.by_owner
+                .get(&prior_owner_id)
+                .is_some_and(|businesses| businesses.contains(&business_id)),
+            "missing owner index entry {business_id}"
+        );
+        assert_eq!(
+            self.by_owner
+                .values()
+                .filter(|businesses| businesses.contains(&business_id))
+                .count(),
+            1,
+            "business {business_id} has duplicate owner index entries"
+        );
+        assert!(
+            self.by_district
+                .get(&district_id)
+                .is_some_and(|businesses| businesses.contains(&business_id)),
+            "missing district index entry {business_id}"
+        );
+        assert_eq!(
+            self.by_district
+                .values()
+                .filter(|businesses| businesses.contains(&business_id))
+                .count(),
+            1,
+            "business {business_id} has duplicate district index entries"
+        );
         if prior_owner_id == new_owner_id {
-            business.operations.manager_id = new_manager_id;
+            self.records
+                .get_mut(&business_id)
+                .expect("validated business must exist")
+                .operations
+                .manager_id = new_manager_id;
             return Some(prior_owner_id);
         }
-
         let remove_prior_owner = self
             .by_owner
             .get_mut(&prior_owner_id)
-            .is_some_and(|businesses| {
-                assert!(
-                    businesses.remove(&business_id),
-                    "missing owner index entry {business_id}"
-                );
-                businesses.is_empty()
-            });
+            .expect("validated owner index must exist");
+        let removed = remove_prior_owner.remove(&business_id);
+        debug_assert!(removed);
+        let remove_prior_owner = remove_prior_owner.is_empty();
         if remove_prior_owner {
             self.by_owner.remove(&prior_owner_id);
         }
-        assert!(
-            self.by_owner
-                .entry(new_owner_id)
-                .or_default()
-                .insert(business_id),
-            "duplicate owner index entry {business_id}"
-        );
+        let inserted = self
+            .by_owner
+            .entry(new_owner_id)
+            .or_default()
+            .insert(business_id);
+        debug_assert!(inserted);
+        let business = self
+            .records
+            .get_mut(&business_id)
+            .expect("validated business must exist");
         business.identity.owner_dynasty_id = new_owner_id;
         business.operations.manager_id = new_manager_id;
         Some(prior_owner_id)
@@ -309,16 +361,23 @@ impl HouseholdStore {
         let household_id = household.id();
         let district_id = household.district_id();
         assert!(
-            self.records.insert(household_id, household).is_none(),
+            !self.records.contains_key(&household_id),
             "duplicate household ID {household_id}"
         );
         assert!(
-            self.by_district
-                .entry(district_id)
-                .or_default()
-                .insert(household_id),
+            !self
+                .by_district
+                .values()
+                .any(|households| households.contains(&household_id)),
             "duplicate household district index entry {household_id}"
         );
+        self.records.insert(household_id, household);
+        let inserted = self
+            .by_district
+            .entry(district_id)
+            .or_default()
+            .insert(household_id);
+        debug_assert!(inserted);
     }
 
     #[must_use]

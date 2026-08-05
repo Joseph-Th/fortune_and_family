@@ -1,33 +1,58 @@
 # Civic Dynasty
 
-Civic Dynasty is a deterministic dynasty and political-economy simulation written in Rust. The repository contains a complete headless Rivergate campaign engine, a CLI, versioned JSON persistence, read-only projections, a self-contained HTML dashboard, and a deterministic gameplay-testing harness.
+Civic Dynasty is a deterministic dynasty, economic, and political simulation written in Rust. The repository contains the Rivergate simulation engine, a CLI, versioned JSON saves, read-only projections, a self-contained HTML dashboard, and a deterministic gameplay-analysis harness.
+
+The central gameplay arc is:
+
+```text
+productive work -> commercial standing -> institutional access -> civic power -> dynastic continuity
+```
+
+## Start here
+
+For a new contributor or agent:
+
+1. Read this file for the project map and commands.
+2. Read `ARCHITECTURE.md` before changing cross-domain behavior.
+3. Read `AGENTS.md` before editing code.
+4. Read the relevant section of `STATUS.md` to confirm current capability and limits.
+5. Use `DESIGN.md`, `TESTING.md`, or `GAMEPLAY_HARNESS.md` only for the task they own.
+
+Before editing, run:
+
+```bash
+git status --short
+bash scripts/test.sh fast
+```
+
+Preserve unrelated working-tree changes.
 
 ## Documentation map
 
-| Document | Use it for |
+| Document | Authority |
 |---|---|
-| `README.md` | Build, run, inspect, and navigate the repository. |
-| `ARCHITECTURE.md` | Understand state ownership, module boundaries, canonical flows, and extension points. |
-| `AGENTS.md` | Follow repository rules when changing code. |
-| `DESIGN.md` | Understand product intent, player fantasy, scope, and design constraints. |
-| `STATUS.md` | Check current implementation coverage, supported schemas, and deliberate gaps. |
-| `TESTING.md` | Select the correct test tier and write maintainable tests. |
-| `GAMEPLAY_HARNESS.md` | Run and interpret deterministic player-agent analysis. |
+| `README.md` | Setup, commands, repository navigation, and entry points. |
+| `ARCHITECTURE.md` | State ownership, dependency direction, mutation flows, execution order, and extension points. |
+| `AGENTS.md` | Repository rules and change procedures. |
+| `DESIGN.md` | Product fantasy, gameplay loop, design constraints, and scope. |
+| `STATUS.md` | Current schemas, implemented systems, public surface, and deliberate limits. |
+| `TESTING.md` | Test tiers, test design, and completion gates. |
+| `GAMEPLAY_HARNESS.md` | Player-agent analysis, report semantics, and harness integration. |
 
-A cold implementation agent should read `ARCHITECTURE.md`, `AGENTS.md`, and the relevant section of `STATUS.md` before editing.
+Do not duplicate a contract across documents. Link to the owning document instead.
 
 ## Requirements
 
 - Rust 1.97 or newer
-- Bash for the repository test scripts
+- Bash for repository scripts
 - Python for CLI JSON smoke validation
-- `cargo-audit` for the full security gate
+- `cargo-audit` for the complete security gate
 
-The crate uses Rust 2024 and has no runtime service dependencies.
+The crate uses Rust 2024 and has no runtime service dependency.
 
 ## Quick start
 
-Run the test suite:
+Run the fast library suite:
 
 ```bash
 bash scripts/test.sh fast
@@ -55,9 +80,75 @@ cargo run --locked -- dashboard saves/valeri.json --output saves/valeri.html
 cargo run --locked -- validate saves/valeri.json
 ```
 
-Starting backgrounds are `baker`, `cloth-trader`, and `blacksmith`.
+Apply a player command:
 
-## Library use
+```bash
+cargo run --locked -- execute saves/valeri.json \
+  --command '{"SetHouseGovernance":{"governance":"FamilyPartnership"}}'
+```
+
+Run `cargo run --locked -- --help` or a subcommand with `--help` for the authoritative CLI syntax. Starting backgrounds are `baker`, `cloth-trader`, and `blacksmith`.
+
+## Core model
+
+The codebase follows a Registry / AppState / Record / System model:
+
+- `Registry` owns immutable Rivergate definitions.
+- `AppState` owns all mutable and serializable campaign state.
+- Records own identity, references, local values, and lifecycle state.
+- Systems validate and perform canonical mutations.
+- Persistence, CLI, projections, rendering, and gameplay analysis are boundary adapters.
+
+The same registry, state, seed, command sequence, and day count must produce identical state.
+
+## Repository map
+
+```text
+src/
+  core/
+    records.rs        Primary population and economic records
+    extended.rs       Strategic, civic, family, finance, and relationship records
+    state.rs          AppState, synchronized stores, clock, and ID allocation
+  registry/mod.rs     Immutable Rivergate definitions
+  systems/
+    bootstrap.rs      New campaign construction
+    commands.rs       Player command schema and dispatch
+    simulation.rs     Daily economic pipeline
+    strategic.rs      Weekly, monthly, annual, and cross-domain systems
+    transactions.rs   Reusable validated transaction primitives
+    invariants.rs     Debug runtime invariants
+  persistence.rs      Save/load, migrations, and release validation
+  projection.rs       Read-only projections and HTML rendering
+  gameplay.rs         Deterministic gameplay harness
+  main.rs             CLI adapter
+  *_tests.rs          Large sibling test suites
+  test_support.rs     Shared deterministic fixtures and diagnostics
+scripts/
+  check_docs.py       Documentation contract consistency checks
+  test.sh             Test tier runner
+  verify_cli.sh       End-to-end CLI smoke suite
+```
+
+## Primary entry points
+
+The supported library facade is exported from `src/lib.rs`.
+
+| Operation | Entry point |
+|---|---|
+| Build definitions | `build_rivergate_registry` |
+| Create campaign | `build_new_game` |
+| Advance time | `advance_days` |
+| Apply player action | `apply_player_command` |
+| Quote strategic acquisitions or liquidation | `quote_business_acquisition`, `quote_property_liquidation` |
+| Save or load | `save_state`, `load_state` |
+| Build read models | `build_state_summary`, `build_campaign_projection` |
+| Render dashboard | `render_campaign_html` |
+| Run gameplay analysis | `run_gameplay_harness`, `render_gameplay_report` |
+| Check runtime invariants | `validate_invariants` |
+
+`PlayerCommand` in `src/systems/commands.rs` is the authoritative player-command schema.
+
+## Library example
 
 ```rust
 use civic_dynasty::{
@@ -76,124 +167,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The supported library facade is defined in `src/lib.rs`. Primary entry points are:
-
-- `build_rivergate_registry`
-- `build_new_game`
-- `advance_days`
-- `apply_player_command`
-- `quote_business_acquisition`
-- `build_state_summary`
-- `build_campaign_projection`
-- `render_campaign_html`
-- `save_state` and `load_state`
-- `run_gameplay_harness` and `render_gameplay_report`
-- `validate_invariants`
-
-## Player commands
-
-Commands use Serde's externally tagged JSON representation:
-
-```bash
-cargo run --locked -- execute saves/valeri.json \
-  --command '{"SetHouseGovernance":{"governance":"FamilyPartnership"}}'
-```
-
-`PlayerCommand` in `src/systems/commands.rs` is the authoritative command schema. It covers business capitalization and acquisition, operating policy, cash transfers, contracts, private loans, municipal debt authorization, property, civic actions, legal cases, family governance, ward adoption, focused family education, office nomination, crisis response, labor disputes, and notification acknowledgement.
-
-Run `cargo run --locked -- --help` for CLI syntax.
-
-## Determinism and persistence
-
-All consequential runtime state is owned by serializable `AppState`. Simulation randomness comes from the state-owned deterministic RNG. Ordered collections and typed-ID tie-breakers make result-affecting iteration stable.
-
-Given the same registry, state, seed, command sequence, and day count, the engine must produce identical state.
-
-Campaigns are human-readable JSON. The current save schema and supported migrations are listed in `STATUS.md`. Saves are validated before writing and after loading. Writes use a synchronized same-directory temporary file followed by atomic replacement.
-
-## Architecture summary
-
-The repository follows a Registry / AppState / Record / System model:
-
-- `Registry` contains immutable Rivergate definitions.
-- `AppState` contains mutable campaign state, indexes, RNG state, IDs, and histories.
-- Records contain identity, references, local values, and lifecycle state.
-- Systems validate operations and perform canonical mutations.
-- Persistence, CLI, projections, rendering, and gameplay analysis are adapters around the core systems.
-
-See `ARCHITECTURE.md` for the full module map and execution flows.
-
-## Repository map
-
-```text
-src/
-  core/
-    records.rs        Primary runtime records
-    extended.rs       Strategic and civic records
-    state.rs          AppState, stores, clock, and ID allocation
-  registry/mod.rs     Immutable Rivergate definitions
-  systems/
-    bootstrap.rs      New campaign construction
-    commands.rs       Player command API
-    simulation.rs     Daily economic pipeline
-    strategic.rs      Weekly, monthly, and annual systems
-    transactions.rs   Validated transfer primitives and errors
-    invariants.rs     Debug runtime invariants
-  persistence.rs      Versioned JSON save/load and migrations
-  projection.rs       Read-only projections and HTML rendering
-  gameplay.rs         Deterministic player-agent harness
-  main.rs             CLI adapter
-  *_tests.rs          Large sibling test suites
-  test_support.rs     Shared deterministic fixtures
-scripts/
-  test.sh             Test tier runner
-  verify_cli.sh       End-to-end CLI smoke suite
-```
-
-## Gameplay analysis
-
-Run the default release-mode harness:
-
-```bash
-cargo run --release --locked -- playtest
-```
-
-Run a focused campaign:
-
-```bash
-cargo run --release --locked -- playtest \
-  --days 360 \
-  --persona entrepreneur \
-  --background baker \
-  --trace-limit 20
-```
-
-Run a multi-seed JSON report:
-
-```bash
-cargo run --release --locked -- playtest \
-  --start-seed 1 \
-  --seeds 10 \
-  --days 1080 \
-  --json \
-  --output gameplay-report.json
-```
-
-The harness selects state-derived commands through the same command API used by the CLI, compares action and no-action branches, and reports reachability, consequences, feedback, resilience, traces, and explicit findings. See `GAMEPLAY_HARNESS.md`.
-
 ## Verification
 
-Use the fast tier while editing and the complete scripted tier before broad review:
+Use focused tests while editing and the complete gate before finishing cross-cutting work:
 
 ```bash
-bash scripts/test.sh fast
+bash scripts/test.sh fast <filter>
+bash scripts/test.sh docs
 bash scripts/test.sh all
 ```
 
-`TESTING.md` is the authoritative reference for filters, exact test selection, soak coverage, CLI validation, test layout, and the full completion gate.
-
-## Product scope
-
-The engine focuses on one deeply simulated city and abstract regional connections. Its core loop converts productive competence into commercial leverage, social standing, political office, institutional power, and dynastic continuity. Officeholding is not a free upgrade: public service consumes administrative capacity, requires recurring private civic contributions, and can be forfeited when a dynasty repeatedly fails its duties.
-
-Tactical combat, manual movement of every character, equal-detail multi-city simulation, repetitive crafting, routine dialogue trees, and decorative interiors without systemic effects are outside the project scope. See `DESIGN.md` for the product contract.
+`TESTING.md` defines the full workflow. `GAMEPLAY_HARNESS.md` defines when systemic player-agent analysis is required.

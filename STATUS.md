@@ -1,94 +1,83 @@
 # Project Status
 
-This document describes the current implementation. Product targets are in `DESIGN.md`; implementation structure is in `ARCHITECTURE.md`.
+This document describes the current implementation contract. It does not record verification history or completed repair work.
 
-## Current milestone
+Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code ownership.
 
-The repository implements the minimum coherent Rivergate game as a deterministic headless engine with:
-
-- A Rust library API
-- A command-line client
-- Versioned JSON persistence
-- Read-only JSON projections
-- A self-contained HTML dashboard
-- A deterministic player-agent gameplay harness
-
-The engine supports multi-generation campaigns and preserves all consequential state required for deterministic continuation.
-
-## Platform and contracts
+## Platform contracts
 
 | Item | Current value |
 |---|---|
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 11 |
-| Supported save migrations | Versions 0 through 10 |
-| Gameplay report schema | 18 |
+| Save schema | 12 |
+| Supported save migrations | Versions 0 through 11 |
+| Gameplay report schema | 20 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |
 
-## Implemented domains
+## Product surface
 
-### World and population
+The repository provides:
 
-- One detailed Rivergate city with six districts and abstract regional trade links.
-- Eight major dynasties and grouped ordinary households.
-- Typed persistent IDs and generated ID allocation.
-- Characters, family links, heads, heirs, wards, councils, governance, focused player-funded education, marriage, health, loyalty, succession, and multi-generation continuity.
+- A Rust library API
+- A command-line client
+- Versioned JSON persistence
+- Read-only JSON projections
+- A self-contained HTML dashboard
+- A deterministic gameplay-analysis harness
 
-### Economy and business
+The Rivergate campaign supports multi-generation deterministic continuation.
 
-- Ten goods and connected food, drink, textile, timber, fuel, metal, and tool chains.
-- Businesses with ownership, management, capacity, policy, cash, inventory, condition, quality, distress, insolvency, closure, recovery, acquisition, and recapitalization.
-- Scarce procurement, production, sales, household consumption, spoilage, maintenance, and causal price formation.
-- Manager capabilities, administrative capacity, office-derived administrative burden, regional supply, and seasonal pressure.
+## Implemented systems
 
-### Contracts, finance, property, and labor
+| Domain | Current capability |
+|---|---|
+| World | One detailed city with six districts, regional routes, seasonal pressure, and external disruption. |
+| Population | Major dynasties, notable characters, grouped households, family links, health, loyalty, wards, education, councils, heirs, and succession. |
+| Businesses | Ownership, management, policy, inventory, cash, production, quality, condition, distress, insolvency, closure, recovery, acquisition, and recapitalization. |
+| Markets | Scarce procurement, production, sales, household consumption, spoilage, maintenance, price formation, controls, and regional supply. |
+| Contracts | Scheduled supply, payment, penalties, fulfillment, durable dynasty attribution, breach, and termination. |
+| Private finance | Loans, interest, repayment, delinquency, default, collateral, seizure, restructuring, and repayment history. |
+| Municipal finance | Authorizing laws, dynasty creditors, treasury proceeds, scheduled service, delinquency, default, and civic consequences. |
+| Property | Ownership, value, tenancy, occupancy, rent, purchase, collateral, voluntary liquidation, lien settlement, and distressed civic guarantees. |
+| Labor | Employment agreements, wages, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. |
+| Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with membership, budgets, legitimacy, powers, terms, and deterministic selection. |
+| Political office | Nomination, commercial eligibility, office-specific competence, established powers, recurring duties, administrative load, voluntary withdrawal, forfeiture, and re-election limits. |
+| Civic systems | Laws, public works, district conditions, legal cases, crisis response, and municipal debt. |
+| Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
+| Information | Source, confidence, summary, creation, expiry, and player-facing reports. |
+| AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure. |
+| Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, response, effects, and resolution. |
+| Observability | Summary, projection, HTML dashboard, outbox, chronicle, audit history, validation, and gameplay reports. |
 
-- Supply contracts with scheduled delivery, payment, penalties, fulfillment, durable breach attribution, and termination.
-- Loans with interest, repayment, delinquency, default, collateral, seizure, and repayment.
-- Municipal debt with explicit authorizing laws, concrete dynasty creditors, treasury proceeds, scheduled interest and repayment, delinquency, default, and civic consequences.
-- Property ownership, tenancy, occupancy, rent, value, purchase, and collateral relationships.
-- Employment agreements with worker capacity, wages, loyalty, conditions, disputes, suspension, recovery, and player responses.
+## Player commands
 
-### Institutions and civic systems
+`PlayerCommand` in `src/systems/commands.rs` is authoritative. The current command surface includes:
 
-- Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions.
-- Membership, officeholders, budgets, legitimacy, powers, terms, institution-specific electoral competence, and deterministic elections.
-- Monthly office duties funded from the officeholder dynasty, administrative strain from public service, standing penalties for shortfalls, and forced forfeiture after repeated failure.
-- Laws affecting prices, imports, interest, tolls, fire safety, rents, guild conditions, and municipal borrowing.
-- District employment, sanitation, safety, rent pressure, food satisfaction, unrest, and political support.
-- Public works with budgets, spending, progress, completion, and persistent district effects.
-- Legal cases with evidence, hearings, judgments, and damages.
+- Business cash transfer, acquisition, investment, and operating policy
+- Supply contracts and private loans
+- Property purchase and sale
+- Laws, public works, and legal cases
+- House governance, ward adoption, and family education
+- Office nomination and institutional withdrawal
+- Crisis and labor-dispute responses
+- Notification acknowledgement
 
-### Relationships, information, AI, and crises
+Commands use the same canonical validation and mutation paths from the library, CLI, tests, and gameplay harness.
 
-- Multidimensional dynasty relationships with trust, fear, respect, obligation, resentment, memories, and interaction dates.
-- Quality and reliability reputation derived from economic behavior.
-- Information reports with source, confidence, summary, creation, and expiry.
-- Deterministic AI objectives for property, supply, office, debt, legitimacy, cash, and rival pressure.
-- Regional routes with capacity, tolls, risk, disruption, and recovery.
-- Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, effects, response, and resolution.
+## Public library surface
 
-### Adapters and observability
-
-- CLI commands for `new`, `simulate`, `summary`, `inspect`, `dashboard`, `execute`, `validate`, and `playtest`.
-- Adapter-facing read-only campaign projections for core and strategic records.
-- Self-contained HTML rendering with escaped visible content and script-safe embedded JSON.
-- Durable outbox notifications, chronicle entries, and audit records.
-- Deterministic gameplay analysis with state-derived candidates, counterfactual branches, family-capacity metrics, scores, findings, and bounded traces.
-
-## Public integration surface
-
-The supported library facade is exported from `src/lib.rs`:
+`src/lib.rs` exports the supported integration API:
 
 - `build_rivergate_registry`
 - `build_new_game`
 - `advance_days`
 - `apply_player_command`
 - `quote_business_acquisition`
+- `quote_property_liquidation`
 - `build_state_summary`
 - `build_campaign_projection`
 - `render_campaign_html`
@@ -96,67 +85,46 @@ The supported library facade is exported from `src/lib.rs`:
 - `run_gameplay_harness` and `render_gameplay_report`
 - `validate_invariants`
 
-The authoritative player command schema is `PlayerCommand` in `src/systems/commands.rs`.
-
 ## Persistence guarantees
 
-Save and load support:
+- Exact round trips for the current schema
+- Deterministic migrations from supported older schemas
+- Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, and ID allocation
+- Preservation of RNG state and generated records required for deterministic continuation
+- Synchronized same-directory temporary writes followed by atomic replacement
 
-- Exact state round trips for the current schema.
-- Deterministic migrations from schema versions 0 through 10.
-- Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, and ID allocation.
-- Preservation of RNG state and all generated records required for deterministic continuation.
-- Same-directory temporary writes, synchronization, and atomic replacement.
-
-A serialized contract change requires a schema increment and a migration from the previous version.
+A serialized contract change requires a schema increment and one migration from the previous version.
 
 ## Runtime guarantees
 
-The current architecture enforces:
+- One canonical mutation path per operation class
+- Validation before mutation
+- Unchanged state on failure
+- Revalidated consumed tokens for deferred commits
+- Stable ordering and typed-ID tie-breaking
+- Fixed-point economic arithmetic with wide ratio intermediates
+- Synchronized records, indexes, ownership, occupancy, and collateral
+- Explicit daily, weekly, monthly, and annual execution order
+- Debug invariant checks during simulation
+- Release-mode validation at persistence boundaries
 
-- One canonical mutation path per operation class.
-- Validation before mutation and unchanged state on failure.
-- Revalidated consumed tokens for deferred cross-record commits.
-- Stable result ordering and typed-ID tie-breaking.
-- Fixed-point economic arithmetic with wide ratio intermediates.
-- Synchronized record indexes and ownership relationships.
-- Debug invariant checks after each simulated day.
-- Release-mode state validation at persistence boundaries.
-- Explicit daily, weekly, monthly, and annual execution order.
+## Deliberate limits
 
-## Deliberate current limits
-
-The following areas are outside the implemented contract or remain reserved for later expansion:
-
-- External powers are represented through routes, demands, and crises rather than a full diplomatic simulation.
-- Religion and charity are institutionally represented but do not yet implement the full doctrinal and faction scope described in `DESIGN.md`.
+- Rivergate is the only detailed scenario.
+- External powers operate through routes, demands, privileges, and crises rather than a full diplomacy simulation.
+- Religion and charity are represented institutionally but do not yet implement deep doctrine or faction systems.
 - The repository has no interactive graphical client. Current clients are the CLI, JSON projection, and HTML dashboard.
-- Rivergate is the only detailed scenario. Additional settings require new registry content and bootstrap integration.
-- Tactical combat, manual character movement, equal-detail multi-city simulation, routine crafting, and repetitive dialogue are not planned for the core engine.
+- Tactical combat, manual character movement, equal-detail multi-city simulation, routine crafting, repetitive dialogue, and decorative interiors without systemic effects are outside scope.
 
-## Verification status
+## Extension priorities
 
-Verified on August 4, 2026:
+New work should deepen the shared economy, institution, family, and city model rather than add parallel progression systems. Suitable areas include:
 
-- 308 non-ignored library tests pass.
-- 2 deterministic long-horizon soak tests pass.
-- Documentation tests pass.
-- Release-mode library tests pass.
-- CLI creation, simulation, command execution, summary, inspection, dashboard, validation, playtest, and invalid-input smoke checks pass.
-- Strict Clippy and rustdoc warning gates pass.
-- The locked dependency graph contains 42 packages, no duplicate versions, and no RustSec advisories.
-- The release gameplay matrix covers 144 campaigns and 155,520 simulated days with no warning or critical findings.
-- An additional ten-year matrix covers 36 campaigns and 129,600 simulated days, exercises event-driven legal cases, and reports no warning or critical findings.
-
-The authoritative release gate is documented in `TESTING.md`.
-
-## Forward expansion areas
-
-Expansion should add new institutional interactions rather than parallel systems. Suitable areas include:
-
-- Additional Rivergate content and authored strategic variation
+- Additional Rivergate content and strategic variation
 - New constitutions and office structures
-- Deeper religion, charity, and legitimacy conflicts
-- Additional regional trade and external-power behavior
-- New read-only or interactive clients built on the existing command and projection APIs
-- New scenarios using the same Registry / AppState / System architecture
+- Deeper religion, charity, and legitimacy conflict
+- Additional regional trade and external-pressure behavior
+- New clients built on the command and projection APIs
+- New scenarios using the existing Registry / AppState / System architecture
+
+The authoritative validation workflow is in `TESTING.md`.

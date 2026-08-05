@@ -1,44 +1,159 @@
 # Testing
 
-This document defines the test tiers, layout, and expected coverage for code changes.
+This document defines test tiers, suite layout, assertion standards, and completion gates.
 
-## Test tiers
+## Commands
 
-| Tier | Command | Use |
-|---|---|---|
-| Focused fast | `bash scripts/test.sh fast <filter>` | Iterate on one domain or behavior. |
-| All fast | `bash scripts/test.sh fast` | Run all non-ignored library tests. |
-| List | `bash scripts/test.sh list <filter>` | Discover fully qualified test names. |
-| Exact | `bash scripts/test.sh exact <name>` | Run one exact test, including an ignored soak test. |
-| Soak | `bash scripts/test.sh soak` | Run deterministic long-horizon invariant tests. |
-| CLI | `bash scripts/test.sh cli` | Run end-to-end command-line smoke coverage. |
-| Complete scripted gate | `bash scripts/test.sh all` | Run shell checks, library tests, doctests, soak tests, and CLI checks. |
-| Gameplay analysis | `cargo run --release --locked -- playtest ...` | Evaluate reachability, consequences, and campaign behavior. |
+| Goal | Command |
+|---|---|
+| Run one domain or behavior | `bash scripts/test.sh fast <filter>` |
+| Run all ordinary library tests | `bash scripts/test.sh fast` |
+| List matching tests | `bash scripts/test.sh list <filter>` |
+| Run one exact test | `bash scripts/test.sh exact <fully-qualified-name>` |
+| Run one exact test with output | `bash scripts/test.sh debug <fully-qualified-name>` |
+| Run long deterministic scenarios | `bash scripts/test.sh soak` |
+| Check documentation contracts and doctests | `bash scripts/test.sh docs` |
+| Run CLI smoke coverage | `bash scripts/test.sh cli` |
+| Run the scripted test gate | `bash scripts/test.sh all` |
 
 Examples:
 
 ```bash
 bash scripts/test.sh fast contracts
-bash scripts/test.sh fast persistence
 bash scripts/test.sh fast gameplay::tests::candidates
-bash scripts/test.sh fast gameplay::tests::findings
-bash scripts/test.sh list labor
-bash scripts/test.sh exact systems::strategic::tests::contracts::rejects_zero_week_duration
-bash scripts/test.sh soak
-bash scripts/test.sh all
+bash scripts/test.sh list liquidation
+bash scripts/test.sh exact systems::strategic::tests::loans::aged_defaulted_credit_is_restructured_in_place
+bash scripts/test.sh debug gameplay::tests::harness::candidate_scenarios_cover_every_command_family
 ```
 
-`fast` excludes documentation tests, the CLI binary, and ignored long simulations. Use it for ordinary edit-test cycles. Filtered and exact modes invoke Cargo once and fail with exit code 2 when no executable test matches, including filters that select only ignored tests.
+Successful `fast` and `exact` runs print a concise summary. Failures print complete Cargo output. A filter that matches no executable test returns exit code 2.
 
-`exact` accepts a fully qualified test name and runs the selected test even when it is ignored by default.
+## Test tiers
 
-`soak` runs the canonical 3,000-day core invariant scenario and the 7,200-day strategic multi-generation scenario serially.
+### Fast library tests
 
-`cli` verifies campaign creation, simulation, command execution, summary, inspection, dashboard generation, validation, gameplay output, and rejected input.
+Use for normal edit-test cycles. This tier excludes documentation tests, the CLI binary, and ignored soak tests.
 
-## Full completion gate
+Tests in this tier should be deterministic, isolated, and quick after compilation. They must not use sleeps, wall-clock time, external services, or environment-dependent behavior.
 
-Run this before finishing a cross-cutting change:
+### Soak tests
+
+Use for behavior that accumulates across long simulation horizons. Soak tests are deterministic and ignored by the fast tier.
+
+Current soak coverage exercises core invariants and strategic multi-generation behavior. Run soak tests serially through `scripts/test.sh`.
+
+### CLI smoke tests
+
+Use for the external command-line contract. `scripts/verify_cli.sh` covers campaign creation, simulation, command execution, summary, projection, dashboard rendering, validation, gameplay output, quality-gate failure, and rejected input.
+
+### Gameplay analysis
+
+Use the release-mode gameplay harness for command reachability, pacing, delayed consequences, strategic variety, resilience, and multi-generation behavior. The harness complements assertion-based tests; it does not replace them.
+
+See `GAMEPLAY_HARNESS.md`.
+
+## Suite layout
+
+Large suites live beside production modules and are loaded by path:
+
+| Area | Test file |
+|---|---|
+| Core state and stores | `src/core/state_tests.rs` |
+| Campaign bootstrap | `src/systems/bootstrap_tests.rs` |
+| Player commands | `src/systems/commands_tests.rs` |
+| Daily simulation | `src/systems/simulation_tests.rs` |
+| Strategic systems | `src/systems/strategic_tests.rs` |
+| Persistence and migrations | `src/persistence_tests.rs` |
+| Projections and HTML | `src/projection_tests.rs` |
+| Gameplay harness | `src/gameplay_tests.rs` |
+| Shared fixtures and diagnostics | `src/test_support.rs` |
+
+Use stable nested modules so filters remain useful. Add a test to the narrowest domain that owns the behavior.
+
+Create an external integration-test target only when the behavior requires a true external crate boundary.
+
+## Fixtures
+
+`rivergate_registry_for_test` returns the shared immutable registry.
+
+`make_test_campaign` returns an isolated clone of the deterministic default campaign. Use `make_test_campaign_with` when seed, name, or starting background is part of the test.
+
+Prefer semantic fixture selection over incidental collection position. For example, select a property by owner and collateral state rather than assuming a particular ID or index.
+
+Extract setup helpers when they express a reusable domain condition. Keep assertion logic in the test unless it is shared and improves diagnostics.
+
+## Assertion standards
+
+Tests should assert public behavior, durable state, accounting, or explicit invariants.
+
+- Use exact values for accounting, serialization, migrations, arithmetic boundaries, schema contracts, and ordered output when order is part of the contract.
+- Use relational assertions for intentionally flexible emergent behavior.
+- Compare sets for exhaustive enum or route coverage. Report missing and unexpected members separately.
+- Assert preconditions when a test could otherwise pass vacuously.
+- Prefer typed error variants and fields over formatted error text.
+- Use `assert_state_unchanged` for rejected mutations and stale-token commits.
+- Use `assert_state_eq` when full-state equality is the contract and first-difference diagnostics are useful.
+- Add context to assertions whose failure would otherwise be ambiguous.
+- Mark shared assertion helpers with `#[track_caller]`.
+
+Avoid assertions against incidental fixture values, generated prose, internal call order, or unrelated state. Derive expected values from the arranged state when the fixture detail is not itself the contract.
+
+## Consequential mutation coverage
+
+A consequential mutation normally requires:
+
+1. A successful state transition.
+2. A rejected precondition with unchanged state.
+3. Arithmetic, range, capacity, or lifecycle boundary coverage.
+4. A stale-token test when validation and commit are separate.
+5. Persistence coverage when serialized state changes.
+6. Deterministic replay when ordering or randomness matters.
+7. Invariant coverage for every new cross-record requirement.
+8. Projection or durable-feedback coverage when the result must be observable.
+
+## Persistence coverage
+
+A save-schema change requires:
+
+- A schema version increment
+- One deterministic migration from the previous version
+- Serialized migration input or an equivalent fixture
+- Exact post-migration assertions
+- Current-schema round-trip equality
+- Invalid-state rejection tests
+- Atomic replacement coverage when write behavior changes
+
+Do not rely on debug assertions alone. Persistence validation is the release-mode boundary contract.
+
+## Gameplay-harness coverage
+
+Update harness tests when a change affects:
+
+- Candidate discoverability or viability
+- Command classification
+- Strategic pacing or cooldowns
+- Immediate, persistent, or delayed consequences
+- Cross-domain interactions
+- Business, food, labor, credit, crisis, or notification resilience
+- Succession and multi-generation progression
+- Structured report fields or semantics
+
+Run focused one-persona reports while iterating and broader release-mode matrices for design review.
+
+## Failure diagnostics
+
+A useful failure identifies:
+
+- The behavior under test
+- Expected and observed values
+- Relevant entity IDs or state
+- The first differing path when state should remain equal
+
+Collection helpers should include observed values. Candidate and finding helpers should include the available candidates or finding titles.
+
+## Completion gate
+
+Run the narrowest relevant subset while editing. Before finishing a cross-cutting change, run:
 
 ```bash
 cargo fmt --all -- --check
@@ -51,100 +166,4 @@ cargo audit
 git diff --check
 ```
 
-Use the narrower relevant subset for isolated documentation or local implementation changes, but do not omit the full gate when changing persistence, commands, simulation order, arithmetic, invariants, or public APIs.
-
-## Test layout
-
-Large suites live beside their production modules and are loaded with `#[path]`:
-
-| Production area | Test file |
-|---|---|
-| Core state and long-horizon determinism | `src/core/state_tests.rs` |
-| Campaign bootstrap | `src/systems/bootstrap_tests.rs` |
-| Player commands | `src/systems/commands_tests.rs` |
-| Daily simulation | `src/systems/simulation_tests.rs` |
-| Strategic systems | `src/systems/strategic_tests.rs` |
-| Persistence and migrations | `src/persistence_tests.rs` |
-| Projections and HTML | `src/projection_tests.rs` |
-| Gameplay harness | `src/gameplay_tests.rs` |
-| Shared fixtures and diagnostics | `src/test_support.rs` |
-
-Small suites may remain in a local `#[cfg(test)] mod tests` at the bottom of the production file.
-
-Do not create a separate integration-test tree unless the test requires a true external crate boundary that cannot be exercised through the existing module structure.
-
-Large suites use stable domain modules so filters remain useful. Gameplay tests are grouped under `harness`, `candidates`, `metrics`, and `findings`. Add new tests to the narrowest applicable domain rather than leaving them at the suite root.
-
-The shared Rivergate registry and default campaign baseline are initialized once. `make_test_campaign` returns an isolated clone of that deterministic baseline. Use `make_test_campaign_with` when a test requires a non-default seed, name, or starting background.
-
-## Test design rules
-
-- Name tests as behavior statements without a redundant `test_` prefix.
-- Arrange only the state required for the behavior under test.
-- Use fresh campaign state for each test.
-- Use the shared immutable Rivergate registry fixture when applicable.
-- Select records by semantic properties rather than incidental collection position.
-- Assert preconditions when a missing precondition could make the test pass vacuously.
-- Test through canonical command, transaction, simulation, persistence, or projection paths.
-- Assert durable or public behavior rather than private sequencing unless sequencing is the contract.
-- Use exact values for accounting, migration, serialization, and arithmetic boundaries.
-- Use exact counts and ordering only when cardinality or order is part of the contract.
-- Use relational assertions only for intentionally flexible emergent behavior.
-- Prefer typed error variants and fields over matching formatted error text.
-- When a helper asserts collection cardinality, include the observed values in its failure output.
-- Mark shared assertion helpers with `#[track_caller]` so failures point to the test call site.
-- Use `assert_state_unchanged` for rejected mutations and stale-token commits.
-- Keep ordinary tests deterministic and free of sleeps, wall-clock dependencies, and external services.
-- Put expensive accumulation and generation coverage in the ignored soak tier.
-
-## Required mutation coverage
-
-A consequential mutation should normally include:
-
-1. A successful transition test.
-2. A rejected-precondition test that proves state remains unchanged.
-3. Arithmetic, capacity, or lifecycle boundary coverage.
-4. A stale-token test when validation and commit are separated.
-5. Persistence round-trip or migration coverage when state is serialized.
-6. Deterministic replay coverage when ordering or randomness is involved.
-7. Invariant coverage for every new cross-record requirement.
-
-## Persistence coverage
-
-A save-schema change requires:
-
-- A schema version increment.
-- A deterministic migration from the previous version.
-- A migration fixture or equivalent serialized input.
-- Exact post-migration assertions.
-- Current-schema round-trip equality.
-- Invalid-state rejection tests.
-- Atomic save replacement coverage when write behavior changes.
-
-## Gameplay harness coverage
-
-The gameplay harness complements assertion-based tests. It does not replace them.
-
-Use it when a change affects:
-
-- Command discoverability or candidate quality
-- Strategic pacing or cooldowns
-- Delayed consequences
-- Cross-domain interaction
-- Business, food, labor, crisis, or notification resilience
-- Multi-generation progression
-
-Run focused one-persona reports while iterating and broader release-mode matrices for design review. See `GAMEPLAY_HARNESS.md`.
-
-## Failure diagnostics
-
-A useful failure identifies:
-
-- The behavior under test
-- The expected result
-- The observed result
-- The first differing state path when state should remain equal
-
-The shared state-difference assertion truncates very large JSON values so failure output remains readable.
-
-Candidate and finding helpers report the complete observed candidate set or available finding titles when an expectation fails. Maintain that diagnostic quality when adding new reusable assertions.
+A cross-cutting change includes persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and gameplay-report schemas.

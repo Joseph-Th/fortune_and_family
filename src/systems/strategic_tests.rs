@@ -176,6 +176,41 @@ mod integration {
             deliveries_after > deliveries_before,
             "bootstrap contracts must participate in weekly settlement"
         );
+        let fulfilled_contracts: Vec<_> = state
+            .contracts
+            .values()
+            .filter(|contract| contract.fulfilled_deliveries > 0)
+            .collect();
+        assert!(
+            !fulfilled_contracts.is_empty(),
+            "the bootstrap economy must complete at least one first-week delivery"
+        );
+        for contract in fulfilled_contracts {
+            let buyer_owner_id = state
+                .businesses
+                .get(contract.buyer_business_id)
+                .expect("contract buyer must exist")
+                .owner_dynasty_id();
+            let seller_owner_id = state
+                .businesses
+                .get(contract.seller_business_id)
+                .expect("contract seller must exist")
+                .owner_dynasty_id();
+            assert_eq!(
+                contract
+                    .fulfilled_deliveries_by_dynasty
+                    .get(&buyer_owner_id),
+                Some(&contract.fulfilled_deliveries),
+                "the buyer dynasty must receive durable credit for each completed obligation"
+            );
+            assert_eq!(
+                contract
+                    .fulfilled_deliveries_by_dynasty
+                    .get(&seller_owner_id),
+                Some(&contract.fulfilled_deliveries),
+                "the seller dynasty must receive durable credit for each completed obligation"
+            );
+        }
         validate_invariants(registry, &state);
     }
 }
@@ -1785,6 +1820,374 @@ mod employment {
     }
 }
 
+mod property_liquidation {
+    use super::*;
+    use crate::test_support::rivergate_registry_for_test;
+
+    fn add_test_property_lien(
+        state: &mut AppState,
+        lender_dynasty_id: DynastyId,
+        borrower_dynasty_id: DynastyId,
+        property_id: PropertyId,
+        balance: Money,
+    ) -> crate::ids::LoanId {
+        let loan_id = state.next_ids.loan();
+        state.loans.insert(
+            loan_id,
+            Loan {
+                id: loan_id,
+                lender_dynasty_id,
+                borrower_dynasty_id,
+                principal: balance,
+                balance,
+                weekly_payment: Money::from_copper(20),
+                interest_basis_points: 500,
+                next_due_day: state.clock.day().saturating_add(7),
+                missed_payments: 0,
+                collateral_property_id: Some(property_id),
+                status: LoanStatus::Current,
+            },
+        );
+        state
+            .properties
+            .get_mut(&property_id)
+            .expect("property must exist")
+            .collateral_loan_id = Some(loan_id);
+        loan_id
+    }
+
+    fn assert_completed_lien_repayment_feedback(
+        state: &AppState,
+        lender_id: DynastyId,
+        borrower_id: DynastyId,
+        loan_id: crate::ids::LoanId,
+        reliability_before: u16,
+    ) {
+        assert_eq!(
+            state
+                .dynasties
+                .get(&borrower_id)
+                .expect("borrower must exist")
+                .resources
+                .reputation_reliability_basis_points,
+            reliability_before.saturating_add(10)
+        );
+        let relationship = state
+            .relationships
+            .get(&DynastyPair::new(lender_id, borrower_id))
+            .expect("loan parties must retain a relationship");
+        assert!(
+            relationship
+                .memories
+                .last()
+                .is_some_and(|memory| memory.contains(&loan_id.to_string()))
+        );
+        assert!(state.information_reports.values().any(|report| {
+            report.owner_dynasty_id == state.player_dynasty_id
+                && report.source == "Completed loan repayment records"
+        }));
+    }
+
+    #[test]
+    fn owned_property_can_be_liquidated_without_displacing_its_occupant() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let seller_id = state.player_dynasty_id;
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(seller_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("campaign must contain an unpledged player property")
+            .id;
+        let buyer_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != seller_id)
+            .expect("campaign must contain another dynasty");
+        state
+            .dynasties
+            .get_mut(&buyer_id)
+            .expect("buyer must exist")
+            .resources
+            .treasury = Money::from_copper(1_000_000);
+        let occupant_owner_id = state
+            .properties
+            .get(&property_id)
+            .and_then(|property| property.occupant_business_id)
+            .and_then(|business_id| state.businesses.get(business_id))
+            .map(crate::core::Business::owner_dynasty_id);
+        let seller_before = state
+            .dynasties
+            .get(&seller_id)
+            .expect("seller must exist")
+            .treasury();
+        let buyer_before = state
+            .dynasties
+            .get(&buyer_id)
+            .expect("buyer must exist")
+            .treasury();
+        let expected_quote =
+            quote_property_liquidation(registry, &state, seller_id, buyer_id, property_id)
+                .expect("property must be liquidatable");
+
+        let quote = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id)
+            .expect("property sale must succeed");
+
+        assert_eq!(quote, expected_quote);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&seller_id)
+                .expect("seller must exist")
+                .treasury(),
+            seller_before.saturating_add(quote.seller_proceeds)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&buyer_id)
+                .expect("buyer must exist")
+                .treasury(),
+            buyer_before.saturating_sub(quote.buyer_contribution)
+        );
+        let property = state
+            .properties
+            .get(&property_id)
+            .expect("property must remain present");
+        assert_eq!(property.owner_dynasty_id, Some(buyer_id));
+        assert_eq!(
+            property.tenant_dynasty_id,
+            occupant_owner_id.filter(|owner_id| *owner_id != buyer_id)
+        );
+        assert!(property.occupant_business_id.is_some());
+    }
+
+    #[test]
+    fn missing_collateral_loan_rejects_liquidation_atomically() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let seller_id = state.player_dynasty_id;
+        let buyer_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != seller_id)
+            .expect("campaign must contain another dynasty");
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| property.owner_dynasty_id == Some(seller_id))
+            .expect("campaign must contain a player property")
+            .id;
+        let loan_id = crate::ids::LoanId::new(u32::MAX);
+        state
+            .properties
+            .get_mut(&property_id)
+            .expect("property must exist")
+            .collateral_loan_id = Some(loan_id);
+        let before = state.clone();
+
+        let result = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id);
+
+        assert_eq!(
+            result,
+            Err(StrategicError::MissingCollateralLoan { loan_id })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "rejected liquidation must not mutate campaign state",
+        );
+    }
+
+    #[test]
+    fn property_sale_settles_its_lien_before_paying_the_seller() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let seller_id = state.player_dynasty_id;
+        let buyer_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != seller_id)
+            .expect("campaign must contain a buyer");
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != seller_id && *dynasty_id != buyer_id)
+            .expect("campaign must contain a lender");
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(seller_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("campaign must contain an unpledged player property")
+            .id;
+        state
+            .dynasties
+            .get_mut(&buyer_id)
+            .expect("buyer must exist")
+            .resources
+            .treasury = Money::from_copper(1_000_000);
+        let unencumbered_quote =
+            quote_property_liquidation(registry, &state, seller_id, buyer_id, property_id)
+                .expect("selected property must be liquidatable before adding the lien");
+        let balance = unencumbered_quote
+            .price
+            .saturating_mul_ratio(1, 2)
+            .max(Money::from_copper(1));
+        let loan_id =
+            add_test_property_lien(&mut state, lender_id, seller_id, property_id, balance);
+        let seller_before = state
+            .dynasties
+            .get(&seller_id)
+            .expect("seller must exist")
+            .treasury();
+        let lender_before = state
+            .dynasties
+            .get(&lender_id)
+            .expect("lender must exist")
+            .treasury();
+        let reliability_before = state
+            .dynasties
+            .get(&seller_id)
+            .expect("seller must exist")
+            .resources
+            .reputation_reliability_basis_points;
+
+        let quote = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id)
+            .expect("sale proceeds must settle the lien");
+
+        assert_eq!(quote.lien_payoff, balance);
+        assert_eq!(quote.seller_proceeds, quote.price.saturating_sub(balance));
+        assert_eq!(
+            state
+                .dynasties
+                .get(&seller_id)
+                .expect("seller must exist")
+                .treasury(),
+            seller_before.saturating_add(quote.seller_proceeds)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&lender_id)
+                .expect("lender must exist")
+                .treasury(),
+            lender_before.saturating_add(balance)
+        );
+        let loan = state
+            .loans
+            .get(&loan_id)
+            .expect("loan must remain auditable");
+        assert_eq!(loan.status, LoanStatus::Repaid);
+        assert_eq!(loan.balance, Money::ZERO);
+        assert_eq!(loan.collateral_property_id, None);
+        let property = state
+            .properties
+            .get(&property_id)
+            .expect("property must remain present");
+        assert_eq!(property.collateral_loan_id, None);
+        assert_eq!(property.owner_dynasty_id, Some(buyer_id));
+        assert_completed_lien_repayment_feedback(
+            &state,
+            lender_id,
+            seller_id,
+            loan_id,
+            reliability_before,
+        );
+    }
+
+    #[test]
+    fn civic_treasury_can_guarantee_a_distressed_property_auction() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let seller_id = state.player_dynasty_id;
+        let buyer_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != seller_id)
+            .expect("campaign must contain a buyer");
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(seller_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("campaign must contain an unpledged player property")
+            .id;
+        state
+            .dynasties
+            .get_mut(&seller_id)
+            .expect("seller must exist")
+            .resources
+            .treasury = Money::from_copper(58);
+        state
+            .dynasties
+            .get_mut(&buyer_id)
+            .expect("buyer must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let business_id = state
+            .businesses
+            .ids_for_owner(seller_id)
+            .and_then(|businesses| businesses.iter().next())
+            .copied()
+            .expect("seller must own a business");
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("business must exist");
+        business.finance.cash = Money::ZERO;
+        business.operations.status = BusinessStatus::Distressed;
+        business.operations.condition_basis_points = 1_000;
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define the treasury");
+        let civic_before = state
+            .institutions
+            .get(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget;
+        let seller_before = state
+            .dynasties
+            .get(&seller_id)
+            .expect("seller must exist")
+            .treasury();
+
+        let quote = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id)
+            .expect("civic guarantee must make the distressed auction liquid");
+
+        assert_eq!(quote.buyer_contribution, Money::ZERO);
+        assert_eq!(quote.civic_guarantee, quote.price);
+        assert_eq!(
+            state
+                .institutions
+                .get(&treasury_id)
+                .expect("treasury runtime must exist")
+                .budget,
+            civic_before.saturating_sub(quote.civic_guarantee)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&seller_id)
+                .expect("seller must exist")
+                .treasury(),
+            seller_before.saturating_add(quote.seller_proceeds)
+        );
+    }
+}
+
 mod loans {
     use super::*;
 
@@ -1965,7 +2368,12 @@ mod loans {
         let existing = state
             .loans
             .values()
-            .find(|loan| loan.status != LoanStatus::Repaid)
+            .find(|loan| {
+                matches!(
+                    loan.status,
+                    LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
+                )
+            })
             .expect("bootstrap must create unsettled credit");
         let duplicate_terms = LoanTerms {
             lender_dynasty_id: existing.lender_dynasty_id,
@@ -1984,6 +2392,119 @@ mod loans {
                 borrower_dynasty_id: existing.borrower_dynasty_id,
                 loan_id: existing.id,
             }
+        );
+    }
+
+    #[test]
+    fn defaulted_credit_cannot_be_restructured_before_the_cooling_period() {
+        let mut state = make_test_campaign();
+        let terms = make_test_loan_terms(&state);
+        let loan_id = issue_loan(&mut state, terms.clone()).expect("loan must be issued");
+        let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+        loan.status = LoanStatus::Defaulted;
+        loan.missed_payments = 3;
+        loan.next_due_day = state.clock.day();
+        let refinancing = LoanTerms {
+            principal: Money::from_copper(1_000),
+            weekly_payment: Money::from_copper(10),
+            interest_basis_points: 900,
+            ..terms
+        };
+
+        assert_eq!(
+            validate_loan(&state, refinancing)
+                .expect_err("recently defaulted credit must remain unavailable"),
+            StrategicError::DefaultedLoanRestructuringCooldown {
+                loan_id,
+                available_day: state
+                    .clock
+                    .day()
+                    .saturating_add(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS),
+            }
+        );
+    }
+
+    #[test]
+    fn aged_defaulted_credit_is_restructured_in_place() {
+        let mut state = make_test_campaign();
+        let terms = make_test_loan_terms(&state);
+        let lender_id = terms.lender_dynasty_id;
+        let borrower_id = terms.borrower_dynasty_id;
+        let loan_id = issue_loan(&mut state, terms.clone()).expect("loan must be issued");
+        let (principal_before, balance_before) = {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            let balances = (loan.principal, loan.balance);
+            loan.status = LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+            loan.next_due_day = state
+                .clock
+                .day()
+                .saturating_sub(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS);
+            balances
+        };
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::from_copper(10_000);
+        let lender_before = state
+            .dynasties
+            .get(&lender_id)
+            .expect("lender must exist")
+            .treasury();
+        let borrower_before = state
+            .dynasties
+            .get(&borrower_id)
+            .expect("borrower must exist")
+            .treasury();
+        let loan_count = state.loans.len();
+        let advance = Money::from_copper(1_000);
+        let refinancing = LoanTerms {
+            principal: advance,
+            weekly_payment: Money::from_copper(10),
+            interest_basis_points: 900,
+            ..terms
+        };
+
+        let returned_id =
+            issue_loan(&mut state, refinancing).expect("aged default must restructure");
+
+        assert_eq!(returned_id, loan_id);
+        assert_eq!(state.loans.len(), loan_count);
+        let loan = state.loans.get(&loan_id).expect("loan must remain present");
+        assert_eq!(loan.status, LoanStatus::Restructured);
+        assert_eq!(
+            loan.principal,
+            principal_before
+                .checked_add(advance)
+                .expect("test principal must remain in range")
+        );
+        assert_eq!(
+            loan.balance,
+            balance_before
+                .checked_add(advance)
+                .expect("test balance must remain in range")
+        );
+        assert_eq!(loan.weekly_payment, Money::from_copper(10));
+        assert_eq!(loan.interest_basis_points, 900);
+        assert_eq!(loan.missed_payments, 0);
+        assert_eq!(loan.next_due_day, state.clock.day().saturating_add(7));
+        assert_eq!(
+            state
+                .dynasties
+                .get(&lender_id)
+                .expect("lender must exist")
+                .treasury(),
+            lender_before.saturating_sub(advance)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&borrower_id)
+                .expect("borrower must exist")
+                .treasury(),
+            borrower_before.saturating_add(advance)
         );
     }
 

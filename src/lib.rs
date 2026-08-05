@@ -38,8 +38,9 @@ pub use projection::{
 pub use registry::{Registry, build_rivergate_registry};
 pub use systems::{
     BusinessAcquisitionQuote, CommandError, CommandOutcome, CrisisResponse, EducationFocus,
-    LaborResponse, NewGameError, PlayerCommand, SimulationError, advance_days,
-    apply_player_command, build_new_game, quote_business_acquisition, validate_invariants,
+    LaborResponse, NewGameError, PlayerCommand, PropertyLiquidationQuote, SimulationError,
+    advance_days, apply_player_command, build_new_game, quote_business_acquisition,
+    quote_property_liquidation, validate_invariants,
 };
 
 #[cfg(test)]

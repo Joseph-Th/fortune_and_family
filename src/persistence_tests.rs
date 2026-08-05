@@ -183,16 +183,20 @@ mod round_trip {
             .filter(|business| business.owner_dynasty_id() == player_id)
             .map(crate::core::Business::id)
             .collect();
-        state
+        let contract = state
             .contracts
             .values_mut()
             .find(|contract| {
                 player_business_ids.contains(&contract.buyer_business_id)
                     || player_business_ids.contains(&contract.seller_business_id)
             })
-            .expect("campaign must contain a player contract")
-            .fulfilled_deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
+            .expect("campaign must contain a player contract");
+        let deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
             .expect("delivery requirement must fit contract counters");
+        contract.fulfilled_deliveries = deliveries;
+        contract
+            .fulfilled_deliveries_by_dynasty
+            .insert(player_id, deliveries);
 
         apply_player_command(
             registry,
@@ -658,6 +662,75 @@ mod migrations {
             "version-ten debt authorizations must migrate to consumed one-time laws"
         );
         validate_state(&loaded).expect("version-ten campaign must remain valid");
+    }
+
+    #[test]
+    fn v11_attributes_historical_deliveries_to_current_contract_parties() {
+        let mut state = make_test_campaign();
+        let contract_id = *state
+            .contracts
+            .keys()
+            .next()
+            .expect("campaign must contain a contract");
+        let (buyer_owner_id, seller_owner_id) = {
+            let contract = state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist");
+            (
+                state
+                    .businesses
+                    .get(contract.buyer_business_id)
+                    .expect("buyer must exist")
+                    .owner_dynasty_id(),
+                state
+                    .businesses
+                    .get(contract.seller_business_id)
+                    .expect("seller must exist")
+                    .owner_dynasty_id(),
+            )
+        };
+        state
+            .contracts
+            .get_mut(&contract_id)
+            .expect("contract must exist")
+            .fulfilled_deliveries = 4;
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(11);
+        for contract in value["contracts"]
+            .as_object_mut()
+            .expect("contracts must be an object")
+            .values_mut()
+        {
+            contract
+                .as_object_mut()
+                .expect("contract must be an object")
+                .remove("fulfilled_deliveries_by_dynasty");
+        }
+
+        let migrated = migrate_to_current(value, Path::new("memory.json"))
+            .expect("version eleven must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        let contract = loaded
+            .contracts
+            .get(&contract_id)
+            .expect("migrated contract must exist");
+        assert_eq!(
+            contract
+                .fulfilled_deliveries_by_dynasty
+                .get(&buyer_owner_id),
+            Some(&4)
+        );
+        assert_eq!(
+            contract
+                .fulfilled_deliveries_by_dynasty
+                .get(&seller_owner_id),
+            Some(&4)
+        );
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        validate_state(&loaded).expect("version-eleven campaign must remain valid");
     }
 
     #[test]
@@ -1217,6 +1290,51 @@ mod validation {
             .breaching_dynasty_id = Some(seller_dynasty_id);
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) = write_test_json_fixture("active-contract-breacher.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "incompatible with its parties or term",
+        );
+    }
+
+    #[test]
+    fn rejects_unattributed_contract_fulfillment() {
+        let mut state = make_test_campaign();
+        let contract = state
+            .contracts
+            .values_mut()
+            .next()
+            .expect("campaign must contain a contract");
+        contract.fulfilled_deliveries = 1;
+        contract.fulfilled_deliveries_by_dynasty.clear();
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("unattributed-contract-delivery.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "incompatible with its parties or term",
+        );
+    }
+
+    #[test]
+    fn rejects_contract_delivery_credit_for_a_missing_dynasty() {
+        let mut state = make_test_campaign();
+        let contract = state
+            .contracts
+            .values_mut()
+            .next()
+            .expect("campaign must contain a contract");
+        contract.fulfilled_deliveries = 1;
+        contract.fulfilled_deliveries_by_dynasty.clear();
+        contract
+            .fulfilled_deliveries_by_dynasty
+            .insert(DynastyId::new(u32::MAX), 1);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("missing-contract-credit-dynasty.json", &value);
 
         assert_invalid_state(
             load_state(&path),

@@ -109,13 +109,15 @@ pub use commands::{
 pub use invariants::validate_invariants;
 pub use simulation::advance_days;
 pub use strategic::{
-    BusinessAcquisitionQuote, LoanTerms, StrategicError, SupplyContractTerms, ValidatedLoan,
-    ValidatedSupplyContract, acquire_business, buy_unowned_property, issue_loan,
-    quote_business_acquisition, sign_supply_contract, validate_loan, validate_supply_contract,
+    BusinessAcquisitionQuote, LoanTerms, PropertyLiquidationQuote, StrategicError,
+    SupplyContractTerms, ValidatedLoan, ValidatedSupplyContract, acquire_business,
+    buy_unowned_property, issue_loan, quote_business_acquisition, quote_property_liquidation,
+    sell_owned_property, sign_supply_contract, validate_loan, validate_supply_contract,
 };
 pub(crate) use strategic::{
-    OFFICE_DUTY_COST_PER_POWER, STANDARD_CONTRACT_BATCHES_PER_WEEK,
-    dynasty_office_administrative_load, initialize_strategic_state,
+    DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, OFFICE_DUTY_COST_PER_POWER,
+    STANDARD_CONTRACT_BATCHES_PER_WEEK, dynasty_office_administrative_load,
+    initialize_strategic_state,
 };
 pub use transactions::{
     SimulationError, ValidatedCashTransfer, transfer_business_cash, validate_business_cash_transfer,

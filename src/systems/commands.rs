@@ -2,7 +2,7 @@
 
 use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
-    acquire_business, buy_unowned_property, issue_loan, sign_supply_contract,
+    acquire_business, buy_unowned_property, issue_loan, sell_owned_property, sign_supply_contract,
     transfer_business_cash,
 };
 use crate::core::{
@@ -77,6 +77,10 @@ pub enum PlayerCommand {
     BuyProperty {
         property_id: PropertyId,
     },
+    SellProperty {
+        property_id: PropertyId,
+        buyer_dynasty_id: DynastyId,
+    },
     EnactLaw {
         kind: LawKind,
         value: i64,
@@ -103,6 +107,10 @@ pub enum PlayerCommand {
         focus: EducationFocus,
     },
     NominateForOffice {
+        institution_id: InstitutionId,
+        character_id: CharacterId,
+    },
+    WithdrawFromInstitution {
         institution_id: InstitutionId,
         character_id: CharacterId,
     },
@@ -148,7 +156,7 @@ pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
 pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_800;
 pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
-pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 52;
+pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 104;
 pub(crate) const WARD_ADOPTION_INTERVAL_DAYS: i64 = 720;
 pub(crate) const WARD_ADOPTION_COST: Money = Money::from_copper(6_000);
 pub(crate) const WARD_ADOPTION_LEGITIMACY_REQUIREMENT: u16 = 3_500;
@@ -305,17 +313,17 @@ pub enum CommandError {
     FamilyEducationCooldown { next_education_day: i64 },
     #[error("institution {institution_id} does not exist")]
     MissingInstitution { institution_id: InstitutionId },
-    #[error("character {character_id} is already a member of institution {institution_id}")]
-    AlreadyInstitutionMember {
-        institution_id: InstitutionId,
-        character_id: CharacterId,
-    },
     #[error("character {character_id} is not an active member of the player dynasty")]
     InvalidNominee { character_id: CharacterId },
     #[error("character {character_id} already holds office in institution {institution_id}")]
     NomineeAlreadyHoldsOffice {
         character_id: CharacterId,
         institution_id: InstitutionId,
+    },
+    #[error("character {character_id} is not a player member of institution {institution_id}")]
+    InvalidInstitutionWithdrawal {
+        institution_id: InstitutionId,
+        character_id: CharacterId,
     },
     #[error("crisis {crisis_id} does not exist")]
     MissingCrisis { crisis_id: CrisisId },
@@ -389,25 +397,14 @@ pub fn apply_player_command(
             },
         ),
         PlayerCommand::CreateSupplyContract { terms } => {
-            ensure_player_contract_party(state, &terms)?;
-            let id = sign_supply_contract(registry, state, terms)?;
-            Ok(CommandOutcome {
-                summary: format!("Created supply contract {id}."),
-            })
+            apply_supply_contract(registry, state, terms)
         }
-        PlayerCommand::IssueLoan { terms } => {
-            ensure_player_loan_party(state, &terms)?;
-            let id = issue_loan(state, terms)?;
-            Ok(CommandOutcome {
-                summary: format!("Issued loan {id}."),
-            })
-        }
-        PlayerCommand::BuyProperty { property_id } => {
-            buy_unowned_property(state, state.player_dynasty_id, property_id)?;
-            Ok(CommandOutcome {
-                summary: format!("Acquired property {property_id}."),
-            })
-        }
+        PlayerCommand::IssueLoan { terms } => apply_loan(state, terms),
+        PlayerCommand::BuyProperty { property_id } => apply_property_purchase(state, property_id),
+        PlayerCommand::SellProperty {
+            property_id,
+            buyer_dynasty_id,
+        } => apply_property_sale(registry, state, property_id, buyer_dynasty_id),
         PlayerCommand::EnactLaw { kind, value } => apply_law(registry, state, kind, value),
         PlayerCommand::StartPublicWork {
             district_id,
@@ -438,6 +435,10 @@ pub fn apply_player_command(
             institution_id,
             character_id,
         } => apply_office_nomination(state, institution_id, character_id),
+        PlayerCommand::WithdrawFromInstitution {
+            institution_id,
+            character_id,
+        } => apply_institution_withdrawal(state, institution_id, character_id),
         PlayerCommand::RespondToCrisis {
             crisis_id,
             response,
@@ -450,6 +451,115 @@ pub fn apply_player_command(
             apply_acknowledgement(state, message_id)
         }
     }
+}
+
+fn apply_supply_contract(
+    registry: &Registry,
+    state: &mut AppState,
+    terms: SupplyContractTerms,
+) -> Result<CommandOutcome, CommandError> {
+    ensure_player_contract_party(state, &terms)?;
+    let id = sign_supply_contract(registry, state, terms)?;
+    Ok(CommandOutcome {
+        summary: format!("Created supply contract {id}."),
+    })
+}
+
+fn apply_loan(state: &mut AppState, terms: LoanTerms) -> Result<CommandOutcome, CommandError> {
+    ensure_player_loan_party(state, &terms)?;
+    let id = issue_loan(state, terms)?;
+    Ok(CommandOutcome {
+        summary: format!("Issued loan {id}."),
+    })
+}
+
+fn apply_property_purchase(
+    state: &mut AppState,
+    property_id: PropertyId,
+) -> Result<CommandOutcome, CommandError> {
+    buy_unowned_property(state, state.player_dynasty_id, property_id)?;
+    Ok(CommandOutcome {
+        summary: format!("Acquired property {property_id}."),
+    })
+}
+
+fn apply_property_sale(
+    registry: &Registry,
+    state: &mut AppState,
+    property_id: PropertyId,
+    buyer_dynasty_id: DynastyId,
+) -> Result<CommandOutcome, CommandError> {
+    let quote = sell_owned_property(
+        registry,
+        state,
+        state.player_dynasty_id,
+        buyer_dynasty_id,
+        property_id,
+    )?;
+    Ok(CommandOutcome {
+        summary: format!("Sold property {property_id} for {}.", quote.price),
+    })
+}
+
+fn apply_institution_withdrawal(
+    state: &mut AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> Result<CommandOutcome, CommandError> {
+    let character =
+        state
+            .characters
+            .get(character_id)
+            .ok_or(CommandError::InvalidInstitutionWithdrawal {
+                institution_id,
+                character_id,
+            })?;
+    if character.dynasty_id() != state.player_dynasty_id {
+        return Err(CommandError::InvalidInstitutionWithdrawal {
+            institution_id,
+            character_id,
+        });
+    }
+    let institution = state
+        .institutions
+        .get(&institution_id)
+        .ok_or(CommandError::MissingInstitution { institution_id })?;
+    if !institution.members.contains(&character_id) {
+        return Err(CommandError::InvalidInstitutionWithdrawal {
+            institution_id,
+            character_id,
+        });
+    }
+    let resigned_office = institution.office_holder_id == Some(character_id);
+    let day = state.clock.day();
+    let institution = state
+        .institutions
+        .get_mut(&institution_id)
+        .expect("validated institution must exist");
+    institution.members.remove(&character_id);
+    if resigned_office {
+        institution.office_holder_id = None;
+        institution.next_selection_day = institution.next_selection_day.min(day.saturating_add(30));
+    }
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Politics,
+        format!("Character {character_id} withdrew from institution {institution_id}"),
+        if resigned_office {
+            "The dynasty surrendered the office and its institutional membership; a replacement selection will be scheduled.".to_owned()
+        } else {
+            "The dynasty surrendered this institutional membership.".to_owned()
+        },
+    );
+    Ok(CommandOutcome {
+        summary: if resigned_office {
+            format!(
+                "Withdrew character {character_id} from institution {institution_id} and resigned the office."
+            )
+        } else {
+            format!("Withdrew character {character_id} from institution {institution_id}.")
+        },
+    })
 }
 
 fn apply_business_acquisition(
@@ -1593,16 +1703,10 @@ fn apply_office_nomination(
             institution_id: existing_institution_id,
         });
     }
-    let institution = state
+    state
         .institutions
         .get(&institution_id)
         .ok_or(CommandError::MissingInstitution { institution_id })?;
-    if institution.members.contains(&character_id) {
-        return Err(CommandError::AlreadyInstitutionMember {
-            institution_id,
-            character_id,
-        });
-    }
     validate_office_nomination_standing(state)?;
     if let Some(last_nomination_day) = state
         .audit_log
@@ -1689,22 +1793,15 @@ pub(super) fn office_nomination_subject(
 }
 
 pub(crate) fn player_contract_deliveries(state: &AppState) -> u32 {
-    state
-        .contracts
-        .values()
-        .filter(|contract| {
-            state
-                .businesses
-                .get(contract.buyer_business_id)
-                .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
-                || state
-                    .businesses
-                    .get(contract.seller_business_id)
-                    .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
-        })
-        .fold(0_u32, |total, contract| {
-            total.saturating_add(u32::from(contract.fulfilled_deliveries))
-        })
+    state.contracts.values().fold(0_u32, |total, contract| {
+        total.saturating_add(u32::from(
+            contract
+                .fulfilled_deliveries_by_dynasty
+                .get(&state.player_dynasty_id)
+                .copied()
+                .unwrap_or(0),
+        ))
+    })
 }
 
 fn apply_crisis_response(

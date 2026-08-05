@@ -532,6 +532,33 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             }),
             "Lifecycle Validity: contract breach attribution is inconsistent with its parties"
         );
+        let attributed_deliveries = contract
+            .fulfilled_deliveries_by_dynasty
+            .values()
+            .fold(0_u32, |total, deliveries| {
+                total.saturating_add(u32::from(*deliveries))
+            });
+        let fulfilled_deliveries = u32::from(contract.fulfilled_deliveries);
+        debug_assert!(
+            contract
+                .fulfilled_deliveries_by_dynasty
+                .iter()
+                .all(|(dynasty_id, deliveries)| {
+                    state.dynasties.contains_key(dynasty_id)
+                        && *deliveries > 0
+                        && *deliveries <= contract.fulfilled_deliveries
+                }),
+            "Record Reference Validity: contract delivery attribution is invalid"
+        );
+        debug_assert!(
+            if fulfilled_deliveries == 0 {
+                contract.fulfilled_deliveries_by_dynasty.is_empty()
+            } else {
+                attributed_deliveries >= fulfilled_deliveries
+                    && attributed_deliveries <= fulfilled_deliveries.saturating_mul(2)
+            },
+            "Derived Data Consistency: contract delivery attribution does not match fulfillment"
+        );
         if let Some(seller) = seller {
             let recipe = registry
                 .get_recipe(seller.recipe_id())

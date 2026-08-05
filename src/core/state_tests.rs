@@ -55,6 +55,284 @@ mod aggregates {
     }
 }
 
+mod synchronized_stores {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn business_ownership_transfer_updates_record_and_index_together() {
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let prior_owner_id = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .owner_dynasty_id();
+        let new_owner_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != prior_owner_id)
+            .expect("campaign must contain another dynasty");
+        let new_manager_id = state
+            .characters
+            .ids_for_dynasty(new_owner_id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .find(|character_id| {
+                state
+                    .characters
+                    .get(*character_id)
+                    .is_some_and(|character| {
+                        character.status() == crate::core::CharacterStatus::Active
+                    })
+            })
+            .expect("new owner must have an active manager");
+
+        let returned_owner =
+            state
+                .businesses
+                .transfer_ownership(business_id, new_owner_id, new_manager_id);
+
+        assert_eq!(returned_owner, Some(prior_owner_id));
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("transferred business must exist");
+        assert_eq!(business.owner_dynasty_id(), new_owner_id);
+        assert_eq!(business.manager_id(), new_manager_id);
+        assert!(
+            state
+                .businesses
+                .ids_for_owner(prior_owner_id)
+                .is_none_or(|businesses| !businesses.contains(&business_id))
+        );
+        assert!(
+            state
+                .businesses
+                .ids_for_owner(new_owner_id)
+                .is_some_and(|businesses| businesses.contains(&business_id))
+        );
+    }
+
+    #[test]
+    fn ownership_transfer_detects_a_stale_source_index_before_mutation() {
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let prior_owner_id = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .owner_dynasty_id();
+        let new_owner_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != prior_owner_id)
+            .expect("campaign must contain another dynasty");
+        let new_manager_id = state
+            .characters
+            .ids_for_dynasty(new_owner_id)
+            .into_iter()
+            .flatten()
+            .next()
+            .copied()
+            .expect("new owner must have a character");
+        state
+            .businesses
+            .by_owner
+            .get_mut(&prior_owner_id)
+            .expect("owner index must exist")
+            .remove(&business_id);
+        let before = state.businesses.clone();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            state
+                .businesses
+                .transfer_ownership(business_id, new_owner_id, new_manager_id);
+        }));
+
+        assert!(
+            result.is_err(),
+            "stale synchronized indexes must be detected"
+        );
+        assert_eq!(
+            state.businesses, before,
+            "failed ownership transfer validation must not mutate either store representation"
+        );
+    }
+
+    #[test]
+    fn store_insertions_preflight_derived_indexes_before_records() {
+        let mut state = make_test_campaign();
+
+        let mut character = state
+            .characters
+            .iter()
+            .next()
+            .expect("campaign must contain a character")
+            .clone();
+        let character_id = state.next_ids.character();
+        character.identity.id = character_id;
+        let stale_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != character.dynasty_id())
+            .expect("campaign must contain another dynasty");
+        state
+            .characters
+            .by_dynasty
+            .entry(stale_dynasty_id)
+            .or_default()
+            .insert(character_id);
+        let characters_before = state.characters.clone();
+        let character_result = catch_unwind(AssertUnwindSafe(|| {
+            state.characters.insert(character);
+        }));
+        assert!(character_result.is_err());
+        assert_eq!(state.characters, characters_before);
+
+        let mut business = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .clone();
+        let business_id = state.next_ids.business();
+        business.identity.id = business_id;
+        let stale_owner_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != business.owner_dynasty_id())
+            .expect("campaign must contain another dynasty");
+        state
+            .businesses
+            .by_owner
+            .entry(stale_owner_id)
+            .or_default()
+            .insert(business_id);
+        let businesses_before = state.businesses.clone();
+        let business_result = catch_unwind(AssertUnwindSafe(|| {
+            state.businesses.insert(business);
+        }));
+        assert!(business_result.is_err());
+        assert_eq!(state.businesses, businesses_before);
+
+        let mut household = state
+            .households
+            .iter()
+            .next()
+            .expect("campaign must contain a household")
+            .clone();
+        let household_id = state.next_ids.household();
+        household.id = household_id;
+        let stale_district_id = state
+            .districts
+            .keys()
+            .copied()
+            .find(|district_id| *district_id != household.district_id())
+            .expect("campaign must contain another district");
+        state
+            .households
+            .by_district
+            .entry(stale_district_id)
+            .or_default()
+            .insert(household_id);
+        let households_before = state.households.clone();
+        let household_result = catch_unwind(AssertUnwindSafe(|| {
+            state.households.insert(household);
+        }));
+        assert!(household_result.is_err());
+        assert_eq!(state.households, households_before);
+    }
+
+    #[test]
+    fn ownership_transfer_preflights_duplicate_owner_and_district_indexes() {
+        let state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist");
+        let prior_owner_id = business.owner_dynasty_id();
+        let district_id = business.district_id();
+        let new_owner_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != prior_owner_id)
+            .expect("campaign must contain another dynasty");
+        let new_manager_id = state
+            .characters
+            .ids_for_dynasty(new_owner_id)
+            .into_iter()
+            .flatten()
+            .next()
+            .copied()
+            .expect("new owner must have a manager");
+        let other_district_id = state
+            .districts
+            .keys()
+            .copied()
+            .find(|candidate| *candidate != district_id)
+            .expect("campaign must contain another district");
+
+        let mut duplicate_owner = state.clone();
+        duplicate_owner
+            .businesses
+            .by_owner
+            .entry(new_owner_id)
+            .or_default()
+            .insert(business_id);
+        let owner_before = duplicate_owner.businesses.clone();
+        let owner_result = catch_unwind(AssertUnwindSafe(|| {
+            duplicate_owner.businesses.transfer_ownership(
+                business_id,
+                new_owner_id,
+                new_manager_id,
+            );
+        }));
+        assert!(owner_result.is_err());
+        assert_eq!(duplicate_owner.businesses, owner_before);
+
+        let mut duplicate_district = state;
+        duplicate_district
+            .businesses
+            .by_district
+            .entry(other_district_id)
+            .or_default()
+            .insert(business_id);
+        let district_before = duplicate_district.businesses.clone();
+        let district_result = catch_unwind(AssertUnwindSafe(|| {
+            duplicate_district.businesses.transfer_ownership(
+                business_id,
+                new_owner_id,
+                new_manager_id,
+            );
+        }));
+        assert!(district_result.is_err());
+        assert_eq!(duplicate_district.businesses, district_before);
+    }
+}
+
 mod determinism {
     use super::*;
 

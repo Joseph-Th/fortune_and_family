@@ -423,6 +423,48 @@ mod coverage {
             Some(seller_name.as_str())
         );
     }
+
+    #[test]
+    fn exposes_dynasties_that_earned_contract_delivery_credit() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let contract_id = *state
+            .contracts
+            .keys()
+            .next()
+            .expect("campaign must contain a contract");
+        let dynasty_id = state.player_dynasty_id;
+        let dynasty_name = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .name()
+            .to_owned();
+        let contract = state
+            .contracts
+            .get_mut(&contract_id)
+            .expect("contract must exist");
+        contract.fulfilled_deliveries = 6;
+        contract
+            .fulfilled_deliveries_by_dynasty
+            .insert(dynasty_id, 6);
+
+        let projection = build_campaign_projection(registry, &state);
+        let contract = projection
+            .contracts
+            .iter()
+            .find(|contract| contract.id == contract_id)
+            .expect("contract must be projected");
+
+        assert_eq!(
+            contract.delivery_credits,
+            vec![ContractDeliveryCreditProjection {
+                dynasty_id,
+                dynasty: dynasty_name,
+                deliveries: 6,
+            }]
+        );
+    }
 }
 
 mod html {
@@ -456,9 +498,78 @@ mod html {
             "dashboard must expose the social network that influences institutional outcomes"
         );
         assert!(
+            html.contains("<caption class=\"sr-only\">Business operations</caption>")
+                && html.contains("<th scope=\"col\">Business</th>")
+                && html.contains(
+                    "<caption class=\"sr-only\">Supply contract obligations and performance</caption>",
+                ),
+            "dashboard tables must expose captions and column-header semantics"
+        );
+        assert!(
             html.contains(player_name),
             "dashboard must identify the player dynasty"
         );
+    }
+
+    #[test]
+    fn renders_human_readable_market_causes_and_empty_states() {
+        let rows = render_market_rows(&[MarketProjection {
+            good: "Bread".to_owned(),
+            price: Money::from_copper(25),
+            previous_price: Money::from_copper(24),
+            stock: Quantity::from_milliunits(1_000),
+            target_stock: Quantity::from_milliunits(2_000),
+            demand_today: Quantity::from_milliunits(3_000),
+            supply_today: Quantity::from_milliunits(1_000),
+            causes: vec![
+                MarketCause::StockBelowTarget,
+                MarketCause::DemandExceededSupply,
+            ],
+        }]);
+
+        assert!(rows.contains("Stock below target, Demand exceeded supply"));
+        assert!(!rows.contains("StockBelowTarget"));
+        assert_eq!(
+            render_notifications(&[]),
+            "<article><p>No recent notices.</p></article>"
+        );
+        assert!(render_business_rows(&[]).contains("No businesses are operating"));
+        assert!(render_contract_rows(&[]).contains("No supply contracts are recorded"));
+    }
+
+    #[test]
+    fn renders_contract_obligations_and_attributed_performance() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_dynasty_id = state.player_dynasty_id;
+        let player_name = state
+            .dynasties
+            .get(&player_dynasty_id)
+            .expect("player dynasty must exist")
+            .name()
+            .to_owned();
+        let contract = state
+            .contracts
+            .values_mut()
+            .next()
+            .expect("campaign must contain a contract");
+        contract.fulfilled_deliveries = 3;
+        contract
+            .fulfilled_deliveries_by_dynasty
+            .insert(player_dynasty_id, 3);
+        let expected_terms = format!(
+            "through day {} · penalty {}",
+            contract.end_day, contract.penalty
+        );
+        let projection = build_campaign_projection(registry, &state);
+
+        let rows = render_contract_rows(&projection.contracts);
+
+        assert!(rows.contains("3 fulfilled"));
+        assert!(rows.contains(&format!("{}: 3", escape_html(&player_name))));
+        assert!(rows.contains(&expected_terms));
+        assert!(rows.contains("Active"));
+        assert!(!rows.contains("ContractStatus"));
     }
 
     #[test]

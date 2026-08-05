@@ -7,7 +7,7 @@ use crate::ids::{
 };
 use crate::money::{Money, Quantity};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContractStatus {
@@ -30,6 +30,7 @@ pub struct SupplyContract {
     pub(crate) next_due_day: i64,
     pub(crate) end_day: i64,
     pub(crate) fulfilled_deliveries: u16,
+    pub(crate) fulfilled_deliveries_by_dynasty: BTreeMap<DynastyId, u16>,
     pub(crate) missed_deliveries: u16,
     pub(crate) breaching_dynasty_id: Option<DynastyId>,
     pub(crate) status: ContractStatus,

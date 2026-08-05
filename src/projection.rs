@@ -273,12 +273,22 @@ pub struct ContractProjection {
     pub good: String,
     pub quantity_per_week: Quantity,
     pub unit_price: Money,
+    pub penalty: Money,
     pub next_due_day: i64,
+    pub end_day: i64,
     pub status: ContractStatus,
     pub fulfilled_deliveries: u16,
+    pub delivery_credits: Vec<ContractDeliveryCreditProjection>,
     pub missed_deliveries: u16,
     pub breaching_dynasty_id: Option<DynastyId>,
     pub breaching_dynasty: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ContractDeliveryCreditProjection {
+    pub dynasty_id: DynastyId,
+    pub dynasty: String,
+    pub deliveries: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -773,9 +783,27 @@ fn build_contract_projections(registry: &Registry, state: &AppState) -> Vec<Cont
                 .to_owned(),
             quantity_per_week: contract.quantity_per_week,
             unit_price: contract.unit_price,
+            penalty: contract.penalty,
             next_due_day: contract.next_due_day,
+            end_day: contract.end_day,
             status: contract.status,
             fulfilled_deliveries: contract.fulfilled_deliveries,
+            delivery_credits: contract
+                .fulfilled_deliveries_by_dynasty
+                .iter()
+                .map(
+                    |(dynasty_id, deliveries)| ContractDeliveryCreditProjection {
+                        dynasty_id: *dynasty_id,
+                        dynasty: state
+                            .dynasties
+                            .get(dynasty_id)
+                            .expect("credited contract dynasty must exist")
+                            .name()
+                            .to_owned(),
+                        deliveries: *deliveries,
+                    },
+                )
+                .collect(),
             missed_deliveries: contract.missed_deliveries,
             breaching_dynasty_id: contract.breaching_dynasty_id,
             breaching_dynasty: contract.breaching_dynasty_id.map(|dynasty_id| {
@@ -1033,6 +1061,7 @@ pub fn render_campaign_html(
     let player = &projection.player;
     let district_rows = render_district_rows(&projection.districts);
     let business_rows = render_business_rows(&projection.businesses);
+    let contract_rows = render_contract_rows(&projection.contracts);
     let market_rows = render_market_rows(&projection.market);
     let civic_debt_rows = render_civic_debt_rows(&projection.civic_debts);
     let relationship_rows = render_relationship_rows(&projection.relationships);
@@ -1046,11 +1075,11 @@ pub fn render_campaign_html(
 <title>Civic Dynasty · {scenario}</title>
 <style>
 :root{{color-scheme:dark;--bg:#12100d;--panel:#211c17;--line:#493c30;--text:#eee6da;--muted:#b8aa99;--accent:#d4a75e}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 Georgia,serif}}header,main{{max-width:1200px;margin:auto;padding:24px}}header{{border-bottom:1px solid var(--line)}}h1,h2,h3{{margin:.2em 0}}small{{color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}}section,article{{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}}.metric{{font-size:1.6rem;color:var(--accent)}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}.scroll{{overflow:auto}}pre{{white-space:pre-wrap;color:var(--muted)}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 Georgia,serif}}header,main{{max-width:1200px;margin:auto;padding:24px}}header{{border-bottom:1px solid var(--line)}}h1,h2,h3{{margin:.2em 0}}small{{color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}}section,article{{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}}.metric{{font-size:1.6rem;color:var(--accent)}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}.scroll{{overflow:auto}}pre{{white-space:pre-wrap;color:var(--muted)}}.sr-only{{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}}
 </style>
 </head>
 <body>
-<header><h1>{scenario}</h1><p>Year {year}, day {day} · simulation day {elapsed} · {phase:?}</p></header>
+<header><h1>{scenario}</h1><p>Year {year}, day {day} · simulation day {elapsed} · {phase}</p></header>
 <main>
 <div class="grid">
 <section><small>Player dynasty</small><h2>House {player}</h2><div class="metric">{treasury}</div><p>Administrative load {load}/{capacity}, including {office_load} from offices</p><p>{contributions} in civic duties · {unmet_duties} unmet duties</p></section>
@@ -1058,11 +1087,12 @@ pub fn render_campaign_html(
 <section><small>Municipal finance</small><div class="metric">{civic_debt_balance}</div><p>{civic_debts} outstanding civic obligations</p></section>
 <section><small>Civic condition</small><div class="metric">{food:.1}% food satisfaction</div><p>{crises} active crises</p></section>
 </div>
-<h2>Businesses</h2><section class="scroll"><table><thead><tr><th>Business</th><th>Owner</th><th>Status</th><th>Cash</th><th>Condition</th><th>Policy</th><th>Manager</th><th>Acquisition</th></tr></thead><tbody>{business_rows}</tbody></table></section>
-<h2>Districts</h2><section class="scroll"><table><thead><tr><th>District</th><th>Food</th><th>Employment</th><th>Sanitation</th><th>Unrest</th><th>Causes</th></tr></thead><tbody>{district_rows}</tbody></table></section>
-<h2>Market</h2><section class="scroll"><table><thead><tr><th>Good</th><th>Price</th><th>Stock</th><th>Causes</th></tr></thead><tbody>{market_rows}</tbody></table></section>
-<h2>Municipal debt</h2><section class="scroll"><table><thead><tr><th>Creditor</th><th>Principal</th><th>Balance</th><th>Weekly payment</th><th>Interest</th><th>Status</th><th>Next due</th></tr></thead><tbody>{civic_debt_rows}</tbody></table></section>
-<h2>Dynasty relationships</h2><section class="scroll"><table><thead><tr><th>House</th><th>Trust</th><th>Respect</th><th>Fear</th><th>Resentment</th><th>Obligation</th><th>Last interaction</th></tr></thead><tbody>{relationship_rows}</tbody></table></section>
+<h2>Businesses</h2><section class="scroll"><table><caption class="sr-only">Business operations</caption><thead><tr><th scope="col">Business</th><th scope="col">Owner</th><th scope="col">Status</th><th scope="col">Cash</th><th scope="col">Condition</th><th scope="col">Policy</th><th scope="col">Manager</th><th scope="col">Acquisition</th></tr></thead><tbody>{business_rows}</tbody></table></section>
+<h2>Supply contracts</h2><section class="scroll"><table><caption class="sr-only">Supply contract obligations and performance</caption><thead><tr><th scope="col">Contract</th><th scope="col">Buyer</th><th scope="col">Seller</th><th scope="col">Good</th><th scope="col">Terms</th><th scope="col">Status</th><th scope="col">Performance</th><th scope="col">Delivery credit</th><th scope="col">Breach</th></tr></thead><tbody>{contract_rows}</tbody></table></section>
+<h2>Districts</h2><section class="scroll"><table><caption class="sr-only">District conditions</caption><thead><tr><th scope="col">District</th><th scope="col">Food</th><th scope="col">Employment</th><th scope="col">Sanitation</th><th scope="col">Unrest</th><th scope="col">Causes</th></tr></thead><tbody>{district_rows}</tbody></table></section>
+<h2>Market</h2><section class="scroll"><table><caption class="sr-only">Market prices and stocks</caption><thead><tr><th scope="col">Good</th><th scope="col">Price</th><th scope="col">Stock</th><th scope="col">Causes</th></tr></thead><tbody>{market_rows}</tbody></table></section>
+<h2>Municipal debt</h2><section class="scroll"><table><caption class="sr-only">Municipal debt obligations</caption><thead><tr><th scope="col">Creditor</th><th scope="col">Principal</th><th scope="col">Balance</th><th scope="col">Weekly payment</th><th scope="col">Interest</th><th scope="col">Status</th><th scope="col">Next due</th></tr></thead><tbody>{civic_debt_rows}</tbody></table></section>
+<h2>Dynasty relationships</h2><section class="scroll"><table><caption class="sr-only">Dynasty relationship measures</caption><thead><tr><th scope="col">House</th><th scope="col">Trust</th><th scope="col">Respect</th><th scope="col">Fear</th><th scope="col">Resentment</th><th scope="col">Obligation</th><th scope="col">Last interaction</th></tr></thead><tbody>{relationship_rows}</tbody></table></section>
 <h2>Recent notices</h2><div class="grid">{alerts}</div>
 <h2>Embedded projection</h2><section><pre id="data"></pre></section>
 </main>
@@ -1073,7 +1103,7 @@ pub fn render_campaign_html(
         year = projection.scenario.year,
         day = projection.scenario.day_of_year,
         elapsed = projection.scenario.elapsed_days,
-        phase = projection.scenario.phase,
+        phase = campaign_phase_label(projection.scenario.phase),
         player = escape_html(&player.name),
         treasury = player.treasury,
         load = player.effective_administrative_load,
@@ -1114,13 +1144,13 @@ fn render_civic_debt_rows(debts: &[CivicDebtProjection]) -> String {
         };
         write!(
             rows,
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.1}%</td><td>{:?}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.1}%</td><td>{}</td><td>{}</td></tr>",
             escape_html(&debt.creditor),
             debt.principal,
             debt.balance,
             debt.weekly_payment,
             f64::from(debt.interest_basis_points) / 100.0,
-            debt.status,
+            civic_debt_status_label(debt.status),
             next_due,
         )
         .expect("writing HTML into a String cannot fail");
@@ -1129,6 +1159,10 @@ fn render_civic_debt_rows(debts: &[CivicDebtProjection]) -> String {
 }
 
 fn render_relationship_rows(relationships: &[RelationshipProjection]) -> String {
+    if relationships.is_empty() {
+        return "<tr><td colspan=\"7\">No dynasty relationships are available.</td></tr>"
+            .to_owned();
+    }
     let mut rows = String::new();
     for relationship in relationships {
         write!(
@@ -1148,6 +1182,9 @@ fn render_relationship_rows(relationships: &[RelationshipProjection]) -> String 
 }
 
 fn render_business_rows(businesses: &[BusinessProjection]) -> String {
+    if businesses.is_empty() {
+        return "<tr><td colspan=\"8\">No businesses are operating.</td></tr>".to_owned();
+    }
     let mut rows = String::new();
     for business in businesses {
         let acquisition = business.acquisition.map_or_else(
@@ -1161,12 +1198,12 @@ fn render_business_rows(businesses: &[BusinessProjection]) -> String {
         );
         write!(
             rows,
-            "<tr><td>{}<br><small>{} · {}</small></td><td>{}</td><td>{:?}</td><td>{}</td><td>{:.1}%</td><td>inputs {}d · outputs {}d · reserve {} · maintenance {:.1}% · quality {:.1}%</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}<br><small>{} · {}</small></td><td>{}</td><td>{}</td><td>{}</td><td>{:.1}%</td><td>inputs {}d · outputs {}d · reserve {} · maintenance {:.1}% · quality {:.1}%</td><td>{}</td><td>{}</td></tr>",
             escape_html(&business.name),
             escape_html(&business.district),
             escape_html(&business.recipe),
             escape_html(&business.owner),
-            business.status,
+            business_status_label(business.status),
             business.cash,
             f64::from(business.condition_basis_points) / 100.0,
             business.target_input_days,
@@ -1182,7 +1219,58 @@ fn render_business_rows(businesses: &[BusinessProjection]) -> String {
     rows
 }
 
+fn render_contract_rows(contracts: &[ContractProjection]) -> String {
+    if contracts.is_empty() {
+        return "<tr><td colspan=\"9\">No supply contracts are recorded.</td></tr>".to_owned();
+    }
+    let mut rows = String::new();
+    for contract in contracts {
+        let next_due = if contract.status == ContractStatus::Active {
+            format!("next due day {}", contract.next_due_day)
+        } else {
+            "no further delivery due".to_owned()
+        };
+        let delivery_credits = if contract.delivery_credits.is_empty() {
+            "None yet".to_owned()
+        } else {
+            contract
+                .delivery_credits
+                .iter()
+                .map(|credit| format!("{}: {}", escape_html(&credit.dynasty), credit.deliveries))
+                .collect::<Vec<_>>()
+                .join("<br>")
+        };
+        let breach = contract
+            .breaching_dynasty
+            .as_deref()
+            .map_or_else(|| "—".to_owned(), escape_html);
+        write!(
+            rows,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{} weekly at {} each<br><small>through day {} · penalty {} · {}</small></td><td>{}</td><td>{} fulfilled · {} missed</td><td>{}</td><td>{}</td></tr>",
+            contract.id,
+            escape_html(&contract.buyer_name),
+            escape_html(&contract.seller_name),
+            escape_html(&contract.good),
+            contract.quantity_per_week,
+            contract.unit_price,
+            contract.end_day,
+            contract.penalty,
+            next_due,
+            contract_status_label(contract.status),
+            contract.fulfilled_deliveries,
+            contract.missed_deliveries,
+            delivery_credits,
+            breach,
+        )
+        .expect("writing HTML into a String cannot fail");
+    }
+    rows
+}
+
 fn render_district_rows(districts: &[DistrictProjection]) -> String {
+    if districts.is_empty() {
+        return "<tr><td colspan=\"6\">No district records are available.</td></tr>".to_owned();
+    }
     let mut rows = String::new();
     for district in districts {
         write!(
@@ -1201,15 +1289,24 @@ fn render_district_rows(districts: &[DistrictProjection]) -> String {
 }
 
 fn render_market_rows(markets: &[MarketProjection]) -> String {
+    if markets.is_empty() {
+        return "<tr><td colspan=\"4\">No market quotes are available.</td></tr>".to_owned();
+    }
     let mut rows = String::new();
     for market in markets {
+        let causes = market
+            .causes
+            .iter()
+            .map(market_cause_label)
+            .collect::<Vec<_>>()
+            .join(", ");
         write!(
             rows,
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{:?}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             escape_html(&market.good),
             market.price,
             market.stock,
-            market.causes,
+            causes,
         )
         .expect("writing HTML into a String cannot fail");
     }
@@ -1217,19 +1314,86 @@ fn render_market_rows(markets: &[MarketProjection]) -> String {
 }
 
 fn render_notifications(notifications: &[NotificationProjection]) -> String {
+    if notifications.is_empty() {
+        return "<article><p>No recent notices.</p></article>".to_owned();
+    }
     let mut alerts = String::new();
     for notification in notifications.iter().rev().take(12) {
         write!(
             alerts,
-            "<article><small>Day {} · {:?}</small><h3>{}</h3><p>{}</p></article>",
+            "<article><small>Day {} · {}</small><h3>{}</h3><p>{}</p></article>",
             notification.day,
-            notification.kind,
+            outbox_kind_label(notification.kind),
             escape_html(&notification.subject),
             escape_html(&notification.body),
         )
         .expect("writing HTML into a String cannot fail");
     }
     alerts
+}
+
+const fn campaign_phase_label(phase: CampaignPhase) -> &'static str {
+    match phase {
+        CampaignPhase::Foundation => "Foundation",
+        CampaignPhase::Establishment => "Establishment",
+        CampaignPhase::Ascendancy => "Ascendancy",
+        CampaignPhase::Dominion => "Dominion",
+        CampaignPhase::Legacy => "Legacy",
+    }
+}
+
+const fn business_status_label(status: BusinessStatus) -> &'static str {
+    match status {
+        BusinessStatus::Active => "Active",
+        BusinessStatus::Distressed => "Distressed",
+        BusinessStatus::Insolvent => "Insolvent",
+        BusinessStatus::Closed => "Closed",
+    }
+}
+
+const fn civic_debt_status_label(status: CivicDebtStatus) -> &'static str {
+    match status {
+        CivicDebtStatus::Current => "Current",
+        CivicDebtStatus::Delinquent => "Delinquent",
+        CivicDebtStatus::Defaulted => "Defaulted",
+        CivicDebtStatus::Repaid => "Repaid",
+    }
+}
+
+const fn contract_status_label(status: ContractStatus) -> &'static str {
+    match status {
+        ContractStatus::Active => "Active",
+        ContractStatus::Fulfilled => "Fulfilled",
+        ContractStatus::Breached => "Breached",
+        ContractStatus::Renegotiated => "Renegotiated",
+        ContractStatus::Cancelled => "Cancelled",
+    }
+}
+
+const fn market_cause_label(cause: &MarketCause) -> &'static str {
+    match cause {
+        MarketCause::StockBelowTarget => "Stock below target",
+        MarketCause::StockAboveTarget => "Stock above target",
+        MarketCause::DemandExceededSupply => "Demand exceeded supply",
+        MarketCause::SupplyExceededDemand => "Supply exceeded demand",
+        MarketCause::SeasonalPressure => "Seasonal pressure",
+        MarketCause::StableConditions => "Stable conditions",
+    }
+}
+
+const fn outbox_kind_label(kind: OutboxKind) -> &'static str {
+    match kind {
+        OutboxKind::Contract => "Contract",
+        OutboxKind::Finance => "Finance",
+        OutboxKind::Property => "Property",
+        OutboxKind::Family => "Family",
+        OutboxKind::Politics => "Politics",
+        OutboxKind::Law => "Law",
+        OutboxKind::District => "District",
+        OutboxKind::Legal => "Legal",
+        OutboxKind::Crisis => "Crisis",
+        OutboxKind::Information => "Information",
+    }
 }
 
 fn escape_html(value: &str) -> String {

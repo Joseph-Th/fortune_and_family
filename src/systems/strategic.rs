@@ -17,7 +17,7 @@ use crate::ids::{
 use crate::money::{Money, Quantity, cost_for};
 use crate::registry::{InstitutionKind, Registry};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 pub(crate) const OFFICE_ADMINISTRATIVE_LOAD_PER_POWER: u16 = 10;
@@ -26,6 +26,9 @@ const OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS: i64 = 90;
 const OFFICE_DUTY_FORFEITURE_WINDOW_DAYS: i64 = 90;
 const OFFICE_DUTY_REELECTION_BAN_DAYS: i64 = 180;
 const OFFICE_DUTY_FORFEITURE_THRESHOLD: usize = 3;
+pub(crate) const DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS: i64 = 180;
+pub(crate) const PROPERTY_LIQUIDATION_BASIS_POINTS: i64 = 5_000;
+const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000);
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StrategicError {
@@ -48,6 +51,19 @@ pub enum StrategicError {
         lender_dynasty_id: DynastyId,
         borrower_dynasty_id: DynastyId,
         loan_id: crate::ids::LoanId,
+    },
+    #[error("defaulted loan {loan_id} cannot be restructured before day {available_day}")]
+    DefaultedLoanRestructuringCooldown {
+        loan_id: crate::ids::LoanId,
+        available_day: i64,
+    },
+    #[error(
+        "loan {loan_id} cannot add {incoming}; current balance {current} would exceed the supported money range"
+    )]
+    LoanBalanceOverflow {
+        loan_id: crate::ids::LoanId,
+        current: Money,
+        incoming: Money,
     },
     #[error("amount must be positive")]
     NonPositiveAmount,
@@ -108,6 +124,43 @@ pub enum StrategicError {
     },
     #[error("property {property_id} is already owned")]
     PropertyAlreadyOwned { property_id: PropertyId },
+    #[error("property {property_id} is not owned by dynasty {seller_dynasty_id}")]
+    PropertyNotOwnedBySeller {
+        property_id: PropertyId,
+        seller_dynasty_id: DynastyId,
+    },
+    #[error("property buyer and seller must differ")]
+    SamePropertyParty,
+    #[error("the civic treasury is not available for a property auction guarantee")]
+    MissingCivicTreasury,
+    #[error(
+        "property auction has only {buyer_available} private and {civic_available} civic liquidity, requires {required}"
+    )]
+    InsufficientPropertyAuctionLiquidity {
+        buyer_available: Money,
+        civic_available: Money,
+        required: Money,
+    },
+    #[error("property collateral references missing loan {loan_id}")]
+    MissingCollateralLoan { loan_id: crate::ids::LoanId },
+    #[error(
+        "property {property_id} lien loan {loan_id} belongs to borrower {borrower_dynasty_id}, not seller {seller_dynasty_id}"
+    )]
+    PropertyLienBorrowerMismatch {
+        property_id: PropertyId,
+        loan_id: crate::ids::LoanId,
+        borrower_dynasty_id: DynastyId,
+        seller_dynasty_id: DynastyId,
+    },
+    #[error(
+        "property {property_id} sale price {price} cannot settle lien loan {loan_id} balance {balance}"
+    )]
+    PropertySaleCannotSettleLien {
+        property_id: PropertyId,
+        loan_id: crate::ids::LoanId,
+        price: Money,
+        balance: Money,
+    },
     #[error("business {business_id} is already owned by dynasty {buyer_dynasty_id}")]
     BusinessAlreadyOwned {
         business_id: BusinessId,
@@ -152,6 +205,22 @@ pub struct LoanTerms {
     pub weekly_payment: Money,
     pub interest_basis_points: u16,
     pub collateral_property_id: Option<PropertyId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PropertyLiquidationQuote {
+    pub price: Money,
+    pub buyer_contribution: Money,
+    pub civic_guarantee: Money,
+    pub lien_payoff: Money,
+    pub seller_proceeds: Money,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PropertyLienSettlement {
+    loan_id: crate::ids::LoanId,
+    lender_dynasty_id: DynastyId,
+    payoff: Money,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +377,7 @@ fn commit_supply_contract(
             next_due_day: day.saturating_add(7),
             end_day,
             fulfilled_deliveries: 0,
+            fulfilled_deliveries_by_dynasty: BTreeMap::default(),
             missed_deliveries: 0,
             breaching_dynasty_id: None,
             status: ContractStatus::Active,
@@ -354,21 +424,24 @@ impl ValidatedLoan {
     ///
     /// Returns the current validation error if state changed after the token was created.
     pub fn commit(self, state: &mut AppState) -> Result<crate::ids::LoanId, StrategicError> {
-        validate_loan_terms(state, &self.terms)?;
-        Ok(commit_loan(state, &self.terms))
+        let defaulted_loan_id = validate_loan_terms(state, &self.terms)?;
+        Ok(commit_loan(state, &self.terms, defaulted_loan_id))
     }
 }
 
-fn commit_loan(state: &mut AppState, terms: &LoanTerms) -> crate::ids::LoanId {
+fn commit_loan(
+    state: &mut AppState,
+    terms: &LoanTerms,
+    defaulted_loan_id: Option<crate::ids::LoanId>,
+) -> crate::ids::LoanId {
     let &LoanTerms {
         lender_dynasty_id,
         borrower_dynasty_id,
         principal,
-        weekly_payment,
-        interest_basis_points,
         collateral_property_id,
+        ..
     } = terms;
-    let id = state.next_ids.loan();
+    let id = defaulted_loan_id.unwrap_or_else(|| state.next_ids.loan());
     let lender = state
         .dynasties
         .get_mut(&lender_dynasty_id)
@@ -390,27 +463,25 @@ fn commit_loan(state: &mut AppState, terms: &LoanTerms) -> crate::ids::LoanId {
             .expect("validated collateral must exist")
             .collateral_loan_id = Some(id);
     }
-    state.loans.insert(
-        id,
-        Loan {
-            id,
-            lender_dynasty_id,
-            borrower_dynasty_id,
-            principal,
-            balance: principal,
-            weekly_payment,
-            interest_basis_points,
-            next_due_day: state.clock.day().saturating_add(7),
-            missed_payments: 0,
-            collateral_property_id,
-            status: LoanStatus::Current,
-        },
-    );
+    commit_loan_record(state, terms, id, defaulted_loan_id);
+    let restructured = defaulted_loan_id.is_some();
     push_outbox(
         state,
         OutboxKind::Finance,
-        format!("Loan {id} issued"),
-        format!("Dynasty {lender_dynasty_id} lent {principal} to dynasty {borrower_dynasty_id}."),
+        if restructured {
+            format!("Loan {id} restructured")
+        } else {
+            format!("Loan {id} issued")
+        },
+        if restructured {
+            format!(
+                "Dynasty {lender_dynasty_id} restructured loan {id} and advanced {principal} to dynasty {borrower_dynasty_id}."
+            )
+        } else {
+            format!(
+                "Dynasty {lender_dynasty_id} lent {principal} to dynasty {borrower_dynasty_id}."
+            )
+        },
     );
     adjust_dynasty_relationship(
         state,
@@ -422,7 +493,11 @@ fn commit_loan(state: &mut AppState, terms: &LoanTerms) -> crate::ids::LoanId {
         state,
         lender_dynasty_id,
         borrower_dynasty_id,
-        &format!("Loan {id} was issued for {principal}."),
+        &if restructured {
+            format!("Loan {id} was restructured with a {principal} advance.")
+        } else {
+            format!("Loan {id} was issued for {principal}.")
+        },
     );
     record_counterparty_information(
         state,
@@ -431,6 +506,51 @@ fn commit_loan(state: &mut AppState, terms: &LoanTerms) -> crate::ids::LoanId {
         "Credit underwriting and repayment records",
     );
     id
+}
+
+fn commit_loan_record(
+    state: &mut AppState,
+    terms: &LoanTerms,
+    id: crate::ids::LoanId,
+    defaulted_loan_id: Option<crate::ids::LoanId>,
+) {
+    if let Some(defaulted_loan_id) = defaulted_loan_id {
+        let loan = state
+            .loans
+            .get_mut(&defaulted_loan_id)
+            .expect("validated defaulted loan must exist");
+        loan.principal = loan
+            .principal
+            .checked_add(terms.principal)
+            .expect("revalidated loan principal must fit the supported range");
+        loan.balance = loan
+            .balance
+            .checked_add(terms.principal)
+            .expect("revalidated loan balance must fit the supported range");
+        loan.weekly_payment = terms.weekly_payment;
+        loan.interest_basis_points = terms.interest_basis_points;
+        loan.next_due_day = state.clock.day().saturating_add(7);
+        loan.missed_payments = 0;
+        loan.collateral_property_id = terms.collateral_property_id;
+        loan.status = LoanStatus::Restructured;
+    } else {
+        state.loans.insert(
+            id,
+            Loan {
+                id,
+                lender_dynasty_id: terms.lender_dynasty_id,
+                borrower_dynasty_id: terms.borrower_dynasty_id,
+                principal: terms.principal,
+                balance: terms.principal,
+                weekly_payment: terms.weekly_payment,
+                interest_basis_points: terms.interest_basis_points,
+                next_due_day: state.clock.day().saturating_add(7),
+                missed_payments: 0,
+                collateral_property_id: terms.collateral_property_id,
+                status: LoanStatus::Current,
+            },
+        );
+    }
 }
 
 /// Validates a supply contract without mutating state.
@@ -540,7 +660,10 @@ pub fn validate_loan(state: &AppState, terms: LoanTerms) -> Result<ValidatedLoan
     Ok(ValidatedLoan { terms })
 }
 
-fn validate_loan_terms(state: &AppState, terms: &LoanTerms) -> Result<(), StrategicError> {
+fn validate_loan_terms(
+    state: &AppState,
+    terms: &LoanTerms,
+) -> Result<Option<crate::ids::LoanId>, StrategicError> {
     if terms.lender_dynasty_id == terms.borrower_dynasty_id {
         return Err(StrategicError::SameLoanParty);
     }
@@ -576,7 +699,10 @@ fn validate_loan_terms(state: &AppState, terms: &LoanTerms) -> Result<(), Strate
     if let Some(existing) = state.loans.values().find(|loan| {
         loan.lender_dynasty_id == terms.lender_dynasty_id
             && loan.borrower_dynasty_id == terms.borrower_dynasty_id
-            && loan.status != LoanStatus::Repaid
+            && matches!(
+                loan.status,
+                LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
+            )
     }) {
         return Err(StrategicError::ExistingUnsettledLoan {
             lender_dynasty_id: terms.lender_dynasty_id,
@@ -584,6 +710,7 @@ fn validate_loan_terms(state: &AppState, terms: &LoanTerms) -> Result<(), Strate
             loan_id: existing.id,
         });
     }
+    let defaulted_loan_id = validate_defaulted_loan_restructuring(state, terms)?;
     if lender.treasury() < terms.principal {
         return Err(StrategicError::InsufficientDynastyFunds {
             dynasty_id: terms.lender_dynasty_id,
@@ -609,7 +736,50 @@ fn validate_loan_terms(state: &AppState, terms: &LoanTerms) -> Result<(), Strate
             });
         }
     }
-    Ok(())
+    Ok(defaulted_loan_id)
+}
+
+fn validate_defaulted_loan_restructuring(
+    state: &AppState,
+    terms: &LoanTerms,
+) -> Result<Option<crate::ids::LoanId>, StrategicError> {
+    let defaulted_loan = state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.lender_dynasty_id == terms.lender_dynasty_id
+                && loan.borrower_dynasty_id == terms.borrower_dynasty_id
+                && loan.status == LoanStatus::Defaulted
+        })
+        .max_by_key(|loan| (loan.next_due_day, loan.id));
+    let Some(defaulted_loan) = defaulted_loan else {
+        return Ok(None);
+    };
+    let available_day = defaulted_loan
+        .next_due_day
+        .saturating_add(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS);
+    if state.clock.day() < available_day {
+        return Err(StrategicError::DefaultedLoanRestructuringCooldown {
+            loan_id: defaulted_loan.id,
+            available_day,
+        });
+    }
+    if defaulted_loan
+        .balance
+        .checked_add(terms.principal)
+        .is_none()
+        || defaulted_loan
+            .principal
+            .checked_add(terms.principal)
+            .is_none()
+    {
+        return Err(StrategicError::LoanBalanceOverflow {
+            loan_id: defaulted_loan.id,
+            current: defaulted_loan.balance,
+            incoming: terms.principal,
+        });
+    }
+    Ok(Some(defaulted_loan.id))
 }
 
 /// Validates and issues a loan through its canonical commit token.
@@ -677,6 +847,358 @@ pub fn buy_unowned_property(
         format!("Dynasty {buyer_dynasty_id} acquired the property for {price}."),
     );
     Ok(())
+}
+
+fn property_liquidation_lien(
+    state: &AppState,
+    seller_dynasty_id: DynastyId,
+    property_id: PropertyId,
+    collateral_loan_id: Option<crate::ids::LoanId>,
+    price: Money,
+) -> Result<Option<PropertyLienSettlement>, StrategicError> {
+    let Some(loan_id) = collateral_loan_id else {
+        return Ok(None);
+    };
+    let loan = state
+        .loans
+        .get(&loan_id)
+        .ok_or(StrategicError::MissingCollateralLoan { loan_id })?;
+    if loan.borrower_dynasty_id != seller_dynasty_id {
+        return Err(StrategicError::PropertyLienBorrowerMismatch {
+            property_id,
+            loan_id,
+            borrower_dynasty_id: loan.borrower_dynasty_id,
+            seller_dynasty_id,
+        });
+    }
+    if loan.balance > price {
+        return Err(StrategicError::PropertySaleCannotSettleLien {
+            property_id,
+            loan_id,
+            price,
+            balance: loan.balance,
+        });
+    }
+    let lender =
+        state
+            .dynasties
+            .get(&loan.lender_dynasty_id)
+            .ok_or(StrategicError::MissingDynasty {
+                dynasty_id: loan.lender_dynasty_id,
+            })?;
+    if lender.treasury().checked_add(loan.balance).is_none() {
+        return Err(StrategicError::DynastyTreasuryOverflow {
+            dynasty_id: loan.lender_dynasty_id,
+            current: lender.treasury(),
+            incoming: loan.balance,
+        });
+    }
+    Ok(Some(PropertyLienSettlement {
+        loan_id,
+        lender_dynasty_id: loan.lender_dynasty_id,
+        payoff: loan.balance,
+    }))
+}
+
+fn property_auction_funding(
+    registry: &Registry,
+    state: &AppState,
+    seller_dynasty_id: DynastyId,
+    buyer_dynasty_id: DynastyId,
+    price: Money,
+) -> Result<(Money, Money), StrategicError> {
+    let seller = state
+        .dynasties
+        .get(&seller_dynasty_id)
+        .ok_or(StrategicError::MissingDynasty {
+            dynasty_id: seller_dynasty_id,
+        })?;
+    let buyer = state
+        .dynasties
+        .get(&buyer_dynasty_id)
+        .ok_or(StrategicError::MissingDynasty {
+            dynasty_id: buyer_dynasty_id,
+        })?;
+    let buyer_contribution = buyer.treasury().min(price);
+    let civic_guarantee = price.saturating_sub(buyer_contribution);
+    if civic_guarantee == Money::ZERO {
+        return Ok((buyer_contribution, civic_guarantee));
+    }
+    let treasury_id = registry
+        .get_institution_id("treasury")
+        .ok_or(StrategicError::MissingCivicTreasury)?;
+    let civic_available = state
+        .institutions
+        .get(&treasury_id)
+        .ok_or(StrategicError::MissingCivicTreasury)?
+        .budget;
+    let distressed_seller = seller.treasury() < PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT
+        && state.businesses.iter().any(|business| {
+            business.owner_dynasty_id() == seller_dynasty_id
+                && (matches!(
+                    business.status(),
+                    BusinessStatus::Distressed | BusinessStatus::Insolvent
+                ) || business.cash() == Money::ZERO
+                    || business.operations.condition_basis_points < 2_000)
+        });
+    if !distressed_seller || civic_available < civic_guarantee {
+        return Err(StrategicError::InsufficientPropertyAuctionLiquidity {
+            buyer_available: buyer.treasury(),
+            civic_available: if distressed_seller {
+                civic_available
+            } else {
+                Money::ZERO
+            },
+            required: price,
+        });
+    }
+    Ok((buyer_contribution, civic_guarantee))
+}
+
+/// Returns the cash price available for a voluntary property liquidation.
+///
+/// # Errors
+///
+/// Returns an error when either dynasty or the property is missing, ownership does not match,
+/// the parties are identical, a lien cannot be settled from the sale, or the transfer cannot fit
+/// or be funded.
+pub fn quote_property_liquidation(
+    registry: &Registry,
+    state: &AppState,
+    seller_dynasty_id: DynastyId,
+    buyer_dynasty_id: DynastyId,
+    property_id: PropertyId,
+) -> Result<PropertyLiquidationQuote, StrategicError> {
+    if seller_dynasty_id == buyer_dynasty_id {
+        return Err(StrategicError::SamePropertyParty);
+    }
+    let property = state
+        .properties
+        .get(&property_id)
+        .ok_or(StrategicError::MissingProperty { property_id })?;
+    if property.owner_dynasty_id != Some(seller_dynasty_id) {
+        return Err(StrategicError::PropertyNotOwnedBySeller {
+            property_id,
+            seller_dynasty_id,
+        });
+    }
+    let seller = state
+        .dynasties
+        .get(&seller_dynasty_id)
+        .ok_or(StrategicError::MissingDynasty {
+            dynasty_id: seller_dynasty_id,
+        })?;
+    let price = property
+        .value
+        .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000)
+        .max(Money::from_copper(1));
+    let lien = property_liquidation_lien(
+        state,
+        seller_dynasty_id,
+        property_id,
+        property.collateral_loan_id,
+        price,
+    )?;
+    let lien_payoff = lien.map_or(Money::ZERO, |settlement| settlement.payoff);
+    let seller_proceeds = price.saturating_sub(lien_payoff);
+    let (buyer_contribution, civic_guarantee) =
+        property_auction_funding(registry, state, seller_dynasty_id, buyer_dynasty_id, price)?;
+    if seller.treasury().checked_add(seller_proceeds).is_none() {
+        return Err(StrategicError::DynastyTreasuryOverflow {
+            dynasty_id: seller_dynasty_id,
+            current: seller.treasury(),
+            incoming: seller_proceeds,
+        });
+    }
+    Ok(PropertyLiquidationQuote {
+        price,
+        buyer_contribution,
+        civic_guarantee,
+        lien_payoff,
+        seller_proceeds,
+    })
+}
+
+fn settle_property_sale_finances(
+    registry: &Registry,
+    state: &mut AppState,
+    seller_dynasty_id: DynastyId,
+    buyer_dynasty_id: DynastyId,
+    quote: PropertyLiquidationQuote,
+    lien: Option<PropertyLienSettlement>,
+) {
+    let buyer = state
+        .dynasties
+        .get_mut(&buyer_dynasty_id)
+        .expect("validated property buyer must exist");
+    buyer.resources.treasury = buyer
+        .resources
+        .treasury
+        .saturating_sub(quote.buyer_contribution);
+    if quote.civic_guarantee > Money::ZERO {
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("validated civic treasury definition must exist");
+        let treasury = state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("validated civic treasury runtime must exist");
+        treasury.budget = treasury.budget.saturating_sub(quote.civic_guarantee);
+    }
+    if let Some(lien) = lien {
+        let lender = state
+            .dynasties
+            .get_mut(&lien.lender_dynasty_id)
+            .expect("validated collateral lender must exist");
+        lender.resources.treasury = lender
+            .resources
+            .treasury
+            .checked_add(lien.payoff)
+            .expect("validated lien payoff must fit lender treasury");
+        let loan = state
+            .loans
+            .get_mut(&lien.loan_id)
+            .expect("validated collateral loan must exist");
+        loan.balance = Money::ZERO;
+        loan.missed_payments = 0;
+        loan.collateral_property_id = None;
+        loan.status = LoanStatus::Repaid;
+    }
+    let seller = state
+        .dynasties
+        .get_mut(&seller_dynasty_id)
+        .expect("validated property seller must exist");
+    seller.resources.treasury = seller
+        .resources
+        .treasury
+        .checked_add(quote.seller_proceeds)
+        .expect("validated property sale must fit seller treasury");
+}
+
+fn record_completed_loan_repayment(
+    state: &mut AppState,
+    lender_dynasty_id: DynastyId,
+    borrower_dynasty_id: DynastyId,
+    loan_id: crate::ids::LoanId,
+) {
+    adjust_dynasty_relationship(
+        state,
+        lender_dynasty_id,
+        borrower_dynasty_id,
+        RelationshipDelta::new(30, 20, 0, -25, -1),
+    );
+    remember_dynasty_interaction(
+        state,
+        lender_dynasty_id,
+        borrower_dynasty_id,
+        &format!("Loan {loan_id} was repaid in full."),
+    );
+    record_counterparty_information(
+        state,
+        lender_dynasty_id,
+        borrower_dynasty_id,
+        "Completed loan repayment records",
+    );
+}
+
+/// Sells an owned property to another dynasty at the canonical liquidation price.
+///
+/// Occupied premises remain occupied and become a tenancy when the buyer differs from the business
+/// owner.
+///
+/// # Errors
+///
+/// Returns the same errors as [`quote_property_liquidation`].
+///
+/// # Panics
+///
+/// Panics only if validated dynasty or property records disappear during the synchronous commit.
+pub fn sell_owned_property(
+    registry: &Registry,
+    state: &mut AppState,
+    seller_dynasty_id: DynastyId,
+    buyer_dynasty_id: DynastyId,
+    property_id: PropertyId,
+) -> Result<PropertyLiquidationQuote, StrategicError> {
+    let quote = quote_property_liquidation(
+        registry,
+        state,
+        seller_dynasty_id,
+        buyer_dynasty_id,
+        property_id,
+    )?;
+    let occupant_owner_id = state
+        .properties
+        .get(&property_id)
+        .and_then(|property| property.occupant_business_id)
+        .and_then(|business_id| state.businesses.get(business_id))
+        .map(crate::core::Business::owner_dynasty_id);
+    let collateral_loan_id = state
+        .properties
+        .get(&property_id)
+        .expect("validated property must exist")
+        .collateral_loan_id;
+    let lien = property_liquidation_lien(
+        state,
+        seller_dynasty_id,
+        property_id,
+        collateral_loan_id,
+        quote.price,
+    )
+    .expect("validated property lien must remain valid");
+    settle_property_sale_finances(
+        registry,
+        state,
+        seller_dynasty_id,
+        buyer_dynasty_id,
+        quote,
+        lien,
+    );
+    if let Some(lien) = lien {
+        adjust_reliability_reputation(state, seller_dynasty_id, 10);
+        record_completed_loan_repayment(
+            state,
+            lien.lender_dynasty_id,
+            seller_dynasty_id,
+            lien.loan_id,
+        );
+    }
+    let property = state
+        .properties
+        .get_mut(&property_id)
+        .expect("validated property must exist");
+    property.collateral_loan_id = None;
+    property.owner_dynasty_id = Some(buyer_dynasty_id);
+    property.tenant_dynasty_id = occupant_owner_id.filter(|owner_id| *owner_id != buyer_dynasty_id);
+    push_outbox(
+        state,
+        OutboxKind::Property,
+        format!("Property {property_id} sold"),
+        if quote.civic_guarantee > Money::ZERO {
+            format!(
+                "Dynasty {seller_dynasty_id} sold property {property_id} to dynasty {buyer_dynasty_id} for {}; the civic treasury guaranteed {} and {} settled the property lien.",
+                quote.price, quote.civic_guarantee, quote.lien_payoff
+            )
+        } else {
+            format!(
+                "Dynasty {seller_dynasty_id} sold property {property_id} to dynasty {buyer_dynasty_id} for {}; {} settled the property lien.",
+                quote.price, quote.lien_payoff
+            )
+        },
+    );
+    adjust_dynasty_relationship(
+        state,
+        seller_dynasty_id,
+        buyer_dynasty_id,
+        RelationshipDelta::new(35, 20, 0, -5, 0),
+    );
+    remember_dynasty_interaction(
+        state,
+        seller_dynasty_id,
+        buyer_dynasty_id,
+        &format!("Property {property_id} changed hands for {}.", quote.price),
+    );
+    Ok(quote)
 }
 
 /// Returns the canonical price and minimum working-capital requirement for acquiring a troubled
@@ -1971,6 +2493,18 @@ fn settle_fulfilled_contract(
         .get_mut(&due.id)
         .expect("contract must exist");
     contract.fulfilled_deliveries = contract.fulfilled_deliveries.saturating_add(1);
+    let buyer_deliveries = contract
+        .fulfilled_deliveries_by_dynasty
+        .entry(settlement.buyer.owner_id)
+        .or_default();
+    *buyer_deliveries = buyer_deliveries.saturating_add(1);
+    if settlement.seller.owner_id != settlement.buyer.owner_id {
+        let seller_deliveries = contract
+            .fulfilled_deliveries_by_dynasty
+            .entry(settlement.seller.owner_id)
+            .or_default();
+        *seller_deliveries = seller_deliveries.saturating_add(1);
+    }
     contract.next_due_day = contract.next_due_day.saturating_add(7);
     if settlement.buyer.owner_id != settlement.seller.owner_id {
         adjust_reliability_reputation(state, settlement.buyer.owner_id, 20);
@@ -2592,30 +3126,14 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
     {
         property.collateral_loan_id = None;
     }
-    adjust_dynasty_relationship(
-        state,
-        lender_id,
-        borrower_id,
-        RelationshipDelta::new(
-            if repaid { 30 } else { 4 },
-            if repaid { 20 } else { 2 },
-            0,
-            if repaid { -25 } else { -1 },
-            if repaid { -1 } else { 0 },
-        ),
-    );
     if repaid {
-        remember_dynasty_interaction(
+        record_completed_loan_repayment(state, lender_id, borrower_id, loan_id);
+    } else {
+        adjust_dynasty_relationship(
             state,
             lender_id,
             borrower_id,
-            &format!("Loan {loan_id} was repaid in full."),
-        );
-        record_counterparty_information(
-            state,
-            lender_id,
-            borrower_id,
-            "Completed loan repayment records",
+            RelationshipDelta::new(4, 2, 0, -1, 0),
         );
     }
     payment

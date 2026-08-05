@@ -820,6 +820,7 @@ fn validate_strategic_records(
             contract.status == crate::core::ContractStatus::Breached
                 && state.dynasties.contains_key(&dynasty_id)
         });
+        let valid_delivery_attribution = contract_delivery_attribution_is_valid(state, contract);
         if seller_recipe.output_good_id() != contract.good_id
             || !buyer_recipe
                 .inputs()
@@ -828,6 +829,7 @@ fn validate_strategic_records(
             || (contract.status == crate::core::ContractStatus::Active
                 && contract.next_due_day > contract.end_day)
             || !valid_breach_attribution
+            || !valid_delivery_attribution
         {
             return Err(format!(
                 "supply contract {contract_id} is incompatible with its parties or term"
@@ -892,6 +894,33 @@ fn validate_strategic_records(
         }
     }
     validate_finance_and_organization_records(state)
+}
+
+fn contract_delivery_attribution_is_valid(
+    state: &AppState,
+    contract: &crate::core::SupplyContract,
+) -> bool {
+    let attributed_deliveries = contract
+        .fulfilled_deliveries_by_dynasty
+        .values()
+        .fold(0_u32, |total, deliveries| {
+            total.saturating_add(u32::from(*deliveries))
+        });
+    let fulfilled_deliveries = u32::from(contract.fulfilled_deliveries);
+    contract
+        .fulfilled_deliveries_by_dynasty
+        .iter()
+        .all(|(dynasty_id, deliveries)| {
+            state.dynasties.contains_key(dynasty_id)
+                && *deliveries > 0
+                && *deliveries <= contract.fulfilled_deliveries
+        })
+        && if fulfilled_deliveries == 0 {
+            contract.fulfilled_deliveries_by_dynasty.is_empty()
+        } else {
+            attributed_deliveries >= fulfilled_deliveries
+                && attributed_deliveries <= fulfilled_deliveries.saturating_mul(2)
+        }
 }
 
 fn validate_finance_and_organization_records(state: &AppState) -> Result<(), String> {
@@ -1398,6 +1427,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             8 => migrate_v8_to_v9(value)?,
             9 => migrate_v9_to_v10(value)?,
             10 => migrate_v10_to_v11(value)?,
+            11 => migrate_v11_to_v12(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -1852,6 +1882,131 @@ fn migrate_v10_to_v11(mut value: Value) -> Result<Value, PersistenceError> {
     }
     object.insert("schema_version".to_owned(), Value::from(11));
     Ok(value)
+}
+
+fn migrate_v11_to_v12(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 11,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let business_owners = v11_business_owners(object)?;
+    let contracts = object
+        .get_mut("contracts")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 11,
+            reason: "save contracts must be an object".to_owned(),
+        })?;
+    for contract in contracts.values_mut() {
+        let contract = contract
+            .as_object_mut()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 11,
+                reason: "save contract must be an object".to_owned(),
+            })?;
+        let fulfilled_deliveries = contract
+            .get("fulfilled_deliveries")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 11,
+                reason: "save contract has invalid fulfilled_deliveries".to_owned(),
+            })?;
+        let buyer_business_id = contract
+            .get("buyer_business_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 11,
+                reason: "save contract has an invalid buyer".to_owned(),
+            })?;
+        let seller_business_id = contract
+            .get("seller_business_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 11,
+                reason: "save contract has an invalid seller".to_owned(),
+            })?;
+        let buyer_owner_id = business_owners
+            .get(&buyer_business_id)
+            .copied()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 11,
+                reason: format!(
+                    "save contract references missing buyer business {buyer_business_id}"
+                ),
+            })?;
+        let seller_owner_id = business_owners
+            .get(&seller_business_id)
+            .copied()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 11,
+                reason: format!(
+                    "save contract references missing seller business {seller_business_id}"
+                ),
+            })?;
+        // Version 11 did not retain the performing dynasty for each delivery. Attribute the
+        // historical total to the current parties deterministically; version 12 records exact
+        // ownership at settlement time for all future deliveries.
+        let mut attribution = serde_json::Map::new();
+        if fulfilled_deliveries > 0 {
+            attribution.insert(
+                buyer_owner_id.to_string(),
+                Value::from(fulfilled_deliveries),
+            );
+            if seller_owner_id != buyer_owner_id {
+                attribution.insert(
+                    seller_owner_id.to_string(),
+                    Value::from(fulfilled_deliveries),
+                );
+            }
+        }
+        contract.insert(
+            "fulfilled_deliveries_by_dynasty".to_owned(),
+            Value::Object(attribution),
+        );
+    }
+    object.insert("schema_version".to_owned(), Value::from(12));
+    Ok(value)
+}
+
+fn v11_business_owners(
+    object: &serde_json::Map<String, Value>,
+) -> Result<BTreeMap<u64, u64>, PersistenceError> {
+    object
+        .get("businesses")
+        .and_then(Value::as_object)
+        .and_then(|businesses| businesses.get("records"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 11,
+            reason: "save businesses.records must be an object".to_owned(),
+        })?
+        .values()
+        .map(|business| {
+            let identity = business
+                .get("identity")
+                .and_then(Value::as_object)
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 11,
+                    reason: "save business identity must be an object".to_owned(),
+                })?;
+            let business_id = identity.get("id").and_then(Value::as_u64).ok_or_else(|| {
+                PersistenceError::Migration {
+                    version: 11,
+                    reason: "save business has an invalid id".to_owned(),
+                }
+            })?;
+            let owner_dynasty_id = identity
+                .get("owner_dynasty_id")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 11,
+                    reason: format!("save business {business_id} has an invalid owner"),
+                })?;
+            Ok((business_id, owner_dynasty_id))
+        })
+        .collect()
 }
 
 #[cfg(test)]

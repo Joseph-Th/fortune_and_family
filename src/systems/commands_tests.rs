@@ -85,8 +85,12 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
                 || player_business_ids.contains(&contract.seller_business_id)
         })
         .expect("campaign must contain a player contract");
-    contract.fulfilled_deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
+    let deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
         .expect("office delivery requirement must fit contract counters");
+    contract.fulfilled_deliveries = deliveries;
+    contract
+        .fulfilled_deliveries_by_dynasty
+        .insert(state.player_dynasty_id, deliveries);
 }
 
 mod validation {
@@ -1518,6 +1522,277 @@ mod politics {
     use super::*;
     use crate::systems::advance_days;
 
+    fn make_nominee_deliberately_weak(
+        state: &mut AppState,
+        institution_id: InstitutionId,
+        character_id: CharacterId,
+    ) {
+        let member_ids: Vec<_> = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist")
+            .members
+            .iter()
+            .copied()
+            .collect();
+        for member_id in member_ids {
+            let capabilities = &mut state
+                .characters
+                .get_mut(member_id)
+                .expect("institution member must exist")
+                .capabilities;
+            capabilities.administration = 100;
+            capabilities.commerce = 100;
+            capabilities.social = 100;
+            capabilities.craft = 100;
+            let dynasty_id = state
+                .characters
+                .get(member_id)
+                .expect("institution member must exist")
+                .dynasty_id();
+            state
+                .dynasties
+                .get_mut(&dynasty_id)
+                .expect("member dynasty must exist")
+                .resources
+                .legitimacy_basis_points = 10_000;
+        }
+        let capabilities = &mut state
+            .characters
+            .get_mut(character_id)
+            .expect("nominee must exist")
+            .capabilities;
+        capabilities.administration = 0;
+        capabilities.commerce = 0;
+        capabilities.social = 0;
+        capabilities.craft = 0;
+    }
+
+    #[test]
+    fn officeholder_can_withdraw_from_an_institution_and_resign() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_with_power_for_test(&mut state, OfficePower::PublicWorks);
+        let (institution_id, character_id, next_selection_before) = state
+            .institutions
+            .values()
+            .find_map(|institution| {
+                let character_id = institution.office_holder_id?;
+                state
+                    .characters
+                    .get(character_id)
+                    .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+                    .then_some((
+                        institution.institution_id,
+                        character_id,
+                        institution.next_selection_day,
+                    ))
+            })
+            .expect("test setup must grant a player office");
+        let day = state.clock.day();
+
+        let outcome = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::WithdrawFromInstitution {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("an officeholder must be able to resign and withdraw");
+
+        let institution = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must remain present");
+        assert!(!institution.members.contains(&character_id));
+        assert_eq!(institution.office_holder_id, None);
+        assert!(institution.next_selection_day <= day.saturating_add(30));
+        assert!(institution.next_selection_day <= next_selection_before);
+        assert!(outcome.summary.contains("resigned the office"));
+        assert!(state.outbox.last().is_some_and(|message| {
+            message.kind == OutboxKind::Politics
+                && message.subject.contains("withdrew from institution")
+        }));
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn nonmember_cannot_withdraw_from_an_institution() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let institution_id = state
+            .institutions
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain an institution");
+        let institution = state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("institution must exist");
+        institution.members.remove(&character_id);
+        assert_ne!(institution.office_holder_id, Some(character_id));
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::WithdrawFromInstitution {
+                institution_id,
+                character_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InvalidInstitutionWithdrawal {
+                institution_id,
+                character_id,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "rejected institution withdrawal must not mutate state",
+        );
+    }
+
+    #[test]
+    fn selling_a_business_preserves_the_sellers_delivery_record() {
+        let mut state = make_test_campaign();
+        let player_dynasty_id = state.player_dynasty_id;
+        let player_contract_id = state
+            .contracts
+            .iter()
+            .find_map(|(contract_id, contract)| {
+                [contract.buyer_business_id, contract.seller_business_id]
+                    .into_iter()
+                    .any(|business_id| {
+                        state.businesses.get(business_id).is_some_and(|business| {
+                            business.owner_dynasty_id() == player_dynasty_id
+                        })
+                    })
+                    .then_some(*contract_id)
+            })
+            .expect("campaign must contain a player contract");
+        let player_business_id = {
+            let contract = state
+                .contracts
+                .get(&player_contract_id)
+                .expect("player contract must exist");
+            [contract.buyer_business_id, contract.seller_business_id]
+                .into_iter()
+                .find(|business_id| {
+                    state
+                        .businesses
+                        .get(*business_id)
+                        .is_some_and(|business| business.owner_dynasty_id() == player_dynasty_id)
+                })
+                .expect("player contract must include a player business")
+        };
+        {
+            let contract = state
+                .contracts
+                .get_mut(&player_contract_id)
+                .expect("player contract must exist");
+            contract.fulfilled_deliveries = 7;
+            contract
+                .fulfilled_deliveries_by_dynasty
+                .insert(player_dynasty_id, 7);
+        }
+        assert_eq!(player_contract_deliveries(&state), 7);
+        let new_owner_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_dynasty_id)
+            .expect("campaign must contain another dynasty");
+        let new_manager_id = state
+            .characters
+            .ids_for_dynasty(new_owner_id)
+            .into_iter()
+            .flatten()
+            .next()
+            .copied()
+            .expect("new owner must have a manager");
+        state
+            .businesses
+            .transfer_ownership(player_business_id, new_owner_id, new_manager_id)
+            .expect("player business must transfer");
+        assert_eq!(
+            player_contract_deliveries(&state),
+            7,
+            "selling a business must not erase delivery history earned before the sale"
+        );
+    }
+
+    #[test]
+    fn acquiring_a_business_does_not_inherit_the_former_owners_delivery_record() {
+        let mut inherited_state = make_test_campaign();
+        let ambient_contract_id = inherited_state
+            .contracts
+            .iter()
+            .find_map(|(contract_id, contract)| {
+                let owners: Vec<_> = [contract.buyer_business_id, contract.seller_business_id]
+                    .into_iter()
+                    .map(|business_id| {
+                        inherited_state
+                            .businesses
+                            .get(business_id)
+                            .expect("contract business must exist")
+                            .owner_dynasty_id()
+                    })
+                    .collect();
+                owners
+                    .iter()
+                    .all(|dynasty_id| *dynasty_id != inherited_state.player_dynasty_id)
+                    .then_some((*contract_id, owners))
+            })
+            .expect("campaign must contain an ambient contract");
+        let ambient_business_id = inherited_state
+            .contracts
+            .get(&ambient_contract_id.0)
+            .expect("ambient contract must exist")
+            .seller_business_id;
+        {
+            let contract = inherited_state
+                .contracts
+                .get_mut(&ambient_contract_id.0)
+                .expect("ambient contract must exist");
+            contract.fulfilled_deliveries = 9;
+            for dynasty_id in ambient_contract_id.1 {
+                contract
+                    .fulfilled_deliveries_by_dynasty
+                    .insert(dynasty_id, 9);
+            }
+        }
+        assert_eq!(player_contract_deliveries(&inherited_state), 0);
+        let player_manager_id = inherited_state
+            .dynasties
+            .get(&inherited_state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        inherited_state
+            .businesses
+            .transfer_ownership(
+                ambient_business_id,
+                inherited_state.player_dynasty_id,
+                player_manager_id,
+            )
+            .expect("ambient business must transfer");
+        assert_eq!(
+            player_contract_deliveries(&inherited_state),
+            0,
+            "acquiring a business must not confer delivery history earned by its former owner"
+        );
+    }
+
     #[test]
     fn nomination_creates_a_funded_campaign_and_can_win_the_scheduled_selection() {
         let registry = rivergate_registry_for_test();
@@ -1846,7 +2121,7 @@ mod politics {
     }
 
     #[test]
-    fn repeated_office_nomination_is_rejected_without_reward() {
+    fn existing_institution_member_can_campaign_again_after_the_cooldown() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let dynasty = state
@@ -1866,6 +2141,7 @@ mod politics {
             .resources
             .reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
         grant_office_nomination_record_for_test(&mut state);
+        make_nominee_deliberately_weak(&mut state, institution_id, character_id);
 
         apply_player_command(
             registry,
@@ -1876,28 +2152,73 @@ mod politics {
             },
         )
         .expect("first nomination must add the heir as a member");
-        let before = state.clone();
+        let member_count = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist")
+            .members
+            .len();
 
-        let result = apply_player_command(
+        advance_days(
+            registry,
+            &mut state,
+            u32::try_from(OFFICE_NOMINATION_INTERVAL_DAYS)
+                .expect("office nomination interval must fit the simulation day command"),
+        )
+        .expect("campaign must advance through the nomination cooldown");
+        assert_ne!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .office_holder_id,
+            Some(character_id),
+            "the deliberately weak nominee must lose the first contest"
+        );
+        let player = state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        player.resources.reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        player.resources.treasury = Money::from_copper(10_000);
+        let treasury_before = player.treasury();
+
+        apply_player_command(
             registry,
             &mut state,
             PlayerCommand::NominateForOffice {
                 institution_id,
                 character_id,
             },
-        );
+        )
+        .expect("an existing member must be allowed to fund a later campaign");
 
         assert_eq!(
-            result,
-            Err(CommandError::AlreadyInstitutionMember {
-                institution_id,
-                character_id,
-            })
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .members
+                .len(),
+            member_count,
+            "renomination must not duplicate institution membership"
         );
-        assert_state_unchanged(
-            &before,
-            &state,
-            "repeated nominations must not grant legitimacy or mutate membership",
+        assert_eq!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            treasury_before.saturating_sub(Money::from_copper(300))
+        );
+        assert_eq!(
+            state
+                .audit_log
+                .iter()
+                .filter(|record| record.kind() == AuditKind::OfficeNomination)
+                .count(),
+            2,
+            "each funded campaign must leave a distinct durable nomination record"
         );
     }
 
@@ -2844,11 +3165,12 @@ mod serialization {
     use super::*;
     use std::collections::BTreeSet;
 
-    const COMMAND_KINDS: [&str; 17] = [
+    const COMMAND_KINDS: [&str; 19] = [
         "acquire-business",
         "acknowledge-notification",
         "adopt-ward",
         "buy-property",
+        "sell-property",
         "create-supply-contract",
         "educate-family-member",
         "enact-law",
@@ -2862,6 +3184,7 @@ mod serialization {
         "set-house-governance",
         "start-public-work",
         "transfer-business-cash",
+        "withdraw-from-institution",
     ];
 
     fn command_kind(command: &PlayerCommand) -> &'static str {
@@ -2873,6 +3196,7 @@ mod serialization {
             PlayerCommand::CreateSupplyContract { .. } => "create-supply-contract",
             PlayerCommand::IssueLoan { .. } => "issue-loan",
             PlayerCommand::BuyProperty { .. } => "buy-property",
+            PlayerCommand::SellProperty { .. } => "sell-property",
             PlayerCommand::EnactLaw { .. } => "enact-law",
             PlayerCommand::StartPublicWork { .. } => "start-public-work",
             PlayerCommand::FileLegalCase { .. } => "file-legal-case",
@@ -2880,15 +3204,15 @@ mod serialization {
             PlayerCommand::AdoptWard { .. } => "adopt-ward",
             PlayerCommand::EducateFamilyMember { .. } => "educate-family-member",
             PlayerCommand::NominateForOffice { .. } => "nominate-for-office",
+            PlayerCommand::WithdrawFromInstitution { .. } => "withdraw-from-institution",
             PlayerCommand::RespondToCrisis { .. } => "respond-to-crisis",
             PlayerCommand::ResolveLaborDispute { .. } => "resolve-labor-dispute",
             PlayerCommand::AcknowledgeNotification { .. } => "acknowledge-notification",
         }
     }
 
-    #[test]
-    fn every_variant_round_trips_through_json() {
-        let commands = vec![
+    fn representative_commands() -> Vec<PlayerCommand> {
+        vec![
             PlayerCommand::TransferBusinessCash {
                 from_business_id: BusinessId::new(1),
                 to_business_id: BusinessId::new(2),
@@ -2935,6 +3259,10 @@ mod serialization {
             PlayerCommand::BuyProperty {
                 property_id: PropertyId::new(1),
             },
+            PlayerCommand::SellProperty {
+                property_id: PropertyId::new(1),
+                buyer_dynasty_id: DynastyId::new(4),
+            },
             PlayerCommand::EnactLaw {
                 kind: LawKind::BreadPriceCeiling,
                 value: 30,
@@ -2964,6 +3292,10 @@ mod serialization {
                 institution_id: InstitutionId::new(1),
                 character_id: CharacterId::new(2),
             },
+            PlayerCommand::WithdrawFromInstitution {
+                institution_id: InstitutionId::new(1),
+                character_id: CharacterId::new(2),
+            },
             PlayerCommand::RespondToCrisis {
                 crisis_id: CrisisId::new(1),
                 response: CrisisResponse::Reform,
@@ -2975,7 +3307,12 @@ mod serialization {
             PlayerCommand::AcknowledgeNotification {
                 message_id: OutboxMessageId::new(1),
             },
-        ];
+        ]
+    }
+
+    #[test]
+    fn every_variant_round_trips_through_json() {
+        let commands = representative_commands();
 
         assert_eq!(
             commands.iter().map(command_kind).collect::<BTreeSet<_>>(),
