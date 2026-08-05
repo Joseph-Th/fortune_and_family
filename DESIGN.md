@@ -74,11 +74,11 @@ Commercial credibility creates access to guilds, offices, courts, laws, public w
 
 ### Dynastic governance
 
-The player manages a portfolio of businesses, property, offices, obligations, family roles, and public commitments. The unit of decision shifts from individual operation to institutional governance.
+The player manages a portfolio of businesses, property, offices, obligations, family roles, and public commitments. The unit of decision shifts from individual operation to institutional governance. Officeholding must provide active directives with visible district tradeoffs, not only passive periodic bonuses.
 
 ### Succession and legacy
 
-A succession tests whether control depends on one exceptional person or on a durable organization. Legacy evaluates both family outcomes and civic consequences.
+A succession tests whether control depends on one exceptional person or on a durable organization. The player can prepare that test by choosing an adult council member as heir, accepting legitimacy and family-unity costs for a successor aligned with the dynasty's strategy. Legacy evaluates both family outcomes and civic consequences.
 
 These phases may overlap, but they should remain strategically distinct. Political authority should not arrive before sustained commercial performance, and late play should not remain an enlarged version of the opening business loop.
 
@@ -106,7 +106,7 @@ Property, laws, contracts, court outcomes, public works, debts, grudges, obligat
 
 ### Information is strategic
 
-Information has a source, confidence, age, subject, and access path. The player should distinguish confirmed state from uncertain reports.
+Information has a source, confidence, age, subject, and access path. The player should distinguish confirmed state from uncertain reports. Commissioned intelligence must unlock a discrete follow-up decision, such as renegotiating a contract, approaching a house, or targeting a district problem, with an explicit financial or political cost.
 
 ### Power creates exposure
 
@@ -120,7 +120,7 @@ Major setbacks should be recoverable through restructuring, asset sale, recapita
 
 ### Dynasty and family
 
-Family structure determines succession, parallel capacity, office eligibility, management coverage, and long-term continuity. Education, governance, wards, marriage, loyalty, and claims should create strategic differences rather than static bonuses.
+Family structure determines succession, parallel capacity, office eligibility, management coverage, and long-term continuity. Education, governance, wards, marriage, loyalty, claims, and deliberate heir designation should create strategic differences rather than static bonuses.
 
 ### Households and labor
 
@@ -140,7 +140,7 @@ Property connects wealth to districts, rent, tenancy, occupancy, collateral, pub
 
 ### Institutions and politics
 
-Institutions have earned membership, offices, budgets, legitimacy, powers, and selection rules. Commercial standing opens patronage, patronage creates membership and coalition support, and established support opens candidacy. Political power must control concrete outcomes such as laws, debt, public works, courts, licensing, trade, or enforcement.
+Institutions have earned membership, offices, budgets, legitimacy, powers, and selection rules. Commercial standing opens patronage, patronage creates membership and coalition support, and established support opens candidacy. Political power must control concrete outcomes such as laws, debt, public works, courts, licensing, trade, or enforcement. Incumbents can spend legitimacy on time-bounded directives that intensify an office power and produce explicit civic benefits or backlash.
 
 Officeholding is not a permanent upgrade. It consumes administrative capacity, creates recurring duties, and can be lost through failure.
 

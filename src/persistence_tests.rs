@@ -3,7 +3,7 @@
 use super::*;
 use crate::core::{AuditKind, CivicDebt, CivicDebtStatus, EnactedLaw, FamilyLinkKind, LawKind};
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
-use crate::money::Money;
+use crate::money::{Money, Quantity};
 use crate::registry::Registry;
 use crate::systems::{
     EducationFocus, OFFICE_NOMINATION_DELIVERY_REQUIREMENT, PlayerCommand, acquire_business,
@@ -1131,6 +1131,27 @@ mod validation {
             load_state(&path),
             StateValidationKind::NumericRanges,
             "invalid economic value",
+        );
+    }
+
+    #[test]
+    fn rejects_contracts_with_unrepresentable_weekly_invoices() {
+        let mut state = make_test_campaign();
+        let contract = state
+            .contracts
+            .values_mut()
+            .next()
+            .expect("campaign must contain a supply contract");
+        contract.quantity_per_week = Quantity::from_milliunits(i64::MAX);
+        contract.unit_price = Money::from_copper(i64::MAX);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("overflowing-contract-invoice.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "supply contract",
         );
     }
 

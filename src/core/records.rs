@@ -528,7 +528,9 @@ pub enum ChronicleKind {
     BusinessDistress,
     BusinessRecovered,
     BusinessAcquired,
+    OfficeDirective,
     FamilyExpanded,
+    SuccessionPrepared,
     NewYear,
     Succession,
 }
@@ -584,9 +586,13 @@ pub enum AuditKind {
     OfficeNomination,
     OfficeDutyShortfall,
     OfficeDutyForfeiture,
+    OfficeDirective,
     HouseGovernanceChange,
+    HeirDesignation,
     WardAdoption,
     FamilyEducation,
+    InformationCommission,
+    InformationLeverage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

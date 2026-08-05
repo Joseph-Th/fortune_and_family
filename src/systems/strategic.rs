@@ -1,7 +1,7 @@
 //! Strategic initialization, periodic systems, and validated cross-record operations.
 
 use super::SimulationError;
-use super::transactions::next_business_finance_version;
+use super::transactions::{debit_market_clearing_account, next_business_finance_version};
 use crate::core::{
     AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
     ChronicleEntry, ChronicleKind, CivicDebtStatus, ContractStatus, Crisis, CrisisKind,
@@ -16,7 +16,7 @@ use crate::ids::{
     BusinessId, CharacterId, CivicDebtId, DistrictId, DynastyId, EmploymentId, GoodId, HouseholdId,
     InstitutionId, PropertyId,
 };
-use crate::money::{Money, Quantity, cost_for};
+use crate::money::{Money, Quantity, checked_cost_for, cost_for};
 use crate::registry::{InstitutionKind, Registry};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,6 +73,13 @@ pub enum StrategicError {
     NonPositiveQuantity,
     #[error("contract duration must contain at least one week")]
     EmptyContractDuration,
+    #[error(
+        "contract payment for quantity {quantity} at unit price {unit_price} exceeds the supported money range"
+    )]
+    ContractPaymentOverflow {
+        quantity: Quantity,
+        unit_price: Money,
+    },
     #[error("seller business {seller_business_id} cannot produce good {good_id}")]
     SellerCannotProduce {
         seller_business_id: BusinessId,
@@ -596,6 +603,12 @@ fn validate_supply_contract_terms(
     if terms.duration_weeks == 0 {
         return Err(StrategicError::EmptyContractDuration);
     }
+    checked_cost_for(terms.quantity_per_week, terms.unit_price).ok_or(
+        StrategicError::ContractPaymentOverflow {
+            quantity: terms.quantity_per_week,
+            unit_price: terms.unit_price,
+        },
+    )?;
     let buyer =
         state
             .businesses
@@ -2320,9 +2333,9 @@ pub(crate) fn run_weekly_strategic_systems(
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
     settle_contracts(state)?;
-    settle_loans(state);
-    settle_civic_debts(registry, state);
-    settle_property_rents(state);
+    settle_loans(state)?;
+    settle_civic_debts(registry, state)?;
+    settle_property_rents(state)?;
     settle_employment(registry, state)?;
     distribute_business_dividends(registry, state)?;
     progress_public_works(registry, state);
@@ -2752,7 +2765,7 @@ fn transfer_contract_money(
     Ok(transferred)
 }
 
-fn settle_loans(state: &mut AppState) {
+fn settle_loans(state: &mut AppState) -> Result<(), SimulationError> {
     let day = state.clock.day();
     let interest_limit = active_interest_limit(state);
     let due: Vec<_> = state
@@ -2775,13 +2788,14 @@ fn settle_loans(state: &mut AppState) {
         })
         .collect();
     for due_loan in due {
-        settle_due_loan(state, due_loan, interest_limit);
+        settle_due_loan(state, due_loan, interest_limit)?;
     }
+    Ok(())
 }
 
-fn settle_civic_debts(registry: &Registry, state: &mut AppState) {
+fn settle_civic_debts(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     let Some(treasury_id) = registry.get_institution_id("treasury") else {
-        return;
+        return Ok(());
     };
     let day = state.clock.day();
     let interest_limit = active_interest_limit(state);
@@ -2804,8 +2818,9 @@ fn settle_civic_debts(registry: &Registry, state: &mut AppState) {
         })
         .collect();
     for due_debt in due {
-        settle_due_civic_debt(state, treasury_id, due_debt, interest_limit);
+        settle_due_civic_debt(state, treasury_id, due_debt, interest_limit)?;
     }
+    Ok(())
 }
 
 fn settle_due_civic_debt(
@@ -2813,13 +2828,19 @@ fn settle_due_civic_debt(
     treasury_id: InstitutionId,
     due: DueCivicDebt,
     interest_limit: Option<u16>,
-) {
+) -> Result<(), SimulationError> {
     let effective_interest = interest_limit.map_or(due.interest_basis_points, |limit| {
         due.interest_basis_points.min(limit)
     });
-    let accrued_balance = due
-        .balance
-        .saturating_add(weekly_interest_due(due.balance, effective_interest));
+    let interest_due = weekly_interest_due(due.balance, effective_interest);
+    let accrued_balance =
+        due.balance
+            .checked_add(interest_due)
+            .ok_or(SimulationError::CivicDebtBalanceOverflow {
+                civic_debt_id: due.id,
+                current: due.balance,
+                incoming: interest_due,
+            })?;
     let amount_due = due.weekly_payment.min(accrued_balance);
     let creditor_headroom = state
         .dynasties
@@ -2833,7 +2854,7 @@ fn settle_due_civic_debt(
             .get_mut(&due.id)
             .expect("civic debt must exist")
             .next_due_day = state.clock.day().saturating_add(7);
-        return;
+        return Ok(());
     }
     state
         .civic_debts
@@ -2850,6 +2871,7 @@ fn settle_due_civic_debt(
     } else {
         settle_missed_civic_debt_payment(state, treasury_id, due);
     }
+    Ok(())
 }
 
 fn settle_successful_civic_debt_payment(
@@ -3022,13 +3044,23 @@ fn settle_missed_civic_debt_payment(
     }
 }
 
-fn settle_due_loan(state: &mut AppState, due: DueLoan, interest_limit: Option<u16>) {
+fn settle_due_loan(
+    state: &mut AppState,
+    due: DueLoan,
+    interest_limit: Option<u16>,
+) -> Result<(), SimulationError> {
     let effective_interest = interest_limit.map_or(due.interest_basis_points, |limit| {
         due.interest_basis_points.min(limit)
     });
-    let accrued_balance = due
-        .balance
-        .saturating_add(weekly_interest_due(due.balance, effective_interest));
+    let interest_due = weekly_interest_due(due.balance, effective_interest);
+    let accrued_balance =
+        due.balance
+            .checked_add(interest_due)
+            .ok_or(SimulationError::LoanBalanceOverflow {
+                loan_id: due.id,
+                current: due.balance,
+                incoming: interest_due,
+            })?;
     let amount_due = due.weekly_payment.min(accrued_balance);
     let borrower_treasury = state
         .dynasties
@@ -3047,7 +3079,7 @@ fn settle_due_loan(state: &mut AppState, due: DueLoan, interest_limit: Option<u1
             .get_mut(&due.id)
             .expect("loan must exist")
             .next_due_day = state.clock.day().saturating_add(7);
-        return;
+        return Ok(());
     }
     state
         .loans
@@ -3059,6 +3091,7 @@ fn settle_due_loan(state: &mut AppState, due: DueLoan, interest_limit: Option<u1
     } else {
         settle_missed_loan_payment(state, due);
     }
+    Ok(())
 }
 
 fn settle_successful_loan_payment(state: &mut AppState, due: DueLoan, amount_due: Money) {
@@ -3244,7 +3277,7 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
     payment
 }
 
-fn settle_property_rents(state: &mut AppState) {
+fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
     let annual_rent_limit =
         active_law_value(state, LawKind::RentRestriction).map(|value| value.clamp(0, 10_000));
     let rents: Vec<_> = state
@@ -3293,10 +3326,7 @@ fn settle_property_rents(state: &mut AppState) {
                 .treasury = tenant_cash.saturating_sub(paid);
             paid
         } else if occupant_business_id.is_none() {
-            state.market.clearing_account = state
-                .market
-                .clearing_account
-                .saturating_sub(receivable_rent);
+            debit_market_clearing_account(state, receivable_rent)?;
             receivable_rent
         } else {
             Money::ZERO
@@ -3314,6 +3344,7 @@ fn settle_property_rents(state: &mut AppState) {
             .checked_add(paid)
             .expect("bounded rent must fit owner treasury");
     }
+    Ok(())
 }
 
 fn distribute_business_dividends(
@@ -4472,8 +4503,7 @@ fn apply_office_power(
                     .budget = institution_budget
                     .checked_add(revenue)
                     .expect("bounded office revenue must fit institution budget");
-                state.market.clearing_account =
-                    state.market.clearing_account.saturating_sub(revenue);
+                debit_market_clearing_account(state, revenue)?;
             }
         }
         OfficePower::DebtEnforcement => adjust_reliability_reputation(state, dynasty_id, 15),

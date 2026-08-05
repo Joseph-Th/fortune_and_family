@@ -77,6 +77,119 @@ fn assert_finding_absent(findings: &[GameplayFinding], unexpected_title: &str) {
 mod harness {
     use super::*;
 
+    fn information_candidate_kinds(registry: &Registry) -> BTreeSet<GameplayCommandKind> {
+        let mut state = make_test_candidate_coverage_state(registry);
+        for _ in 0..180 {
+            state.clock.advance_one_day();
+        }
+        let mut kinds = candidate_kinds_for_test(registry, &state);
+        let counterparty_id = state
+            .relationships
+            .values()
+            .find_map(|relationship| {
+                if relationship.pair.first == state.player_dynasty_id {
+                    Some(relationship.pair.second)
+                } else if relationship.pair.second == state.player_dynasty_id {
+                    Some(relationship.pair.first)
+                } else {
+                    None
+                }
+            })
+            .expect("coverage fixture must contain a known counterparty");
+        let counterparty_name = state
+            .dynasties
+            .get(&counterparty_id)
+            .expect("counterparty dynasty must exist")
+            .name()
+            .to_owned();
+        let report_id = state.next_ids.information_report();
+        state.information_reports.insert(
+            report_id,
+            crate::core::InformationReport {
+                id: report_id,
+                owner_dynasty_id: state.player_dynasty_id,
+                subject: format!("Commissioned house brief: House {counterparty_name}"),
+                confidence: crate::core::InformationConfidence::Confirmed,
+                created_day: state.clock.day(),
+                expires_day: state.clock.day().saturating_add(540),
+                source: COMMISSIONED_INFORMATION_SOURCE.to_owned(),
+                summary: "Coverage report".to_owned(),
+            },
+        );
+        kinds.extend(candidate_kinds_for_test(registry, &state));
+        kinds
+    }
+
+    fn support_candidate_kinds(registry: &Registry) -> BTreeSet<GameplayCommandKind> {
+        let mut state = make_test_candidate_coverage_state(registry);
+        for _ in 0..INSTITUTION_SUPPORT_INTERVAL_DAYS {
+            state.clock.advance_one_day();
+        }
+        let officeholders: BTreeSet<_> = state
+            .institutions
+            .values()
+            .filter_map(|institution| institution.office_holder_id)
+            .collect();
+        let character_id = state
+            .characters
+            .iter()
+            .find(|character| {
+                character.dynasty_id() == state.player_dynasty_id
+                    && !officeholders.contains(&character.id())
+            })
+            .expect("fixture must contain a player character without an office")
+            .id();
+        for institution in state.institutions.values_mut() {
+            institution.members.remove(&character_id);
+        }
+        let suffix = format!(":character:{character_id}");
+        state.audit_log.retain(|record| {
+            record.kind() != AuditKind::InstitutionPatronage || !record.subject().ends_with(&suffix)
+        });
+        candidate_kinds_for_test(registry, &state)
+    }
+
+    fn succession_candidate_kinds(registry: &Registry) -> BTreeSet<GameplayCommandKind> {
+        let mut state = make_test_candidate_coverage_state(registry);
+        for _ in 0..(20 * 360) {
+            state.clock.advance_one_day();
+        }
+        let player_id = state.player_dynasty_id;
+        let current_heir_id = state
+            .dynasties
+            .get(&player_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("coverage fixture must contain a current heir");
+        let replacement_id = state.next_ids.character();
+        let mut replacement = state
+            .characters
+            .get(current_heir_id)
+            .expect("current heir must exist")
+            .clone();
+        replacement.identity.id = replacement_id;
+        replacement.identity.name = "Harness Successor".to_owned();
+        replacement.identity.birth_day = state.clock.day().saturating_sub(30 * 360);
+        replacement.capabilities.administration = 100;
+        replacement.capabilities.commerce = 100;
+        replacement.capabilities.social = 100;
+        replacement.capabilities.craft = 100;
+        replacement.runtime.role = crate::core::CharacterRole::Clerk;
+        state.characters.insert(replacement);
+        state
+            .family_councils
+            .get_mut(&player_id)
+            .expect("player family council must exist")
+            .members
+            .insert(replacement_id);
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points = 5_000;
+        candidate_kinds_for_test(registry, &state)
+    }
+
     #[test]
     fn default_harness_uses_the_monthly_strategic_cadence() {
         assert_eq!(GameplayHarnessConfig::default().decision_interval_days, 30);
@@ -240,39 +353,9 @@ mod harness {
         make_institution_withdrawal_available_for_test(&mut withdrawal_state);
         kinds.extend(candidate_kinds_for_test(registry, &withdrawal_state));
 
-        let mut information_state = make_test_candidate_coverage_state(registry);
-        for _ in 0..360 {
-            information_state.clock.advance_one_day();
-        }
-        kinds.extend(candidate_kinds_for_test(registry, &information_state));
-
-        let mut support_state = make_test_candidate_coverage_state(registry);
-        for _ in 0..INSTITUTION_SUPPORT_INTERVAL_DAYS {
-            support_state.clock.advance_one_day();
-        }
-        let player_officeholders: BTreeSet<_> = support_state
-            .institutions
-            .values()
-            .filter_map(|institution| institution.office_holder_id)
-            .collect();
-        let support_character_id = support_state
-            .characters
-            .iter()
-            .find(|character| {
-                character.dynasty_id() == support_state.player_dynasty_id
-                    && !player_officeholders.contains(&character.id())
-            })
-            .expect("fixture must contain a player character without an office")
-            .id();
-        for institution in support_state.institutions.values_mut() {
-            institution.members.remove(&support_character_id);
-        }
-        let subject_suffix = format!(":character:{support_character_id}");
-        support_state.audit_log.retain(|record| {
-            record.kind() != AuditKind::InstitutionPatronage
-                || !record.subject().ends_with(&subject_suffix)
-        });
-        kinds.extend(candidate_kinds_for_test(registry, &support_state));
+        kinds.extend(information_candidate_kinds(registry));
+        kinds.extend(support_candidate_kinds(registry));
+        kinds.extend(succession_candidate_kinds(registry));
 
         assert_set_eq(
             &ALL_COMMAND_KINDS.into_iter().collect(),
@@ -1588,10 +1671,22 @@ mod candidates {
         );
         assert!(
             candidates.is_empty(),
-            "commissioned intelligence should enter the agent loop after the foundation year"
+            "commissioned intelligence should enter the agent loop after initial commercial observation"
         );
-        for _ in 0..360 {
+        for _ in 0..180 {
             state.clock.advance_one_day();
+        }
+        let player_business_ids: BTreeSet<_> = state
+            .businesses
+            .iter()
+            .filter(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            .map(crate::core::Business::id)
+            .collect();
+        for contract in state.contracts.values_mut().filter(|contract| {
+            player_business_ids.contains(&contract.buyer_business_id)
+                || player_business_ids.contains(&contract.seller_business_id)
+        }) {
+            contract.end_day = state.clock.day().saturating_add(360);
         }
 
         generate_information_candidates(
@@ -1626,9 +1721,31 @@ mod candidates {
             GameplayPersona::Entrepreneur,
             &mut candidates,
         );
+        let leverage = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::LeverageInformation)
+            .expect("commissioned intelligence must unlock a concrete follow-up action")
+            .clone();
+        apply_player_command(registry, &mut state, leverage.command)
+            .expect("generated intelligence leverage must be executable");
+        assert!(
+            state.information_reports.values().all(|report| {
+                report.owner_dynasty_id != state.player_dynasty_id
+                    || report.source != COMMISSIONED_INFORMATION_SOURCE
+            }),
+            "leveraging the report must consume the commissioned intelligence"
+        );
+
+        candidates.clear();
+        generate_information_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
         assert!(
             candidates.is_empty(),
-            "the annual commission interval must prevent repetitive intelligence housekeeping"
+            "the annual commission interval must prevent repetitive intelligence housekeeping after leverage"
         );
     }
 
@@ -2213,6 +2330,7 @@ mod metrics {
         snapshot.day = 900;
         snapshot.player_disputed_employment = 1;
         accumulator.observe_snapshot(&snapshot);
+        accumulator.record_executed_command(GameplayCommandKind::DesignateHeir, 1_200);
 
         snapshot.day = 5_200;
         snapshot.generation = snapshot.generation.saturating_add(1);
@@ -2228,6 +2346,7 @@ mod metrics {
                 first_office_day: Some(440),
                 first_city_shaping_action_day: Some(454),
                 first_player_labor_dispute_day: Some(900),
+                first_heir_designation_day: Some(1_200),
                 first_succession_day: Some(5_200),
             }
         );

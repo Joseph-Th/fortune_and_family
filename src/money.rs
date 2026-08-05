@@ -253,12 +253,24 @@ impl fmt::Display for Quantity {
 
 #[must_use]
 pub fn cost_for(quantity: Quantity, unit_price: Money) -> Money {
-    let product = i128::from(quantity.milliunits()).saturating_mul(i128::from(unit_price.copper()));
+    Money::from_copper(saturating_i128_to_i64(rounded_cost_copper(
+        quantity, unit_price,
+    )))
+}
+
+/// Returns the rounded transaction cost when it fits the supported money range.
+///
+/// Positive fractional copper is rounded upward, matching [`cost_for`].
+#[must_use]
+pub fn checked_cost_for(quantity: Quantity, unit_price: Money) -> Option<Money> {
+    checked_i128_to_i64(rounded_cost_copper(quantity, unit_price)).map(Money::from_copper)
+}
+
+fn rounded_cost_copper(quantity: Quantity, unit_price: Money) -> i128 {
+    let product = i128::from(quantity.milliunits()) * i128::from(unit_price.copper());
     let whole_copper = product / 1_000;
     let positive_remainder = product > 0 && product % 1_000 != 0;
-    Money::from_copper(saturating_i128_to_i64(
-        whole_copper.saturating_add(i128::from(positive_remainder)),
-    ))
+    whole_copper + i128::from(positive_remainder)
 }
 
 #[must_use]
@@ -337,6 +349,15 @@ mod tests {
         );
 
         assert_eq!(cost_for(quantity, price), expected);
+    }
+
+    #[test]
+    fn checked_cost_rejects_a_final_money_overflow() {
+        let quantity = Quantity::from_milliunits(i64::MAX);
+        let price = Money::from_copper(i64::MAX);
+
+        assert_eq!(checked_cost_for(quantity, price), None);
+        assert_eq!(cost_for(quantity, price), Money::from_copper(i64::MAX));
     }
 
     #[test]

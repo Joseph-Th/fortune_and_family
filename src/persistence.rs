@@ -2,7 +2,7 @@
 
 use crate::core::{AppState, AuditKind, CURRENT_SCHEMA_VERSION, FamilyLinkKind};
 use crate::ids::{BusinessId, HouseholdId};
-use crate::money::{Money, Quantity};
+use crate::money::{Money, Quantity, checked_cost_for};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -440,6 +440,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         if contract.quantity_per_week <= Quantity::ZERO
             || contract.unit_price <= Money::ZERO
             || contract.penalty < Money::ZERO
+            || checked_cost_for(contract.quantity_per_week, contract.unit_price).is_none()
         {
             return Err(format!(
                 "supply contract {} has an invalid financial value",

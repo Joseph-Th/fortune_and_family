@@ -524,18 +524,7 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             ids.goods.contains(&contract.good_id),
             "Registry Reference Validity: contract good does not exist"
         );
-        debug_assert!(
-            contract.quantity_per_week > crate::money::Quantity::ZERO,
-            "Lifecycle Validity: contract quantity must remain positive"
-        );
-        debug_assert!(
-            contract.unit_price > crate::money::Money::ZERO,
-            "Lifecycle Validity: contract price must remain positive"
-        );
-        debug_assert!(
-            !contract.penalty.is_negative(),
-            "Lifecycle Validity: contract penalty must not be negative"
-        );
+        validate_contract_financial_values(contract);
         debug_assert!(
             contract.next_due_day <= contract.end_day || contract.status != ContractStatus::Active,
             "Lifecycle Validity: active contract due date exceeds its term"
@@ -597,6 +586,25 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             );
         }
     }
+}
+
+fn validate_contract_financial_values(contract: &crate::core::SupplyContract) {
+    debug_assert!(
+        contract.quantity_per_week > crate::money::Quantity::ZERO,
+        "Lifecycle Validity: contract quantity must remain positive"
+    );
+    debug_assert!(
+        contract.unit_price > crate::money::Money::ZERO,
+        "Lifecycle Validity: contract price must remain positive"
+    );
+    debug_assert!(
+        crate::money::checked_cost_for(contract.quantity_per_week, contract.unit_price).is_some(),
+        "Lifecycle Validity: contract weekly invoice exceeds the supported money range"
+    );
+    debug_assert!(
+        !contract.penalty.is_negative(),
+        "Lifecycle Validity: contract penalty must not be negative"
+    );
 }
 
 fn validate_loans_and_properties(state: &AppState, ids: &RegistryIds) {

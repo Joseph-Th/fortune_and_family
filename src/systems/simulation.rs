@@ -1,7 +1,9 @@
 //! Deterministic daily simulation pipeline; each phase decides before it applies.
 
 use super::SimulationError;
-use super::transactions::next_business_finance_version;
+use super::transactions::{
+    credit_market_clearing_account, debit_market_clearing_account, next_business_finance_version,
+};
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
     CharacterCapabilities, CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus,
@@ -152,7 +154,7 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
     apply_business_sales(state, sale_plan)?;
 
     let household_plan = decide_household_consumption(registry, state)?;
-    apply_household_consumption(state, household_plan);
+    apply_household_consumption(state, household_plan)?;
 
     let maintenance_plan = decide_maintenance(registry, state);
     apply_maintenance(state, maintenance_plan)?;
@@ -164,7 +166,7 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
 
     state.clock.advance_one_day();
     if state.clock.is_week_boundary() {
-        settle_weekly_external_income(state);
+        settle_weekly_external_income(state)?;
         super::strategic::run_weekly_strategic_systems(registry, state)?;
     }
     if state.clock.day() > 0 && state.clock.day() % 30 == 0 {
@@ -309,7 +311,7 @@ fn apply_business_purchases(
             quote.stock = quote.stock.saturating_sub(quantity);
             quote.demand_today = quote.demand_today.saturating_add(quantity);
         }
-        state.market.clearing_account = state.market.clearing_account.saturating_add(cost);
+        credit_market_clearing_account(state, cost)?;
         total_cost = total_cost.saturating_add(cost);
         total_quantity = total_quantity.saturating_add(quantity);
     }
@@ -737,7 +739,7 @@ fn apply_business_sales(
             quote.stock = quote.stock.saturating_add(quantity);
             quote.supply_today = quote.supply_today.saturating_add(quantity);
         }
-        state.market.clearing_account = state.market.clearing_account.saturating_sub(revenue);
+        debit_market_clearing_account(state, revenue)?;
         total_revenue = total_revenue.saturating_add(revenue);
         total_quantity = total_quantity.saturating_add(quantity);
     }
@@ -901,7 +903,10 @@ fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, 
     )
 }
 
-fn apply_household_consumption(state: &mut AppState, plan: HouseholdConsumptionPlan) {
+fn apply_household_consumption(
+    state: &mut AppState,
+    plan: HouseholdConsumptionPlan,
+) -> Result<(), SimulationError> {
     let HouseholdConsumptionPlan {
         lines,
         food_satisfaction,
@@ -931,7 +936,7 @@ fn apply_household_consumption(state: &mut AppState, plan: HouseholdConsumptionP
             quote.stock = quote.stock.saturating_sub(quantity);
             quote.demand_today = quote.demand_today.saturating_add(quantity);
         }
-        state.market.clearing_account = state.market.clearing_account.saturating_add(cost);
+        credit_market_clearing_account(state, cost)?;
         total_cost = total_cost.saturating_add(cost);
         total_quantity = total_quantity.saturating_add(quantity);
     }
@@ -952,6 +957,7 @@ fn apply_household_consumption(state: &mut AppState, plan: HouseholdConsumptionP
             total_cost.copper()
         ),
     });
+    Ok(())
 }
 
 fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenancePlan {
@@ -1395,7 +1401,7 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
     }
 }
 
-fn settle_weekly_external_income(state: &mut AppState) {
+fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationError> {
     let household_ids: Vec<_> = state
         .households
         .iter()
@@ -1416,13 +1422,14 @@ fn settle_weekly_external_income(state: &mut AppState) {
             .expect("bounded weekly income must fit household cash");
         total = total.saturating_add(paid);
     }
-    state.market.clearing_account = state.market.clearing_account.saturating_sub(total);
+    debit_market_clearing_account(state, total)?;
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::LaborSettlement,
         subject: "external-economy".to_owned(),
         detail: format!("weekly_income={}", total.copper()),
     });
+    Ok(())
 }
 
 fn process_year_boundary(registry: &Registry, state: &mut AppState) {

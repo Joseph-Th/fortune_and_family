@@ -1,7 +1,7 @@
 //! Validated multi-record transactions and shared simulation errors.
 
 use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};
-use crate::ids::{BusinessId, GoodId};
+use crate::ids::{BusinessId, CivicDebtId, GoodId, LoanId};
 use crate::money::Money;
 use thiserror::Error;
 
@@ -71,6 +71,55 @@ pub enum SimulationError {
     BusinessFinanceVersionExhausted { business_id: BusinessId },
     #[error("market quote is missing for good {good_id}")]
     MarketQuoteMissing { good_id: GoodId },
+    #[error(
+        "loan {loan_id} cannot accrue interest {incoming}; current balance {current} would exceed the supported money range"
+    )]
+    LoanBalanceOverflow {
+        loan_id: LoanId,
+        current: Money,
+        incoming: Money,
+    },
+    #[error(
+        "civic debt {civic_debt_id} cannot accrue interest {incoming}; current balance {current} would exceed the supported money range"
+    )]
+    CivicDebtBalanceOverflow {
+        civic_debt_id: CivicDebtId,
+        current: Money,
+        incoming: Money,
+    },
+    #[error(
+        "market clearing account {current} cannot apply change {change} within the supported money range"
+    )]
+    MarketClearingAccountOverflow { current: Money, change: Money },
+}
+
+pub(crate) fn credit_market_clearing_account(
+    state: &mut AppState,
+    incoming: Money,
+) -> Result<(), SimulationError> {
+    debug_assert!(incoming >= Money::ZERO, "market credit must be nonnegative");
+    let current = state.market.clearing_account;
+    state.market.clearing_account =
+        current
+            .checked_add(incoming)
+            .ok_or(SimulationError::MarketClearingAccountOverflow {
+                current,
+                change: incoming,
+            })?;
+    Ok(())
+}
+
+pub(crate) fn debit_market_clearing_account(
+    state: &mut AppState,
+    outgoing: Money,
+) -> Result<(), SimulationError> {
+    debug_assert!(outgoing >= Money::ZERO, "market debit must be nonnegative");
+    let current = state.market.clearing_account;
+    let change = Money::from_copper(-outgoing.copper());
+    state.market.clearing_account = current
+        .checked_sub(outgoing)
+        .ok_or(SimulationError::MarketClearingAccountOverflow { current, change })?;
+    Ok(())
 }
 
 pub(crate) fn next_business_finance_version(business: &Business) -> Result<u64, SimulationError> {
@@ -268,6 +317,50 @@ pub fn validate_business_cash_transfer(
 mod tests {
     use super::*;
     use crate::test_support::{assert_state_unchanged, make_test_campaign};
+
+    #[test]
+    fn rejects_market_clearing_credit_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        state.market.clearing_account = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = credit_market_clearing_account(&mut state, Money::from_copper(1));
+
+        assert_eq!(
+            result,
+            Err(SimulationError::MarketClearingAccountOverflow {
+                current: Money::from_copper(i64::MAX),
+                change: Money::from_copper(1),
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing market credits must not clamp the external account",
+        );
+    }
+
+    #[test]
+    fn rejects_market_clearing_debit_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        state.market.clearing_account = Money::from_copper(i64::MIN);
+        let before = state.clone();
+
+        let result = debit_market_clearing_account(&mut state, Money::from_copper(1));
+
+        assert_eq!(
+            result,
+            Err(SimulationError::MarketClearingAccountOverflow {
+                current: Money::from_copper(i64::MIN),
+                change: Money::from_copper(-1),
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing market debits must not clamp the external account",
+        );
+    }
 
     #[test]
     fn rejects_insufficient_cash_without_mutation() {

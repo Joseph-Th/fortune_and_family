@@ -74,6 +74,7 @@ fn current_loan_id(state: &AppState) -> crate::ids::LoanId {
 
 mod arithmetic_boundaries {
     use super::*;
+    use crate::core::CivicDebt;
 
     #[test]
     fn weekly_interest_uses_the_full_supported_balance_range() {
@@ -81,6 +82,106 @@ mod arithmetic_boundaries {
         let expected = Money::from_copper(i64::MAX / 52 + i64::from(i64::MAX % 52 != 0));
 
         assert_eq!(weekly_interest_due(balance, 10_000), expected);
+    }
+
+    #[test]
+    fn loan_interest_overflow_aborts_the_requested_advance_without_mutation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        for law in state
+            .laws
+            .values_mut()
+            .filter(|law| law.kind == LawKind::InterestLimit)
+        {
+            law.active = false;
+        }
+        for loan in state.loans.values_mut() {
+            loan.next_due_day = 1_000;
+        }
+        let loan_id = current_loan_id(&state);
+        let balance = Money::from_copper(i64::MAX);
+        let interest = weekly_interest_due(balance, 10_000);
+        let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+        loan.balance = balance;
+        loan.interest_basis_points = 10_000;
+        loan.next_due_day = 7;
+        let before = state.clone();
+
+        let result = advance_days(registry, &mut state, 7);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::LoanBalanceOverflow {
+                loan_id,
+                current: balance,
+                incoming: interest,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "unrepresentable loan interest must abort the complete requested advance",
+        );
+    }
+
+    #[test]
+    fn civic_debt_interest_overflow_is_rejected_before_settlement_mutates_state() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("Rivergate must define a civic treasury");
+        let creditor_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a non-player dynasty");
+        let civic_debt_id = state.next_ids.civic_debt();
+        let balance = Money::from_copper(i64::MAX);
+        let interest = weekly_interest_due(balance, 10_000);
+        state.civic_debts.insert(
+            civic_debt_id,
+            CivicDebt {
+                id: civic_debt_id,
+                creditor_dynasty_id,
+                authorizing_law_id: crate::ids::LawId::new(0),
+                sponsor_dynasty_id: None,
+                principal: balance,
+                balance,
+                weekly_payment: Money::from_copper(1),
+                interest_basis_points: 10_000,
+                issued_day: state.clock.day(),
+                next_due_day: state.clock.day(),
+                missed_payments: 0,
+                status: CivicDebtStatus::Current,
+            },
+        );
+        let due = DueCivicDebt {
+            id: civic_debt_id,
+            creditor_dynasty_id,
+            sponsor_dynasty_id: None,
+            weekly_payment: Money::from_copper(1),
+            balance,
+            interest_basis_points: 10_000,
+        };
+        let before = state.clone();
+
+        let result = settle_due_civic_debt(&mut state, treasury_id, due, None);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::CivicDebtBalanceOverflow {
+                civic_debt_id,
+                current: balance,
+                incoming: interest,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "unrepresentable civic-debt interest must fail before settlement mutation",
+        );
     }
 
     #[test]
@@ -529,7 +630,7 @@ mod gameplay_stability {
             .expect("player dynasty must exist")
             .treasury();
 
-        settle_property_rents(&mut state);
+        settle_property_rents(&mut state).expect("property rent settlement must succeed");
 
         assert!(
             state
@@ -996,6 +1097,33 @@ mod contracts {
             validate_supply_contract(registry, &state, terms)
                 .expect_err("zero-duration contracts must be rejected"),
             StrategicError::EmptyContractDuration
+        );
+    }
+
+    #[test]
+    fn rejects_an_unrepresentable_weekly_invoice_without_mutation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let mut terms = make_test_contract_terms(&state);
+        terms.quantity_per_week = Quantity::from_milliunits(i64::MAX);
+        terms.unit_price = Money::from_copper(i64::MAX);
+        let expected_quantity = terms.quantity_per_week;
+        let expected_unit_price = terms.unit_price;
+        let before = state.clone();
+
+        let result = sign_supply_contract(registry, &mut state, terms);
+
+        assert_eq!(
+            result,
+            Err(StrategicError::ContractPaymentOverflow {
+                quantity: expected_quantity,
+                unit_price: expected_unit_price,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "unrepresentable contract invoices must fail before creating durable records",
         );
     }
 
@@ -2866,7 +2994,7 @@ mod loans {
             .resources
             .treasury = payment;
 
-        settle_loans(&mut state);
+        settle_loans(&mut state).expect("loan settlement must succeed");
 
         assert_eq!(
             state
@@ -2929,7 +3057,7 @@ mod loans {
             loan.next_due_day = state.clock.day();
         }
 
-        settle_loans(&mut state);
+        settle_loans(&mut state).expect("loan settlement must succeed");
 
         let loan = state.loans.get(&loan_id).expect("loan must exist");
         assert_eq!(
@@ -2973,7 +3101,7 @@ mod loans {
             .resources
             .treasury = Money::ZERO;
 
-        settle_loans(&mut state);
+        settle_loans(&mut state).expect("loan settlement must succeed");
 
         assert_eq!(
             state.loans.get(&loan_id).expect("loan must exist").balance,
@@ -3006,7 +3134,7 @@ mod loans {
             .resources
             .reputation_reliability_basis_points;
 
-        settle_loans(&mut state);
+        settle_loans(&mut state).expect("loan settlement must succeed");
 
         assert_eq!(
             state
@@ -3044,7 +3172,7 @@ mod loans {
             .expect("creditor relationship must exist")
             .obligation = 1;
 
-        settle_civic_debts(registry, &mut state);
+        settle_civic_debts(registry, &mut state).expect("civic debt settlement must succeed");
 
         let debt = state.civic_debts.get(&debt_id).expect("debt must exist");
         assert_eq!(debt.balance, Money::from_copper(900));
@@ -3104,7 +3232,7 @@ mod loans {
             .expect("creditor relationship must exist")
             .obligation = 1;
 
-        settle_civic_debts(registry, &mut state);
+        settle_civic_debts(registry, &mut state).expect("civic debt settlement must succeed");
 
         let debt = state.civic_debts.get(&debt_id).expect("debt must exist");
         assert_eq!(debt.balance, Money::ZERO);
@@ -3159,7 +3287,7 @@ mod loans {
             },
         );
 
-        settle_civic_debts(registry, &mut state);
+        settle_civic_debts(registry, &mut state).expect("civic debt settlement must succeed");
 
         let debt = state.civic_debts.get(&debt_id).expect("debt must exist");
         assert_eq!(debt.balance, Money::from_copper(900));
@@ -3197,7 +3325,7 @@ mod loans {
                 .get_mut(&debt_id)
                 .expect("debt must exist")
                 .next_due_day = state.clock.day();
-            settle_civic_debts(registry, &mut state);
+            settle_civic_debts(registry, &mut state).expect("civic debt settlement must succeed");
         }
 
         let debt = state.civic_debts.get(&debt_id).expect("debt must exist");
@@ -3264,7 +3392,7 @@ mod laws {
             },
         );
 
-        settle_loans(&mut state);
+        settle_loans(&mut state).expect("loan settlement must succeed");
 
         let loan = state.loans.get(&loan_id).expect("loan must exist");
         assert_eq!(
@@ -3382,7 +3510,7 @@ mod laws {
             },
         );
 
-        settle_property_rents(&mut state);
+        settle_property_rents(&mut state).expect("property rent settlement must succeed");
 
         assert_eq!(
             state
@@ -4057,7 +4185,7 @@ mod ai {
         loan.missed_payments = 2;
         loan.next_due_day = state.clock.day();
 
-        settle_loans(&mut state);
+        settle_loans(&mut state).expect("loan settlement must succeed");
 
         assert_eq!(
             state.loans.get(&loan_id).expect("loan must exist").status,

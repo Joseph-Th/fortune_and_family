@@ -211,7 +211,7 @@ mod transfer_boundaries {
         }
         let clearing_before = state.market.clearing_account;
 
-        settle_weekly_external_income(&mut state);
+        settle_weekly_external_income(&mut state).expect("weekly income settlement must succeed");
 
         assert_eq!(
             state
