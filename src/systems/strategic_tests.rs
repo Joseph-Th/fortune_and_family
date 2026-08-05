@@ -110,6 +110,62 @@ mod arithmetic_boundaries {
 
         assert_eq!(quote.purchase_price, expected);
     }
+
+    #[test]
+    fn acquisition_rejects_exhausted_business_finance_version_without_mutation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("selected business must exist");
+        business.operations.status = BusinessStatus::Distressed;
+        business.finance.cash = Money::ZERO;
+        business.finance.version = u64::MAX;
+        let manager_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an eligible manager");
+        let quote =
+            quote_business_acquisition(registry, &state, state.player_dynasty_id, business_id)
+                .expect("distressed business must remain quotable");
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = quote
+            .purchase_price
+            .saturating_add(quote.minimum_recapitalization);
+        let buyer_dynasty_id = state.player_dynasty_id;
+        let before = state.clone();
+
+        let result = acquire_business(
+            registry,
+            &mut state,
+            buyer_dynasty_id,
+            business_id,
+            manager_id,
+            quote.minimum_recapitalization,
+        );
+
+        assert_eq!(
+            result,
+            Err(StrategicError::BusinessFinanceVersionExhausted { business_id })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "exhausted business finance versions must fail before funds or ownership move",
+        );
+    }
 }
 
 mod integration {
@@ -296,8 +352,8 @@ mod gameplay_stability {
             .finance
             .cash = Money::from_copper(100_000);
 
-        settle_employment(registry, &mut state);
-        settle_employment(registry, &mut state);
+        settle_employment(registry, &mut state).expect("employment settlement must succeed");
+        settle_employment(registry, &mut state).expect("employment settlement must succeed");
 
         assert_eq!(
             state
@@ -373,7 +429,7 @@ mod gameplay_stability {
             .expect("household must exist")
             .cash();
 
-        settle_employment(registry, &mut state);
+        settle_employment(registry, &mut state).expect("employment settlement must succeed");
 
         let retainer = Money::from_copper(weekly_wage.copper() / 4);
         assert_eq!(
@@ -434,7 +490,8 @@ mod gameplay_stability {
             .expect("owner dynasty must exist")
             .treasury();
 
-        distribute_business_dividends(registry, &mut state);
+        distribute_business_dividends(registry, &mut state)
+            .expect("dividend distribution must succeed");
 
         assert!(
             state
@@ -513,7 +570,7 @@ mod gameplay_stability {
             .expect("player business must exist")
             .cash();
 
-        apply_office_power_effects(registry, &mut state);
+        apply_office_power_effects(registry, &mut state).expect("office power effects must apply");
 
         assert!(
             state
@@ -552,7 +609,7 @@ mod gameplay_stability {
         }
         let clearing_before = state.market.clearing_account;
 
-        apply_office_power_effects(registry, &mut state);
+        apply_office_power_effects(registry, &mut state).expect("office power effects must apply");
 
         assert_eq!(
             state
@@ -1062,7 +1119,7 @@ mod contracts {
             .reputation_reliability_basis_points;
         let relationship_before = contract_relationship(&state, contract_id).clone();
 
-        settle_contracts(&mut state);
+        settle_contracts(&mut state).expect("contract settlement must succeed");
 
         assert_eq!(
             state
@@ -1147,7 +1204,7 @@ mod contracts {
             .expect("seller must exist")
             .cash();
 
-        settle_contracts(&mut state);
+        settle_contracts(&mut state).expect("contract settlement must succeed");
 
         assert_eq!(
             state
@@ -1215,7 +1272,7 @@ mod contracts {
             .expect("buyer must exist")
             .inventory_quantity(good_id);
 
-        settle_contracts(&mut state);
+        settle_contracts(&mut state).expect("contract settlement must succeed");
 
         let buyer = state.businesses.get(buyer_id).expect("buyer must exist");
         let seller = state.businesses.get(seller_id).expect("seller must exist");
@@ -1231,6 +1288,55 @@ mod contracts {
                 .missed_deliveries,
             1,
             "an unrepresentable settlement must remain an unfulfilled obligation"
+        );
+    }
+
+    #[test]
+    fn contract_cost_overflow_is_rejected_before_goods_or_money_move() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (buyer_id, seller_id, good_id, quantity, payment) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.next_due_day = state.clock.day();
+            let payment = cost_for(contract.quantity_per_week, contract.unit_price);
+            (
+                contract.buyer_business_id,
+                contract.seller_business_id,
+                contract.good_id,
+                contract.quantity_per_week,
+                payment,
+            )
+        };
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .add_inventory(good_id, quantity);
+        let buyer = state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist");
+        buyer.finance.cash = payment;
+        buyer.finance.lifetime_costs = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = settle_contracts(&mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::BusinessLifetimeCostsOverflow {
+                business_id: buyer_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: payment,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "contract accounting overflow must fail before payment, delivery, or contract mutation",
         );
     }
 
@@ -1259,7 +1365,7 @@ mod contracts {
             .expect("seller must exist")
             .owner_dynasty_id();
 
-        settle_contracts(&mut state);
+        settle_contracts(&mut state).expect("contract settlement must succeed");
 
         assert_eq!(
             state
@@ -1332,7 +1438,7 @@ mod contracts {
             .expect("seller must exist")
             .inventory_quantity(good_id);
 
-        settle_contracts(&mut state);
+        settle_contracts(&mut state).expect("contract settlement must succeed");
 
         assert_eq!(
             state
@@ -1671,7 +1777,7 @@ mod employment {
             .expect("employment household must exist")
             .cash();
 
-        settle_employment(registry, &mut state);
+        settle_employment(registry, &mut state).expect("employment settlement must succeed");
 
         assert_eq!(
             state
@@ -1741,7 +1847,7 @@ mod employment {
             Money::from_copper(200),
         );
 
-        assert_eq!(paid, Money::ZERO);
+        assert_eq!(paid, Ok(Money::ZERO));
         assert_eq!(
             state
                 .businesses
@@ -1800,7 +1906,7 @@ mod employment {
             Money::from_copper(100),
         );
 
-        assert_eq!(paid, Money::ZERO);
+        assert_eq!(paid, Ok(Money::ZERO));
         assert_eq!(
             &state
                 .businesses
@@ -3425,7 +3531,7 @@ mod crises {
             "test shortage",
         );
 
-        apply_crisis_daily_effects(registry, &mut state);
+        apply_crisis_daily_effects(registry, &mut state).expect("daily crisis effects must apply");
 
         let quote = state
             .market
@@ -3580,7 +3686,7 @@ mod crises {
             "test panic",
         );
 
-        apply_crisis_daily_effects(registry, &mut state);
+        apply_crisis_daily_effects(registry, &mut state).expect("daily crisis effects must apply");
 
         let after = &state
             .businesses
@@ -3631,7 +3737,7 @@ mod crises {
             "test demand",
         );
 
-        apply_crisis_daily_effects(registry, &mut state);
+        apply_crisis_daily_effects(registry, &mut state).expect("daily crisis effects must apply");
 
         let treasury_after = state
             .institutions
@@ -3795,7 +3901,8 @@ mod routes {
             "test route disruption",
         );
 
-        run_daily_strategic_systems(registry, &mut state);
+        run_daily_strategic_systems(registry, &mut state)
+            .expect("daily strategic systems must run");
 
         let stock_after = state
             .market
@@ -3825,7 +3932,8 @@ mod routes {
             .expect("campaign must contain an external route")
             .disruption_basis_points = 7_300;
 
-        run_monthly_strategic_systems(registry, &mut state);
+        run_monthly_strategic_systems(registry, &mut state)
+            .expect("monthly strategic systems must run");
 
         assert!(
             has_active_crisis(&state, CrisisKind::TradeDisruption),

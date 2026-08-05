@@ -122,11 +122,13 @@ The harness records separate fantasy milestones:
 - First player labor dispute
 - First succession
 
-Institutional patronage becomes available after full commercial standing: established reputation and 104 credited contract deliveries. Patronage transfers treasury into an institution, creates membership, improves support among member houses, and must mature for 90 days. Office nomination then requires established support in the target institution. Office powers become available after a separate 180-day establishment period. Officeholders then face recurring duties, administrative load, and possible forfeiture.
+Institutional patronage becomes available after full commercial standing: established reputation and 78 credited contract deliveries, representing roughly 18 months of reliable weekly trade for a single-contract business. Patronage transfers treasury into an institution, creates membership, improves support among member houses, and must mature for 90 days. Patronage and nomination cooldowns are tracked per character, so a larger trained family can pursue several political projects in parallel. An active nomination locks that character for one year; after the contest resolves, another nomination requires a two-year recovery from the original campaign date. Each character may belong to at most two institutions, which keeps political identity focused and makes additional trained relatives the source of broader dynastic reach. Office nomination requires established support in the target institution. Office powers become available after a separate 180-day establishment period. Officeholders then face recurring duties, administrative load, and possible forfeiture.
 
 Family growth remains player-directed through governance, ward adoption, and focused education. Commercial maturity gates the advanced family routes.
 
 Established dynasties may also commission annual intelligence reports. The focus is persona-specific in automated runs: markets for entrepreneurs, district conditions for stewards, and rival-house conditions for political or opportunistic agents.
+
+Automated agents preserve twelve months of current office-duty costs plus a household liquidity buffer before taking discretionary spending actions. Emergency crisis and severe business-rehabilitation actions may override that reserve. This policy prevents the harness from manufacturing activity through predictable duty defaults; phase findings still report strategically quiet periods created by the conservative reserve.
 
 ## Phase quality
 
@@ -139,7 +141,7 @@ The harness classifies each decision cycle by the furthest reached fantasy miles
 | Institutional ascent | The first institutional support campaign is launched. |
 | Dynastic governance | The first city-shaping law or public work is sponsored. |
 
-Each phase records action share, quiet and blocked cycles, viable command-family breadth, and multi-family choice frequency. Findings use these counters so a strong aggregate score cannot hide a passive establishment period or a strategically narrow governance phase.
+Each phase records action share, quiet and blocked cycles, viable command-family breadth, and multi-family choice frequency. Findings warn when establishment or institutional ascent becomes mostly waiting, or when mature governance is quiet in at least 30% of cycles or averages fewer than two viable command families in actionable cycles. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
 
 ## Recovery routes
 
@@ -148,7 +150,7 @@ The harness must be able to discover and evaluate canonical recovery actions, in
 - Business recapitalization and internal cash transfer
 - New credit when available
 - Delayed restructuring of defaulted credit
-- Voluntary property liquidation
+- Voluntary property liquidation, including emergency sales by healthy but cash-poor dynasties with several properties
 - Lien settlement from sale proceeds
 - Distressed civic auction guarantees when private liquidity is insufficient
 - Voluntary institutional withdrawal when office duties threaten business or household liquidity
@@ -196,16 +198,18 @@ Findings use `Info`, `Warning`, or `Critical` severity. They cover conditions su
 
 - Command families that are absent, blocked, unselected, or inconsequential
 - Repetitive command streaks and housekeeping displacement
-- Long periods without a substantive action
+- Long periods without a substantive action, including severe outlier campaigns hidden by healthy aggregate averages
+- Asset-rich but cash-poor quiet streaks measured while the liquidity condition is actually present, not inferred from unrelated endpoint wealth
 - Economic states with no viable recovery route
 - Persistent business, food, labor, credit, crisis, or notification failure
 - Public-work or office-duty overload
 - Misordered, compressed, synchronized, or unreachable campaign milestones
 - Weak strategic variety or persona convergence
+- Patronage and nomination administration consuming too much of substantive play
 - Political growth without family capacity
 - Long campaigns that do not reach stable succession
 
-Absence is interpreted against the configured horizon and prerequisite availability. Event-driven commands are not treated as broken before their trigger exists.
+Absence is interpreted against the configured horizon and prerequisite availability. Event-driven and office-power-dependent commands are not treated as broken before their trigger or mature authority exists. The report records actual law and public-work activation opportunities rather than inferring availability from campaign age alone.
 
 ## Trace contract
 

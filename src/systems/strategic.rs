@@ -1,5 +1,7 @@
 //! Strategic initialization, periodic systems, and validated cross-record operations.
 
+use super::SimulationError;
+use super::transactions::next_business_finance_version;
 use crate::core::{
     AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
     ChronicleEntry, ChronicleKind, CivicDebtStatus, ContractStatus, Crisis, CrisisKind,
@@ -103,6 +105,8 @@ pub enum StrategicError {
         current: Money,
         incoming: Money,
     },
+    #[error("business {business_id} finance version is exhausted")]
+    BusinessFinanceVersionExhausted { business_id: BusinessId },
     #[error(
         "business acquisition cost overflows the supported money range: price {purchase_price}, recapitalization {recapitalization}"
     )]
@@ -1326,6 +1330,7 @@ struct ValidatedBusinessAcquisition {
     total_required: Money,
     seller_treasury_after: Money,
     business_cash_after: Money,
+    business_finance_version_after: u64,
     administrative_load: u16,
 }
 
@@ -1438,6 +1443,11 @@ fn validate_business_acquisition(
             incoming: recapitalization,
         },
     )?;
+    let business_finance_version_after = business
+        .finance
+        .version
+        .checked_add(1)
+        .ok_or(StrategicError::BusinessFinanceVersionExhausted { business_id })?;
     let recipe_id = business.recipe_id();
     let administrative_load = registry
         .get_recipe(recipe_id)
@@ -1449,6 +1459,7 @@ fn validate_business_acquisition(
         total_required,
         seller_treasury_after,
         business_cash_after,
+        business_finance_version_after,
         administrative_load,
     })
 }
@@ -1499,7 +1510,7 @@ fn commit_business_acquisition(
         .get_mut(business_id)
         .expect("transferred business must exist");
     business.finance.cash = validated.business_cash_after;
-    business.finance.version = business.finance.version.saturating_add(1);
+    business.finance.version = validated.business_finance_version_after;
     let rehabilitation = u16::try_from((recapitalization.copper() / 2).clamp(0, 3_000))
         .expect("bounded acquisition rehabilitation must fit u16");
     business.operations.condition_basis_points = business
@@ -2110,10 +2121,14 @@ fn initialize_information(state: &mut AppState) {
     );
 }
 
-pub(crate) fn run_daily_strategic_systems(registry: &Registry, state: &mut AppState) {
+pub(crate) fn run_daily_strategic_systems(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     apply_route_laws(state);
-    apply_crisis_daily_effects(registry, state);
+    apply_crisis_daily_effects(registry, state)?;
     apply_external_route_supply(state);
+    Ok(())
 }
 
 fn active_law_value(state: &AppState, kind: LawKind) -> Option<i64> {
@@ -2178,7 +2193,10 @@ pub(crate) fn apply_law_price_controls(registry: &Registry, state: &mut AppState
     quote.price = quote.price.min(Money::from_copper(ceiling));
 }
 
-fn apply_crisis_daily_effects(registry: &Registry, state: &mut AppState) {
+fn apply_crisis_daily_effects(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let active: Vec<_> = state
         .crises
         .values()
@@ -2245,7 +2263,7 @@ fn apply_crisis_daily_effects(registry: &Registry, state: &mut AppState) {
                 }
             }
             CrisisKind::BankingPanic => {
-                apply_banking_panic_losses(state, severity);
+                apply_banking_panic_losses(state, severity)?;
             }
             CrisisKind::NobleDemand => {
                 if let Some(treasury_id) = registry.get_institution_id("treasury")
@@ -2265,36 +2283,56 @@ fn apply_crisis_daily_effects(registry: &Registry, state: &mut AppState) {
             }
         }
     }
+    Ok(())
 }
 
-fn apply_banking_panic_losses(state: &mut AppState, severity: u16) {
+fn apply_banking_panic_losses(state: &mut AppState, severity: u16) -> Result<(), SimulationError> {
     for business in state.businesses.iter_mut() {
         let loss = business
             .finance
             .cash
             .saturating_mul_ratio(i64::from(severity), 1_000_000);
         if loss > Money::ZERO {
-            business.finance.cash = business.finance.cash.saturating_sub(loss);
-            business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(loss);
-            business.finance.version = business.finance.version.saturating_add(1);
+            let resulting_cash = business
+                .finance
+                .cash
+                .checked_sub(loss)
+                .expect("banking-panic loss must not exceed business cash");
+            let resulting_lifetime_costs =
+                business.finance.lifetime_costs.checked_add(loss).ok_or(
+                    SimulationError::BusinessLifetimeCostsOverflow {
+                        business_id: business.id(),
+                        current: business.finance.lifetime_costs,
+                        incoming: loss,
+                    },
+                )?;
+            let next_finance_version = next_business_finance_version(business)?;
+            business.finance.cash = resulting_cash;
+            business.finance.lifetime_costs = resulting_lifetime_costs;
+            business.finance.version = next_finance_version;
         }
     }
+    Ok(())
 }
 
-pub(crate) fn run_weekly_strategic_systems(registry: &Registry, state: &mut AppState) {
-    settle_contracts(state);
+pub(crate) fn run_weekly_strategic_systems(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
+    settle_contracts(state)?;
     settle_loans(state);
     settle_civic_debts(registry, state);
     settle_property_rents(state);
-    settle_employment(registry, state);
-    distribute_business_dividends(registry, state);
+    settle_employment(registry, state)?;
+    distribute_business_dividends(registry, state)?;
     progress_public_works(registry, state);
     update_relationships_from_obligations(state);
     update_quality_reputations(state);
     apply_law_economic_effects(registry, state);
+    Ok(())
 }
 
-fn settle_contracts(state: &mut AppState) {
+fn settle_contracts(state: &mut AppState) -> Result<(), SimulationError> {
     let day = state.clock.day();
     let due: Vec<_> = state
         .contracts
@@ -2314,11 +2352,12 @@ fn settle_contracts(state: &mut AppState) {
         })
         .collect();
     for due_contract in due {
-        settle_due_contract(state, due_contract);
+        settle_due_contract(state, due_contract)?;
     }
+    Ok(())
 }
 
-fn settle_due_contract(state: &mut AppState, due: DueContract) {
+fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), SimulationError> {
     let payment = cost_for(due.quantity, due.unit_price);
     let (seller_active, seller_owner_id, seller_can_deliver, seller_can_receive_payment) = {
         let seller = state
@@ -2362,7 +2401,7 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) {
             buyer_active,
             seller_active,
         );
-        return;
+        return Ok(());
     }
     let settlement = ContractSettlementState {
         buyer: ContractPartySettlementState {
@@ -2378,11 +2417,12 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) {
     };
     let fulfilled = settlement.is_fulfilled();
     if fulfilled {
-        settle_fulfilled_contract(state, due, payment, settlement);
+        settle_fulfilled_contract(state, due, payment, settlement)?;
     } else {
-        settle_failed_contract(state, due, settlement);
+        settle_failed_contract(state, due, settlement)?;
     }
     finalize_expired_contract(state, due, settlement, fulfilled);
+    Ok(())
 }
 
 fn terminate_inactive_contract(
@@ -2498,7 +2538,12 @@ fn settle_fulfilled_contract(
     due: DueContract,
     payment: Money,
     settlement: ContractSettlementState,
-) {
+) -> Result<(), SimulationError> {
+    let transferred = transfer_contract_money(state, due.buyer_id, due.seller_id, payment)?;
+    debug_assert_eq!(
+        transferred, payment,
+        "prevalidated contract payment must transfer in full"
+    );
     state
         .businesses
         .get_mut(due.seller_id)
@@ -2509,11 +2554,6 @@ fn settle_fulfilled_contract(
         .get_mut(due.buyer_id)
         .expect("contract buyer must exist")
         .add_inventory(due.good_id, due.quantity);
-    let transferred = transfer_contract_money(state, due.buyer_id, due.seller_id, payment);
-    debug_assert_eq!(
-        transferred, payment,
-        "prevalidated contract payment must transfer in full"
-    );
     let contract = state
         .contracts
         .get_mut(&due.id)
@@ -2542,13 +2582,14 @@ fn settle_fulfilled_contract(
             RelationshipDelta::new(5, 3, 0, -2, 0),
         );
     }
+    Ok(())
 }
 
 fn settle_failed_contract(
     state: &mut AppState,
     due: DueContract,
     settlement: ContractSettlementState,
-) {
+) -> Result<(), SimulationError> {
     let penalty_parties = match (settlement.seller.can_perform, settlement.buyer.can_perform) {
         (true, false) => Some((due.buyer_id, due.seller_id)),
         (false, true) => Some((due.seller_id, due.buyer_id)),
@@ -2560,7 +2601,7 @@ fn settle_failed_contract(
             .get(payer_id)
             .expect("contract penalty payer must exist")
             .cash();
-        transfer_contract_money(state, payer_id, recipient_id, due.penalty.min(available));
+        transfer_contract_money(state, payer_id, recipient_id, due.penalty.min(available))?;
     }
     let breached = {
         let contract = state
@@ -2619,6 +2660,7 @@ fn settle_failed_contract(
             );
         }
     }
+    Ok(())
 }
 
 fn transfer_contract_money(
@@ -2626,9 +2668,9 @@ fn transfer_contract_money(
     payer_id: BusinessId,
     recipient_id: BusinessId,
     amount: Money,
-) -> Money {
+) -> Result<Money, SimulationError> {
     if amount <= Money::ZERO {
-        return Money::ZERO;
+        return Ok(Money::ZERO);
     }
     let payer_cash = state
         .businesses
@@ -2643,16 +2685,56 @@ fn transfer_contract_money(
         .max_nonnegative_addend();
     let transferred = amount.min(payer_cash).min(recipient_headroom);
     if transferred <= Money::ZERO {
-        return Money::ZERO;
+        return Ok(Money::ZERO);
     }
+    let (payer_lifetime_costs, payer_finance_version) = {
+        let payer = state
+            .businesses
+            .get(payer_id)
+            .expect("contract payer must exist");
+        (
+            payer
+                .finance
+                .lifetime_costs
+                .checked_add(transferred)
+                .ok_or(SimulationError::BusinessLifetimeCostsOverflow {
+                    business_id: payer_id,
+                    current: payer.finance.lifetime_costs,
+                    incoming: transferred,
+                })?,
+            next_business_finance_version(payer)?,
+        )
+    };
+    let (recipient_lifetime_revenue, recipient_finance_version) = {
+        let recipient = state
+            .businesses
+            .get(recipient_id)
+            .expect("contract recipient must exist");
+        (
+            recipient
+                .finance
+                .lifetime_revenue
+                .checked_add(transferred)
+                .ok_or(SimulationError::BusinessLifetimeRevenueOverflow {
+                    business_id: recipient_id,
+                    current: recipient.finance.lifetime_revenue,
+                    incoming: transferred,
+                })?,
+            next_business_finance_version(recipient)?,
+        )
+    };
     {
         let payer = state
             .businesses
             .get_mut(payer_id)
             .expect("contract payer must exist");
-        payer.finance.cash = payer.finance.cash.saturating_sub(transferred);
-        payer.finance.lifetime_costs = payer.finance.lifetime_costs.saturating_add(transferred);
-        payer.finance.version = payer.finance.version.saturating_add(1);
+        payer.finance.cash = payer
+            .finance
+            .cash
+            .checked_sub(transferred)
+            .expect("bounded contract transfer must fit payer cash");
+        payer.finance.lifetime_costs = payer_lifetime_costs;
+        payer.finance.version = payer_finance_version;
     }
     {
         let recipient = state
@@ -2664,13 +2746,10 @@ fn transfer_contract_money(
             .cash
             .checked_add(transferred)
             .expect("bounded contract transfer must fit recipient cash");
-        recipient.finance.lifetime_revenue = recipient
-            .finance
-            .lifetime_revenue
-            .saturating_add(transferred);
-        recipient.finance.version = recipient.finance.version.saturating_add(1);
+        recipient.finance.lifetime_revenue = recipient_lifetime_revenue;
+        recipient.finance.version = recipient_finance_version;
     }
-    transferred
+    Ok(transferred)
 }
 
 fn settle_loans(state: &mut AppState) {
@@ -3237,7 +3316,10 @@ fn settle_property_rents(state: &mut AppState) {
     }
 }
 
-fn distribute_business_dividends(registry: &Registry, state: &mut AppState) {
+fn distribute_business_dividends(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let dividends: Vec<_> = state
         .businesses
         .iter()
@@ -3277,8 +3359,14 @@ fn distribute_business_dividends(registry: &Registry, state: &mut AppState) {
             .businesses
             .get_mut(business_id)
             .expect("dividend business must exist");
-        business.finance.cash = business.finance.cash.saturating_sub(dividend);
-        business.finance.version = business.finance.version.saturating_add(1);
+        let resulting_cash = business
+            .finance
+            .cash
+            .checked_sub(dividend)
+            .expect("planned dividend must fit business cash");
+        let next_finance_version = next_business_finance_version(business)?;
+        business.finance.cash = resulting_cash;
+        business.finance.version = next_finance_version;
         let owner = state
             .dynasties
             .get_mut(&owner_id)
@@ -3298,9 +3386,10 @@ fn distribute_business_dividends(registry: &Registry, state: &mut AppState) {
             detail: format!("dividends={}", total.copper()),
         });
     }
+    Ok(())
 }
 
-fn settle_employment(registry: &Registry, state: &mut AppState) {
+fn settle_employment(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     let agreements: Vec<_> = state
         .employment
         .values()
@@ -3329,8 +3418,9 @@ fn settle_employment(registry: &Registry, state: &mut AppState) {
             household_id,
             wage,
             prior_status,
-        );
+        )?;
     }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3348,7 +3438,7 @@ fn settle_employment_agreement(
     household_id: HouseholdId,
     wage: Money,
     prior_status: EmploymentStatus,
-) {
+) -> Result<(), SimulationError> {
     let utilization_basis_points =
         business_labor_utilization_basis_points(registry, state, business_id);
     let labor_environment = {
@@ -3363,7 +3453,7 @@ fn settle_employment_agreement(
         }
     };
     let wage_due = wage.saturating_mul_ratio(i64::from(utilization_basis_points), 10_000);
-    let paid = pay_employment_wage(registry, state, business_id, household_id, wage_due);
+    let paid = pay_employment_wage(registry, state, business_id, household_id, wage_due)?;
     let (recovered, became_disputed) = update_employment_after_payment(
         state,
         employment_id,
@@ -3373,6 +3463,7 @@ fn settle_employment_agreement(
         wage_due,
     );
     emit_employment_outcome(state, business_id, recovered, became_disputed);
+    Ok(())
 }
 
 fn pay_employment_wage(
@@ -3381,7 +3472,7 @@ fn pay_employment_wage(
     business_id: BusinessId,
     household_id: HouseholdId,
     wage_due: Money,
-) -> Money {
+) -> Result<Money, SimulationError> {
     let business = state
         .businesses
         .get(business_id)
@@ -3397,7 +3488,7 @@ fn pay_employment_wage(
     };
     let spendable = business_cash.saturating_sub(payroll_reserve);
     if wage_due <= Money::ZERO || spendable <= Money::ZERO {
-        return Money::ZERO;
+        return Ok(Money::ZERO);
     }
     let household_headroom = state
         .households
@@ -3407,15 +3498,33 @@ fn pay_employment_wage(
         .max_nonnegative_addend();
     let paid = wage_due.min(spendable).min(household_headroom);
     if paid <= Money::ZERO {
-        return Money::ZERO;
+        return Ok(Money::ZERO);
     }
+    let (resulting_lifetime_costs, next_finance_version) = {
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("employment business must exist");
+        (
+            business.finance.lifetime_costs.checked_add(paid).ok_or(
+                SimulationError::BusinessLifetimeCostsOverflow {
+                    business_id,
+                    current: business.finance.lifetime_costs,
+                    incoming: paid,
+                },
+            )?,
+            next_business_finance_version(business)?,
+        )
+    };
     let business = state
         .businesses
         .get_mut(business_id)
         .expect("employment business must exist");
-    business.finance.cash = business_cash.saturating_sub(paid);
-    business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(paid);
-    business.finance.version = business.finance.version.saturating_add(1);
+    business.finance.cash = business_cash
+        .checked_sub(paid)
+        .expect("bounded wage must fit business cash");
+    business.finance.lifetime_costs = resulting_lifetime_costs;
+    business.finance.version = next_finance_version;
     let household = state
         .households
         .get_mut(household_id)
@@ -3424,7 +3533,7 @@ fn pay_employment_wage(
         .cash
         .checked_add(paid)
         .expect("bounded wage must fit household cash");
-    paid
+    Ok(paid)
 }
 
 fn update_employment_after_payment(
@@ -3992,11 +4101,14 @@ fn apply_law_economic_effects(registry: &Registry, state: &mut AppState) {
     }
 }
 
-pub(crate) fn run_monthly_strategic_systems(registry: &Registry, state: &mut AppState) {
+pub(crate) fn run_monthly_strategic_systems(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     update_district_conditions(state);
     resolve_institution_selections(registry, state);
     apply_office_duties(state);
-    apply_office_power_effects(registry, state);
+    apply_office_power_effects(registry, state)?;
     advance_ai_objectives(registry, state);
     update_information_reports(registry, state);
     advance_legal_case_hearings(state);
@@ -4004,6 +4116,7 @@ pub(crate) fn run_monthly_strategic_systems(registry: &Registry, state: &mut App
     update_external_route_risk(state);
     detect_and_advance_crises(registry, state);
     recover_external_routes(state);
+    Ok(())
 }
 
 pub(crate) fn dynasty_office_administrative_load(state: &AppState, dynasty_id: DynastyId) -> u16 {
@@ -4278,7 +4391,10 @@ fn recover_external_routes(state: &mut AppState) {
     }
 }
 
-fn apply_office_power_effects(registry: &Registry, state: &mut AppState) {
+fn apply_office_power_effects(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let offices: Vec<_> = state
         .institutions
         .values()
@@ -4297,95 +4413,110 @@ fn apply_office_power_effects(registry: &Registry, state: &mut AppState) {
         .collect();
     for (institution_id, dynasty_id, district_id, powers) in offices {
         for power in powers {
-            match power {
-                OfficePower::Licenses => {
-                    let dynasty = state
-                        .dynasties
-                        .get_mut(&dynasty_id)
-                        .expect("officeholder dynasty must exist");
-                    dynasty.resources.legitimacy_basis_points = dynasty
-                        .resources
-                        .legitimacy_basis_points
-                        .saturating_add(15)
-                        .min(10_000);
-                }
-                OfficePower::Inspections => {
-                    let dynasty = state
-                        .dynasties
-                        .get_mut(&dynasty_id)
-                        .expect("officeholder dynasty must exist");
-                    dynasty.resources.reputation_quality_basis_points = dynasty
-                        .resources
-                        .reputation_quality_basis_points
-                        .saturating_add(15)
-                        .min(10_000);
-                }
-                OfficePower::MarketTolls | OfficePower::Taxation => {
-                    let institution_budget = state
-                        .institutions
-                        .get(&institution_id)
-                        .expect("office institution must exist")
-                        .budget;
-                    let revenue =
-                        Money::from_copper(100).min(institution_budget.max_nonnegative_addend());
-                    if revenue > Money::ZERO {
-                        state
-                            .institutions
-                            .get_mut(&institution_id)
-                            .expect("office institution must exist")
-                            .budget = institution_budget
-                            .checked_add(revenue)
-                            .expect("bounded office revenue must fit institution budget");
-                        state.market.clearing_account =
-                            state.market.clearing_account.saturating_sub(revenue);
-                    }
-                }
-                OfficePower::DebtEnforcement => {
-                    adjust_reliability_reputation(state, dynasty_id, 15);
-                }
-                OfficePower::CityContracts => {
-                    award_city_contract(state, institution_id, dynasty_id);
-                }
-                OfficePower::PublicWorks => {
-                    let district = state
-                        .districts
-                        .get_mut(&district_id)
-                        .expect("office district must exist");
-                    district.employment_basis_points = district
-                        .employment_basis_points
-                        .saturating_add(20)
-                        .min(10_000);
-                }
-                OfficePower::WatchPriorities => {
-                    let district = state
-                        .districts
-                        .get_mut(&district_id)
-                        .expect("office district must exist");
-                    district.safety_basis_points =
-                        district.safety_basis_points.saturating_add(40).min(10_000);
-                }
-                OfficePower::EmergencyImports => {
-                    if let Some(grain_id) = registry.get_good_id("grain") {
-                        let quote = state
-                            .market
-                            .quotes
-                            .get_mut(&grain_id)
-                            .expect("grain quote must exist");
-                        let quantity = Quantity::from_units(20);
-                        quote.stock = quote.stock.saturating_add(quantity);
-                        quote.supply_today = quote.supply_today.saturating_add(quantity);
-                    }
-                }
+            apply_office_power(
+                registry,
+                state,
+                institution_id,
+                dynasty_id,
+                district_id,
+                power,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_office_power(
+    registry: &Registry,
+    state: &mut AppState,
+    institution_id: InstitutionId,
+    dynasty_id: DynastyId,
+    district_id: DistrictId,
+    power: OfficePower,
+) -> Result<(), SimulationError> {
+    match power {
+        OfficePower::Licenses => {
+            let dynasty = state
+                .dynasties
+                .get_mut(&dynasty_id)
+                .expect("officeholder dynasty must exist");
+            dynasty.resources.legitimacy_basis_points = dynasty
+                .resources
+                .legitimacy_basis_points
+                .saturating_add(15)
+                .min(10_000);
+        }
+        OfficePower::Inspections => {
+            let dynasty = state
+                .dynasties
+                .get_mut(&dynasty_id)
+                .expect("officeholder dynasty must exist");
+            dynasty.resources.reputation_quality_basis_points = dynasty
+                .resources
+                .reputation_quality_basis_points
+                .saturating_add(15)
+                .min(10_000);
+        }
+        OfficePower::MarketTolls | OfficePower::Taxation => {
+            let institution_budget = state
+                .institutions
+                .get(&institution_id)
+                .expect("office institution must exist")
+                .budget;
+            let revenue = Money::from_copper(100).min(institution_budget.max_nonnegative_addend());
+            if revenue > Money::ZERO {
+                state
+                    .institutions
+                    .get_mut(&institution_id)
+                    .expect("office institution must exist")
+                    .budget = institution_budget
+                    .checked_add(revenue)
+                    .expect("bounded office revenue must fit institution budget");
+                state.market.clearing_account =
+                    state.market.clearing_account.saturating_sub(revenue);
+            }
+        }
+        OfficePower::DebtEnforcement => adjust_reliability_reputation(state, dynasty_id, 15),
+        OfficePower::CityContracts => award_city_contract(state, institution_id, dynasty_id)?,
+        OfficePower::PublicWorks => {
+            let district = state
+                .districts
+                .get_mut(&district_id)
+                .expect("office district must exist");
+            district.employment_basis_points = district
+                .employment_basis_points
+                .saturating_add(20)
+                .min(10_000);
+        }
+        OfficePower::WatchPriorities => {
+            let district = state
+                .districts
+                .get_mut(&district_id)
+                .expect("office district must exist");
+            district.safety_basis_points =
+                district.safety_basis_points.saturating_add(40).min(10_000);
+        }
+        OfficePower::EmergencyImports => {
+            if let Some(grain_id) = registry.get_good_id("grain") {
+                let quote = state
+                    .market
+                    .quotes
+                    .get_mut(&grain_id)
+                    .expect("grain quote must exist");
+                let quantity = Quantity::from_units(20);
+                quote.stock = quote.stock.saturating_add(quantity);
+                quote.supply_today = quote.supply_today.saturating_add(quantity);
             }
         }
     }
+    Ok(())
 }
 
 fn award_city_contract(
     state: &mut AppState,
     institution_id: crate::ids::InstitutionId,
     dynasty_id: DynastyId,
-) {
+) -> Result<(), SimulationError> {
     let business_id = state
         .businesses
         .ids_for_owner(dynasty_id)
@@ -4396,7 +4527,7 @@ fn award_city_contract(
         .min_by_key(|business| (business.cash(), business.id()))
         .map(crate::core::Business::id);
     let Some(business_id) = business_id else {
-        return;
+        return Ok(());
     };
     let institution_budget = state
         .institutions
@@ -4413,8 +4544,24 @@ fn award_city_contract(
         .min(institution_budget)
         .min(business_headroom);
     if award == Money::ZERO {
-        return;
+        return Ok(());
     }
+    let (resulting_lifetime_revenue, next_finance_version) = {
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("city contract business must exist");
+        (
+            business.finance.lifetime_revenue.checked_add(award).ok_or(
+                SimulationError::BusinessLifetimeRevenueOverflow {
+                    business_id,
+                    current: business.finance.lifetime_revenue,
+                    incoming: award,
+                },
+            )?,
+            next_business_finance_version(business)?,
+        )
+    };
     state
         .institutions
         .get_mut(&institution_id)
@@ -4429,8 +4576,9 @@ fn award_city_contract(
         .cash
         .checked_add(award)
         .expect("bounded city-contract award must fit business cash");
-    business.finance.lifetime_revenue = business.finance.lifetime_revenue.saturating_add(award);
-    business.finance.version = business.finance.version.saturating_add(1);
+    business.finance.lifetime_revenue = resulting_lifetime_revenue;
+    business.finance.version = next_finance_version;
+    Ok(())
 }
 
 fn update_district_conditions(state: &mut AppState) {

@@ -110,11 +110,11 @@ PlayerCommand
 
 Owner: `src/systems/commands.rs` and the subsystem functions it invokes.
 
-Cross-record operations may use consumed validated tokens. A token must revalidate state at commit time because the state may have changed after initial validation.
+Cross-record operations may use consumed validated tokens. A token must revalidate state at commit time because the state may have changed after initial validation. Business-finance tokens also capture the finance version of each affected business, so an intervening valid finance mutation invalidates the stale token even when balances would still permit the original operation.
 
 ### Time advancement
 
-`advance_days` validates the requested range and registry compatibility before mutation. Each simulated day runs in this order:
+`advance_days` validates the requested range and registry compatibility before mutation. It executes the complete requested range against a working copy and replaces the caller's state only after every requested day succeeds. Accounting overflow, finance-version exhaustion, or another typed simulation failure therefore leaves the original campaign unchanged. Each simulated day runs in this order:
 
 1. Reset market flow counters.
 2. Apply routes, laws, and active crisis effects.

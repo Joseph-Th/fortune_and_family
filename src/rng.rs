@@ -10,12 +10,7 @@ pub struct DeterministicRng {
 impl DeterministicRng {
     #[must_use]
     pub const fn seeded(seed: u64) -> Self {
-        let state = if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        };
-        Self { state }
+        Self { state: seed }
     }
 
     #[must_use]
@@ -51,5 +46,28 @@ impl DeterministicRng {
             "chance must be at most 10,000 basis points"
         );
         self.range_u32(10_000) < u32::from(basis_points)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distinct_seed_values_do_not_share_the_same_initial_stream() {
+        let mut zero = DeterministicRng::seeded(0);
+        let mut golden_ratio = DeterministicRng::seeded(0x9E37_79B9_7F4A_7C15);
+
+        assert_ne!(zero.next_u64(), golden_ratio.next_u64());
+    }
+
+    #[test]
+    fn identical_seed_values_reproduce_the_same_stream() {
+        let mut first = DeterministicRng::seeded(0);
+        let mut second = DeterministicRng::seeded(0);
+
+        for _ in 0..16 {
+            assert_eq!(first.next_u64(), second.next_u64());
+        }
     }
 }

@@ -9,7 +9,7 @@ use civic_dynasty::{
     render_gameplay_report, run_gameplay_harness, save_state, validate_invariants,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use thiserror::Error;
 
@@ -123,10 +123,21 @@ enum CliError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("failed to serialize campaign projection: {source}")]
+    ProjectionSerialization {
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("failed to render campaign dashboard: {source}")]
     DashboardSerialization {
         #[source]
         source: serde_json::Error,
+    },
+    #[error("failed to create output directory {path}: {source}")]
+    OutputDirectoryCreate {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
     },
     #[error("failed to write dashboard {path}: {source}")]
     DashboardWrite {
@@ -219,7 +230,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             validate_invariants(&registry, &state);
             let projection = build_campaign_projection(&registry, &state);
             let json = serde_json::to_string_pretty(&projection)
-                .map_err(|source| CliError::SummarySerialization { source })?;
+                .map_err(|source| CliError::ProjectionSerialization { source })?;
             println!("{json}");
         }
         Command::Dashboard { input, output } => {
@@ -227,6 +238,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             validate_invariants(&registry, &state);
             let html = render_campaign_html(&registry, &state)
                 .map_err(|source| CliError::DashboardSerialization { source })?;
+            create_output_parent(&output)?;
             std::fs::write(&output, html).map_err(|source| CliError::DashboardWrite {
                 path: output.clone(),
                 source,
@@ -343,6 +355,7 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
         render_gameplay_report(&report)
     };
     if let Some(path) = args.output {
+        create_output_parent(&path)?;
         std::fs::write(&path, rendered).map_err(|source| CliError::GameplayReportWrite {
             path: path.clone(),
             source,
@@ -380,6 +393,20 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
                 reason: format!("report contains {critical} critical findings"),
             });
         }
+    }
+    Ok(())
+}
+
+fn create_output_parent(path: &Path) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if parent != Path::new(".") {
+        std::fs::create_dir_all(parent).map_err(|source| CliError::OutputDirectoryCreate {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
     Ok(())
 }
@@ -438,6 +465,28 @@ fn print_human_summary(registry: &Registry, state: &civic_dynasty::AppState) {
             message.kind(),
             message.subject(),
             message.body()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_parent_creation_supports_nested_adapter_outputs() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let output = directory
+            .path()
+            .join("reports")
+            .join("nested")
+            .join("report.json");
+
+        create_output_parent(&output).expect("nested output parent must be created");
+
+        assert!(
+            output.parent().expect("output must have a parent").is_dir(),
+            "all adapter file outputs must support missing nested parent directories"
         );
     }
 }

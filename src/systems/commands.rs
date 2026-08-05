@@ -1,5 +1,6 @@
 //! Canonical player-command validation and dispatch across simulation subsystems.
 
+use super::transactions::next_business_finance_version;
 use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
     acquire_business, buy_unowned_property, issue_loan, sell_owned_property, sign_supply_contract,
@@ -174,10 +175,13 @@ pub(crate) const INSTITUTION_SUPPORT_INTERVAL_DAYS: i64 = 360;
 pub(crate) const INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS: i64 = 90;
 pub(crate) const INSTITUTION_SUPPORT_COST: Money = Money::from_copper(1_200);
 pub(crate) const INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT: u16 = 5_500;
-pub(crate) const INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT: u32 = 104;
+pub(crate) const INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT: u32 = 78;
+pub(crate) const MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER: usize = 2;
 pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
+pub(crate) const OFFICE_NOMINATION_RECOVERY_DAYS: i64 = 720;
+const OFFICE_NOMINATION_RESOLUTION_DAYS: i64 = 60;
 pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
-pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 104;
+pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 78;
 pub(crate) const WARD_ADOPTION_INTERVAL_DAYS: i64 = 720;
 pub(crate) const WARD_ADOPTION_COST: Money = Money::from_copper(6_000);
 pub(crate) const WARD_ADOPTION_LEGITIMACY_REQUIREMENT: u16 = 3_500;
@@ -356,6 +360,14 @@ pub enum CommandError {
     InstitutionSupportAlreadyEstablished {
         institution_id: InstitutionId,
         character_id: CharacterId,
+    },
+    #[error(
+        "character {character_id} already belongs to {current} institutions; maximum supported portfolio is {maximum}"
+    )]
+    InstitutionMembershipCapacity {
+        character_id: CharacterId,
+        current: usize,
+        maximum: usize,
     },
     #[error(
         "the dynasty cannot cultivate support in another institution before day {next_support_day}"
@@ -740,13 +752,14 @@ fn apply_business_investment(
             incoming: amount,
         })
     })?;
+    let next_finance_version = next_business_finance_version(business)?;
     spend_player_treasury(state, amount)?;
     let business = state
         .businesses
         .get_mut(business_id)
         .expect("validated business must exist");
     business.finance.cash = resulting_cash;
-    business.finance.version = business.finance.version.saturating_add(1);
+    business.finance.version = next_finance_version;
     let rehabilitation = u16::try_from((amount.copper() / 2).clamp(0, 3_000))
         .expect("bounded rehabilitation must fit u16");
     business.operations.condition_basis_points = business
@@ -844,6 +857,7 @@ fn apply_business_policy(
             });
         }
     }
+    let next_finance_version = next_business_finance_version(business)?;
     let business = state
         .businesses
         .get_mut(business_id)
@@ -853,7 +867,7 @@ fn apply_business_policy(
     business.policy.minimum_cash_reserve = minimum_cash_reserve;
     business.policy.maintenance_basis_points = maintenance_basis_points;
     business.policy.quality_target_basis_points = quality_target_basis_points;
-    business.finance.version = business.finance.version.saturating_add(1);
+    business.finance.version = next_finance_version;
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::BusinessPolicyChange,
@@ -1811,17 +1825,18 @@ fn apply_institution_support(
             character_id,
         });
     }
-    if let Some(last_support_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::InstitutionPatronage)
-        .map(AuditRecord::day)
+    let membership_count = institution_membership_count(state, character_id);
+    if membership_count >= MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER {
+        return Err(CommandError::InstitutionMembershipCapacity {
+            character_id,
+            current: membership_count,
+            maximum: MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
+        });
+    }
+    if let Some(next_support_day) = institution_support_next_day(state, character_id)
+        && state.clock.day() < next_support_day
     {
-        let next_support_day = last_support_day.saturating_add(INSTITUTION_SUPPORT_INTERVAL_DAYS);
-        if state.clock.day() < next_support_day {
-            return Err(CommandError::InstitutionSupportCooldown { next_support_day });
-        }
+        return Err(CommandError::InstitutionSupportCooldown { next_support_day });
     }
     let institution = state
         .institutions
@@ -2002,20 +2017,12 @@ fn apply_office_nomination(
             available_day,
         });
     }
-    if let Some(last_nomination_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::OfficeNomination)
-        .map(AuditRecord::day)
+    if let Some(next_nomination_day) = office_nomination_next_day(state, character_id)
+        && state.clock.day() < next_nomination_day
     {
-        let next_nomination_day =
-            last_nomination_day.saturating_add(OFFICE_NOMINATION_INTERVAL_DAYS);
-        if state.clock.day() < next_nomination_day {
-            return Err(CommandError::OfficeNominationCooldown {
-                next_nomination_day,
-            });
-        }
+        return Err(CommandError::OfficeNominationCooldown {
+            next_nomination_day,
+        });
     }
     let campaign_cost = Money::from_copper(300);
     spend_player_treasury(state, campaign_cost)?;
@@ -2086,11 +2093,56 @@ pub(super) fn office_nomination_subject(
     format!("institution:{institution_id}:character:{character_id}")
 }
 
+pub(crate) fn office_nomination_next_day(
+    state: &AppState,
+    character_id: CharacterId,
+) -> Option<i64> {
+    latest_character_campaign_day(state, AuditKind::OfficeNomination, character_id).map(|day| {
+        let resolution_day = day.saturating_add(OFFICE_NOMINATION_RESOLUTION_DAYS);
+        let interval = if state.clock.day() < resolution_day {
+            OFFICE_NOMINATION_INTERVAL_DAYS
+        } else {
+            OFFICE_NOMINATION_RECOVERY_DAYS
+        };
+        day.saturating_add(interval)
+    })
+}
+
 pub(crate) fn institution_support_subject(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> String {
     format!("institution:{institution_id}:character:{character_id}")
+}
+
+pub(crate) fn institution_support_next_day(
+    state: &AppState,
+    character_id: CharacterId,
+) -> Option<i64> {
+    latest_character_campaign_day(state, AuditKind::InstitutionPatronage, character_id)
+        .map(|day| day.saturating_add(INSTITUTION_SUPPORT_INTERVAL_DAYS))
+}
+
+pub(crate) fn institution_membership_count(state: &AppState, character_id: CharacterId) -> usize {
+    state
+        .institutions
+        .values()
+        .filter(|institution| institution.members.contains(&character_id))
+        .count()
+}
+
+fn latest_character_campaign_day(
+    state: &AppState,
+    kind: AuditKind,
+    character_id: CharacterId,
+) -> Option<i64> {
+    let suffix = format!(":character:{character_id}");
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == kind && record.subject().ends_with(&suffix))
+        .map(AuditRecord::day)
 }
 
 pub(crate) fn institution_support_day(
@@ -2403,11 +2455,11 @@ fn spend_business_cash(
     business_id: BusinessId,
     amount: Money,
 ) -> Result<(), CommandError> {
-    let cash = state
+    let business = state
         .businesses
         .get(business_id)
-        .ok_or(CommandError::MissingBusiness { business_id })?
-        .cash();
+        .ok_or(CommandError::MissingBusiness { business_id })?;
+    let cash = business.cash();
     if cash < amount {
         return Err(CommandError::InsufficientBusinessFunds {
             business_id,
@@ -2415,6 +2467,19 @@ fn spend_business_cash(
             required: amount,
         });
     }
+    let resulting_lifetime_costs =
+        business
+            .finance
+            .lifetime_costs
+            .checked_add(amount)
+            .ok_or(CommandError::Simulation(
+                super::SimulationError::BusinessLifetimeCostsOverflow {
+                    business_id,
+                    current: business.finance.lifetime_costs,
+                    incoming: amount,
+                },
+            ))?;
+    let next_finance_version = next_business_finance_version(business)?;
     let business = state
         .businesses
         .get_mut(business_id)
@@ -2422,8 +2487,8 @@ fn spend_business_cash(
     business.finance.cash = cash
         .checked_sub(amount)
         .expect("validated business spend must fit available cash");
-    business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(amount);
-    business.finance.version = business.finance.version.saturating_add(1);
+    business.finance.lifetime_costs = resulting_lifetime_costs;
+    business.finance.version = next_finance_version;
     Ok(())
 }
 

@@ -38,8 +38,8 @@ trap 'rm -rf "$work_dir"' EXIT
 campaign="$work_dir/campaign.json"
 summary="$work_dir/summary.json"
 projection="$work_dir/projection.json"
-dashboard="$work_dir/campaign.html"
-playtest="$work_dir/playtest.json"
+dashboard="$work_dir/exports/dashboard/campaign.html"
+playtest="$work_dir/exports/playtest/playtest.json"
 
 if python3 --version > /dev/null 2>&1; then
   python_command=python3

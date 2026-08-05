@@ -3,6 +3,7 @@
 use super::*;
 use crate::core::{AuditKind, AuditRecord, Crisis, CrisisKind, OutboxKind, OutboxMessage};
 use crate::ids::OutboxMessageId;
+use crate::systems::INSTITUTION_SUPPORT_INTERVAL_DAYS;
 use crate::systems::{OFFICE_POWER_ESTABLISHMENT_DAYS, OFFICE_TERM_DAYS, issue_loan};
 use crate::test_support::{assert_set_eq, make_test_campaign, rivergate_registry_for_test};
 use std::sync::OnceLock;
@@ -104,6 +105,23 @@ mod harness {
         let error = run_gameplay_harness(registry, config).expect_err("empty personas must fail");
 
         assert!(matches!(error, GameplayHarnessError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn rejects_seed_ranges_that_would_repeat_through_saturation() {
+        let registry = rivergate_registry_for_test();
+        let mut config = focused_config(30);
+        config.start_seed = u64::MAX;
+        config.seed_count = 2;
+
+        let error = run_gameplay_harness(registry, config)
+            .expect_err("overflowing seed ranges must be rejected");
+
+        assert!(matches!(
+            error,
+            GameplayHarnessError::InvalidConfig { reason }
+                if reason == "configured seed range exceeds u64::MAX"
+        ));
     }
 
     #[test]
@@ -232,32 +250,27 @@ mod harness {
         for _ in 0..INSTITUTION_SUPPORT_INTERVAL_DAYS {
             support_state.clock.advance_one_day();
         }
-        let player_character_ids: BTreeSet<_> = support_state
-            .characters
-            .iter()
-            .filter(|character| character.dynasty_id() == support_state.player_dynasty_id)
-            .map(crate::core::Character::id)
-            .collect();
-        let support_institution_id = support_state
+        let player_officeholders: BTreeSet<_> = support_state
             .institutions
             .values()
-            .find(|institution| {
-                institution
-                    .office_holder_id
-                    .is_none_or(|holder_id| !player_character_ids.contains(&holder_id))
+            .filter_map(|institution| institution.office_holder_id)
+            .collect();
+        let support_character_id = support_state
+            .characters
+            .iter()
+            .find(|character| {
+                character.dynasty_id() == support_state.player_dynasty_id
+                    && !player_officeholders.contains(&character.id())
             })
-            .expect("fixture must contain an institution without a player officeholder")
-            .institution_id;
-        support_state
-            .institutions
-            .get_mut(&support_institution_id)
-            .expect("support institution must exist")
-            .members
-            .retain(|character_id| !player_character_ids.contains(character_id));
-        let subject_prefix = format!("institution:{support_institution_id}:");
+            .expect("fixture must contain a player character without an office")
+            .id();
+        for institution in support_state.institutions.values_mut() {
+            institution.members.remove(&support_character_id);
+        }
+        let subject_suffix = format!(":character:{support_character_id}");
         support_state.audit_log.retain(|record| {
             record.kind() != AuditKind::InstitutionPatronage
-                || !record.subject().starts_with(&subject_prefix)
+                || !record.subject().ends_with(&subject_suffix)
         });
         kinds.extend(candidate_kinds_for_test(registry, &support_state));
 
@@ -600,6 +613,71 @@ mod candidates {
                 .owner_dynasty_id,
             Some(player_id),
             "liquidation must transfer ownership"
+        );
+    }
+
+    #[test]
+    fn asset_rich_cash_poor_dynasty_is_offered_property_liquidation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100);
+        let additional_property = state
+            .properties
+            .values_mut()
+            .find(|property| {
+                property.owner_dynasty_id.is_none() && property.collateral_loan_id.is_none()
+            })
+            .expect("fixture must contain an unowned property");
+        additional_property.owner_dynasty_id = Some(player_id);
+        for business in state
+            .businesses
+            .iter_mut()
+            .filter(|business| business.owner_dynasty_id() == player_id)
+        {
+            business.operations.status = BusinessStatus::Active;
+            business.operations.condition_basis_points = 9_000;
+            business.finance.cash = Money::from_copper(20_000);
+        }
+        for dynasty in state
+            .dynasties
+            .values_mut()
+            .filter(|dynasty| dynasty.id() != player_id)
+        {
+            dynasty.resources.treasury = Money::from_copper(1_000_000);
+        }
+
+        assert!(
+            has_property_liquidation_opportunity(registry, &state),
+            "healthy assets must still provide emergency liquidity when treasury cash is exhausted"
+        );
+        let mut candidates = Vec::new();
+        generate_finance_candidates(registry, &state, GameplayPersona::Steward, &mut candidates);
+        let candidate = candidates
+            .into_iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::SellProperty)
+            .expect("cash-poor asset owners must receive an executable liquidation route");
+        let treasury_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        apply_player_command(registry, &mut state, candidate.command)
+            .expect("generated emergency liquidation must be executable");
+
+        assert!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .treasury()
+                > treasury_before
         );
     }
 
@@ -1886,14 +1964,38 @@ mod metrics {
     #[test]
     fn substantive_action_gaps_include_quiet_and_housekeeping_cycles() {
         let mut accumulator = CampaignAccumulator::new();
+        let snapshot = GameplaySnapshot::capture(&make_test_campaign());
 
-        accumulator.record_action_gap(None, 180);
-        accumulator.record_action_gap(Some(GameplayCommandKind::AcknowledgeNotification), 180);
+        accumulator.record_action_gap(None, 180, &snapshot);
+        accumulator.record_action_gap(
+            Some(GameplayCommandKind::AcknowledgeNotification),
+            180,
+            &snapshot,
+        );
 
         assert_eq!(accumulator.longest_substantive_action_gap_days, 360);
-        accumulator.record_action_gap(Some(GameplayCommandKind::EnactLaw), 30);
+        accumulator.record_action_gap(Some(GameplayCommandKind::EnactLaw), 30, &snapshot);
         assert_eq!(accumulator.current_substantive_action_gap_days, 0);
         assert_eq!(accumulator.longest_substantive_action_gap_days, 360);
+    }
+
+    #[test]
+    fn asset_rich_liquidity_gaps_require_temporal_overlap() {
+        let mut accumulator = CampaignAccumulator::new();
+        let mut snapshot = GameplaySnapshot::capture(&make_test_campaign());
+        snapshot.player_treasury = Money::from_copper(100);
+        snapshot.player_properties = 2;
+        snapshot.player_business_cash = Money::from_copper(20_000);
+        snapshot.active_businesses = 1;
+
+        accumulator.record_action_gap(None, 180, &snapshot);
+        accumulator.record_action_gap(None, 180, &snapshot);
+
+        assert_eq!(accumulator.longest_asset_rich_quiet_gap_days, 360);
+        snapshot.player_treasury = Money::from_copper(10_000);
+        accumulator.record_action_gap(None, 30, &snapshot);
+        assert_eq!(accumulator.current_asset_rich_quiet_gap_days, 0);
+        assert_eq!(accumulator.longest_asset_rich_quiet_gap_days, 360);
     }
 
     #[test]
@@ -2217,6 +2319,80 @@ mod findings {
         finding_with_title(
             &findings,
             "Long stretches pass without a substantive player decision",
+        );
+    }
+
+    #[test]
+    fn findings_surface_asset_rich_liquidity_droughts() {
+        let mut report = cached_focused_report(30);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.longest_asset_rich_quiet_gap_days = 360;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(&findings, "Asset-rich dynasties can become decision-poor");
+    }
+
+    #[test]
+    fn phase_findings_surface_quiet_establishment_and_governance() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.phase_stats.insert(
+            GameplayPhase::Establishment,
+            GameplayPhaseStats {
+                decision_cycles: 100,
+                substantive_actions: 55,
+                quiet_cycles: 45,
+                blocked_cycles: 0,
+                cycles_with_multiple_viable_command_kinds: 20,
+                total_viable_command_kinds: 80,
+            },
+        );
+        report.aggregate.phase_stats.insert(
+            GameplayPhase::DynasticGovernance,
+            GameplayPhaseStats {
+                decision_cycles: 100,
+                substantive_actions: 65,
+                quiet_cycles: 35,
+                blocked_cycles: 0,
+                cycles_with_multiple_viable_command_kinds: 29,
+                total_viable_command_kinds: 110,
+            },
+        );
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(&findings, "Establishment becomes a waiting phase");
+        finding_with_title(
+            &findings,
+            "Dynastic governance remains intermittent and strategically narrow",
+        );
+    }
+
+    #[test]
+    fn findings_surface_campaign_administration_dominance() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.substantive_actions = 100;
+        report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::CultivateInstitutionSupport)
+            .expect("support statistics must exist")
+            .executed = 20;
+        report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::NominateForOffice)
+            .expect("nomination statistics must exist")
+            .executed = 20;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Institutional campaigning dominates the decision loop",
         );
     }
 

@@ -70,7 +70,7 @@ fn grant_player_office_with_power_for_test(state: &mut AppState, power: OfficePo
     institution.next_selection_day = mature_next_selection_day;
 }
 
-fn grant_office_nomination_record_for_test(state: &mut AppState) {
+fn grant_commercial_standing_for_test(state: &mut AppState) {
     let player_business_ids: BTreeSet<_> = state
         .businesses
         .iter()
@@ -91,6 +91,16 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
     contract
         .fulfilled_deliveries_by_dynasty
         .insert(state.player_dynasty_id, deliveries);
+    state
+        .dynasties
+        .get_mut(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .resources
+        .reputation_reliability_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+}
+
+fn grant_office_nomination_record_for_test(state: &mut AppState) {
+    grant_commercial_standing_for_test(state);
     let support_day = state
         .clock
         .day()
@@ -1122,6 +1132,45 @@ mod business_acquisition {
     }
 
     #[test]
+    fn rejects_business_investment_when_finance_version_is_exhausted() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist")
+            .finance
+            .version = u64::MAX;
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::InvestInBusiness {
+                business_id,
+                amount: Money::from_copper(1),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Simulation(
+                crate::systems::SimulationError::BusinessFinanceVersionExhausted { business_id }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "exhausted finance versions must fail before debiting dynasty treasury",
+        );
+    }
+
+    #[test]
     fn rejects_nonpositive_business_investment_without_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -1613,6 +1662,68 @@ mod politics {
         capabilities.commerce = 0;
         capabilities.social = 0;
         capabilities.craft = 0;
+    }
+
+    fn resolved_failed_nomination_fixture(
+        registry: &Registry,
+    ) -> (AppState, CharacterId, InstitutionId, usize) {
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        grant_office_nomination_record_for_test(&mut state);
+        make_nominee_deliberately_weak(&mut state, institution_id, character_id);
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("first nomination must add the heir as a member");
+        let member_count = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist")
+            .members
+            .len();
+        advance_days(
+            registry,
+            &mut state,
+            u32::try_from(OFFICE_NOMINATION_INTERVAL_DAYS)
+                .expect("office nomination interval must fit the simulation day command"),
+        )
+        .expect("campaign must advance through the nomination cooldown");
+        assert_ne!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .office_holder_id,
+            Some(character_id),
+            "the deliberately weak nominee must lose the first contest"
+        );
+        let player = state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        player.resources.reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        player.resources.treasury = Money::from_copper(10_000);
+        (state, character_id, institution_id, member_count)
     }
 
     fn make_patronage_fixture() -> (
@@ -2304,7 +2415,7 @@ mod politics {
     }
 
     #[test]
-    fn office_nomination_has_a_dynasty_wide_cooldown() {
+    fn office_nomination_cooldown_follows_the_character_across_institutions() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let character_id = state
@@ -2359,65 +2470,239 @@ mod politics {
         assert_state_unchanged(
             &before,
             &state,
-            "a rapid second campaign must not spend money or alter membership",
+            "the same character must not launch overlapping office campaigns",
         );
     }
 
     #[test]
-    fn existing_institution_member_can_campaign_again_after_the_cooldown() {
+    fn different_family_members_can_campaign_in_parallel() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
+        grant_office_nomination_record_for_test(&mut state);
         let dynasty = state
             .dynasties
             .get(&state.player_dynasty_id)
             .expect("player dynasty must exist");
-        let character_id = dynasty.heir_id().expect("player dynasty must have an heir");
-        let institution_id = *state
-            .institutions
-            .keys()
-            .next()
-            .expect("campaign must contain an institution");
+        let first_character_id = dynasty.head_id();
+        let second_character_id = dynasty.heir_id().expect("player dynasty must have an heir");
+        let institution_ids: Vec<_> = state.institutions.keys().copied().take(2).collect();
+        let [first_institution_id, second_institution_id] = institution_ids.as_slice() else {
+            panic!("fixture must contain two institutions: {institution_ids:?}");
+        };
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id: *first_institution_id,
+                character_id: first_character_id,
+            },
+        )
+        .expect("the first family campaign must succeed");
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id: *second_institution_id,
+                character_id: second_character_id,
+            },
+        )
+        .expect("another family member must be able to campaign in parallel");
+
+        assert_eq!(
+            state
+                .audit_log
+                .iter()
+                .filter(|record| record.kind() == AuditKind::OfficeNomination)
+                .count(),
+            2,
+            "parallel campaigns must leave separate durable records",
+        );
+    }
+
+    #[test]
+    fn institution_support_cooldown_is_per_character() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_commercial_standing_for_test(&mut state);
         state
             .dynasties
             .get_mut(&state.player_dynasty_id)
             .expect("player dynasty must exist")
             .resources
-            .reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
-        grant_office_nomination_record_for_test(&mut state);
-        make_nominee_deliberately_weak(&mut state, institution_id, character_id);
+            .treasury = Money::from_copper(20_000);
+        let dynasty = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        let first_character_id = dynasty.head_id();
+        let second_character_id = dynasty.heir_id().expect("player dynasty must have an heir");
+        let institution_ids: Vec<_> = state.institutions.keys().copied().take(3).collect();
+        let [
+            first_institution_id,
+            second_institution_id,
+            third_institution_id,
+        ] = institution_ids.as_slice()
+        else {
+            panic!("fixture must contain three institutions: {institution_ids:?}");
+        };
 
         apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id: *first_institution_id,
+                character_id: first_character_id,
+            },
+        )
+        .expect("the first character must cultivate support");
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id: *second_institution_id,
+                character_id: second_character_id,
+            },
+        )
+        .expect("another character must cultivate support without waiting a year");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id: *third_institution_id,
+                character_id: first_character_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InstitutionSupportCooldown {
+                next_support_day: INSTITUTION_SUPPORT_INTERVAL_DAYS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "one character's support campaign must retain its own cooldown",
+        );
+    }
+
+    #[test]
+    fn character_institutional_portfolio_is_bounded() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_commercial_standing_for_test(&mut state);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(20_000);
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let institution_ids: Vec<_> = state.institutions.keys().copied().take(3).collect();
+        let [
+            first_institution_id,
+            second_institution_id,
+            third_institution_id,
+        ] = institution_ids.as_slice()
+        else {
+            panic!("fixture must contain three institutions: {institution_ids:?}");
+        };
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id: *first_institution_id,
+                character_id,
+            },
+        )
+        .expect("first institutional affiliation must succeed");
+        advance_days(
+            registry,
+            &mut state,
+            u32::try_from(INSTITUTION_SUPPORT_INTERVAL_DAYS)
+                .expect("support interval must fit day command"),
+        )
+        .expect("campaign must advance through the support cooldown");
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id: *second_institution_id,
+                character_id,
+            },
+        )
+        .expect("second institutional affiliation must succeed");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id: *third_institution_id,
+                character_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InstitutionMembershipCapacity {
+                character_id,
+                current: MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
+                maximum: MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a character at institutional capacity must not spend treasury or alter membership",
+        );
+    }
+
+    #[test]
+    fn failed_candidate_can_campaign_again_after_the_recovery_period() {
+        let registry = rivergate_registry_for_test();
+        let (mut state, character_id, institution_id, member_count) =
+            resolved_failed_nomination_fixture(registry);
+        let before_recovery = state.clone();
+
+        let result = apply_player_command(
             registry,
             &mut state,
             PlayerCommand::NominateForOffice {
                 institution_id,
                 character_id,
             },
-        )
-        .expect("first nomination must add the heir as a member");
-        let member_count = state
-            .institutions
-            .get(&institution_id)
-            .expect("institution must exist")
-            .members
-            .len();
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::OfficeNominationCooldown {
+                next_nomination_day: OFFICE_NOMINATION_RECOVERY_DAYS,
+            })
+        );
+        assert_state_unchanged(
+            &before_recovery,
+            &state,
+            "a resolved failed campaign must require a longer recovery before renomination",
+        );
 
         advance_days(
             registry,
             &mut state,
-            u32::try_from(OFFICE_NOMINATION_INTERVAL_DAYS)
-                .expect("office nomination interval must fit the simulation day command"),
+            u32::try_from(
+                OFFICE_NOMINATION_RECOVERY_DAYS.saturating_sub(OFFICE_NOMINATION_INTERVAL_DAYS),
+            )
+            .expect("remaining nomination recovery must fit the simulation day command"),
         )
-        .expect("campaign must advance through the nomination cooldown");
-        assert_ne!(
-            state
-                .institutions
-                .get(&institution_id)
-                .expect("institution must exist")
-                .office_holder_id,
-            Some(character_id),
-            "the deliberately weak nominee must lose the first contest"
-        );
+        .expect("campaign must advance through the remaining nomination recovery");
         let player = state
             .dynasties
             .get_mut(&state.player_dynasty_id)
@@ -2434,7 +2719,7 @@ mod politics {
                 character_id,
             },
         )
-        .expect("an existing member must be allowed to fund a later campaign");
+        .expect("an existing member must be allowed to fund a later campaign after recovery");
 
         assert_eq!(
             state
@@ -3338,6 +3623,46 @@ mod labor {
             &before,
             &state,
             "overflowing wage negotiations must fail before charging the business or changing employment",
+        );
+    }
+
+    #[test]
+    fn condition_investment_rejects_lifetime_cost_overflow_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (employment_id, business_id) = disputed_player_employment(&mut state);
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("employment business must exist");
+        business.finance.cash = Money::from_copper(2_000);
+        business.finance.lifetime_costs = Money::from_copper(i64::MAX);
+        let before = state.clone();
+        let incoming = Money::from_copper(1_000);
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::ResolveLaborDispute {
+                employment_id,
+                response: LaborResponse::ImproveConditions,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Simulation(
+                crate::systems::SimulationError::BusinessLifetimeCostsOverflow {
+                    business_id,
+                    current: Money::from_copper(i64::MAX),
+                    incoming,
+                }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing lifetime costs must fail before cash or employment mutation",
         );
     }
 

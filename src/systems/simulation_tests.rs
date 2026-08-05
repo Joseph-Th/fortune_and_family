@@ -64,6 +64,126 @@ mod preflight {
             "preflight failure must leave the entire campaign unchanged",
         );
     }
+
+    #[test]
+    fn exhausted_business_finance_version_fails_before_day_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("business must exist")
+            .finance
+            .version = u64::MAX;
+        let before = state.clone();
+
+        let result = advance_days(registry, &mut state, 1);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::BusinessFinanceVersionExhausted { business_id })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "finance-version exhaustion must fail before any daily system mutates state",
+        );
+    }
+
+    #[test]
+    fn automatic_cost_overflow_leaves_the_requested_advance_uncommitted() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("business must exist")
+            .finance
+            .lifetime_costs = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = advance_days(registry, &mut state, 1);
+
+        assert!(
+            matches!(
+                result,
+                Err(SimulationError::BusinessLifetimeCostsOverflow {
+                    business_id: failed_business_id,
+                    ..
+                }) if failed_business_id == business_id
+            ),
+            "automatic accounting overflow must return a typed error, received {result:?}"
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a failed automatic finance mutation must not commit any part of the day",
+        );
+    }
+
+    #[test]
+    fn automatic_revenue_overflow_is_rejected_before_inventory_or_cash_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let good_id = registry
+            .goods()
+            .first()
+            .expect("registry must contain a good")
+            .id();
+        let quantity = Quantity::from_units(1);
+        let revenue = Money::from_copper(1);
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("business must exist");
+        business.add_inventory(good_id, quantity);
+        business.finance.lifetime_revenue = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = apply_business_sales(
+            &mut state,
+            BusinessSalePlan {
+                lines: vec![BusinessSaleLine {
+                    business_id,
+                    good_id,
+                    quantity,
+                    revenue,
+                }],
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(SimulationError::BusinessLifetimeRevenueOverflow {
+                business_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: revenue,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "revenue overflow must fail before inventory, cash, market, or audit mutation",
+        );
+    }
 }
 
 mod transfer_boundaries {
@@ -315,7 +435,7 @@ mod inventory_policy {
             .stock = Quantity::ZERO;
 
         let plan = decide_business_sales(registry, &state).expect("sale plan must resolve");
-        apply_business_sales(&mut state, plan);
+        apply_business_sales(&mut state, plan).expect("business sales must apply");
 
         let business = state
             .businesses
@@ -534,7 +654,7 @@ mod inventory_policy {
             .stock = Quantity::ZERO;
 
         let plan = decide_business_sales(registry, &state).expect("sale plan must resolve");
-        apply_business_sales(&mut state, plan);
+        apply_business_sales(&mut state, plan).expect("business sales must apply");
 
         assert!(
             state
@@ -609,7 +729,7 @@ mod inventory_policy {
             .stock = Quantity::ZERO;
 
         let plan = decide_business_sales(registry, &state).expect("sale plan must resolve");
-        apply_business_sales(&mut state, plan);
+        apply_business_sales(&mut state, plan).expect("business sales must apply");
 
         let seller = state.businesses.get(seller_id).expect("seller must exist");
         assert!(
@@ -1265,7 +1385,7 @@ mod maintenance_policy {
         }
 
         let plan = decide_maintenance(registry, &mut state);
-        apply_maintenance(&mut state, plan);
+        apply_maintenance(&mut state, plan).expect("maintenance plan must apply");
 
         assert!(
             state
@@ -1306,7 +1426,7 @@ mod maintenance_policy {
         };
 
         let plan = decide_maintenance(registry, &mut state);
-        apply_maintenance(&mut state, plan);
+        apply_maintenance(&mut state, plan).expect("maintenance plan must apply");
 
         let business = state
             .businesses
@@ -1383,7 +1503,7 @@ mod maintenance_policy {
 
         for _ in 0..360 {
             let plan = decide_maintenance(registry, &mut state);
-            apply_maintenance(&mut state, plan);
+            apply_maintenance(&mut state, plan).expect("maintenance plan must apply");
         }
 
         assert!(
@@ -1423,7 +1543,7 @@ mod maintenance_policy {
 
         for _ in 0..360 {
             let plan = decide_maintenance(registry, &mut state);
-            apply_maintenance(&mut state, plan);
+            apply_maintenance(&mut state, plan).expect("maintenance plan must apply");
         }
 
         let business = state

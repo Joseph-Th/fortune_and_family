@@ -1,6 +1,7 @@
 //! Deterministic daily simulation pipeline; each phase decides before it applies.
 
 use super::SimulationError;
+use super::transactions::next_business_finance_version;
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
     CharacterCapabilities, CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus,
@@ -94,7 +95,8 @@ struct SuccessionLine {
 /// # Errors
 ///
 /// Returns an error for a zero day count, an exhausted day range, a registry mismatch, or missing
-/// market definitions.
+/// market definitions, and when a business finance ledger cannot represent a required mutation.
+/// The campaign is unchanged when any requested day fails.
 pub fn advance_days(
     registry: &Registry,
     state: &mut AppState,
@@ -117,10 +119,12 @@ pub fn advance_days(
     }
     validate_market_quotes(registry, state)?;
 
+    let mut next_state = state.clone();
     for _ in 0..days {
-        run_one_day(registry, state)?;
-        super::validate_invariants(registry, state);
+        run_one_day(registry, &mut next_state)?;
+        super::validate_invariants(registry, &next_state);
     }
+    *state = next_state;
 
     Ok(())
 }
@@ -136,22 +140,22 @@ fn validate_market_quotes(registry: &Registry, state: &AppState) -> Result<(), S
 
 fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     reset_market_flows(state);
-    super::strategic::run_daily_strategic_systems(registry, state);
+    super::strategic::run_daily_strategic_systems(registry, state)?;
 
     let purchase_plan = decide_business_purchases(registry, state)?;
-    apply_business_purchases(state, purchase_plan);
+    apply_business_purchases(state, purchase_plan)?;
 
     let production_plan = decide_production(registry, state);
-    apply_production(state, production_plan);
+    apply_production(state, production_plan)?;
 
     let sale_plan = decide_business_sales(registry, state)?;
-    apply_business_sales(state, sale_plan);
+    apply_business_sales(state, sale_plan)?;
 
     let household_plan = decide_household_consumption(registry, state)?;
     apply_household_consumption(state, household_plan);
 
     let maintenance_plan = decide_maintenance(registry, state);
-    apply_maintenance(state, maintenance_plan);
+    apply_maintenance(state, maintenance_plan)?;
 
     apply_market_spoilage(registry, state);
     update_market_prices(registry, state);
@@ -161,10 +165,10 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
     state.clock.advance_one_day();
     if state.clock.is_week_boundary() {
         settle_weekly_external_income(state);
-        super::strategic::run_weekly_strategic_systems(registry, state);
+        super::strategic::run_weekly_strategic_systems(registry, state)?;
     }
     if state.clock.day() > 0 && state.clock.day() % 30 == 0 {
-        super::strategic::run_monthly_strategic_systems(registry, state);
+        super::strategic::run_monthly_strategic_systems(registry, state)?;
     }
     if state.clock.is_year_boundary() {
         process_year_boundary(registry, state);
@@ -259,7 +263,10 @@ fn decide_business_purchases(
     Ok(BusinessPurchasePlan { lines })
 }
 
-fn apply_business_purchases(state: &mut AppState, plan: BusinessPurchasePlan) {
+fn apply_business_purchases(
+    state: &mut AppState,
+    plan: BusinessPurchasePlan,
+) -> Result<(), SimulationError> {
     let mut total_cost = Money::ZERO;
     let mut total_quantity = Quantity::ZERO;
     for line in plan.lines {
@@ -274,9 +281,23 @@ fn apply_business_purchases(state: &mut AppState, plan: BusinessPurchasePlan) {
                 .businesses
                 .get_mut(business_id)
                 .expect("planned business purchase target must exist");
-            business.finance.cash = business.finance.cash.saturating_sub(cost);
-            business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(cost);
-            business.finance.version = business.finance.version.saturating_add(1);
+            let resulting_cash = business
+                .finance
+                .cash
+                .checked_sub(cost)
+                .expect("planned business purchase must fit available cash");
+            let resulting_lifetime_costs =
+                business.finance.lifetime_costs.checked_add(cost).ok_or(
+                    SimulationError::BusinessLifetimeCostsOverflow {
+                        business_id,
+                        current: business.finance.lifetime_costs,
+                        incoming: cost,
+                    },
+                )?;
+            let next_finance_version = next_business_finance_version(business)?;
+            business.finance.cash = resulting_cash;
+            business.finance.lifetime_costs = resulting_lifetime_costs;
+            business.finance.version = next_finance_version;
             business.add_inventory(good_id, quantity);
         }
         {
@@ -304,6 +325,7 @@ fn apply_business_purchases(state: &mut AppState, plan: BusinessPurchasePlan) {
             ),
         });
     }
+    Ok(())
 }
 
 fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
@@ -511,7 +533,7 @@ const fn governance_administrative_multiplier(governance: HouseGovernance) -> u3
     }
 }
 
-fn apply_production(state: &mut AppState, plan: ProductionPlan) {
+fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), SimulationError> {
     let mut total_output = Quantity::ZERO;
     let mut total_operating_cost = Money::ZERO;
 
@@ -527,16 +549,28 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) {
             .businesses
             .get_mut(business_id)
             .expect("planned production business must exist");
+        let resulting_cash = business
+            .finance
+            .cash
+            .checked_sub(operating_cost)
+            .expect("planned production must fit available cash");
+        let resulting_lifetime_costs = business
+            .finance
+            .lifetime_costs
+            .checked_add(operating_cost)
+            .ok_or(SimulationError::BusinessLifetimeCostsOverflow {
+                business_id,
+                current: business.finance.lifetime_costs,
+                incoming: operating_cost,
+            })?;
+        let next_finance_version = next_business_finance_version(business)?;
         for (good_id, quantity) in inputs {
             business.remove_inventory(good_id, quantity);
         }
         business.add_inventory(output_good_id, output_quantity);
-        business.finance.cash = business.finance.cash.saturating_sub(operating_cost);
-        business.finance.lifetime_costs = business
-            .finance
-            .lifetime_costs
-            .saturating_add(operating_cost);
-        business.finance.version = business.finance.version.saturating_add(1);
+        business.finance.cash = resulting_cash;
+        business.finance.lifetime_costs = resulting_lifetime_costs;
+        business.finance.version = next_finance_version;
         total_output = total_output.saturating_add(output_quantity);
         total_operating_cost = total_operating_cost.saturating_add(operating_cost);
     }
@@ -553,6 +587,7 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) {
             ),
         });
     }
+    Ok(())
 }
 
 fn decide_business_sales(
@@ -655,7 +690,10 @@ fn decide_business_sales(
     Ok(BusinessSalePlan { lines })
 }
 
-fn apply_business_sales(state: &mut AppState, plan: BusinessSalePlan) {
+fn apply_business_sales(
+    state: &mut AppState,
+    plan: BusinessSalePlan,
+) -> Result<(), SimulationError> {
     let mut total_revenue = Money::ZERO;
     let mut total_quantity = Quantity::ZERO;
     for line in plan.lines {
@@ -670,15 +708,25 @@ fn apply_business_sales(state: &mut AppState, plan: BusinessSalePlan) {
                 .businesses
                 .get_mut(business_id)
                 .expect("planned business sale source must exist");
-            business.remove_inventory(good_id, quantity);
-            business.finance.cash = business
+            let resulting_cash = business
                 .finance
                 .cash
                 .checked_add(revenue)
                 .expect("planned sale revenue must fit business cash");
-            business.finance.lifetime_revenue =
-                business.finance.lifetime_revenue.saturating_add(revenue);
-            business.finance.version = business.finance.version.saturating_add(1);
+            let resulting_lifetime_revenue = business
+                .finance
+                .lifetime_revenue
+                .checked_add(revenue)
+                .ok_or(SimulationError::BusinessLifetimeRevenueOverflow {
+                    business_id,
+                    current: business.finance.lifetime_revenue,
+                    incoming: revenue,
+                })?;
+            let next_finance_version = next_business_finance_version(business)?;
+            business.remove_inventory(good_id, quantity);
+            business.finance.cash = resulting_cash;
+            business.finance.lifetime_revenue = resulting_lifetime_revenue;
+            business.finance.version = next_finance_version;
         }
         {
             let quote = state
@@ -705,6 +753,7 @@ fn apply_business_sales(state: &mut AppState, plan: BusinessSalePlan) {
             ),
         });
     }
+    Ok(())
 }
 
 fn decide_household_consumption(
@@ -1004,7 +1053,7 @@ fn maintenance_effect(maintenance_basis_points: u16, condition_basis_points: u16
     i16::try_from(scaled.saturating_add(catch_up)).expect("bounded maintenance effect must fit i16")
 }
 
-fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) {
+fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), SimulationError> {
     let mut total_cost = Money::ZERO;
     for line in plan.lines {
         let MaintenanceLine {
@@ -1018,9 +1067,23 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) {
             .get_mut(business_id)
             .expect("planned maintenance business must exist");
         if cost > Money::ZERO {
-            business.finance.cash = business.finance.cash.saturating_sub(cost);
-            business.finance.lifetime_costs = business.finance.lifetime_costs.saturating_add(cost);
-            business.finance.version = business.finance.version.saturating_add(1);
+            let resulting_cash = business
+                .finance
+                .cash
+                .checked_sub(cost)
+                .expect("planned maintenance must fit available cash");
+            let resulting_lifetime_costs =
+                business.finance.lifetime_costs.checked_add(cost).ok_or(
+                    SimulationError::BusinessLifetimeCostsOverflow {
+                        business_id,
+                        current: business.finance.lifetime_costs,
+                        incoming: cost,
+                    },
+                )?;
+            let next_finance_version = next_business_finance_version(business)?;
+            business.finance.cash = resulting_cash;
+            business.finance.lifetime_costs = resulting_lifetime_costs;
+            business.finance.version = next_finance_version;
         }
         let condition = i32::from(business.operations.condition_basis_points)
             .saturating_add(i32::from(condition_delta))
@@ -1042,6 +1105,7 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) {
             detail: format!("cost={}", total_cost.copper()),
         });
     }
+    Ok(())
 }
 
 fn apply_market_spoilage(registry: &Registry, state: &mut AppState) {

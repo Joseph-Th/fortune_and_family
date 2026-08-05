@@ -22,9 +22,11 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
-        run: cargo check --all-targets --locked
+        run: cargo check --all-targets --all-features --locked
       - name: Fast tests
         run: bash scripts/test.sh fast
+      - name: Documentation consistency
+        run: python3 scripts/check_docs.py
       - name: Documentation tests
         run: cargo test --quiet --locked --doc
       - name: Soak tests
@@ -37,3 +39,11 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --locked
+      - name: Release tests
+        run: cargo test --release --quiet --locked --lib
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Dependency audit
+        run: cargo audit
+      - name: Whitespace errors
+        run: git diff-tree --check --no-commit-id --root -r HEAD

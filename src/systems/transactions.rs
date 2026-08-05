@@ -1,6 +1,6 @@
 //! Validated multi-record transactions and shared simulation errors.
 
-use crate::core::{AppState, AuditKind, AuditRecord, BusinessStatus};
+use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};
 use crate::ids::{BusinessId, GoodId};
 use crate::money::Money;
 use thiserror::Error;
@@ -43,8 +43,42 @@ pub enum SimulationError {
         current: Money,
         incoming: Money,
     },
+    #[error(
+        "business {business_id} cannot record cost {incoming}; lifetime costs {current} would exceed the supported money range"
+    )]
+    BusinessLifetimeCostsOverflow {
+        business_id: BusinessId,
+        current: Money,
+        incoming: Money,
+    },
+    #[error(
+        "business {business_id} cannot record revenue {incoming}; lifetime revenue {current} would exceed the supported money range"
+    )]
+    BusinessLifetimeRevenueOverflow {
+        business_id: BusinessId,
+        current: Money,
+        incoming: Money,
+    },
+    #[error(
+        "business {business_id} finance changed after validation: expected version {expected_version}, found {actual_version}"
+    )]
+    StaleBusinessFinance {
+        business_id: BusinessId,
+        expected_version: u64,
+        actual_version: u64,
+    },
+    #[error("business {business_id} finance version is exhausted")]
+    BusinessFinanceVersionExhausted { business_id: BusinessId },
     #[error("market quote is missing for good {good_id}")]
     MarketQuoteMissing { good_id: GoodId },
+}
+
+pub(crate) fn next_business_finance_version(business: &Business) -> Result<u64, SimulationError> {
+    business.finance.version.checked_add(1).ok_or(
+        SimulationError::BusinessFinanceVersionExhausted {
+            business_id: business.id(),
+        },
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -52,6 +86,8 @@ pub struct ValidatedCashTransfer {
     from_business_id: BusinessId,
     to_business_id: BusinessId,
     amount: Money,
+    from_finance_version: u64,
+    to_finance_version: u64,
 }
 
 impl ValidatedCashTransfer {
@@ -71,8 +107,25 @@ impl ValidatedCashTransfer {
             from_business_id,
             to_business_id,
             amount,
+            from_finance_version,
+            to_finance_version,
         } = self;
-        validate_business_cash_transfer(state, from_business_id, to_business_id, amount)?;
+        let current =
+            validate_business_cash_transfer(state, from_business_id, to_business_id, amount)?;
+        if current.from_finance_version != from_finance_version {
+            return Err(SimulationError::StaleBusinessFinance {
+                business_id: from_business_id,
+                expected_version: from_finance_version,
+                actual_version: current.from_finance_version,
+            });
+        }
+        if current.to_finance_version != to_finance_version {
+            return Err(SimulationError::StaleBusinessFinance {
+                business_id: to_business_id,
+                expected_version: to_finance_version,
+                actual_version: current.to_finance_version,
+            });
+        }
 
         {
             let source = state
@@ -84,7 +137,11 @@ impl ValidatedCashTransfer {
                 .cash
                 .checked_sub(amount)
                 .expect("revalidated transfer source must cover the amount");
-            source.finance.version = source.finance.version.saturating_add(1);
+            source.finance.version = source
+                .finance
+                .version
+                .checked_add(1)
+                .expect("revalidated transfer source finance version must have headroom");
         }
         {
             let target = state
@@ -96,7 +153,11 @@ impl ValidatedCashTransfer {
                 .cash
                 .checked_add(amount)
                 .expect("revalidated transfer target cash must fit the supported range");
-            target.finance.version = target.finance.version.saturating_add(1);
+            target.finance.version = target
+                .finance
+                .version
+                .checked_add(1)
+                .expect("revalidated transfer target finance version must have headroom");
         }
 
         state.audit_log.push(AuditRecord {
@@ -183,11 +244,23 @@ pub fn validate_business_cash_transfer(
             incoming: amount,
         });
     }
+    if source.finance.version == u64::MAX {
+        return Err(SimulationError::BusinessFinanceVersionExhausted {
+            business_id: from_business_id,
+        });
+    }
+    if target.finance.version == u64::MAX {
+        return Err(SimulationError::BusinessFinanceVersionExhausted {
+            business_id: to_business_id,
+        });
+    }
 
     Ok(ValidatedCashTransfer {
         from_business_id,
         to_business_id,
         amount,
+        from_finance_version: source.finance.version,
+        to_finance_version: target.finance.version,
     })
 }
 
@@ -267,6 +340,96 @@ mod tests {
             &before,
             &state,
             "stale validation tokens must fail before mutating either business",
+        );
+    }
+
+    #[test]
+    fn validated_transfer_rejects_stale_finance_even_when_balances_still_cover_it() {
+        let mut state = make_test_campaign();
+        let business_ids: Vec<_> = state
+            .businesses()
+            .iter()
+            .map(crate::core::Business::id)
+            .collect();
+        let [from_business_id, to_business_id, intervening_target_id, ..] = business_ids.as_slice()
+        else {
+            panic!("test campaign must contain at least three businesses: {business_ids:?}");
+        };
+        let from_business_id = *from_business_id;
+        let to_business_id = *to_business_id;
+        let intervening_target_id = *intervening_target_id;
+        let amount = Money::from_copper(1);
+        let token =
+            validate_business_cash_transfer(&state, from_business_id, to_business_id, amount)
+                .expect("initial transfer must validate");
+        let expected_version = state
+            .businesses()
+            .get(from_business_id)
+            .expect("source business must exist")
+            .finance
+            .version;
+        transfer_business_cash(&mut state, from_business_id, intervening_target_id, amount)
+            .expect("intervening transfer must succeed");
+        let actual_version = state
+            .businesses()
+            .get(from_business_id)
+            .expect("source business must exist")
+            .finance
+            .version;
+        let before = state.clone();
+
+        let result = token.commit(&mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::StaleBusinessFinance {
+                business_id: from_business_id,
+                expected_version,
+                actual_version,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "stale finance tokens must not apply after an intervening valid mutation",
+        );
+    }
+
+    #[test]
+    fn rejects_exhausted_finance_version_without_mutation() {
+        let mut state = make_test_campaign();
+        let (from_business_id, to_business_id) = {
+            let mut businesses = state.businesses().iter().map(crate::core::Business::id);
+            (
+                businesses.next().expect("source business must exist"),
+                businesses.next().expect("target business must exist"),
+            )
+        };
+        state
+            .businesses
+            .get_mut(from_business_id)
+            .expect("source business must exist")
+            .finance
+            .version = u64::MAX;
+        let before = state.clone();
+
+        let result = transfer_business_cash(
+            &mut state,
+            from_business_id,
+            to_business_id,
+            Money::from_copper(1),
+        );
+
+        assert_eq!(
+            result,
+            Err(SimulationError::BusinessFinanceVersionExhausted {
+                business_id: from_business_id,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "exhausted finance versions must be rejected before balance mutation",
         );
     }
 
