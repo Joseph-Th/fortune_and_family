@@ -36,6 +36,13 @@ const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StrategicError {
+    #[error(
+        "state scenario {state_scenario:?} does not match registry scenario {registry_scenario:?}"
+    )]
+    RegistryMismatch {
+        state_scenario: String,
+        registry_scenario: String,
+    },
     #[error("business {business_id} does not exist")]
     MissingBusiness { business_id: BusinessId },
     #[error("business {business_id} is not active")]
@@ -199,6 +206,16 @@ pub enum StrategicError {
     },
 }
 
+fn ensure_registry_matches(registry: &Registry, state: &AppState) -> Result<(), StrategicError> {
+    if state.scenario_key() != registry.scenario().key() {
+        return Err(StrategicError::RegistryMismatch {
+            state_scenario: state.scenario_key().to_owned(),
+            registry_scenario: registry.scenario().key().to_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupplyContractTerms {
     pub buyer_business_id: BusinessId,
@@ -296,15 +313,23 @@ impl ContractSettlementState {
             && self.seller.can_receive
     }
 
+    const fn buyer_is_at_fault(self) -> bool {
+        !self.buyer.can_perform || !self.buyer.can_receive
+    }
+
+    const fn seller_is_at_fault(self) -> bool {
+        !self.seller.can_perform || !self.seller.can_receive
+    }
+
     const fn has_attributable_nonperformance(self) -> bool {
-        !self.buyer.can_perform || !self.seller.can_perform
+        self.buyer_is_at_fault() || self.seller_is_at_fault()
     }
 
     const fn breaching_dynasty_id(self) -> Option<DynastyId> {
-        match (self.buyer.can_perform, self.seller.can_perform) {
-            (false, true) => Some(self.buyer.owner_id),
-            (true, false) => Some(self.seller.owner_id),
-            (false, false) | (true, true) => None,
+        match (self.buyer_is_at_fault(), self.seller_is_at_fault()) {
+            (true, false) => Some(self.buyer.owner_id),
+            (false, true) => Some(self.seller.owner_id),
+            (true, true) | (false, false) => None,
         }
     }
 }
@@ -593,6 +618,7 @@ fn validate_supply_contract_terms(
     state: &AppState,
     terms: &SupplyContractTerms,
 ) -> Result<(), StrategicError> {
+    ensure_registry_matches(registry, state)?;
     if terms.buyer_business_id == terms.seller_business_id {
         return Err(StrategicError::SameContractParty);
     }
@@ -987,6 +1013,7 @@ pub fn quote_property_liquidation(
     buyer_dynasty_id: DynastyId,
     property_id: PropertyId,
 ) -> Result<PropertyLiquidationQuote, StrategicError> {
+    ensure_registry_matches(registry, state)?;
     if seller_dynasty_id == buyer_dynasty_id {
         return Err(StrategicError::SamePropertyParty);
     }
@@ -1260,6 +1287,7 @@ pub fn quote_business_acquisition(
     buyer_dynasty_id: DynastyId,
     business_id: BusinessId,
 ) -> Result<BusinessAcquisitionQuote, StrategicError> {
+    ensure_registry_matches(registry, state)?;
     if !state.dynasties.contains_key(&buyer_dynasty_id) {
         return Err(StrategicError::MissingDynasty {
             dynasty_id: buyer_dynasty_id,
@@ -1648,28 +1676,6 @@ fn initialize_districts(registry: &Registry, state: &mut AppState) {
     }
 }
 
-fn powers_for(kind: InstitutionKind) -> BTreeSet<OfficePower> {
-    let values: &[OfficePower] = match kind {
-        InstitutionKind::CraftGuild => &[OfficePower::Licenses, OfficePower::Inspections],
-        InstitutionKind::MerchantGuild => &[OfficePower::CityContracts, OfficePower::MarketTolls],
-        InstitutionKind::Council => &[
-            OfficePower::Taxation,
-            OfficePower::PublicWorks,
-            OfficePower::CityContracts,
-        ],
-        InstitutionKind::Court => &[OfficePower::DebtEnforcement],
-        InstitutionKind::Watch => &[OfficePower::WatchPriorities],
-        InstitutionKind::Treasury => &[OfficePower::Taxation, OfficePower::CityContracts],
-        InstitutionKind::Charity => &[OfficePower::EmergencyImports],
-        InstitutionKind::MarketOffice => &[
-            OfficePower::Inspections,
-            OfficePower::MarketTolls,
-            OfficePower::EmergencyImports,
-        ],
-    };
-    values.iter().copied().collect()
-}
-
 fn initialize_institutions(registry: &Registry, state: &mut AppState) {
     for definition in registry.institutions() {
         let mut members = BTreeSet::new();
@@ -1693,7 +1699,7 @@ fn initialize_institutions(registry: &Registry, state: &mut AppState) {
                 institution_id: definition.id(),
                 members,
                 office_holder_id,
-                powers: powers_for(definition.kind()),
+                powers: super::institution_powers_for(definition.kind()),
                 budget: Money::from_copper(120_000),
                 legitimacy_basis_points: 7_000,
                 term_started_day: 0,
@@ -2286,7 +2292,10 @@ fn apply_crisis_daily_effects(
                     && let Some(treasury) = state.institutions.get_mut(&treasury_id)
                 {
                     let levy = Money::from_copper(i64::from(severity) / 20).min(treasury.budget);
-                    treasury.budget = treasury.budget.saturating_sub(levy);
+                    treasury.budget = treasury
+                        .budget
+                        .checked_sub(levy)
+                        .expect("bounded noble levy must not exceed civic treasury");
                 }
                 if let Some(district_id) = district_id
                     && let Some(district) = state.districts.get_mut(&district_id)
@@ -2606,9 +2615,12 @@ fn settle_failed_contract(
     due: DueContract,
     settlement: ContractSettlementState,
 ) -> Result<(), SimulationError> {
-    let penalty_parties = match (settlement.seller.can_perform, settlement.buyer.can_perform) {
-        (true, false) => Some((due.buyer_id, due.seller_id)),
-        (false, true) => Some((due.seller_id, due.buyer_id)),
+    let penalty_parties = match (
+        settlement.seller_is_at_fault(),
+        settlement.buyer_is_at_fault(),
+    ) {
+        (false, true) => Some((due.buyer_id, due.seller_id)),
+        (true, false) => Some((due.seller_id, due.buyer_id)),
         (false, false) | (true, true) => None,
     };
     if let Some((payer_id, recipient_id)) = penalty_parties {
@@ -2646,10 +2658,10 @@ fn settle_failed_contract(
     if settlement.has_attributable_nonperformance()
         && settlement.buyer.owner_id != settlement.seller.owner_id
     {
-        if !settlement.seller.can_perform {
+        if settlement.seller_is_at_fault() {
             adjust_reliability_reputation(state, settlement.seller.owner_id, -120);
         }
-        if !settlement.buyer.can_perform {
+        if settlement.buyer_is_at_fault() {
             adjust_reliability_reputation(state, settlement.buyer.owner_id, -120);
         }
         adjust_dynasty_relationship(
@@ -2888,7 +2900,10 @@ fn settle_successful_civic_debt_payment(
             .institutions
             .get_mut(&treasury_id)
             .expect("civic treasury must exist");
-        treasury.budget = treasury.budget.saturating_sub(payment);
+        treasury.budget = treasury
+            .budget
+            .checked_sub(payment)
+            .expect("validated civic debt payment must not exceed treasury budget");
     }
     {
         let creditor = state
@@ -2906,7 +2921,10 @@ fn settle_successful_civic_debt_payment(
             .civic_debts
             .get_mut(&due.id)
             .expect("civic debt must exist");
-        debt.balance = debt.balance.saturating_sub(payment);
+        debt.balance = debt
+            .balance
+            .checked_sub(payment)
+            .expect("validated civic debt payment must not exceed debt balance");
         debt.next_due_day = debt.next_due_day.saturating_add(7);
         debt.missed_payments = 0;
         if debt.balance == Money::ZERO {
@@ -3240,7 +3258,9 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
         .get_mut(&borrower_id)
         .expect("loan borrower must exist")
         .resources
-        .treasury = borrower_treasury.saturating_sub(payment);
+        .treasury = borrower_treasury
+        .checked_sub(payment)
+        .expect("validated loan payment must not exceed borrower treasury");
     let lender = state
         .dynasties
         .get_mut(&lender_id)
@@ -3252,7 +3272,10 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
         .expect("prevalidated loan payment must fit lender treasury");
     let repaid = {
         let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
-        loan.balance = loan.balance.saturating_sub(payment);
+        loan.balance = loan
+            .balance
+            .checked_sub(payment)
+            .expect("validated loan payment must not exceed loan balance");
         if loan.balance == Money::ZERO {
             loan.status = LoanStatus::Repaid;
             loan.missed_payments = 0;
@@ -3326,7 +3349,9 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
                 .get_mut(&tenant_id)
                 .expect("property tenant dynasty must exist")
                 .resources
-                .treasury = tenant_cash.saturating_sub(paid);
+                .treasury = tenant_cash
+                .checked_sub(paid)
+                .expect("bounded rent payment must not exceed tenant treasury");
             paid
         } else if occupant_business_id.is_none() {
             debit_market_clearing_account(state, receivable_rent)?;
@@ -3831,7 +3856,10 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) {
                 .institutions
                 .get_mut(&treasury_id)
                 .expect("civic treasury runtime must exist");
-            treasury.budget = treasury.budget.saturating_sub(weekly_spend);
+            treasury.budget = treasury
+                .budget
+                .checked_sub(weekly_spend)
+                .expect("bounded public-work spending must not exceed treasury budget");
         }
 
         let completion = {
@@ -3844,7 +3872,10 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) {
                 None
             } else {
                 work.status = PublicWorkStatus::Building;
-                work.spent = work.spent.saturating_add(weekly_spend);
+                work.spent = work
+                    .spent
+                    .checked_add(weekly_spend)
+                    .expect("bounded public-work spending must fit project total");
                 let progress = work
                     .spent
                     .saturating_mul_ratio(10_000, work.budget.copper())
@@ -4145,7 +4176,7 @@ pub(crate) fn run_monthly_strategic_systems(
 ) -> Result<(), SimulationError> {
     update_district_conditions(state);
     resolve_institution_selections(registry, state)?;
-    apply_office_duties(state);
+    apply_office_duties(state)?;
     apply_office_power_effects(registry, state)?;
     advance_ai_objectives(registry, state);
     update_information_reports(registry, state);
@@ -4175,7 +4206,7 @@ pub(crate) fn dynasty_office_administrative_load(state: &AppState, dynasty_id: D
         })
 }
 
-fn apply_office_duties(state: &mut AppState) {
+fn apply_office_duties(state: &mut AppState) -> Result<(), SimulationError> {
     let duties: Vec<_> = state
         .institutions
         .values()
@@ -4187,8 +4218,9 @@ fn apply_office_duties(state: &mut AppState) {
         })
         .collect();
     for (institution_id, dynasty_id, power_count) in duties {
-        apply_office_duty(state, institution_id, dynasty_id, power_count);
+        apply_office_duty(state, institution_id, dynasty_id, power_count)?;
     }
+    Ok(())
 }
 
 fn apply_office_duty(
@@ -4196,7 +4228,7 @@ fn apply_office_duty(
     institution_id: crate::ids::InstitutionId,
     dynasty_id: DynastyId,
     power_count: u16,
-) {
+) -> Result<(), SimulationError> {
     let required = OFFICE_DUTY_COST_PER_POWER.saturating_mul(i64::from(power_count));
     let institution_budget = state
         .institutions
@@ -4205,7 +4237,7 @@ fn apply_office_duty(
         .budget;
     let collectible = required.min(institution_budget.max_nonnegative_addend());
     if collectible == Money::ZERO {
-        return;
+        return Ok(());
     }
     let treasury = state
         .dynasties
@@ -4220,7 +4252,7 @@ fn apply_office_duty(
         institution_budget,
         treasury,
         paid,
-    );
+    )?;
     if paid < collectible {
         record_office_duty_shortfall(
             state,
@@ -4231,6 +4263,7 @@ fn apply_office_duty(
             collectible.saturating_sub(paid),
         );
     }
+    Ok(())
 }
 
 fn transfer_office_duty_payment(
@@ -4240,17 +4273,31 @@ fn transfer_office_duty_payment(
     institution_budget: Money,
     treasury: Money,
     paid: Money,
-) {
+) -> Result<(), SimulationError> {
     if paid == Money::ZERO {
-        return;
+        return Ok(());
     }
+    let current_contributions = state
+        .dynasties
+        .get(&dynasty_id)
+        .expect("officeholder dynasty must exist")
+        .resources
+        .civic_contributions;
+    let next_contributions = current_contributions.checked_add(paid).ok_or(
+        SimulationError::DynastyCivicContributionsOverflow {
+            dynasty_id,
+            current: current_contributions,
+            incoming: paid,
+        },
+    )?;
     let dynasty = state
         .dynasties
         .get_mut(&dynasty_id)
         .expect("officeholder dynasty must exist");
-    dynasty.resources.treasury = treasury.saturating_sub(paid);
-    dynasty.resources.civic_contributions =
-        dynasty.resources.civic_contributions.saturating_add(paid);
+    dynasty.resources.treasury = treasury
+        .checked_sub(paid)
+        .expect("validated office-duty payment must not exceed dynasty treasury");
+    dynasty.resources.civic_contributions = next_contributions;
     state
         .institutions
         .get_mut(&institution_id)
@@ -4258,6 +4305,7 @@ fn transfer_office_duty_payment(
         .budget = institution_budget
         .checked_add(paid)
         .expect("bounded civic duty contribution must fit institution budget");
+    Ok(())
 }
 
 fn record_office_duty_shortfall(
@@ -4603,7 +4651,9 @@ fn award_city_contract(
         .institutions
         .get_mut(&institution_id)
         .expect("city contract institution must exist")
-        .budget = institution_budget.saturating_sub(award);
+        .budget = institution_budget
+        .checked_sub(award)
+        .expect("bounded city-contract award must not exceed institution budget");
     let business = state
         .businesses
         .get_mut(business_id)
@@ -4887,13 +4937,22 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
             ),
             ObjectiveKind::ContainRival => advance_ai_rival_objective(state, dynasty_id),
         };
-        let terminal_status = match progress {
-            ObjectiveProgress::Achieved => Some(ObjectiveStatus::Achieved),
-            ObjectiveProgress::Pending => (day.saturating_sub(created_day)
-                >= AI_OBJECTIVE_REVIEW_DAYS)
-                .then_some(ObjectiveStatus::Abandoned),
+        let terminal = match progress {
+            ObjectiveProgress::Achieved => Some((
+                ObjectiveStatus::Achieved,
+                "The prior objective was completed; the house selected the next strongest route to durable power.",
+            )),
+            ObjectiveProgress::Pending
+                if day.saturating_sub(created_day) >= AI_OBJECTIVE_REVIEW_DAYS =>
+            {
+                Some((
+                    ObjectiveStatus::Abandoned,
+                    "The prior objective stalled; the house redirected resources toward a more viable route to durable power.",
+                ))
+            }
+            ObjectiveProgress::Pending => None,
         };
-        if let Some(terminal_status) = terminal_status {
+        if let Some((terminal_status, rationale)) = terminal {
             let objective = state
                 .ai_objectives
                 .get_mut(&objective_id)
@@ -4905,17 +4964,6 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
                 );
             }
             let new_id = state.next_ids.objective();
-            let rationale = match terminal_status {
-                ObjectiveStatus::Achieved => {
-                    "The prior objective was completed; the house selected the next strongest route to durable power."
-                }
-                ObjectiveStatus::Abandoned => {
-                    "The prior objective stalled; the house redirected resources toward a more viable route to durable power."
-                }
-                ObjectiveStatus::Planned | ObjectiveStatus::Pursuing => {
-                    unreachable!("only terminal objectives are replaced")
-                }
-            };
             state.ai_objectives.insert(
                 new_id,
                 AiObjective {
@@ -4973,7 +5021,11 @@ fn advance_ai_office_objective(state: &mut AppState, dynasty_id: DynastyId) -> O
     }
     if let Some(dynasty) = state.dynasties.get_mut(&dynasty_id) {
         let spend = Money::from_copper(500).min(dynasty.resources.treasury);
-        dynasty.resources.treasury = dynasty.resources.treasury.saturating_sub(spend);
+        dynasty.resources.treasury = dynasty
+            .resources
+            .treasury
+            .checked_sub(spend)
+            .expect("bounded AI office spending must not exceed treasury");
         let legitimacy_gain = u16::try_from(spend.saturating_mul_ratio(80, 500).copper())
             .unwrap_or(80)
             .min(80);
@@ -5109,7 +5161,11 @@ fn advance_ai_legitimacy_objective(
         return ObjectiveProgress::Achieved;
     }
     let spend = Money::from_copper(750).min(dynasty.resources.treasury);
-    dynasty.resources.treasury = dynasty.resources.treasury.saturating_sub(spend);
+    dynasty.resources.treasury = dynasty
+        .resources
+        .treasury
+        .checked_sub(spend)
+        .expect("bounded AI legitimacy spending must not exceed treasury");
     let legitimacy_gain = u16::try_from(spend.saturating_mul_ratio(120, 750).copper())
         .unwrap_or(120)
         .min(120);
@@ -5305,7 +5361,9 @@ fn settle_legal_damages(
         .get_mut(&defendant_id)
         .expect("legal defendant must exist")
         .resources
-        .treasury = defendant_cash.saturating_sub(paid);
+        .treasury = defendant_cash
+        .checked_sub(paid)
+        .expect("bounded damages must not exceed defendant treasury");
     let plaintiff = state
         .dynasties
         .get_mut(&plaintiff_id)

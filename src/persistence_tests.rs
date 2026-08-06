@@ -996,6 +996,97 @@ mod validation {
     }
 
     #[test]
+    fn rejects_market_target_stock_that_differs_from_registry() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let quote = value["market"]["quotes"]
+            .as_object_mut()
+            .and_then(|quotes| quotes.values_mut().next())
+            .expect("serialized state must contain a market quote");
+        quote["target_stock"] = Value::from(1);
+        let (_directory, path) = write_test_json_fixture("mismatched-market-target.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::DefinitionReferences,
+            "target stock does not match the scenario registry",
+        );
+    }
+
+    #[test]
+    fn rejects_institution_powers_that_differ_from_registry() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let institution = value["institutions"]
+            .as_object_mut()
+            .and_then(|institutions| institutions.values_mut().next())
+            .expect("serialized state must contain an institution");
+        institution["powers"] = Value::Array(Vec::new());
+        let (_directory, path) =
+            write_test_json_fixture("mismatched-institution-powers.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::DefinitionReferences,
+            "powers do not match the scenario registry",
+        );
+    }
+
+    #[test]
+    fn rejects_empty_chronicle_content() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let entry = value["chronicle"]
+            .as_array_mut()
+            .and_then(|entries| entries.first_mut())
+            .expect("serialized state must contain a chronicle entry");
+        entry["summary"] = Value::String("   ".to_owned());
+        let (_directory, path) = write_test_json_fixture("empty-chronicle-entry.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "chronicle entry lacks user-facing content",
+        );
+    }
+
+    #[test]
+    fn rejects_empty_audit_content() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let record = value["audit_log"]
+            .as_array_mut()
+            .and_then(|records| records.first_mut())
+            .expect("serialized state must contain an audit record");
+        record["detail"] = Value::String("\t".to_owned());
+        let (_directory, path) = write_test_json_fixture("empty-audit-record.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "audit record lacks diagnostic content",
+        );
+    }
+
+    #[test]
+    fn rejects_blank_runtime_names() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let dynasty = value["dynasties"]
+            .as_object_mut()
+            .and_then(|dynasties| dynasties.values_mut().next())
+            .expect("serialized state must contain a dynasty");
+        dynasty["identity"]["name"] = Value::String("  ".to_owned());
+        let (_directory, path) = write_test_json_fixture("blank-dynasty-name.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::PrimaryRecords,
+            "has a blank name",
+        );
+    }
+
+    #[test]
     fn rejects_future_dated_institution_term_start() {
         let mut state = make_test_campaign();
         let future_day = state.clock.day().saturating_add(1);
@@ -1067,6 +1158,39 @@ mod validation {
             StateValidationKind::IdentifierAllocation,
             "exhausted the supported identifier space",
         );
+    }
+
+    #[test]
+    fn rejects_noncanonical_dynasty_pair_keys() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let relationships = value["relationships"]
+            .as_object_mut()
+            .expect("serialized relationships must be an object");
+        let canonical_key = relationships
+            .keys()
+            .next()
+            .cloned()
+            .expect("campaign must contain a relationship");
+        let relationship = relationships
+            .remove(&canonical_key)
+            .expect("selected relationship must exist");
+        let (first, second) = canonical_key
+            .split_once(':')
+            .expect("serialized dynasty pair must contain a separator");
+        relationships.insert(format!("{second}:{first}"), relationship);
+        let (_directory, path) = write_test_json_fixture("noncanonical-dynasty-pair.json", &value);
+
+        match load_state(&path) {
+            Err(PersistenceError::Parse { source, .. }) => assert!(
+                source
+                    .to_string()
+                    .contains("dynasty pair must use ascending first:second order"),
+                "unexpected parse error: {source}"
+            ),
+            Err(error) => panic!("expected parse error, got {error:?}"),
+            Ok(_) => panic!("noncanonical relationship key unexpectedly loaded"),
+        }
     }
 
     #[test]

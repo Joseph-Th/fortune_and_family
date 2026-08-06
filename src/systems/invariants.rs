@@ -65,7 +65,7 @@ pub fn validate_invariants(registry: &Registry, state: &AppState) {
     validate_dynasties(state);
     validate_businesses(registry, state, &ids);
     validate_households(state, &ids);
-    validate_institutions(state, &ids);
+    validate_institutions(registry, state, &ids);
     validate_strategic_state(registry, state, &ids);
     validate_history(state);
 }
@@ -105,12 +105,25 @@ fn validate_market(registry: &Registry, state: &AppState, ids: &RegistryIds) {
             quote.target_stock > crate::money::Quantity::ZERO,
             "Definition/Runtime Separation: market target stock must remain positive"
         );
+        debug_assert_eq!(
+            quote.target_stock,
+            registry
+                .get_good(*good_id)
+                .expect("validated market good must exist")
+                .target_market_stock(),
+            "Definition/Runtime Separation: market target stock differs from its definition"
+        );
     }
 }
 
 fn validate_characters(state: &AppState) {
     let mut expected_index: BTreeMap<DynastyId, BTreeSet<CharacterId>> = BTreeMap::new();
     for character in state.characters.records().values() {
+        debug_assert!(
+            !character.name().trim().is_empty(),
+            "No Lost Runtime State: character {} has a blank name",
+            character.id()
+        );
         debug_assert!(
             character.birth_day() <= state.clock.day(),
             "Lifecycle Validity: character {} is born after the current day",
@@ -154,6 +167,11 @@ fn validate_characters(state: &AppState) {
 
 fn validate_dynasties(state: &AppState) {
     for dynasty in state.dynasties.values() {
+        debug_assert!(
+            !dynasty.name().trim().is_empty(),
+            "No Lost Runtime State: dynasty {} has a blank name",
+            dynasty.id()
+        );
         debug_assert_ne!(
             Some(dynasty.head_id()),
             dynasty.heir_id(),
@@ -277,6 +295,11 @@ fn validate_businesses(registry: &Registry, state: &AppState, ids: &RegistryIds)
 }
 
 fn validate_business_record(state: &AppState, business: &Business, ids: &RegistryIds) {
+    debug_assert!(
+        !business.name().trim().is_empty(),
+        "No Lost Runtime State: business {} has a blank name",
+        business.id()
+    );
     debug_assert!(
         state.dynasties.contains_key(&business.owner_dynasty_id()),
         "Record Reference Validity: business {} owner dynasty {} does not exist",
@@ -415,7 +438,7 @@ fn validate_households(state: &AppState, ids: &RegistryIds) {
     );
 }
 
-fn validate_institutions(state: &AppState, ids: &RegistryIds) {
+fn validate_institutions(registry: &Registry, state: &AppState, ids: &RegistryIds) {
     debug_assert_eq!(
         state.institutions.len(),
         ids.institutions.len(),
@@ -430,6 +453,16 @@ fn validate_institutions(state: &AppState, ids: &RegistryIds) {
         debug_assert!(
             ids.institutions.contains(institution_id),
             "Registry Reference Validity: runtime institution references missing definition"
+        );
+        debug_assert_eq!(
+            institution.powers,
+            super::institution_powers_for(
+                registry
+                    .get_institution(*institution_id)
+                    .expect("validated institution definition must exist")
+                    .kind()
+            ),
+            "Definition/Runtime Separation: institution powers differ from their definition"
         );
         debug_assert!(
             !institution.budget.is_negative()
@@ -1339,7 +1372,7 @@ fn validate_outbox(state: &AppState) {
             "Deterministic Decision Ordering: outbox messages are not chronologically valid"
         );
         debug_assert!(
-            !message.subject.is_empty() && !message.body.is_empty(),
+            !message.subject.trim().is_empty() && !message.body.trim().is_empty(),
             "No Lost Runtime State: outbox message lacks user-facing content"
         );
         prior_day = message.day;
@@ -1363,6 +1396,10 @@ fn validate_history(state: &AppState) {
             entry.day() <= state.clock.day(),
             "No Lost Runtime State: chronicle entry is dated after current simulation time"
         );
+        debug_assert!(
+            !entry.summary().trim().is_empty(),
+            "No Lost Runtime State: chronicle entry lacks user-facing content"
+        );
         prior_day = entry.day();
     }
     let mut prior_audit_day = i64::MIN;
@@ -1370,6 +1407,10 @@ fn validate_history(state: &AppState) {
         debug_assert!(
             record.day() >= prior_audit_day && record.day() <= state.clock.day(),
             "Deterministic Decision Ordering: audit records are not chronologically valid"
+        );
+        debug_assert!(
+            !record.subject().trim().is_empty() && !record.detail().trim().is_empty(),
+            "No Lost Runtime State: audit record lacks diagnostic content"
         );
         prior_audit_day = record.day();
     }

@@ -43,9 +43,15 @@ pub struct StateSummary {
 ///
 /// # Panics
 ///
-/// Panics when the player dynasty reference or a derived numeric invariant is corrupt.
+/// Panics when the registry belongs to another scenario, the player dynasty reference is corrupt,
+/// or a derived numeric invariant is corrupt.
 #[must_use]
 pub fn build_state_summary(registry: &Registry, state: &AppState) -> StateSummary {
+    assert_eq!(
+        state.scenario_key(),
+        registry.scenario().key(),
+        "state and registry scenarios must match before projection"
+    );
     let dynasty = state
         .dynasties
         .get(&state.player_dynasty_id)

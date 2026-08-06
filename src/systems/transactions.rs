@@ -73,6 +73,14 @@ pub enum SimulationError {
     FamilyCharterVersionExhausted { dynasty_id: DynastyId },
     #[error("dynasty {dynasty_id} generation is exhausted")]
     DynastyGenerationExhausted { dynasty_id: DynastyId },
+    #[error(
+        "dynasty {dynasty_id} cannot record civic contribution {incoming}; current total {current} would exceed the supported money range"
+    )]
+    DynastyCivicContributionsOverflow {
+        dynasty_id: DynastyId,
+        current: Money,
+        incoming: Money,
+    },
     #[error("institution {institution_id} term number is exhausted")]
     InstitutionTermNumberExhausted { institution_id: InstitutionId },
     #[error("market quote is missing for good {good_id}")]

@@ -14,6 +14,33 @@ pub(crate) const MAX_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 14_000;
 pub(crate) const OFFICE_TERM_DAYS: i64 = 360;
 pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 240;
 
+pub(crate) fn institution_powers_for(
+    kind: crate::registry::InstitutionKind,
+) -> std::collections::BTreeSet<crate::core::OfficePower> {
+    use crate::core::OfficePower;
+    use crate::registry::InstitutionKind;
+
+    let values: &[OfficePower] = match kind {
+        InstitutionKind::CraftGuild => &[OfficePower::Licenses, OfficePower::Inspections],
+        InstitutionKind::MerchantGuild => &[OfficePower::CityContracts, OfficePower::MarketTolls],
+        InstitutionKind::Council => &[
+            OfficePower::Taxation,
+            OfficePower::PublicWorks,
+            OfficePower::CityContracts,
+        ],
+        InstitutionKind::Court => &[OfficePower::DebtEnforcement],
+        InstitutionKind::Watch => &[OfficePower::WatchPriorities],
+        InstitutionKind::Treasury => &[OfficePower::Taxation, OfficePower::CityContracts],
+        InstitutionKind::Charity => &[OfficePower::EmergencyImports],
+        InstitutionKind::MarketOffice => &[
+            OfficePower::Inspections,
+            OfficePower::MarketTolls,
+            OfficePower::EmergencyImports,
+        ],
+    };
+    values.iter().copied().collect()
+}
+
 pub(crate) fn supported_worker_capacity(business: &crate::core::Business) -> u32 {
     u32::from(business.operations.capacity_batches_per_day)
         .saturating_mul(u32::from(WORKERS_PER_BATCH))
@@ -97,12 +124,12 @@ pub(crate) use commands::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
     COMMISSIONED_INFORMATION_SOURCE, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
     HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
-    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST,
-    INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST, INSTITUTION_SUPPORT_COST,
-    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
-    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
-    MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
+    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST, INFORMATION_LEVERAGE_COST,
+    INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
+    LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS,
+    LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
     OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
     PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT,

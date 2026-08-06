@@ -135,6 +135,39 @@ mod validation {
     use super::*;
 
     #[test]
+    fn rejects_registry_mismatch_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state.scenario_key = "another-scenario".to_owned();
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::StartPublicWork {
+                district_id: DistrictId::new(u32::MAX),
+                kind: PublicWorkKind::Bridge,
+                budget: Money::from_copper(10_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Simulation(
+                crate::systems::SimulationError::RegistryMismatch {
+                    state_scenario: "another-scenario".to_owned(),
+                    registry_scenario: "rivergate".to_owned(),
+                }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "registry mismatch must be rejected before command-specific validation or mutation",
+        );
+    }
+
+    #[test]
     fn rejects_invalid_public_work_without_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

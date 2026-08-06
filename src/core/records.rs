@@ -441,7 +441,9 @@ impl Business {
             current >= quantity,
             "business inventory underflow for good {good_id}"
         );
-        let remaining = current.saturating_sub(quantity);
+        let remaining = current
+            .checked_sub(quantity)
+            .expect("validated inventory removal must not underflow");
         if remaining.is_zero() {
             self.inventory.remove(&good_id);
         } else {

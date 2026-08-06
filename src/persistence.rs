@@ -586,6 +586,19 @@ fn validate_definition_references(
     {
         return Err("market quote map key differs from its record ID".to_owned());
     }
+    for good in registry.goods() {
+        let quote = state
+            .market
+            .quotes
+            .get(&good.id())
+            .expect("validated market quote ID set must contain every good");
+        if quote.target_stock != good.target_market_stock() {
+            return Err(format!(
+                "market quote {} target stock does not match the scenario registry",
+                good.id()
+            ));
+        }
+    }
     let expected_districts: BTreeSet<_> = registry
         .districts()
         .iter()
@@ -628,6 +641,18 @@ fn validate_definition_references(
     if actual_institutions != expected_institutions {
         return Err("institution state IDs do not match the scenario registry".to_owned());
     }
+    for definition in registry.institutions() {
+        let institution = state
+            .institutions
+            .get(&definition.id())
+            .expect("validated institution ID set must contain every definition");
+        if institution.powers != crate::systems::institution_powers_for(definition.kind()) {
+            return Err(format!(
+                "institution {} powers do not match the scenario registry",
+                definition.id()
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -643,6 +668,9 @@ fn validate_primary_records(
             return Err(format!(
                 "dynasty map key {dynasty_id} differs from record ID"
             ));
+        }
+        if dynasty.name().trim().is_empty() {
+            return Err(format!("dynasty {dynasty_id} has a blank name"));
         }
         if dynasty.heir_id() == Some(dynasty.head_id()) {
             return Err(format!(
@@ -686,6 +714,9 @@ fn validate_primary_records(
             return Err(format!(
                 "character {character_id} has an invalid identity reference"
             ));
+        }
+        if character.name().trim().is_empty() {
+            return Err(format!("character {character_id} has a blank name"));
         }
         character_index
             .entry(character.dynasty_id())
@@ -734,6 +765,9 @@ fn validate_business_records(
             return Err(format!(
                 "business {business_id} has an invalid definition reference"
             ));
+        }
+        if business.name().trim().is_empty() {
+            return Err(format!("business {business_id} has a blank name"));
         }
         let manager = state
             .characters
@@ -1417,7 +1451,7 @@ fn validate_persisted_history(state: &AppState) -> Result<(), String> {
         if message.day < prior_outbox_day || message.day > state.clock.day() {
             return Err("outbox messages are not chronologically valid".to_owned());
         }
-        if message.subject.is_empty() || message.body.is_empty() {
+        if message.subject.trim().is_empty() || message.body.trim().is_empty() {
             return Err("outbox message lacks user-facing content".to_owned());
         }
         prior_outbox_day = message.day;
@@ -1432,12 +1466,18 @@ fn validate_persisted_history(state: &AppState) -> Result<(), String> {
         if entry.day() < prior_chronicle_day || entry.day() > state.clock.day() {
             return Err("chronicle entries are not chronologically valid".to_owned());
         }
+        if entry.summary().trim().is_empty() {
+            return Err("chronicle entry lacks user-facing content".to_owned());
+        }
         prior_chronicle_day = entry.day();
     }
     let mut prior_audit_day = i64::MIN;
     for record in &state.audit_log {
         if record.day() < prior_audit_day || record.day() > state.clock.day() {
             return Err("audit log is not chronologically valid".to_owned());
+        }
+        if record.subject().trim().is_empty() || record.detail().trim().is_empty() {
+            return Err("audit record lacks diagnostic content".to_owned());
         }
         prior_audit_day = record.day();
     }

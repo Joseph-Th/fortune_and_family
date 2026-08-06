@@ -255,8 +255,17 @@ fn decide_business_purchases(
                 continue;
             }
             let cost = cost_for(quantity, quote.price);
-            remaining_stock.insert(input.good_id(), stock.saturating_sub(quantity));
-            available_cash.insert(business.id(), cash.saturating_sub(cost));
+            remaining_stock.insert(
+                input.good_id(),
+                stock
+                    .checked_sub(quantity)
+                    .expect("planned business purchase must not exceed market stock"),
+            );
+            available_cash.insert(
+                business.id(),
+                cash.checked_sub(cost)
+                    .expect("affordable business purchase must not exceed available cash"),
+            );
             lines.push(BusinessPurchaseLine {
                 business_id: business.id(),
                 good_id: input.good_id(),
@@ -312,8 +321,14 @@ fn apply_business_purchases(
                 .quotes
                 .get_mut(&good_id)
                 .expect("planned market purchase quote must exist");
-            quote.stock = quote.stock.saturating_sub(quantity);
-            quote.demand_today = quote.demand_today.saturating_add(quantity);
+            quote.stock = quote
+                .stock
+                .checked_sub(quantity)
+                .expect("planned business purchase must not exceed market stock");
+            quote.demand_today = quote
+                .demand_today
+                .checked_add(quantity)
+                .expect("bounded business demand must fit market flow totals");
         }
         credit_market_clearing_account(state, cost)?;
         total_cost = total_cost.saturating_add(cost);
@@ -882,8 +897,15 @@ fn plan_household_purchase(
         return Ok(Quantity::ZERO);
     }
     let cost = cost_for(quantity, quote.price);
-    stock.insert(good_id, available.saturating_sub(quantity));
-    *cash = cash.saturating_sub(cost);
+    stock.insert(
+        good_id,
+        available
+            .checked_sub(quantity)
+            .expect("planned purchase quantity must not exceed available stock"),
+    );
+    *cash = cash
+        .checked_sub(cost)
+        .expect("affordable planned purchase must not exceed household cash");
     lines.push(HouseholdPurchaseLine {
         household_id,
         good_id,
@@ -929,7 +951,10 @@ fn apply_household_consumption(
                 .households
                 .get_mut(household_id)
                 .expect("planned household purchase target must exist");
-            household.cash = household.cash.saturating_sub(cost);
+            household.cash = household
+                .cash
+                .checked_sub(cost)
+                .expect("planned household purchase must not exceed household cash");
         }
         {
             let quote = state
@@ -937,8 +962,14 @@ fn apply_household_consumption(
                 .quotes
                 .get_mut(&good_id)
                 .expect("planned household purchase quote must exist");
-            quote.stock = quote.stock.saturating_sub(quantity);
-            quote.demand_today = quote.demand_today.saturating_add(quantity);
+            quote.stock = quote
+                .stock
+                .checked_sub(quantity)
+                .expect("planned household purchase must not exceed market stock");
+            quote.demand_today = quote
+                .demand_today
+                .checked_add(quantity)
+                .expect("bounded household demand must fit market flow totals");
         }
         credit_market_clearing_account(state, cost)?;
         total_cost = total_cost.saturating_add(cost);

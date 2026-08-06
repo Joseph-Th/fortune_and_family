@@ -769,7 +769,7 @@ mod gameplay_stability {
             .expect("city council must exist")
             .budget;
 
-        apply_office_duties(&mut state);
+        apply_office_duties(&mut state).expect("office duties must remain representable");
 
         let player = state
             .dynasties
@@ -785,6 +785,63 @@ mod gameplay_stability {
                 .expect("city council must exist")
                 .budget,
             budget_before.saturating_add(required)
+        );
+    }
+
+    #[test]
+    fn office_duty_contribution_overflow_is_atomic() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let institution_id = registry
+            .get_institution_id("city_council")
+            .expect("registry must define the city council");
+        let player_id = state.player_dynasty_id;
+        let holder_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("city council must exist")
+            .office_holder_id = Some(holder_id);
+        let incoming = OFFICE_DUTY_COST_PER_POWER.saturating_mul(
+            i64::try_from(
+                state
+                    .institutions
+                    .get(&institution_id)
+                    .expect("city council must exist")
+                    .powers
+                    .len(),
+            )
+            .expect("power count must fit i64"),
+        );
+        let player = state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist");
+        player.resources.treasury = Money::from_copper(10_000);
+        player.resources.civic_contributions = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = apply_office_duties(&mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::DynastyCivicContributionsOverflow {
+                dynasty_id: player_id,
+                current: Money::from_copper(i64::MAX),
+                incoming,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "civic contribution overflow must be rejected before any ledger moves",
         );
     }
 
@@ -822,8 +879,8 @@ mod gameplay_stability {
             .expect("city council must exist")
             .legitimacy_basis_points;
 
-        apply_office_duties(&mut state);
-        apply_office_duties(&mut state);
+        apply_office_duties(&mut state).expect("office duties must remain representable");
+        apply_office_duties(&mut state).expect("office duties must remain representable");
 
         let player = state
             .dynasties
@@ -896,9 +953,9 @@ mod gameplay_stability {
             .resources
             .treasury = Money::ZERO;
 
-        apply_office_duties(&mut state);
-        apply_office_duties(&mut state);
-        apply_office_duties(&mut state);
+        apply_office_duties(&mut state).expect("office duties must remain representable");
+        apply_office_duties(&mut state).expect("office duties must remain representable");
+        apply_office_duties(&mut state).expect("office duties must remain representable");
 
         let institution = state
             .institutions
@@ -1037,6 +1094,30 @@ mod gameplay_stability {
 
 mod contracts {
     use super::*;
+
+    #[test]
+    fn rejects_registry_mismatch_without_mutation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let terms = make_test_contract_terms(&state);
+        state.scenario_key = "another-scenario".to_owned();
+        let before = state.clone();
+
+        let result = sign_supply_contract(registry, &mut state, terms);
+
+        assert_eq!(
+            result,
+            Err(StrategicError::RegistryMismatch {
+                state_scenario: "another-scenario".to_owned(),
+                registry_scenario: "rivergate".to_owned(),
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "registry mismatch must be rejected before strategic validation or mutation",
+        );
+    }
 
     #[test]
     fn signing_a_contract_creates_relationship_memory_and_counterparty_intelligence() {
@@ -1398,10 +1479,10 @@ mod contracts {
     }
 
     #[test]
-    fn settlement_does_not_move_goods_or_money_when_seller_cash_cannot_receive_payment() {
+    fn settlement_moves_only_penalty_when_seller_cannot_receive_payment() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
-        let (buyer_id, seller_id, good_id, quantity, payment) = {
+        let (buyer_id, seller_id, good_id, quantity, payment, penalty) = {
             let contract = state
                 .contracts
                 .get_mut(&contract_id)
@@ -1414,6 +1495,7 @@ mod contracts {
                 contract.good_id,
                 contract.quantity_per_week,
                 payment,
+                contract.penalty,
             )
         };
         {
@@ -1440,9 +1522,12 @@ mod contracts {
 
         let buyer = state.businesses.get(buyer_id).expect("buyer must exist");
         let seller = state.businesses.get(seller_id).expect("seller must exist");
-        assert_eq!(buyer.cash(), payment);
+        assert_eq!(buyer.cash(), payment.saturating_add(penalty));
         assert_eq!(buyer.inventory_quantity(good_id), buyer_inventory_before);
-        assert_eq!(seller.cash(), Money::from_copper(i64::MAX));
+        assert_eq!(
+            seller.cash(),
+            Money::from_copper(i64::MAX).saturating_sub(penalty)
+        );
         assert_eq!(seller.inventory_quantity(good_id), quantity);
         assert_eq!(
             state
@@ -1452,6 +1537,173 @@ mod contracts {
                 .missed_deliveries,
             1,
             "an unrepresentable settlement must remain an unfulfilled obligation"
+        );
+    }
+
+    #[test]
+    fn final_delivery_attributes_seller_when_payment_cannot_be_received() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (buyer_id, seller_id, good_id, quantity, payment, penalty) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.next_due_day = state.clock.day();
+            contract.end_day = state.clock.day();
+            (
+                contract.buyer_business_id,
+                contract.seller_business_id,
+                contract.good_id,
+                contract.quantity_per_week,
+                cost_for(contract.quantity_per_week, contract.unit_price),
+                contract.penalty,
+            )
+        };
+        let seller_dynasty_id = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
+        let buyer_dynasty_id = state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .owner_dynasty_id();
+        assert_ne!(seller_dynasty_id, buyer_dynasty_id);
+        let seller_reliability_before = state
+            .dynasties
+            .get(&seller_dynasty_id)
+            .expect("seller dynasty must exist")
+            .resources
+            .reputation_reliability_basis_points;
+        {
+            let seller = state
+                .businesses
+                .get_mut(seller_id)
+                .expect("seller must exist");
+            seller.inventory.insert(good_id, quantity);
+            seller.finance.cash = Money::from_copper(i64::MAX);
+        }
+        state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist")
+            .finance
+            .cash = payment;
+
+        settle_contracts(&mut state).expect("contract settlement must succeed");
+
+        let contract = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist");
+        assert_eq!(contract.status, ContractStatus::Breached);
+        assert_eq!(contract.breaching_dynasty_id, Some(seller_dynasty_id));
+        assert_eq!(
+            state
+                .dynasties
+                .get(&seller_dynasty_id)
+                .expect("seller dynasty must exist")
+                .resources
+                .reputation_reliability_basis_points,
+            seller_reliability_before.saturating_sub(120)
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(buyer_id)
+                .expect("buyer must exist")
+                .cash(),
+            payment.saturating_add(penalty),
+            "the party unable to receive payment must owe the contractual penalty"
+        );
+    }
+
+    #[test]
+    fn final_delivery_attributes_buyer_when_goods_cannot_be_received() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (buyer_id, seller_id, good_id, quantity, payment, penalty) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.next_due_day = state.clock.day();
+            contract.end_day = state.clock.day();
+            (
+                contract.buyer_business_id,
+                contract.seller_business_id,
+                contract.good_id,
+                contract.quantity_per_week,
+                cost_for(contract.quantity_per_week, contract.unit_price),
+                contract.penalty,
+            )
+        };
+        let buyer_dynasty_id = state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .owner_dynasty_id();
+        let seller_dynasty_id = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
+        assert_ne!(buyer_dynasty_id, seller_dynasty_id);
+        let buyer_reliability_before = state
+            .dynasties
+            .get(&buyer_dynasty_id)
+            .expect("buyer dynasty must exist")
+            .resources
+            .reputation_reliability_basis_points;
+        let seller_cash_before = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .cash();
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .inventory
+            .insert(good_id, quantity);
+        {
+            let buyer = state
+                .businesses
+                .get_mut(buyer_id)
+                .expect("buyer must exist");
+            buyer
+                .inventory
+                .insert(good_id, Quantity::from_milliunits(i64::MAX));
+            buyer.finance.cash = payment.saturating_add(penalty);
+        }
+
+        settle_contracts(&mut state).expect("contract settlement must succeed");
+
+        let contract = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist");
+        assert_eq!(contract.status, ContractStatus::Breached);
+        assert_eq!(contract.breaching_dynasty_id, Some(buyer_dynasty_id));
+        assert_eq!(
+            state
+                .dynasties
+                .get(&buyer_dynasty_id)
+                .expect("buyer dynasty must exist")
+                .resources
+                .reputation_reliability_basis_points,
+            buyer_reliability_before.saturating_sub(120)
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(seller_id)
+                .expect("seller must exist")
+                .cash(),
+            seller_cash_before.saturating_add(penalty),
+            "the party unable to receive goods must owe the contractual penalty"
         );
     }
 

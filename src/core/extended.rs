@@ -415,6 +415,11 @@ impl<'de> Deserialize<'de> for DynastyPair {
                 "dynasty relationship pair must be distinct",
             ));
         }
+        if first > second {
+            return Err(serde::de::Error::custom(
+                "dynasty pair must use ascending first:second order",
+            ));
+        }
         Ok(Self::new(DynastyId::new(first), DynastyId::new(second)))
     }
 }

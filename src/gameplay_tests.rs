@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::core::{AuditKind, AuditRecord, Crisis, CrisisKind, OutboxKind, OutboxMessage};
-use crate::ids::OutboxMessageId;
+use crate::ids::{DynastyId, OutboxMessageId};
 use crate::systems::INSTITUTION_SUPPORT_INTERVAL_DAYS;
 use crate::systems::{OFFICE_POWER_ESTABLISHMENT_DAYS, OFFICE_TERM_DAYS, issue_loan};
 use crate::test_support::{assert_set_eq, make_test_campaign, rivergate_registry_for_test};
@@ -119,6 +119,9 @@ mod harness {
                 summary: "Coverage report".to_owned(),
             },
         );
+        for _ in 0..AGENT_INFORMATION_LEVERAGE_DELAY_DAYS {
+            state.clock.advance_one_day();
+        }
         kinds.extend(candidate_kinds_for_test(registry, &state));
         kinds
     }
@@ -337,6 +340,11 @@ mod harness {
             report.aggregate.cycles_with_distinct_immediate_consequences
                 <= report.aggregate.cycles_with_multiple_viable_command_kinds
         );
+        assert!(
+            report.aggregate.cycles_with_distinct_projected_consequences
+                <= report.aggregate.cycles_with_multiple_viable_command_kinds
+        );
+        assert!(report.aggregate.quiet_cycles_with_ambient_change <= report.aggregate.quiet_cycles);
     }
 
     #[test]
@@ -1418,6 +1426,41 @@ mod candidates {
     }
 
     #[test]
+    fn office_duty_audits_require_an_exact_dynasty_subject_segment() {
+        let mut state = make_test_campaign();
+        state.player_dynasty_id = DynastyId::new(1);
+        for kind in [
+            AuditKind::OfficeDutyForfeiture,
+            AuditKind::OfficeDutyShortfall,
+        ] {
+            state.audit_log.push(AuditRecord {
+                day: state.clock.day(),
+                kind,
+                subject: "institution:3;dynasty:10".to_owned(),
+                detail: "different dynasty".to_owned(),
+            });
+        }
+
+        assert!(!player_has_office_duty_forfeiture(&state));
+        assert!(!has_recent_player_office_duty_shortfall(&state));
+
+        for kind in [
+            AuditKind::OfficeDutyForfeiture,
+            AuditKind::OfficeDutyShortfall,
+        ] {
+            state.audit_log.push(AuditRecord {
+                day: state.clock.day(),
+                kind,
+                subject: "institution:3;dynasty:1".to_owned(),
+                detail: "player dynasty".to_owned(),
+            });
+        }
+
+        assert!(player_has_office_duty_forfeiture(&state));
+        assert!(has_recent_player_office_duty_shortfall(&state));
+    }
+
+    #[test]
     fn office_reserves_do_not_block_emergency_business_rehabilitation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -1498,7 +1541,7 @@ mod candidates {
     }
 
     #[test]
-    fn severe_business_rehabilitation_can_use_treasury_above_household_emergency_reserve() {
+    fn collapsed_portfolio_can_commit_all_available_treasury_to_rehabilitation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let business_id = *state
@@ -1539,7 +1582,7 @@ mod candidates {
         assert!(matches!(
             candidate.command,
             PlayerCommand::InvestInBusiness { amount, .. }
-                if amount > Money::ZERO && amount <= Money::from_copper(3_000)
+                if amount > Money::from_copper(3_000) && amount <= Money::from_copper(5_000)
         ));
     }
 
@@ -1778,6 +1821,19 @@ mod candidates {
         }));
 
         candidates.clear();
+        generate_information_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+        assert!(
+            candidates.is_empty(),
+            "automated personas should hold a report long enough for world conditions to change before leveraging it"
+        );
+        for _ in 0..AGENT_INFORMATION_LEVERAGE_DELAY_DAYS {
+            state.clock.advance_one_day();
+        }
         generate_information_candidates(
             registry,
             &state,
@@ -2025,8 +2081,10 @@ mod metrics {
             registry,
             &state,
             [acknowledgement, governance].into_iter(),
+            30,
             &mut accumulator,
-        );
+        )
+        .expect("candidate projection must remain representable");
 
         assert_eq!(probe.viable_count, 2);
         assert_eq!(probe.substantive_viable_count, 1);
@@ -2527,10 +2585,13 @@ mod findings {
                 decision_cycles: 100,
                 substantive_actions: 55,
                 quiet_cycles: 45,
+                quiet_cycles_with_ambient_change: 0,
                 blocked_cycles: 0,
                 cycles_with_multiple_viable_command_kinds: 20,
                 cycles_with_close_viable_command_kinds: 0,
                 cycles_with_distinct_immediate_consequences: 0,
+                cycles_with_distinct_projected_consequences: 0,
+                total_viable_choices: 80,
                 total_viable_command_kinds: 80,
             },
         );
@@ -2540,10 +2601,13 @@ mod findings {
                 decision_cycles: 100,
                 substantive_actions: 65,
                 quiet_cycles: 35,
+                quiet_cycles_with_ambient_change: 0,
                 blocked_cycles: 0,
                 cycles_with_multiple_viable_command_kinds: 29,
                 cycles_with_close_viable_command_kinds: 0,
                 cycles_with_distinct_immediate_consequences: 0,
+                cycles_with_distinct_projected_consequences: 0,
+                total_viable_choices: 110,
                 total_viable_command_kinds: 110,
             },
         );
@@ -2552,6 +2616,34 @@ mod findings {
 
         finding_with_title(&findings, "Establishment becomes a waiting phase");
         finding_with_title(
+            &findings,
+            "Dynastic governance remains intermittent and strategically narrow",
+        );
+    }
+
+    #[test]
+    fn governance_choice_depth_can_compensate_for_focused_command_families() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.phase_stats.insert(
+            GameplayPhase::DynasticGovernance,
+            GameplayPhaseStats {
+                decision_cycles: 100,
+                substantive_actions: 72,
+                quiet_cycles: 28,
+                quiet_cycles_with_ambient_change: 28,
+                blocked_cycles: 0,
+                cycles_with_multiple_viable_command_kinds: 39,
+                cycles_with_close_viable_command_kinds: 20,
+                cycles_with_distinct_immediate_consequences: 39,
+                cycles_with_distinct_projected_consequences: 39,
+                total_viable_choices: 324,
+                total_viable_command_kinds: 137,
+            },
+        );
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(
             &findings,
             "Dynastic governance remains intermittent and strategically narrow",
         );
@@ -2604,6 +2696,39 @@ mod findings {
         finding_with_title(
             &findings,
             "Economic failure can become an unrecoverable campaign state",
+        );
+    }
+
+    #[test]
+    fn findings_identify_active_but_ineffective_recovery_churn() {
+        let mut report = cached_focused_report(30);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.longest_substantive_action_gap_days = 30;
+        campaign.end.player_treasury = Money::ZERO;
+        campaign.end.active_businesses = 0;
+        campaign.end.distressed_businesses = 1;
+        campaign.end.insolvent_businesses = 0;
+        campaign.end.player_properties = 0;
+        campaign.end.defaulted_loans = 2;
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::BorrowFunds)
+            .expect("borrowing statistics must exist")
+            .executed = 4;
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::InvestInBusiness)
+            .expect("investment statistics must exist")
+            .executed = 3;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "An individual dynasty remains trapped in recovery churn",
         );
     }
 
@@ -2729,6 +2854,48 @@ mod findings {
     }
 
     #[test]
+    fn findings_surface_alternatives_that_converge_after_projection() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.decision_cycles = 100;
+        report.aggregate.quiet_cycles = 0;
+        report.aggregate.viable_choices = 300;
+        report.aggregate.viable_command_kinds = 250;
+        report.aggregate.cycles_with_multiple_viable_command_kinds = 80;
+        report.aggregate.cycles_with_close_viable_command_kinds = 80;
+        report.aggregate.cycles_with_distinct_immediate_consequences = 80;
+        report.aggregate.cycles_with_distinct_projected_consequences = 20;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Strategic alternatives converge after one decision interval",
+        );
+    }
+
+    #[test]
+    fn findings_surface_routine_commission_and_leverage_pairs() {
+        let mut report = cached_focused_report(30);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::CommissionInformation)
+            .expect("commission statistics must exist")
+            .executed = 20;
+        campaign.commission_leverage_pairs = 15;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Commissioned intelligence becomes a routine two-step ritual",
+        );
+    }
+
+    #[test]
     fn findings_surface_near_universal_institutional_reach() {
         let mut report = cached_focused_report(30);
         let campaign = report
@@ -2824,6 +2991,37 @@ mod findings {
     }
 
     #[test]
+    fn city_shaping_warning_waits_for_office_powers_to_establish() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 1_080;
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 1_080;
+        campaign.fantasy_arc.first_city_shaping_action_day = None;
+        campaign.fantasy_arc.first_office_day = Some(
+            1_080_i64
+                .saturating_sub(OFFICE_POWER_ESTABLISHMENT_DAYS)
+                .saturating_add(1),
+        );
+
+        let premature_findings = derive_findings(&report.aggregate, &report.campaigns);
+        assert_finding_absent(
+            &premature_findings,
+            "Institutional power does not become city-shaping action",
+        );
+
+        report.campaigns[0].fantasy_arc.first_office_day =
+            Some(1_080_i64.saturating_sub(OFFICE_POWER_ESTABLISHMENT_DAYS));
+        let mature_findings = derive_findings(&report.aggregate, &report.campaigns);
+        finding_with_title(
+            &mature_findings,
+            "Institutional power does not become city-shaping action",
+        );
+    }
+
+    #[test]
     fn dynastic_continuity_is_only_required_at_generation_length() {
         let mut report = cached_focused_report(30);
         report.aggregate.simulated_days = 3_600;
@@ -2842,6 +3040,27 @@ mod findings {
             &generation_findings,
             "Long campaigns do not exercise dynastic continuity",
         );
+    }
+
+    #[test]
+    fn isolated_late_succession_does_not_condemn_a_generation_length_matrix() {
+        let mut report = cached_focused_report(30);
+        let baseline = report.campaigns[0].clone();
+        report.aggregate.campaigns = 6;
+        report.aggregate.simulated_days = 43_200;
+        report.campaigns = (0..6)
+            .map(|index| {
+                let mut campaign = baseline.clone();
+                campaign.simulated_days = 7_200;
+                campaign.fantasy_arc.first_succession_day =
+                    (index != 0).then_some(5_400_i64.saturating_add(i64::from(index) * 30));
+                campaign
+            })
+            .collect();
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(&findings, "The dynastic arc does not reach succession");
     }
 
     #[test]
@@ -2949,6 +3168,27 @@ mod findings {
         );
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn cadence_findings_distinguish_static_quiet_from_world_movement() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.decision_cycles = 100;
+        report.aggregate.quiet_cycles = 30;
+        report.aggregate.quiet_cycles_with_ambient_change = 0;
+
+        let static_findings = derive_findings(&report.aggregate, &report.campaigns);
+        finding_with_title(
+            &static_findings,
+            "Strategic cadence leaves too many static decision cycles",
+        );
+
+        report.aggregate.quiet_cycles_with_ambient_change = 30;
+        let dynamic_findings = derive_findings(&report.aggregate, &report.campaigns);
+        assert_finding_absent(
+            &dynamic_findings,
+            "Strategic cadence leaves too many static decision cycles",
+        );
     }
 
     #[test]

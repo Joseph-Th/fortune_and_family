@@ -509,6 +509,13 @@ pub fn apply_player_command(
     state: &mut AppState,
     command: PlayerCommand,
 ) -> Result<CommandOutcome, CommandError> {
+    if state.scenario_key() != registry.scenario().key() {
+        return Err(super::SimulationError::RegistryMismatch {
+            state_scenario: state.scenario_key().to_owned(),
+            registry_scenario: registry.scenario().key().to_owned(),
+        }
+        .into());
+    }
     let mut candidate = state.clone();
     match dispatch_player_command(registry, &mut candidate, command) {
         Ok(outcome) => {
@@ -558,9 +565,7 @@ fn dispatch_player_command(
                 quality_target_basis_points,
             },
         ),
-        PlayerCommand::CreateSupplyContract { terms } => {
-            apply_supply_contract(registry, state, terms)
-        }
+        PlayerCommand::CreateSupplyContract { terms } => apply_contract(registry, state, terms),
         PlayerCommand::IssueLoan { terms } => apply_loan(state, terms),
         PlayerCommand::BuyProperty { property_id } => apply_property_purchase(state, property_id),
         PlayerCommand::SellProperty {
@@ -585,10 +590,13 @@ fn dispatch_player_command(
             evidence_basis_points,
             damages,
         ),
-        command @ (PlayerCommand::SetHouseGovernance { .. }
-        | PlayerCommand::DesignateHeir { .. }
-        | PlayerCommand::AdoptWard { .. }
-        | PlayerCommand::EducateFamilyMember { .. }) => dispatch_family_command(state, &command),
+        PlayerCommand::SetHouseGovernance { governance } => apply_governance(state, governance),
+        PlayerCommand::DesignateHeir { character_id } => apply_heir(state, character_id),
+        PlayerCommand::AdoptWard { focus } => apply_adopt_ward(state, focus),
+        PlayerCommand::EducateFamilyMember {
+            character_id,
+            focus,
+        } => apply_family_education(state, character_id, focus),
         PlayerCommand::CultivateInstitutionSupport {
             institution_id,
             character_id,
@@ -613,53 +621,17 @@ fn dispatch_player_command(
             employment_id,
             response,
         } => apply_labor_response(state, employment_id, response),
-        command @ (PlayerCommand::CommissionInformation { .. }
-        | PlayerCommand::LeverageInformation { .. }) => {
-            dispatch_information_command(registry, state, &command)
-        }
-        PlayerCommand::AcknowledgeNotification { message_id } => {
-            apply_acknowledgement(state, message_id)
-        }
-    }
-}
-
-fn dispatch_information_command(
-    registry: &Registry,
-    state: &mut AppState,
-    command: &PlayerCommand,
-) -> Result<CommandOutcome, CommandError> {
-    match command {
         PlayerCommand::CommissionInformation { focus } => {
-            apply_information_commission(registry, state, *focus)
+            commission_information(registry, state, focus)
         }
         PlayerCommand::LeverageInformation { report_id } => {
-            apply_information_leverage(registry, state, *report_id)
+            leverage_information(registry, state, report_id)
         }
-        _ => unreachable!("information dispatcher received an unrelated command"),
+        PlayerCommand::AcknowledgeNotification { message_id } => acknowledge(state, message_id),
     }
 }
 
-fn dispatch_family_command(
-    state: &mut AppState,
-    command: &PlayerCommand,
-) -> Result<CommandOutcome, CommandError> {
-    match command {
-        PlayerCommand::SetHouseGovernance { governance } => {
-            apply_house_governance(state, *governance)
-        }
-        PlayerCommand::DesignateHeir { character_id } => {
-            apply_heir_designation(state, *character_id)
-        }
-        PlayerCommand::AdoptWard { focus } => apply_adopt_ward(state, *focus),
-        PlayerCommand::EducateFamilyMember {
-            character_id,
-            focus,
-        } => apply_family_education(state, *character_id, *focus),
-        _ => unreachable!("family dispatcher received an unrelated command"),
-    }
-}
-
-fn apply_supply_contract(
+fn apply_contract(
     registry: &Registry,
     state: &mut AppState,
     terms: SupplyContractTerms,
@@ -1523,7 +1495,7 @@ fn apply_legal_case(
     })
 }
 
-fn apply_house_governance(
+fn apply_governance(
     state: &mut AppState,
     governance: HouseGovernance,
 ) -> Result<CommandOutcome, CommandError> {
@@ -1658,7 +1630,7 @@ fn validate_heir_designation(
     })
 }
 
-fn apply_heir_designation(
+fn apply_heir(
     state: &mut AppState,
     character_id: CharacterId,
 ) -> Result<CommandOutcome, CommandError> {
@@ -3041,7 +3013,7 @@ struct InformationCommissionPlan {
     summary: String,
 }
 
-fn apply_information_commission(
+fn commission_information(
     registry: &Registry,
     state: &mut AppState,
     focus: InformationFocus,
@@ -3508,7 +3480,7 @@ fn resolve_district_information_leverage(
     })
 }
 
-fn apply_information_leverage(
+fn leverage_information(
     registry: &Registry,
     state: &mut AppState,
     report_id: InformationReportId,
@@ -3637,7 +3609,7 @@ fn adjust_basis_points(value: u16, change: i16) -> u16 {
     }
 }
 
-fn apply_acknowledgement(
+fn acknowledge(
     state: &mut AppState,
     message_id: OutboxMessageId,
 ) -> Result<CommandOutcome, CommandError> {

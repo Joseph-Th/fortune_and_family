@@ -211,6 +211,16 @@ mod coverage {
     }
 
     #[test]
+    #[should_panic(expected = "state and registry scenarios must match before projection")]
+    fn summary_rejects_registry_mismatch() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state.scenario_key = "another-scenario".to_owned();
+
+        let _ = build_state_summary(registry, &state);
+    }
+
+    #[test]
     fn summary_counts_defaulted_debt_as_outstanding_but_excludes_repaid_debt() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

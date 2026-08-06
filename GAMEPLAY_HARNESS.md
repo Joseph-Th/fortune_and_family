@@ -126,7 +126,7 @@ Institutional patronage becomes available after full commercial standing: establ
 
 Family growth remains player-directed through governance, ward adoption, and focused education. Under meaningful succession pressure, the harness either selects a strategically superior adult council member or formally confirms the default heir when no better replacement exists. A default heir may be formally confirmed once; repeated unchanged designations remain invalid. Commercial maturity gates the advanced family routes.
 
-Established dynasties may also commission annual intelligence reports. The focus is persona-specific in automated runs: markets for entrepreneurs, district conditions for stewards, and rival-house conditions for political or opportunistic agents.
+Established dynasties may also commission intelligence reports. The canonical player command retains its annual cooldown, while automated personas wait two years between commissions and hold a new report for at least 90 days before leveraging it. This prevents the harness from manufacturing a predictable annual two-click ritual and allows intervening world conditions to matter. The focus is persona-specific in automated runs: markets for entrepreneurs, district conditions for stewards, and rival-house conditions for political or opportunistic agents.
 
 Automated agents preserve twelve months of current office-duty costs plus a household liquidity buffer before taking discretionary spending actions. Emergency crisis and severe business-rehabilitation actions may override that reserve. This policy prevents the harness from manufacturing activity through predictable duty defaults; phase findings still report strategically quiet periods created by the conservative reserve.
 
@@ -141,7 +141,7 @@ The harness classifies each decision cycle by the furthest reached fantasy miles
 | Institutional ascent | The first institutional support campaign is launched. |
 | Dynastic governance | The first city-shaping law or public work is sponsored. |
 
-Each phase records action share, quiet and blocked cycles, viable command-family breadth, multi-family choice frequency, closely ranked alternatives, and whether alternatives produce distinct immediate consequence profiles. Findings warn when establishment or institutional ascent becomes mostly waiting, when apparently broad choices have one obvious winner or equivalent immediate effects, or when mature governance is quiet in at least 30% of cycles or averages fewer than two viable command families in actionable cycles. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
+Each phase records action share, quiet and blocked cycles, how many quiet cycles still contain autonomous world change, viable option depth, viable command-family breadth, multi-family choice frequency, closely ranked alternatives, and whether alternatives produce distinct immediate and one-interval projected consequence profiles. Findings distinguish consequential time passage from genuinely static downtime. They warn when establishment or institutional ascent becomes mostly waiting, when apparently broad choices have one obvious winner, equivalent immediate effects, or convergent short-term trajectories, or when mature governance is quiet in at least 30% of cycles and lacks either meaningful option depth or broad command-family competition. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
 
 ## Recovery routes
 
@@ -199,14 +199,18 @@ Findings use `Info`, `Warning`, or `Critical` severity. They cover conditions su
 - Command families that are absent, blocked, unselected, or inconsequential
 - Repetitive command streaks and housekeeping displacement
 - Long periods without a substantive action, including severe outlier campaigns hidden by healthy aggregate averages
+- Quiet decision cycles that produce neither a player action nor meaningful autonomous world change
 - Asset-rich but cash-poor quiet streaks measured while the liquidity condition is actually present, not inferred from unrelated endpoint wealth
 - Economic states with no viable recovery route
+- Active but ineffective recovery churn that ends without cash, property, or an operating business
 - Persistent business, food, labor, credit, crisis, or notification failure
 - Public-work or office-duty overload
 - Misordered, compressed, synchronized, or unreachable campaign milestones
 - Weak strategic variety or persona convergence
 - Multi-family cycles dominated by one obviously superior option
 - Viable alternatives with indistinguishable immediate consequence profiles
+- Viable alternatives whose simulated trajectories converge after one decision interval
+- Commission-and-leverage information loops that become scheduled maintenance
 - Patronage and nomination administration consuming too much of substantive play
 - Political growth without family capacity
 - Near-universal institutional representation that erodes specialization
@@ -223,9 +227,10 @@ Each retained step includes:
 - Considered, viable, and substantive candidate counts
 - Distinct viable command families
 - Ranked candidates and scores
-- Successfully probed viable alternatives, their scores, descriptions, and immediate consequence domains
+- Successfully probed viable alternatives, their scores, descriptions, immediate consequence domains, and projected domains after one decision interval
 - Score distance between the strongest two command families
 - Number of distinct immediate consequence profiles among viable command families
+- Number of distinct projected consequence profiles among viable command families
 - Selected command and outcome
 - Rejection summary
 - Immediate, persistent, delayed, and ambient domains
@@ -242,7 +247,8 @@ The JSON report contains:
 - `schema_version`
 - Harness configuration
 - Aggregate counters, scores, command statistics, and interaction edges
-- Per-phase actionability, command-family breadth, close-choice frequency, and immediate consequence differentiation
+- Per-phase actionability, viable option depth, command-family breadth, close-choice frequency, and immediate plus one-interval projected consequence differentiation
+- Per-phase and aggregate separation of quiet cycles with ambient world change from genuinely static quiet cycles
 - Per-campaign start and end snapshots
 - Fantasy-arc milestones
 - Findings and limitations
@@ -278,6 +284,6 @@ The harness can evaluate deterministic state and command behavior. It cannot est
 - Whether real-time pacing feels appropriate
 - Whether mechanically distinct options feel emotionally or narratively meaningful
 - Whether a player recognizes which rival caused a setback or understands that rival's intent
-- How every unchosen branch develops across its full delayed consequence horizon
+- How every unchosen branch develops beyond the first decision interval and across its full delayed consequence horizon
 
 Use human playtesting for those questions.

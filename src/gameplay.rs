@@ -15,18 +15,18 @@ use crate::systems::{
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, EducationFocus, FAMILY_EDUCATION_COST,
     FAMILY_EDUCATION_INTERVAL_DAYS, HEIR_DESIGNATION_INTERVAL_DAYS,
     HEIR_DESIGNATION_LEGITIMACY_COST, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
-    INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
-    INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
-    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
-    InformationFocus, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
-    LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
-    MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError, OFFICE_DUTY_COST_PER_POWER,
-    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
-    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
-    OFFICE_POWER_ESTABLISHMENT_DAYS, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, SimulationError, StrategicError, SupplyContractTerms,
-    WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    INFORMATION_COMMISSION_COST, INFORMATION_LEVERAGE_COST, INSTITUTION_SUPPORT_COST,
+    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
+    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, InformationFocus, LABOR_REPLACEMENT_COST,
+    LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST,
+    LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
+    OFFICE_DUTY_COST_PER_POWER, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
+    OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, OFFICE_POWER_ESTABLISHMENT_DAYS,
+    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
+    SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
+    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT, advance_days,
     apply_player_command, available_household_workers, build_new_game,
     has_established_player_office_power, institution_capability_score,
@@ -90,7 +90,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 28;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 30;
 const CLOSE_CHOICE_SCORE_GAP: i64 = 300;
 const HEIR_CONFIRMATION_HEAD_AGE_YEARS: i64 = 52;
 const HEIR_CONFIRMATION_HEALTH_THRESHOLD: u16 = 5_000;
@@ -105,6 +105,8 @@ const AGENT_CASH_REBALANCE_BUFFER: Money = Money::from_copper(2_000);
 const AGENT_CASH_REBALANCE_INTERVAL_DAYS: i64 = 28;
 const AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS: i64 = 360;
 const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_000);
+const AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 720;
+const AGENT_INFORMATION_LEVERAGE_DELAY_DAYS: i64 = 90;
 const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 14;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -327,6 +329,7 @@ impl GameplayCommandKind {
                 | Self::ResolveLaborDispute
                 | Self::SellProperty
                 | Self::ExtendCredit
+                | Self::SetHouseGovernance
                 | Self::EnactLaw
                 | Self::StartPublicWork
                 | Self::WithdrawFromInstitution
@@ -1279,6 +1282,7 @@ pub struct GameplayViableOption {
     pub score: i64,
     pub description: String,
     pub immediate_domains: BTreeSet<GameplayDomain>,
+    pub projected_domains: BTreeSet<GameplayDomain>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1293,6 +1297,7 @@ pub struct GameplayTraceStep {
     pub viable_options: Vec<GameplayViableOption>,
     pub close_choice_score_gap: Option<i64>,
     pub distinct_immediate_choice_profiles: u16,
+    pub distinct_projected_choice_profiles: u16,
     pub selected_command: Option<GameplayCommandKind>,
     pub command_description: Option<String>,
     pub outcome: Option<String>,
@@ -1350,10 +1355,13 @@ pub struct GameplayPhaseStats {
     pub decision_cycles: u32,
     pub substantive_actions: u32,
     pub quiet_cycles: u32,
+    pub quiet_cycles_with_ambient_change: u32,
     pub blocked_cycles: u32,
     pub cycles_with_multiple_viable_command_kinds: u32,
     pub cycles_with_close_viable_command_kinds: u32,
     pub cycles_with_distinct_immediate_consequences: u32,
+    pub cycles_with_distinct_projected_consequences: u32,
+    pub total_viable_choices: u32,
     pub total_viable_command_kinds: u32,
 }
 
@@ -1368,8 +1376,10 @@ pub struct GameplayCampaignReport {
     pub cycles_with_multiple_viable_command_kinds: u32,
     pub cycles_with_close_viable_command_kinds: u32,
     pub cycles_with_distinct_immediate_consequences: u32,
+    pub cycles_with_distinct_projected_consequences: u32,
     pub no_action_cycles: u32,
     pub quiet_cycles: u32,
+    pub quiet_cycles_with_ambient_change: u32,
     pub blocked_cycles: u32,
     pub total_viable_choices: u32,
     pub total_viable_command_kinds: u32,
@@ -1395,6 +1405,7 @@ pub struct GameplayCampaignReport {
     pub longest_substantive_streak_command: Option<GameplayCommandKind>,
     pub longest_substantive_action_gap_days: u32,
     pub longest_asset_rich_quiet_gap_days: u32,
+    pub commission_leverage_pairs: u16,
     pub fantasy_arc: GameplayFantasyArc,
     pub trace: Vec<GameplayTraceStep>,
 }
@@ -1426,10 +1437,12 @@ pub struct GameplayAggregate {
     pub phase_stats: BTreeMap<GameplayPhase, GameplayPhaseStats>,
     pub no_action_cycles: u64,
     pub quiet_cycles: u64,
+    pub quiet_cycles_with_ambient_change: u64,
     pub blocked_cycles: u64,
     pub cycles_with_multiple_viable_command_kinds: u64,
     pub cycles_with_close_viable_command_kinds: u64,
     pub cycles_with_distinct_immediate_consequences: u64,
+    pub cycles_with_distinct_projected_consequences: u64,
     pub command_coverage: u16,
     pub domain_coverage: u16,
     pub commands: BTreeMap<GameplayCommandKind, GameplayCommandStats>,
@@ -1486,6 +1499,7 @@ struct ProbeResult {
     viable_options: Vec<GameplayViableOption>,
     close_choice_score_gap: Option<i64>,
     distinct_immediate_choice_profiles: usize,
+    distinct_projected_choice_profiles: usize,
     rejections: Vec<String>,
 }
 
@@ -1496,12 +1510,14 @@ struct ChoiceCycleMetrics {
     viable_command_kind_count: usize,
     close_choice: bool,
     distinct_immediate_choices: bool,
+    distinct_projected_choices: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct PhaseCycleObservation {
     action: Option<GameplayCommandKind>,
     choices: ChoiceCycleMetrics,
+    ambient_change: bool,
 }
 
 #[derive(Debug)]
@@ -1519,8 +1535,10 @@ struct CampaignAccumulator {
     cycles_with_multiple_viable_command_kinds: u32,
     cycles_with_close_viable_command_kinds: u32,
     cycles_with_distinct_immediate_consequences: u32,
+    cycles_with_distinct_projected_consequences: u32,
     no_action_cycles: u32,
     quiet_cycles: u32,
+    quiet_cycles_with_ambient_change: u32,
     blocked_cycles: u32,
     total_viable_choices: u32,
     total_viable_command_kinds: u32,
@@ -1542,6 +1560,7 @@ struct CampaignAccumulator {
     longest_substantive_action_gap_days: u32,
     current_asset_rich_quiet_gap_days: u32,
     longest_asset_rich_quiet_gap_days: u32,
+    commission_leverage_pairs: u16,
     starting_generation: Option<u16>,
     fantasy_arc: GameplayFantasyArc,
 }
@@ -1562,8 +1581,10 @@ impl CampaignAccumulator {
             cycles_with_multiple_viable_command_kinds: 0,
             cycles_with_close_viable_command_kinds: 0,
             cycles_with_distinct_immediate_consequences: 0,
+            cycles_with_distinct_projected_consequences: 0,
             no_action_cycles: 0,
             quiet_cycles: 0,
+            quiet_cycles_with_ambient_change: 0,
             blocked_cycles: 0,
             total_viable_choices: 0,
             total_viable_command_kinds: 0,
@@ -1585,6 +1606,7 @@ impl CampaignAccumulator {
             longest_substantive_action_gap_days: 0,
             current_asset_rich_quiet_gap_days: 0,
             longest_asset_rich_quiet_gap_days: 0,
+            commission_leverage_pairs: 0,
             starting_generation: None,
             fantasy_arc: GameplayFantasyArc::default(),
         }
@@ -1619,6 +1641,14 @@ impl CampaignAccumulator {
             self.fantasy_arc
                 .first_city_shaping_action_day
                 .get_or_insert(day);
+        }
+        if kind == GameplayCommandKind::LeverageInformation
+            && self.last_substantive_command == Some(GameplayCommandKind::CommissionInformation)
+            && self
+                .last_substantive_command_day
+                .is_some_and(|previous_day| day.saturating_sub(previous_day) <= 60)
+        {
+            self.commission_leverage_pairs = self.commission_leverage_pairs.saturating_add(1);
         }
         let follows_recent_same_command = self.last_substantive_command == Some(kind)
             && self
@@ -1674,7 +1704,11 @@ impl CampaignAccumulator {
     }
 
     fn record_phase_cycle(&mut self, phase: GameplayPhase, observation: PhaseCycleObservation) {
-        let PhaseCycleObservation { action, choices } = observation;
+        let PhaseCycleObservation {
+            action,
+            choices,
+            ambient_change,
+        } = observation;
         let stats = self
             .phase_stats
             .get_mut(&phase)
@@ -1683,11 +1717,20 @@ impl CampaignAccumulator {
         stats.total_viable_command_kinds = stats
             .total_viable_command_kinds
             .saturating_add(usize_to_u32(choices.viable_command_kind_count));
+        stats.total_viable_choices = stats
+            .total_viable_choices
+            .saturating_add(usize_to_u32(choices.substantive_viable_count));
         if action.is_some_and(|kind| kind != GameplayCommandKind::AcknowledgeNotification) {
             stats.substantive_actions = stats.substantive_actions.saturating_add(1);
         } else if choices.substantive_viable_count == 0 {
             if choices.substantive_candidate_count == 0 {
                 stats.quiet_cycles = stats.quiet_cycles.saturating_add(1);
+                if ambient_change {
+                    stats.quiet_cycles_with_ambient_change =
+                        stats.quiet_cycles_with_ambient_change.saturating_add(1);
+                    self.quiet_cycles_with_ambient_change =
+                        self.quiet_cycles_with_ambient_change.saturating_add(1);
+                }
             } else {
                 stats.blocked_cycles = stats.blocked_cycles.saturating_add(1);
             }
@@ -1705,6 +1748,11 @@ impl CampaignAccumulator {
         if choices.distinct_immediate_choices {
             stats.cycles_with_distinct_immediate_consequences = stats
                 .cycles_with_distinct_immediate_consequences
+                .saturating_add(1);
+        }
+        if choices.distinct_projected_choices {
+            stats.cycles_with_distinct_projected_consequences = stats
+                .cycles_with_distinct_projected_consequences
                 .saturating_add(1);
         }
     }
@@ -1837,7 +1885,7 @@ fn gameplay_harness_limitations() -> Vec<String> {
         "Automated agents measure reachability and systemic outcomes, not whether a human understands the interface or enjoys the decisions.".to_owned(),
         "The report cannot measure emotional investment, narrative quality, or the cognitive burden of comparing choices.".to_owned(),
         "Agents inspect authoritative simulation state when choosing what to investigate; commissioned reports can unlock traceable follow-up actions, but the harness does not measure whether a human can interpret the report or identify the best use.".to_owned(),
-        "Alternative-choice profiles compare immediate snapshot effects; the harness does not advance every unchosen branch through its full delayed consequence horizon.".to_owned(),
+        "Alternative-choice profiles compare immediate effects and one decision interval of projected divergence; the harness does not advance every unchosen branch through its full delayed consequence horizon.".to_owned(),
         "Deterministic personas follow fixed priorities and do not model experimentation, misunderstanding, changing preferences, or interface friction.".to_owned(),
         "AI-objective progress measures rival activity, but the harness cannot prove that a human recognizes which house caused a setback or understands that rival's intent.".to_owned(),
         "Counterfactual attribution can only detect consequences represented by the report snapshot and configured consequence horizon.".to_owned(),
@@ -1896,8 +1944,11 @@ fn run_campaign(
         cycles_with_close_viable_command_kinds: accumulator.cycles_with_close_viable_command_kinds,
         cycles_with_distinct_immediate_consequences: accumulator
             .cycles_with_distinct_immediate_consequences,
+        cycles_with_distinct_projected_consequences: accumulator
+            .cycles_with_distinct_projected_consequences,
         no_action_cycles: accumulator.no_action_cycles,
         quiet_cycles: accumulator.quiet_cycles,
+        quiet_cycles_with_ambient_change: accumulator.quiet_cycles_with_ambient_change,
         blocked_cycles: accumulator.blocked_cycles,
         total_viable_choices: accumulator.total_viable_choices,
         total_viable_command_kinds: accumulator.total_viable_command_kinds,
@@ -1923,6 +1974,7 @@ fn run_campaign(
         longest_substantive_streak_command: accumulator.longest_substantive_streak_command,
         longest_substantive_action_gap_days: accumulator.longest_substantive_action_gap_days,
         longest_asset_rich_quiet_gap_days: accumulator.longest_asset_rich_quiet_gap_days,
+        commission_leverage_pairs: accumulator.commission_leverage_pairs,
         fantasy_arc: accumulator.fantasy_arc,
         trace,
     })
@@ -1957,19 +2009,13 @@ fn run_decision_cycle(
         registry,
         state,
         candidates_to_probe.into_iter(),
+        step_days,
         accumulator,
-    );
+    )?;
     let choice_metrics =
         record_choice_cycle_metrics(accumulator, substantive_candidate_count, &probe);
     let action = apply_selected_candidate(registry, state, probe.selected, accumulator)?;
     let action_kind = action.as_ref().map(|action| action.kind);
-    accumulator.record_phase_cycle(
-        phase,
-        PhaseCycleObservation {
-            action: action_kind,
-            choices: choice_metrics,
-        },
-    );
     accumulator.record_action_gap(action_kind, step_days, &before);
     let after_command = GameplaySnapshot::capture(state);
     let consequence_horizon = consequence_horizon_days(
@@ -1989,6 +2035,17 @@ fn run_decision_cycle(
     };
     advance_days(registry, &mut baseline_state, consequence_horizon)?;
     let baseline_after_time = GameplaySnapshot::capture(&baseline_state);
+    let ambient_change = !before.changed_domains(&baseline_after_time).is_empty()
+        || baseline_after_time.outbox_messages > before.outbox_messages
+        || baseline_after_time.chronicle_entries > before.chronicle_entries;
+    accumulator.record_phase_cycle(
+        phase,
+        PhaseCycleObservation {
+            action: action_kind,
+            choices: choice_metrics,
+            ambient_change,
+        },
+    );
     record_cycle(
         CycleObservation {
             before: &before,
@@ -2003,6 +2060,7 @@ fn run_decision_cycle(
             viable_options: probe.viable_options,
             close_choice_score_gap: probe.close_choice_score_gap,
             distinct_immediate_choice_profiles: probe.distinct_immediate_choice_profiles,
+            distinct_projected_choice_profiles: probe.distinct_projected_choice_profiles,
             rejections: probe.rejections,
             action,
         },
@@ -2020,6 +2078,7 @@ fn record_choice_cycle_metrics(
         .close_choice_score_gap
         .is_some_and(|gap| gap <= CLOSE_CHOICE_SCORE_GAP);
     let distinct_immediate_choices = probe.distinct_immediate_choice_profiles >= 2;
+    let distinct_projected_choices = probe.distinct_projected_choice_profiles >= 2;
     accumulator.total_viable_choices = accumulator
         .total_viable_choices
         .saturating_add(usize_to_u32(probe.substantive_viable_count));
@@ -2052,12 +2111,18 @@ fn record_choice_cycle_metrics(
             .cycles_with_distinct_immediate_consequences
             .saturating_add(1);
     }
+    if distinct_projected_choices {
+        accumulator.cycles_with_distinct_projected_consequences = accumulator
+            .cycles_with_distinct_projected_consequences
+            .saturating_add(1);
+    }
     ChoiceCycleMetrics {
         substantive_candidate_count,
         substantive_viable_count: probe.substantive_viable_count,
         viable_command_kind_count: probe.viable_command_kinds.len(),
         close_choice,
         distinct_immediate_choices,
+        distinct_projected_choices,
     }
 }
 
@@ -2254,6 +2319,11 @@ fn record_activation_opportunities(
     let property_liquidation_opportunity = has_property_liquidation_opportunity(registry, state);
     let institution_withdrawal_opportunity = has_institution_withdrawal_opportunity(state);
     let extend_credit_opportunity = has_extend_credit_opportunity(state, persona);
+    let mut family_candidates = Vec::new();
+    generate_family_candidates(registry, state, persona, &mut family_candidates);
+    let governance_opportunity = family_candidates
+        .iter()
+        .any(|candidate| candidate.kind == GameplayCommandKind::SetHouseGovernance);
     let mut civic_candidates = Vec::new();
     generate_law_candidates(registry, state, persona, &mut civic_candidates);
     generate_public_work_candidates(registry, state, persona, &mut civic_candidates);
@@ -2276,6 +2346,10 @@ fn record_activation_opportunities(
             institution_withdrawal_opportunity,
         ),
         (GameplayCommandKind::ExtendCredit, extend_credit_opportunity),
+        (
+            GameplayCommandKind::SetHouseGovernance,
+            governance_opportunity,
+        ),
         (GameplayCommandKind::EnactLaw, law_opportunity),
         (
             GameplayCommandKind::StartPublicWork,
@@ -2341,9 +2415,13 @@ fn probe_candidates(
     registry: &Registry,
     state: &AppState,
     candidates: impl Iterator<Item = Candidate>,
+    projection_days: u32,
     accumulator: &mut CampaignAccumulator,
-) -> ProbeResult {
+) -> Result<ProbeResult, GameplayHarnessError> {
     let baseline = GameplaySnapshot::capture(state);
+    let mut projected_baseline_state = state.clone();
+    advance_days(registry, &mut projected_baseline_state, projection_days)?;
+    let projected_baseline = GameplaySnapshot::capture(&projected_baseline_state);
     let mut selected = None;
     let mut housekeeping_fallback = None;
     let mut viable_count = 0_usize;
@@ -2351,6 +2429,7 @@ fn probe_candidates(
     let mut viable_command_kinds = BTreeSet::new();
     let mut viable_options = Vec::new();
     let mut immediate_profiles = BTreeSet::new();
+    let mut projected_profiles = BTreeSet::new();
     let mut rejections = Vec::new();
     for candidate in candidates {
         let command_stats = accumulator
@@ -2368,12 +2447,18 @@ fn probe_candidates(
                     if viable_command_kinds.insert(candidate.kind) {
                         let immediate_domains =
                             baseline.changed_domains(&GameplaySnapshot::capture(&probe));
+                        let mut projected_state = probe.clone();
+                        advance_days(registry, &mut projected_state, projection_days)?;
+                        let projected_domains = projected_baseline
+                            .changed_domains(&GameplaySnapshot::capture(&projected_state));
                         immediate_profiles.insert(immediate_domains.clone());
+                        projected_profiles.insert(projected_domains.clone());
                         viable_options.push(GameplayViableOption {
                             command: candidate.kind,
                             score: candidate.score,
                             description: candidate.description.clone(),
                             immediate_domains,
+                            projected_domains,
                         });
                     }
                     if selected.is_none() {
@@ -2400,7 +2485,7 @@ fn probe_candidates(
         .first()
         .zip(viable_options.get(1))
         .map(|(first, second)| first.score.saturating_sub(second.score));
-    ProbeResult {
+    Ok(ProbeResult {
         selected: selected.or(housekeeping_fallback),
         viable_count,
         substantive_viable_count,
@@ -2408,8 +2493,9 @@ fn probe_candidates(
         viable_options,
         close_choice_score_gap,
         distinct_immediate_choice_profiles: immediate_profiles.len(),
+        distinct_projected_choice_profiles: projected_profiles.len(),
         rejections,
-    }
+    })
 }
 
 struct CycleObservation<'a> {
@@ -2425,6 +2511,7 @@ struct CycleObservation<'a> {
     viable_options: Vec<GameplayViableOption>,
     close_choice_score_gap: Option<i64>,
     distinct_immediate_choice_profiles: usize,
+    distinct_projected_choice_profiles: usize,
     rejections: Vec<String>,
     action: Option<ExecutedAction>,
 }
@@ -2443,6 +2530,7 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         viable_options,
         close_choice_score_gap,
         distinct_immediate_choice_profiles,
+        distinct_projected_choice_profiles,
         rejections,
         action,
     } = observation;
@@ -2481,21 +2569,13 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         .copied()
         .chain(ambient_domains.iter().copied())
         .collect();
-    for domain in observed_domains {
-        *accumulator.domain_changes.entry(domain).or_default() += 1;
-    }
-    for domain in immediate_domains.union(&delayed_domains) {
-        *accumulator
-            .causal_domain_changes
-            .entry(*domain)
-            .or_default() += 1;
-    }
-    for domain in &ambient_domains {
-        *accumulator
-            .ambient_domain_changes
-            .entry(*domain)
-            .or_default() += 1;
-    }
+    record_cycle_domain_changes(
+        &observed_domains,
+        &immediate_domains,
+        &delayed_domains,
+        &ambient_domains,
+        accumulator,
+    );
     if let Some(action) = &action {
         record_action_consequences(
             action.kind,
@@ -2518,6 +2598,7 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         viable_options,
         close_choice_score_gap,
         distinct_immediate_choice_profiles: usize_to_u16(distinct_immediate_choice_profiles),
+        distinct_projected_choice_profiles: usize_to_u16(distinct_projected_choice_profiles),
         selected_command: action.as_ref().map(|action| action.kind),
         command_description: action.as_ref().map(|action| action.description.clone()),
         outcome: action.map(|action| action.outcome),
@@ -2530,6 +2611,30 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         delayed_world_feedback: delayed_feedback,
         ambient_world_feedback: ambient_feedback,
     });
+}
+
+fn record_cycle_domain_changes(
+    observed: &BTreeSet<GameplayDomain>,
+    immediate: &BTreeSet<GameplayDomain>,
+    delayed: &BTreeSet<GameplayDomain>,
+    ambient: &BTreeSet<GameplayDomain>,
+    accumulator: &mut CampaignAccumulator,
+) {
+    for domain in observed {
+        *accumulator.domain_changes.entry(*domain).or_default() += 1;
+    }
+    for domain in immediate.union(delayed) {
+        *accumulator
+            .causal_domain_changes
+            .entry(*domain)
+            .or_default() += 1;
+    }
+    for domain in ambient {
+        *accumulator
+            .ambient_domain_changes
+            .entry(*domain)
+            .or_default() += 1;
+    }
 }
 
 fn record_action_consequences(
@@ -2614,12 +2719,34 @@ fn candidate_preserves_office_duty_reserve(
     if candidate_is_emergency_spending(state, candidate) {
         return true;
     }
-    let additional_powers = match candidate.command {
+    let additional_powers = match &candidate.command {
         PlayerCommand::NominateForOffice { institution_id, .. } => state
             .institutions
-            .get(&institution_id)
+            .get(institution_id)
             .map_or(0, |institution| institution.powers.len()),
-        _ => 0,
+        PlayerCommand::TransferBusinessCash { .. }
+        | PlayerCommand::AcquireBusiness { .. }
+        | PlayerCommand::InvestInBusiness { .. }
+        | PlayerCommand::SetBusinessPolicy { .. }
+        | PlayerCommand::CreateSupplyContract { .. }
+        | PlayerCommand::IssueLoan { .. }
+        | PlayerCommand::BuyProperty { .. }
+        | PlayerCommand::SellProperty { .. }
+        | PlayerCommand::EnactLaw { .. }
+        | PlayerCommand::StartPublicWork { .. }
+        | PlayerCommand::FileLegalCase { .. }
+        | PlayerCommand::SetHouseGovernance { .. }
+        | PlayerCommand::DesignateHeir { .. }
+        | PlayerCommand::AdoptWard { .. }
+        | PlayerCommand::EducateFamilyMember { .. }
+        | PlayerCommand::CultivateInstitutionSupport { .. }
+        | PlayerCommand::ExerciseOfficePower { .. }
+        | PlayerCommand::WithdrawFromInstitution { .. }
+        | PlayerCommand::RespondToCrisis { .. }
+        | PlayerCommand::ResolveLaborDispute { .. }
+        | PlayerCommand::CommissionInformation { .. }
+        | PlayerCommand::LeverageInformation { .. }
+        | PlayerCommand::AcknowledgeNotification { .. } => 0,
     };
     let reserve = player_office_duty_reserve(state, additional_powers);
     let reserve = if additional_powers > 0 && player_has_office_duty_forfeiture(state) {
@@ -2640,29 +2767,54 @@ fn candidate_preserves_office_duty_reserve(
 }
 
 fn player_has_office_duty_forfeiture(state: &AppState) -> bool {
-    let dynasty_marker = format!("dynasty:{}", state.player_dynasty_id.value());
     state.audit_log.iter().any(|record| {
         record.kind() == AuditKind::OfficeDutyForfeiture
-            && record.subject().contains(&dynasty_marker)
+            && audit_subject_has_dynasty(record.subject(), state.player_dynasty_id)
     })
 }
 
+fn audit_subject_has_dynasty(subject: &str, dynasty_id: DynastyId) -> bool {
+    let expected = format!("dynasty:{}", dynasty_id.value());
+    subject.split(';').any(|segment| segment == expected)
+}
+
 fn candidate_is_emergency_spending(state: &AppState, candidate: &Candidate) -> bool {
-    match candidate.command {
+    match &candidate.command {
         PlayerCommand::RespondToCrisis { crisis_id, .. } => {
-            state.crises.get(&crisis_id).is_some_and(|crisis| {
+            state.crises.get(crisis_id).is_some_and(|crisis| {
                 crisis.status == CrisisStatus::Escalated || crisis.severity_basis_points >= 8_000
             })
         }
         PlayerCommand::InvestInBusiness { business_id, .. } => {
-            state.businesses.get(business_id).is_some_and(|business| {
+            state.businesses.get(*business_id).is_some_and(|business| {
                 matches!(
                     business.status(),
                     BusinessStatus::Distressed | BusinessStatus::Insolvent
                 ) || business.operations.condition_basis_points < 2_000
             })
         }
-        _ => false,
+        PlayerCommand::TransferBusinessCash { .. }
+        | PlayerCommand::AcquireBusiness { .. }
+        | PlayerCommand::SetBusinessPolicy { .. }
+        | PlayerCommand::CreateSupplyContract { .. }
+        | PlayerCommand::IssueLoan { .. }
+        | PlayerCommand::BuyProperty { .. }
+        | PlayerCommand::SellProperty { .. }
+        | PlayerCommand::EnactLaw { .. }
+        | PlayerCommand::StartPublicWork { .. }
+        | PlayerCommand::FileLegalCase { .. }
+        | PlayerCommand::SetHouseGovernance { .. }
+        | PlayerCommand::DesignateHeir { .. }
+        | PlayerCommand::AdoptWard { .. }
+        | PlayerCommand::EducateFamilyMember { .. }
+        | PlayerCommand::CultivateInstitutionSupport { .. }
+        | PlayerCommand::NominateForOffice { .. }
+        | PlayerCommand::ExerciseOfficePower { .. }
+        | PlayerCommand::WithdrawFromInstitution { .. }
+        | PlayerCommand::ResolveLaborDispute { .. }
+        | PlayerCommand::CommissionInformation { .. }
+        | PlayerCommand::LeverageInformation { .. }
+        | PlayerCommand::AcknowledgeNotification { .. } => false,
     }
 }
 
@@ -3162,7 +3314,10 @@ fn generate_business_investment_candidate(
         .is_some_and(|good| good.category() == GoodCategory::Staple)
         && average_food_satisfaction < 5_000;
     let severe_rehabilitation = business.operations.condition_basis_points < 2_000;
-    let dynasty_reserve = if severe_rehabilitation {
+    let portfolio_emergency = player_has_no_active_business(state);
+    let dynasty_reserve = if portfolio_emergency {
+        Money::ZERO
+    } else if severe_rehabilitation {
         Money::from_copper(2_000)
     } else {
         recapitalization_dynasty_reserve(persona, staple_emergency)
@@ -3196,7 +3351,9 @@ fn generate_business_investment_candidate(
         GameplayPersona::PowerBroker => 260,
         GameplayPersona::Opportunist => 180,
     };
-    let emergency_bonus = if staple_emergency {
+    let emergency_bonus = if portfolio_emergency {
+        4_500
+    } else if staple_emergency {
         3_000
     } else if severe_rehabilitation {
         2_600
@@ -3617,7 +3774,7 @@ fn generate_contract_candidates(
                         quantity_per_week: input
                             .quantity()
                             .saturating_mul_ratio(secure_supply_batches(business), 1),
-                        bonus: contract_direction_bonus(persona, GameplayCommandKind::SecureSupply),
+                        bonus: secure_supply_bonus(persona),
                     },
                 );
             }
@@ -3637,7 +3794,7 @@ fn generate_contract_candidates(
                     quantity_per_week: recipe
                         .output_quantity()
                         .saturating_mul_ratio(STANDARD_CONTRACT_BATCHES_PER_WEEK, 1),
-                    bonus: contract_direction_bonus(persona, GameplayCommandKind::SellOutput),
+                    bonus: sell_output_bonus(persona),
                 },
             );
         }
@@ -3654,19 +3811,20 @@ fn secure_supply_batches(business: &crate::core::Business) -> i64 {
     }
 }
 
-fn contract_direction_bonus(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
-    match (persona, kind) {
-        (GameplayPersona::Steward, GameplayCommandKind::SecureSupply) => 420,
-        (
-            GameplayPersona::Steward | GameplayPersona::PowerBroker,
-            GameplayCommandKind::SellOutput,
-        ) => 100,
-        (GameplayPersona::Entrepreneur, GameplayCommandKind::SecureSupply) => 520,
-        (GameplayPersona::Entrepreneur, GameplayCommandKind::SellOutput) => 620,
-        (GameplayPersona::PowerBroker, GameplayCommandKind::SecureSupply) => 80,
-        (GameplayPersona::Opportunist, GameplayCommandKind::SecureSupply) => 120,
-        (GameplayPersona::Opportunist, GameplayCommandKind::SellOutput) => 560,
-        (_, _) => unreachable!("contract bonus requires a contract command kind"),
+const fn secure_supply_bonus(persona: GameplayPersona) -> i64 {
+    match persona {
+        GameplayPersona::Steward => 420,
+        GameplayPersona::Entrepreneur => 520,
+        GameplayPersona::PowerBroker => 80,
+        GameplayPersona::Opportunist => 120,
+    }
+}
+
+const fn sell_output_bonus(persona: GameplayPersona) -> i64 {
+    match persona {
+        GameplayPersona::Steward | GameplayPersona::PowerBroker => 100,
+        GameplayPersona::Entrepreneur => 620,
+        GameplayPersona::Opportunist => 560,
     }
 }
 
@@ -4287,6 +4445,10 @@ fn generate_information_candidates(
     for report in state.information_reports.values().filter(|report| {
         report.owner_dynasty_id == state.player_dynasty_id
             && report.source == COMMISSIONED_INFORMATION_SOURCE
+            && state.clock.day()
+                >= report
+                    .created_day
+                    .saturating_add(AGENT_INFORMATION_LEVERAGE_DELAY_DAYS)
     }) {
         let Ok(quote) = quote_information_leverage(registry, state, report.id()) else {
             continue;
@@ -4339,7 +4501,7 @@ fn generate_information_candidates(
     let available = report_commission_day
         .max(audit_commission_day)
         .is_none_or(|day| {
-            state.clock.day() >= day.saturating_add(INFORMATION_COMMISSION_INTERVAL_DAYS)
+            state.clock.day() >= day.saturating_add(AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS)
         });
     if !available {
         return;
@@ -5561,10 +5723,9 @@ fn player_has_severe_business_distress(state: &AppState) -> bool {
 }
 
 fn has_recent_player_office_duty_shortfall(state: &AppState) -> bool {
-    let marker = format!("dynasty:{}", state.player_dynasty_id.value());
     state.audit_log.iter().rev().any(|record| {
         record.kind() == AuditKind::OfficeDutyShortfall
-            && record.subject().contains(&marker)
+            && audit_subject_has_dynasty(record.subject(), state.player_dynasty_id)
             && state.clock.day().saturating_sub(record.day()) <= 180
     })
 }
@@ -5906,8 +6067,62 @@ fn rank_adjustment(
     persona_weight(persona, kind)
         .saturating_add(coverage)
         .saturating_add(urgency_weight(state, kind))
+        .saturating_add(recovery_priority_adjustment(state, kind))
         .saturating_sub(repetition)
         .saturating_sub(repeat_last)
+}
+
+fn player_has_no_active_business(state: &AppState) -> bool {
+    let mut owns_business = false;
+    let mut has_active = false;
+    let mut has_recoverable = false;
+    for business in state
+        .businesses
+        .iter()
+        .filter(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+    {
+        owns_business = true;
+        has_active |= business.status() == BusinessStatus::Active;
+        has_recoverable |= matches!(
+            business.status(),
+            BusinessStatus::Distressed | BusinessStatus::Insolvent
+        );
+    }
+    owns_business && !has_active && has_recoverable
+}
+
+fn recovery_priority_adjustment(state: &AppState, kind: GameplayCommandKind) -> i64 {
+    if !player_has_no_active_business(state) {
+        return 0;
+    }
+    match kind {
+        GameplayCommandKind::TransferBusinessCash
+        | GameplayCommandKind::InvestInBusiness
+        | GameplayCommandKind::BorrowFunds
+        | GameplayCommandKind::AcquireBusiness
+        | GameplayCommandKind::SellProperty => 3_500,
+        GameplayCommandKind::SecureSupply
+        | GameplayCommandKind::SellOutput
+        | GameplayCommandKind::ResolveLaborDispute
+        | GameplayCommandKind::RespondToCrisis => 500,
+        GameplayCommandKind::BuyProperty
+        | GameplayCommandKind::ExtendCredit
+        | GameplayCommandKind::CommissionInformation
+        | GameplayCommandKind::LeverageInformation
+        | GameplayCommandKind::CultivateInstitutionSupport
+        | GameplayCommandKind::NominateForOffice
+        | GameplayCommandKind::EnactLaw
+        | GameplayCommandKind::StartPublicWork
+        | GameplayCommandKind::FileLegalCase
+        | GameplayCommandKind::SetHouseGovernance
+        | GameplayCommandKind::DesignateHeir
+        | GameplayCommandKind::AdoptWard
+        | GameplayCommandKind::EducateFamilyMember
+        | GameplayCommandKind::ExerciseOfficePower => -2_500,
+        GameplayCommandKind::SetBusinessPolicy
+        | GameplayCommandKind::WithdrawFromInstitution
+        | GameplayCommandKind::AcknowledgeNotification => 0,
+    }
 }
 
 fn steward_weight(kind: GameplayCommandKind) -> i64 {
@@ -6038,82 +6253,17 @@ fn active_crisis_urgency(state: &AppState) -> i64 {
 fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
     match kind {
         GameplayCommandKind::RespondToCrisis => active_crisis_urgency(state),
-        GameplayCommandKind::ResolveLaborDispute => {
-            if state
-                .employment
-                .values()
-                .any(|agreement| agreement.status == EmploymentStatus::Disputed)
-            {
-                2_100
-            } else {
-                0
-            }
-        }
-        GameplayCommandKind::SetBusinessPolicy => {
-            if state.businesses.iter().any(|business| {
-                business.owner_dynasty_id() == state.player_dynasty_id
-                    && business.status() == BusinessStatus::Distressed
-            }) {
-                1_000
-            } else {
-                0
-            }
-        }
-        GameplayCommandKind::InvestInBusiness => {
-            if state.businesses.iter().any(|business| {
-                business.owner_dynasty_id() == state.player_dynasty_id
-                    && matches!(
-                        business.status(),
-                        BusinessStatus::Distressed | BusinessStatus::Insolvent
-                    )
-            }) {
-                2_400
-            } else {
-                0
-            }
-        }
-        GameplayCommandKind::AcquireBusiness => {
-            if state.businesses.iter().any(|business| {
-                business.owner_dynasty_id() == state.player_dynasty_id
-                    && matches!(
-                        business.status(),
-                        BusinessStatus::Active | BusinessStatus::Distressed
-                    )
-            }) {
-                0
-            } else {
-                2_300
-            }
-        }
-        GameplayCommandKind::AcknowledgeNotification => {
-            if state
-                .outbox
-                .iter()
-                .filter(|message| !message.acknowledged)
-                .count()
-                > 8
-            {
-                650
-            } else {
-                0
-            }
-        }
-        GameplayCommandKind::BorrowFunds => {
-            if state
-                .dynasties
-                .get(&state.player_dynasty_id)
-                .is_some_and(|dynasty| dynasty.treasury() < Money::from_copper(8_000))
-            {
-                700
-            } else {
-                0
-            }
-        }
+        GameplayCommandKind::ResolveLaborDispute => labor_dispute_urgency(state),
+        GameplayCommandKind::SetBusinessPolicy => business_policy_urgency(state),
+        GameplayCommandKind::InvestInBusiness => impaired_business_urgency(state, 2_400),
+        GameplayCommandKind::AcquireBusiness => acquisition_urgency(state),
+        GameplayCommandKind::AcknowledgeNotification => notification_urgency(state),
+        GameplayCommandKind::BorrowFunds => borrowing_urgency(state),
         GameplayCommandKind::SellProperty => 3_500,
+        GameplayCommandKind::TransferBusinessCash => impaired_business_urgency(state, 2_800),
         GameplayCommandKind::LeverageInformation => 600,
         GameplayCommandKind::WithdrawFromInstitution => institution_withdrawal_urgency(state),
-        GameplayCommandKind::TransferBusinessCash
-        | GameplayCommandKind::SecureSupply
+        GameplayCommandKind::SecureSupply
         | GameplayCommandKind::SellOutput
         | GameplayCommandKind::ExtendCredit
         | GameplayCommandKind::BuyProperty
@@ -6128,6 +6278,85 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         | GameplayCommandKind::CommissionInformation
         | GameplayCommandKind::ExerciseOfficePower
         | GameplayCommandKind::NominateForOffice => 0,
+    }
+}
+
+fn labor_dispute_urgency(state: &AppState) -> i64 {
+    if state
+        .employment
+        .values()
+        .any(|agreement| agreement.status == EmploymentStatus::Disputed)
+    {
+        2_100
+    } else {
+        0
+    }
+}
+
+fn business_policy_urgency(state: &AppState) -> i64 {
+    if state.businesses.iter().any(|business| {
+        business.owner_dynasty_id() == state.player_dynasty_id
+            && business.status() == BusinessStatus::Distressed
+    }) {
+        1_000
+    } else {
+        0
+    }
+}
+
+fn impaired_business_urgency(state: &AppState, urgency: i64) -> i64 {
+    if state.businesses.iter().any(|business| {
+        business.owner_dynasty_id() == state.player_dynasty_id
+            && matches!(
+                business.status(),
+                BusinessStatus::Distressed | BusinessStatus::Insolvent
+            )
+    }) {
+        urgency
+    } else {
+        0
+    }
+}
+
+fn acquisition_urgency(state: &AppState) -> i64 {
+    if state.businesses.iter().any(|business| {
+        business.owner_dynasty_id() == state.player_dynasty_id
+            && matches!(
+                business.status(),
+                BusinessStatus::Active | BusinessStatus::Distressed
+            )
+    }) {
+        0
+    } else {
+        2_300
+    }
+}
+
+fn notification_urgency(state: &AppState) -> i64 {
+    if state
+        .outbox
+        .iter()
+        .filter(|message| !message.acknowledged)
+        .count()
+        > 8
+    {
+        650
+    } else {
+        0
+    }
+}
+
+fn borrowing_urgency(state: &AppState) -> i64 {
+    if player_has_no_active_business(state) {
+        3_000
+    } else if state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .is_some_and(|dynasty| dynasty.treasury() < Money::from_copper(8_000))
+    {
+        700
+    } else {
+        0
     }
 }
 
@@ -6248,6 +6477,20 @@ fn labor_response_bonus(persona: GameplayPersona, response: LaborResponse) -> i6
     }
 }
 
+const LAW_POWER_PENDING: &str = "law sponsorship office power not established";
+const WORK_REQUIRES_OFFICE: &str = "public-work sponsorship requires office";
+const WORK_REQUIRES_POWER: &str = "public-work sponsorship requires office power";
+const WORK_POWER_PENDING: &str = "public-work office power not established";
+const OFFICE_RECORD_SHORT: &str = "insufficient office commercial record";
+const WARD_RECORD_SHORT: &str = "insufficient ward commercial record";
+const OFFICE_DIRECTIVE_PENDING: &str = "office power directive not established";
+const SUPPORT_REPUTATION_SHORT: &str = "insufficient institution-support reputation";
+const SUPPORT_RECORD_SHORT: &str = "insufficient institution-support commercial record";
+const SUPPORT_EXISTS: &str = "institution support already established";
+const SUPPORT_MISSING: &str = "institution support not established";
+const REPORT_UNCOMMISSIONED: &str = "intelligence report not commissioned";
+const REPORT_NO_LEVERAGE: &str = "intelligence report has no leverage";
+
 const fn command_error_category(error: &CommandError) -> &'static str {
     match error {
         CommandError::Strategic(source) => strategic_error_category(source),
@@ -6266,9 +6509,7 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::CivicTreasuryOverflow { .. } => "civic treasury overflow",
         CommandError::LawSponsorshipRequiresOffice => "law sponsorship requires office",
         CommandError::LawSponsorshipRequiresPower { .. } => "law sponsorship requires office power",
-        CommandError::LawSponsorshipPowerNotEstablished { .. } => {
-            "law sponsorship office power not established"
-        }
+        CommandError::LawSponsorshipPowerNotEstablished { .. } => LAW_POWER_PENDING,
         CommandError::LawCooldown { .. } => "law cooldown",
         CommandError::MissingDistrict { .. } => "missing district",
         CommandError::MissingDynasty { .. } => "missing dynasty",
@@ -6276,15 +6517,9 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::InsufficientPlayerLegitimacy { .. } => "insufficient player legitimacy",
         CommandError::InsufficientBusinessFunds { .. } => "insufficient business funds",
         CommandError::InvalidPublicWorkBudget => "invalid public-work budget",
-        CommandError::PublicWorkSponsorshipRequiresOffice => {
-            "public-work sponsorship requires office"
-        }
-        CommandError::PublicWorkSponsorshipRequiresPower => {
-            "public-work sponsorship requires office power"
-        }
-        CommandError::PublicWorkPowerNotEstablished { .. } => {
-            "public-work office power not established"
-        }
+        CommandError::PublicWorkSponsorshipRequiresOffice => WORK_REQUIRES_OFFICE,
+        CommandError::PublicWorkSponsorshipRequiresPower => WORK_REQUIRES_POWER,
+        CommandError::PublicWorkPowerNotEstablished { .. } => WORK_POWER_PENDING,
         CommandError::DuplicateActivePublicWork { .. } => "duplicate active public work",
         CommandError::PublicWorkCooldown { .. } => "public-work cooldown",
         CommandError::PublicWorkCapacity { .. } => "public-work capacity",
@@ -6299,35 +6534,27 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::UnchangedHeir { .. } => "unchanged heir",
         CommandError::HeirDesignationCooldown { .. } => "heir designation cooldown",
         CommandError::InsufficientOfficeReputation { .. } => "insufficient office reputation",
-        CommandError::InsufficientOfficeCommercialRecord { .. } => {
-            "insufficient office commercial record"
-        }
+        CommandError::InsufficientOfficeCommercialRecord { .. } => OFFICE_RECORD_SHORT,
         CommandError::OfficeNominationCooldown { .. } => "office nomination cooldown",
         CommandError::WardAdoptionCooldown { .. } => "ward adoption cooldown",
         CommandError::WardCapacity { .. } => "ward capacity",
         CommandError::InsufficientWardReputation { .. } => "insufficient ward reputation",
-        CommandError::InsufficientWardCommercialRecord { .. } => {
-            "insufficient ward commercial record"
-        }
+        CommandError::InsufficientWardCommercialRecord { .. } => WARD_RECORD_SHORT,
         CommandError::InvalidFamilyStudent { .. } => "invalid family student",
         CommandError::FamilyEducationAtMaximum { .. } => "family education at maximum",
         CommandError::FamilyEducationCooldown { .. } => "family education cooldown",
         CommandError::MissingInstitution { .. } => "missing institution",
         CommandError::OfficePowerUnavailable { .. } => "office power unavailable",
-        CommandError::OfficePowerDirectiveNotEstablished { .. } => {
-            "office power directive not established"
-        }
+        CommandError::OfficePowerDirectiveNotEstablished { .. } => OFFICE_DIRECTIVE_PENDING,
         CommandError::OfficePowerDirectiveCooldown { .. } => "office power directive cooldown",
-        CommandError::InsufficientInstitutionSupportReputation { .. }
-        | CommandError::InsufficientInstitutionSupportCommercialRecord { .. }
-        | CommandError::InstitutionSupportAlreadyEstablished { .. }
-        | CommandError::InstitutionMembershipCapacity { .. }
-        | CommandError::InstitutionSupportCooldown { .. }
-        | CommandError::InstitutionBudgetOverflow { .. }
-        | CommandError::MissingInstitutionSupport { .. }
-        | CommandError::InstitutionSupportNotEstablished { .. } => {
-            institution_support_error_category(error)
-        }
+        CommandError::InsufficientInstitutionSupportReputation { .. } => SUPPORT_REPUTATION_SHORT,
+        CommandError::InsufficientInstitutionSupportCommercialRecord { .. } => SUPPORT_RECORD_SHORT,
+        CommandError::InstitutionSupportAlreadyEstablished { .. } => SUPPORT_EXISTS,
+        CommandError::InstitutionMembershipCapacity { .. } => "institution membership capacity",
+        CommandError::InstitutionSupportCooldown { .. } => "institution support cooldown",
+        CommandError::InstitutionBudgetOverflow { .. } => "institution budget overflow",
+        CommandError::MissingInstitutionSupport { .. } => "missing institution support",
+        CommandError::InstitutionSupportNotEstablished { .. } => SUPPORT_MISSING,
         CommandError::InvalidNominee { .. } => "invalid nominee",
         CommandError::NomineeAlreadyHoldsOffice { .. } => "nominee already holds office",
         CommandError::InvalidInstitutionWithdrawal { .. } => "invalid institution withdrawal",
@@ -6340,58 +6567,20 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::NoReplacementLaborAvailable { .. } => "no replacement labor available",
         CommandError::MissingGood { .. } => "missing good",
         CommandError::MissingMarketQuote { .. } => "missing market quote",
-        CommandError::InformationCannotTargetPlayer
-        | CommandError::InformationCommissionCooldown { .. }
-        | CommandError::MissingInformationReport { .. }
-        | CommandError::InformationReportNotOwned { .. }
-        | CommandError::InformationReportNotCommissioned { .. }
-        | CommandError::InformationReportExpired { .. }
-        | CommandError::InformationReportHasNoLeverage { .. } => information_error_category(error),
-        CommandError::MissingNotification { .. } => "missing notification",
-    }
-}
-
-const fn information_error_category(error: &CommandError) -> &'static str {
-    match error {
         CommandError::InformationCannotTargetPlayer => "invalid intelligence target",
         CommandError::InformationCommissionCooldown { .. } => "intelligence commission cooldown",
         CommandError::MissingInformationReport { .. } => "missing intelligence report",
         CommandError::InformationReportNotOwned { .. } => "intelligence report not owned",
-        CommandError::InformationReportNotCommissioned { .. } => {
-            "intelligence report not commissioned"
-        }
+        CommandError::InformationReportNotCommissioned { .. } => REPORT_UNCOMMISSIONED,
         CommandError::InformationReportExpired { .. } => "intelligence report expired",
-        CommandError::InformationReportHasNoLeverage { .. } => {
-            "intelligence report has no leverage"
-        }
-        _ => unreachable!(),
-    }
-}
-
-const fn institution_support_error_category(error: &CommandError) -> &'static str {
-    match error {
-        CommandError::InsufficientInstitutionSupportReputation { .. } => {
-            "insufficient institution-support reputation"
-        }
-        CommandError::InsufficientInstitutionSupportCommercialRecord { .. } => {
-            "insufficient institution-support commercial record"
-        }
-        CommandError::InstitutionSupportAlreadyEstablished { .. } => {
-            "institution support already established"
-        }
-        CommandError::InstitutionMembershipCapacity { .. } => "institution membership capacity",
-        CommandError::InstitutionSupportCooldown { .. } => "institution support cooldown",
-        CommandError::InstitutionBudgetOverflow { .. } => "institution budget overflow",
-        CommandError::MissingInstitutionSupport { .. } => "missing institution support",
-        CommandError::InstitutionSupportNotEstablished { .. } => {
-            "institution support not established"
-        }
-        _ => unreachable!(),
+        CommandError::InformationReportHasNoLeverage { .. } => REPORT_NO_LEVERAGE,
+        CommandError::MissingNotification { .. } => "missing notification",
     }
 }
 
 const fn strategic_error_category(error: &StrategicError) -> &'static str {
     match error {
+        StrategicError::RegistryMismatch { .. } => "strategic: registry mismatch",
         StrategicError::MissingBusiness { .. } => "strategic: missing business",
         StrategicError::BusinessInactive { .. } => "strategic: inactive business",
         StrategicError::MissingDynasty { .. } => "strategic: missing dynasty",
@@ -6474,6 +6663,9 @@ const fn simulation_error_category(error: &SimulationError) -> &'static str {
         }
         SimulationError::DynastyGenerationExhausted { .. } => {
             "simulation: dynasty generation exhausted"
+        }
+        SimulationError::DynastyCivicContributionsOverflow { .. } => {
+            "simulation: civic contributions overflow"
         }
         SimulationError::InstitutionTermNumberExhausted { .. } => {
             "simulation: institution term number exhausted"
@@ -6655,10 +6847,12 @@ struct AggregateCycleTotals {
     viable_command_kinds: u64,
     no_action_cycles: u64,
     quiet_cycles: u64,
+    quiet_cycles_with_ambient_change: u64,
     blocked_cycles: u64,
     multiple_viable_command_kinds: u64,
     close_viable_command_kinds: u64,
     distinct_immediate_consequences: u64,
+    distinct_projected_consequences: u64,
 }
 
 impl AggregateCycleTotals {
@@ -6681,6 +6875,9 @@ impl AggregateCycleTotals {
         self.quiet_cycles = self
             .quiet_cycles
             .saturating_add(u64::from(campaign.quiet_cycles));
+        self.quiet_cycles_with_ambient_change = self
+            .quiet_cycles_with_ambient_change
+            .saturating_add(u64::from(campaign.quiet_cycles_with_ambient_change));
         self.blocked_cycles = self
             .blocked_cycles
             .saturating_add(u64::from(campaign.blocked_cycles));
@@ -6694,6 +6891,11 @@ impl AggregateCycleTotals {
             self.distinct_immediate_consequences
                 .saturating_add(u64::from(
                     campaign.cycles_with_distinct_immediate_consequences,
+                ));
+        self.distinct_projected_consequences =
+            self.distinct_projected_consequences
+                .saturating_add(u64::from(
+                    campaign.cycles_with_distinct_projected_consequences,
                 ));
     }
 }
@@ -6761,10 +6963,12 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
         phase_stats,
         no_action_cycles: totals.no_action_cycles,
         quiet_cycles: totals.quiet_cycles,
+        quiet_cycles_with_ambient_change: totals.quiet_cycles_with_ambient_change,
         blocked_cycles: totals.blocked_cycles,
         cycles_with_multiple_viable_command_kinds: totals.multiple_viable_command_kinds,
         cycles_with_close_viable_command_kinds: totals.close_viable_command_kinds,
         cycles_with_distinct_immediate_consequences: totals.distinct_immediate_consequences,
+        cycles_with_distinct_projected_consequences: totals.distinct_projected_consequences,
         command_coverage,
         domain_coverage,
         commands,
@@ -6794,6 +6998,9 @@ fn merge_phase_stats(
             .substantive_actions
             .saturating_add(source.substantive_actions);
         target.quiet_cycles = target.quiet_cycles.saturating_add(source.quiet_cycles);
+        target.quiet_cycles_with_ambient_change = target
+            .quiet_cycles_with_ambient_change
+            .saturating_add(source.quiet_cycles_with_ambient_change);
         target.blocked_cycles = target.blocked_cycles.saturating_add(source.blocked_cycles);
         target.cycles_with_multiple_viable_command_kinds = target
             .cycles_with_multiple_viable_command_kinds
@@ -6804,6 +7011,12 @@ fn merge_phase_stats(
         target.cycles_with_distinct_immediate_consequences = target
             .cycles_with_distinct_immediate_consequences
             .saturating_add(source.cycles_with_distinct_immediate_consequences);
+        target.cycles_with_distinct_projected_consequences = target
+            .cycles_with_distinct_projected_consequences
+            .saturating_add(source.cycles_with_distinct_projected_consequences);
+        target.total_viable_choices = target
+            .total_viable_choices
+            .saturating_add(source.total_viable_choices);
         target.total_viable_command_kinds = target
             .total_viable_command_kinds
             .saturating_add(source.total_viable_command_kinds);
@@ -6906,6 +7119,7 @@ fn derive_findings(
     add_action_concentration_finding(aggregate, &mut findings);
     add_institutional_campaign_concentration_finding(aggregate, &mut findings);
     add_repetitive_command_streak_finding(campaigns, &mut findings);
+    add_information_routine_finding(campaigns, &mut findings);
     add_long_substantive_gap_finding(campaigns, &mut findings);
     add_asset_liquidity_drought_finding(campaigns, &mut findings);
     add_economic_recovery_dead_end_finding(campaigns, &mut findings);
@@ -6936,40 +7150,51 @@ fn add_strategic_cadence_finding(
     if aggregate.decision_cycles == 0 {
         return;
     }
-    let quiet_share = scaled_ratio_u64(aggregate.quiet_cycles, aggregate.decision_cycles, 100);
-    if quiet_share < 25 {
+    let static_quiet_cycles = aggregate
+        .quiet_cycles
+        .saturating_sub(aggregate.quiet_cycles_with_ambient_change);
+    let static_quiet_share = scaled_ratio_u64(static_quiet_cycles, aggregate.decision_cycles, 100);
+    if static_quiet_share < 25 {
         return;
     }
     let worst = campaigns.iter().max_by_key(|campaign| {
+        let static_quiet = campaign
+            .quiet_cycles
+            .saturating_sub(campaign.quiet_cycles_with_ambient_change);
         scaled_ratio_u64(
-            u64::from(campaign.quiet_cycles),
+            u64::from(static_quiet),
             u64::from(campaign.decision_cycles),
             100,
         )
     });
     let worst_evidence = worst.map_or_else(String::new, |campaign| {
-        let campaign_quiet_share = scaled_ratio_u64(
-            u64::from(campaign.quiet_cycles),
+        let campaign_static_quiet = campaign
+            .quiet_cycles
+            .saturating_sub(campaign.quiet_cycles_with_ambient_change);
+        let campaign_static_quiet_share = scaled_ratio_u64(
+            u64::from(campaign_static_quiet),
             u64::from(campaign.decision_cycles),
             100,
         );
         format!(
-            " The quietest campaign was seed {}, {} {:?}, at {campaign_quiet_share}%.",
+            " The most static campaign was seed {}, {} {:?}, at {campaign_static_quiet_share}%.",
             campaign.seed,
             campaign.persona.label(),
             campaign.background
         )
     });
     findings.push(GameplayFinding {
-        severity: if quiet_share >= 40 {
+        severity: if static_quiet_share >= 40 {
             GameplayFindingSeverity::Critical
         } else {
             GameplayFindingSeverity::Warning
         },
-        title: "Strategic cadence leaves too many empty decision cycles".to_owned(),
+        title: "Strategic cadence leaves too many static decision cycles".to_owned(),
         evidence: format!(
-            "{} of {} decision cycles were quiet ({quiet_share}%). Actionability now counts these empty intervals instead of measuring only cycles where the agent already found something to do.{worst_evidence}",
-            aggregate.quiet_cycles, aggregate.decision_cycles
+            "{} of {} decision cycles were quiet, but {} still contained ambient world change. The remaining {static_quiet_cycles} static cycles were {static_quiet_share}% of all decisions.{worst_evidence}",
+            aggregate.quiet_cycles,
+            aggregate.decision_cycles,
+            aggregate.quiet_cycles_with_ambient_change,
         ),
     });
 }
@@ -6979,6 +7204,7 @@ struct PhaseQualityThresholds {
     minimum_action_share: u64,
     maximum_quiet_share: u64,
     minimum_multi_family_share: u64,
+    minimum_average_choices_tenths: u64,
     minimum_average_families_tenths: u64,
 }
 
@@ -6993,6 +7219,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
             minimum_action_share: 60,
             maximum_quiet_share: 40,
             minimum_multi_family_share: 25,
+            minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 16,
         },
     );
@@ -7006,6 +7233,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
             minimum_action_share: 60,
             maximum_quiet_share: 35,
             minimum_multi_family_share: 25,
+            minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 15,
         },
     );
@@ -7017,8 +7245,9 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
         "Dynastic governance remains intermittent and strategically narrow",
         PhaseQualityThresholds {
             minimum_action_share: 0,
-            maximum_quiet_share: 25,
-            minimum_multi_family_share: 40,
+            maximum_quiet_share: 30,
+            minimum_multi_family_share: 35,
+            minimum_average_choices_tenths: 30,
             minimum_average_families_tenths: 20,
         },
     );
@@ -7056,15 +7285,23 @@ fn add_phase_quality_finding(
         100,
     );
     let opportunity_cycles = stats.decision_cycles.saturating_sub(stats.quiet_cycles);
+    let average_choices_tenths = scaled_ratio_u64(
+        u64::from(stats.total_viable_choices),
+        u64::from(opportunity_cycles),
+        10,
+    );
     let average_families_tenths = scaled_ratio_u64(
         u64::from(stats.total_viable_command_kinds),
         u64::from(opportunity_cycles),
         10,
     );
+    let choice_depth_is_sufficient = average_families_tenths
+        >= thresholds.minimum_average_families_tenths
+        || average_choices_tenths >= thresholds.minimum_average_choices_tenths;
     if action_share >= thresholds.minimum_action_share
         && quiet_share < thresholds.maximum_quiet_share
         && multi_family_share >= thresholds.minimum_multi_family_share
-        && average_families_tenths >= thresholds.minimum_average_families_tenths
+        && choice_depth_is_sufficient
     {
         return;
     }
@@ -7072,8 +7309,9 @@ fn add_phase_quality_finding(
         severity: GameplayFindingSeverity::Warning,
         title: title.to_owned(),
         evidence: format!(
-            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, multiple command families were viable in {multi_family_share}%, and actionable cycles averaged {} viable families.",
+            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, multiple command families were viable in {multi_family_share}%, and actionable cycles averaged {} viable choices across {} families.",
             stats.decision_cycles,
+            format_tenths(average_choices_tenths),
             format_tenths(average_families_tenths)
         ),
     });
@@ -7104,6 +7342,35 @@ fn add_repetitive_command_streak_finding(
             campaign.seed,
             campaign.persona.label(),
             campaign.background
+        ),
+    });
+}
+
+fn add_information_routine_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let commissions: u32 = campaigns
+        .iter()
+        .map(|campaign| {
+            campaign
+                .commands
+                .get(&GameplayCommandKind::CommissionInformation)
+                .map_or(0, |stats| stats.executed)
+        })
+        .sum();
+    let pairs: u32 = campaigns
+        .iter()
+        .map(|campaign| u32::from(campaign.commission_leverage_pairs))
+        .sum();
+    if commissions < 20 || pairs.saturating_mul(100) < commissions.saturating_mul(75) {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Commissioned intelligence becomes a routine two-step ritual".to_owned(),
+        evidence: format!(
+            "{pairs} of {commissions} commissioned reports were leveraged within 60 days. Intelligence is functioning, but the repeated commission-then-spend sequence risks becoming scheduled maintenance rather than a response to uncertainty."
         ),
     });
 }
@@ -7202,24 +7469,55 @@ fn add_economic_recovery_dead_end_finding(
                     == 0
         })
         .collect();
-    let Some(worst) = trapped
+    if let Some(worst) = trapped
         .iter()
         .max_by_key(|campaign| campaign.longest_substantive_action_gap_days)
-    else {
-        return;
-    };
-    findings.push(GameplayFinding {
-        severity: GameplayFindingSeverity::Critical,
-        title: "Economic failure can become an unrecoverable campaign state".to_owned(),
-        evidence: format!(
-            "{} campaign(s) ended with no treasury, no healthy business, no property, no active or restructured credit, and a year-scale decision drought. The worst was seed {}, {} {:?}, with {} days without a substantive route.",
-            trapped.len(),
-            worst.seed,
-            worst.persona.label(),
-            worst.background,
-            worst.longest_substantive_action_gap_days
-        ),
-    });
+    {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Critical,
+            title: "Economic failure can become an unrecoverable campaign state".to_owned(),
+            evidence: format!(
+                "{} campaign(s) ended with no treasury, no healthy business, no property, no active or restructured credit, and a year-scale decision drought. The worst was seed {}, {} {:?}, with {} days without a substantive route.",
+                trapped.len(),
+                worst.seed,
+                worst.persona.label(),
+                worst.background,
+                worst.longest_substantive_action_gap_days
+            ),
+        });
+    }
+
+    if let Some(campaign) = campaigns.iter().find(|campaign| {
+        campaign.end.player_treasury <= Money::ZERO
+            && campaign.end.active_businesses == 0
+            && campaign
+                .end
+                .distressed_businesses
+                .saturating_add(campaign.end.insolvent_businesses)
+                > 0
+            && campaign.end.player_properties == 0
+            && campaign.end.defaulted_loans > 0
+    }) {
+        let borrowing = campaign
+            .commands
+            .get(&GameplayCommandKind::BorrowFunds)
+            .map_or(0, |stats| stats.executed);
+        let investment = campaign
+            .commands
+            .get(&GameplayCommandKind::InvestInBusiness)
+            .map_or(0, |stats| stats.executed);
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "An individual dynasty remains trapped in recovery churn".to_owned(),
+            evidence: format!(
+                "Seed {}, {} {:?} ended with no treasury, property, or active business and {} defaulted loans despite {borrowing} borrowing or restructuring actions and {investment} recapitalizations. Activity continued, but it did not produce a credible recovery path.",
+                campaign.seed,
+                campaign.persona.label(),
+                campaign.background,
+                campaign.end.defaulted_loans
+            ),
+        });
+    }
 }
 
 fn add_campaign_blocking_finding(
@@ -7682,16 +7980,22 @@ fn add_choice_quality_finding(aggregate: &GameplayAggregate, findings: &mut Vec<
         opportunity_cycles,
         100,
     );
-    let close_share = scaled_ratio_u64(
-        aggregate.cycles_with_close_viable_command_kinds,
-        aggregate.cycles_with_multiple_viable_command_kinds,
-        100,
+    add_choice_breadth_finding(
+        average_choices_tenths,
+        average_kinds_tenths,
+        multiple_share,
+        findings,
     );
-    let distinct_share = scaled_ratio_u64(
-        aggregate.cycles_with_distinct_immediate_consequences,
-        aggregate.cycles_with_multiple_viable_command_kinds,
-        100,
-    );
+    add_choice_tradeoff_findings(aggregate, findings);
+    add_blocked_choice_finding(aggregate, opportunity_cycles, findings);
+}
+
+fn add_choice_breadth_finding(
+    average_choices_tenths: u64,
+    average_kinds_tenths: u64,
+    multiple_share: u64,
+    findings: &mut Vec<GameplayFinding>,
+) {
     if average_choices_tenths < 20 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
@@ -7723,29 +8027,72 @@ fn add_choice_quality_finding(aggregate: &GameplayAggregate, findings: &mut Vec<
             ),
         });
     }
-    if aggregate.cycles_with_multiple_viable_command_kinds >= 20 && close_share < 20 {
+}
+
+fn add_choice_tradeoff_findings(
+    aggregate: &GameplayAggregate,
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if aggregate.cycles_with_multiple_viable_command_kinds < 20 {
+        return;
+    }
+    let denominator = aggregate.cycles_with_multiple_viable_command_kinds;
+    let close_share = scaled_ratio_u64(
+        aggregate.cycles_with_close_viable_command_kinds,
+        denominator,
+        100,
+    );
+    let immediate_share = scaled_ratio_u64(
+        aggregate.cycles_with_distinct_immediate_consequences,
+        denominator,
+        100,
+    );
+    let projected_share = scaled_ratio_u64(
+        aggregate.cycles_with_distinct_projected_consequences,
+        denominator,
+        100,
+    );
+    if close_share < 20 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Most multi-option cycles still have an obvious winner".to_owned(),
             evidence: format!(
                 "Only {} of {} cycles with multiple viable command families placed the two highest-ranked viable families within {CLOSE_CHOICE_SCORE_GAP} score points ({close_share}%). The harness sees breadth, but the agent rarely faces a close strategic tradeoff.",
                 aggregate.cycles_with_close_viable_command_kinds,
-                aggregate.cycles_with_multiple_viable_command_kinds
+                denominator
             ),
         });
     }
-    if aggregate.cycles_with_multiple_viable_command_kinds >= 20 && distinct_share < 50 {
+    if immediate_share < 50 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Viable alternatives often share the same immediate consequence profile"
                 .to_owned(),
             evidence: format!(
-                "Only {} of {} multi-family cycles exposed at least two distinct immediate domain-change profiles ({distinct_share}%). Delayed effects may still diverge, but the first-order feedback risks making different commands feel interchangeable.",
+                "Only {} of {} multi-family cycles exposed at least two distinct immediate domain-change profiles ({immediate_share}%). Delayed effects may still diverge, but the first-order feedback risks making different commands feel interchangeable.",
                 aggregate.cycles_with_distinct_immediate_consequences,
-                aggregate.cycles_with_multiple_viable_command_kinds
+                denominator
             ),
         });
     }
+    if projected_share < 50 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Strategic alternatives converge after one decision interval".to_owned(),
+            evidence: format!(
+                "Only {} of {} multi-family cycles produced at least two distinct projected domain-change profiles after one decision interval ({projected_share}%). Immediate feedback may differ while the simulated trajectories still converge.",
+                aggregate.cycles_with_distinct_projected_consequences,
+                denominator
+            ),
+        });
+    }
+}
+
+fn add_blocked_choice_finding(
+    aggregate: &GameplayAggregate,
+    opportunity_cycles: u64,
+    findings: &mut Vec<GameplayFinding>,
+) {
     let blocked_share = scaled_ratio_u64(aggregate.blocked_cycles, opportunity_cycles, 100);
     if blocked_share >= 10 {
         findings.push(GameplayFinding {
@@ -8358,7 +8705,7 @@ fn add_fantasy_arc_completion_findings(
                 campaign.fantasy_arc.first_office_day.is_some_and(|day| {
                     day <= i64::try_from(average_days)
                         .unwrap_or(i64::MAX)
-                        .saturating_sub(90)
+                        .saturating_sub(OFFICE_POWER_ESTABLISHMENT_DAYS)
                 })
             })
             .collect();
@@ -8373,7 +8720,7 @@ fn add_fantasy_arc_completion_findings(
                 severity: GameplayFindingSeverity::Warning,
                 title: "Institutional power does not become city-shaping action".to_owned(),
                 evidence: format!(
-                    "{without_city_shaping} of {} campaigns that held office for at least 90 days never sponsored a law, started a public work, or issued an office directive.",
+                    "{without_city_shaping} of {} campaigns whose office powers had time to establish never sponsored a law, started a public work, or issued an office directive.",
                     established_in_time.len()
                 ),
             });
@@ -8384,13 +8731,14 @@ fn add_fantasy_arc_completion_findings(
             .iter()
             .filter(|campaign| campaign.fantasy_arc.first_succession_day.is_none())
             .count();
-        if without_succession > 0 {
+        let missing_share = scaled_ratio_usize(without_succession, campaigns.len(), 100);
+        if missing_share >= 25 {
             findings.push(GameplayFinding {
                 severity: GameplayFindingSeverity::Warning,
                 title: "The dynastic arc does not reach succession".to_owned(),
                 evidence: format!(
-                    "{without_succession} of {} generation-length campaigns did not transfer leadership to a successor.",
-                    campaigns.len()
+                    "{without_succession} of {} generation-length campaigns did not transfer leadership to a successor ({missing_share}%).",
+                    campaigns.len(),
                 ),
             });
         }
@@ -8914,7 +9262,17 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             u64::from(stats.cycles_with_multiple_viable_command_kinds),
             100,
         );
+        let projected_choice_share = scaled_ratio_u64(
+            u64::from(stats.cycles_with_distinct_projected_consequences),
+            u64::from(stats.cycles_with_multiple_viable_command_kinds),
+            100,
+        );
         let opportunity_cycles = stats.decision_cycles.saturating_sub(stats.quiet_cycles);
+        let average_choices_tenths = scaled_ratio_u64(
+            u64::from(stats.total_viable_choices),
+            u64::from(opportunity_cycles),
+            10,
+        );
         let average_families_tenths = scaled_ratio_u64(
             u64::from(stats.total_viable_command_kinds),
             u64::from(opportunity_cycles),
@@ -8922,16 +9280,20 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
         );
         let _ = writeln!(
             output,
-            "  {:<22} cycles {:>5} | action {:>3}% | multi {:>3}% | close {:>3}% | distinct {:>3}% | families {}.{} | quiet {:>5} | blocked {:>5}",
+            "  {:<22} cycles {:>5} | action {:>3}% | multi {:>3}% | close {:>3}% | distinct now {:>3}% / next {:>3}% | choices {}.{} / families {}.{} | quiet {:>5} (ambient {:>5}) | blocked {:>5}",
             phase.label(),
             stats.decision_cycles,
             action_share,
             multi_family_share,
             close_choice_share,
             distinct_choice_share,
+            projected_choice_share,
+            average_choices_tenths / 10,
+            average_choices_tenths % 10,
             average_families_tenths / 10,
             average_families_tenths % 10,
             stats.quiet_cycles,
+            stats.quiet_cycles_with_ambient_change,
             stats.blocked_cycles
         );
     }
@@ -9086,7 +9448,7 @@ fn render_report_header(report: &GameplayHarnessReport, output: &mut String) {
     );
     let _ = writeln!(
         output,
-        "coverage: {}/{} command kinds | causal domains {}/{} | ambient domains {}/{} | {} command-domain edges | {} quiet / {} blocked cycles",
+        "coverage: {}/{} command kinds | causal domains {}/{} | ambient domains {}/{} | {} command-domain edges | {} quiet ({} with ambient change) / {} blocked cycles",
         aggregate.command_coverage,
         ALL_COMMAND_KINDS.len(),
         aggregate.causal_domain_coverage,
@@ -9095,6 +9457,7 @@ fn render_report_header(report: &GameplayHarnessReport, output: &mut String) {
         ALL_DOMAINS.len(),
         aggregate.interactions.len(),
         aggregate.quiet_cycles,
+        aggregate.quiet_cycles_with_ambient_change,
         aggregate.blocked_cycles
     );
     let opportunity_cycles = aggregate
@@ -9114,10 +9477,11 @@ fn render_report_header(report: &GameplayHarnessReport, output: &mut String) {
     let average_choices = format_tenths(average_choices_tenths);
     let _ = writeln!(
         output,
-        "choice quality: {average_choices} viable choices / {average_families} command families per actionable cycle | {} multi-family | {} close-ranked | {} distinct immediate profiles\n",
+        "choice quality: {average_choices} viable choices / {average_families} command families per actionable cycle | {} multi-family | {} close-ranked | {} distinct immediate profiles | {} distinct projected profiles\n",
         aggregate.cycles_with_multiple_viable_command_kinds,
         aggregate.cycles_with_close_viable_command_kinds,
-        aggregate.cycles_with_distinct_immediate_consequences
+        aggregate.cycles_with_distinct_immediate_consequences,
+        aggregate.cycles_with_distinct_projected_consequences
     );
 }
 
@@ -9277,7 +9641,7 @@ fn render_trace_samples(report: &GameplayHarnessReport, output: &mut String) {
             .map_or("none", GameplayCommandKind::label);
         let _ = writeln!(
             output,
-            "  seed {} {:<12} {:?} day {:>4}: {:<18} viable [{}] gap {:?} profiles {} immediate [{}] delayed [{}] ambient [{}]",
+            "  seed {} {:<12} {:?} day {:>4}: {:<18} viable [{}] gap {:?} profiles immediate:{} projected:{} immediate [{}] delayed [{}] ambient [{}]",
             campaign.seed,
             campaign.persona.label(),
             campaign.background,
@@ -9287,15 +9651,17 @@ fn render_trace_samples(report: &GameplayHarnessReport, output: &mut String) {
                 .iter()
                 .take(3)
                 .map(|candidate| format!(
-                    "{}:{}:{}",
+                    "{}:{}:now={}:next={}",
                     candidate.command.label(),
                     candidate.score,
-                    domain_labels(&candidate.immediate_domains)
+                    domain_labels(&candidate.immediate_domains),
+                    domain_labels(&candidate.projected_domains)
                 ))
                 .collect::<Vec<_>>()
                 .join(","),
             step.close_choice_score_gap,
             step.distinct_immediate_choice_profiles,
+            step.distinct_projected_choice_profiles,
             domain_labels(&step.immediate_domains),
             domain_labels(&step.delayed_domains),
             domain_labels(&step.ambient_domains)
