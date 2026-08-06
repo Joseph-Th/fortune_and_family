@@ -2676,16 +2676,7 @@ fn apply_crisis_response(
     if !crisis.status.is_active() {
         return Err(CommandError::InactiveCrisis { crisis_id });
     }
-    let subject = format!("crisis:{crisis_id}");
-    if state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::CrisisResponse && record.subject() == subject)
-        .is_some()
-    {
-        return Err(CommandError::CrisisAlreadyAddressed { crisis_id });
-    }
+    let subject = validate_crisis_response_history(state, crisis_id, response)?;
     let severity = crisis.severity_basis_points;
     let district_id = crisis.district_id;
     match response {
@@ -2768,6 +2759,32 @@ fn apply_crisis_response(
     Ok(CommandOutcome {
         summary: format!("Applied {response:?} response to crisis {crisis_id}."),
     })
+}
+
+fn validate_crisis_response_history(
+    state: &AppState,
+    crisis_id: CrisisId,
+    response: CrisisResponse,
+) -> Result<String, CommandError> {
+    let subject = format!("crisis:{crisis_id}");
+    let prior_responses: Vec<_> = state
+        .audit_log
+        .iter()
+        .rev()
+        .filter(|record| record.kind() == AuditKind::CrisisResponse && record.subject() == subject)
+        .collect();
+    let has_containment_response = prior_responses
+        .iter()
+        .any(|record| super::strategic::crisis_response_contains_crisis(record));
+    let has_exploitation_response = prior_responses
+        .iter()
+        .any(|record| record.detail() == "response=Exploit");
+    if has_containment_response
+        || (response == CrisisResponse::Exploit && has_exploitation_response)
+    {
+        return Err(CommandError::CrisisAlreadyAddressed { crisis_id });
+    }
+    Ok(subject)
 }
 
 fn reduce_crisis(state: &mut AppState, crisis_id: CrisisId, amount: u16) {

@@ -4133,6 +4133,34 @@ mod crises {
     }
 
     #[test]
+    fn exploited_crisis_remains_uncontained_and_intensifies() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let crisis_id = insert_crisis(
+            &mut state,
+            CrisisKind::NobleDemand,
+            None,
+            4_500,
+            "test exploitation",
+        );
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::CrisisResponse,
+            subject: format!("crisis:{crisis_id}"),
+            detail: "response=Exploit".to_owned(),
+        });
+
+        detect_and_advance_crises(registry, &mut state);
+
+        let crisis = state.crises.get(&crisis_id).expect("crisis must exist");
+        assert_eq!(crisis.status, CrisisStatus::Active);
+        assert_eq!(
+            crisis.severity_basis_points,
+            4_500 + UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS
+        );
+    }
+
+    #[test]
     fn addressed_crisis_resolution_adds_durable_notification() {
         let registry = test_registry();
         let mut state = make_test_campaign();
@@ -4147,7 +4175,7 @@ mod crises {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
             subject: format!("crisis:{crisis_id}"),
-            detail: "test response".to_owned(),
+            detail: "response=Reform".to_owned(),
         });
         let outbox_before = state.outbox.len();
 

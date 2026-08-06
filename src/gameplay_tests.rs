@@ -1230,6 +1230,55 @@ mod candidates {
     }
 
     #[test]
+    fn reactive_agents_can_contain_a_crisis_after_exploiting_it() {
+        let mut state = make_test_campaign();
+        add_active_crisis(&mut state);
+        let crisis_id = *state
+            .crises
+            .keys()
+            .next_back()
+            .expect("test crisis must exist");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::CrisisResponse,
+            subject: format!("crisis:{crisis_id}"),
+            detail: "response=Exploit".to_owned(),
+        });
+        let mut candidates = Vec::new();
+
+        generate_reactive_candidates(&state, GameplayPersona::Opportunist, &mut candidates);
+
+        let crisis_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.kind == GameplayCommandKind::RespondToCrisis)
+            .collect();
+        assert!(!crisis_candidates.is_empty());
+        assert!(crisis_candidates.iter().all(|candidate| {
+            !matches!(
+                candidate.command,
+                PlayerCommand::RespondToCrisis {
+                    response: CrisisResponse::Exploit,
+                    ..
+                }
+            )
+        }));
+
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::CrisisResponse,
+            subject: format!("crisis:{crisis_id}"),
+            detail: "response=Reform".to_owned(),
+        });
+        candidates.clear();
+        generate_reactive_candidates(&state, GameplayPersona::Opportunist, &mut candidates);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.kind != GameplayCommandKind::RespondToCrisis)
+        );
+    }
+
+    #[test]
     fn acquisition_waits_until_the_existing_portfolio_is_healthy_and_funded() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -3398,6 +3447,50 @@ mod findings {
         );
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+    }
+
+    #[test]
+    fn one_off_viable_alternatives_remain_informational() {
+        let mut report = cached_focused_report(30);
+        let stats = report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::WithdrawFromInstitution)
+            .expect("all command statistics must exist");
+        stats.offered_cycles = 1;
+        stats.generated = 3;
+        stats.considered = 3;
+        stats.viable = 3;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "institution-withdrawal appeared only as a rare unselected alternative",
+        );
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+    }
+
+    #[test]
+    fn repeatedly_viable_unselected_commands_remain_warnings() {
+        let mut report = cached_focused_report(30);
+        let stats = report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::WithdrawFromInstitution)
+            .expect("all command statistics must exist");
+        stats.offered_cycles = 3;
+        stats.generated = 3;
+        stats.considered = 3;
+        stats.viable = 3;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "institution-withdrawal was viable but never selected",
+        );
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
     }
 
     #[test]

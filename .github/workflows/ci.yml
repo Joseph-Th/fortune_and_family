@@ -41,6 +41,8 @@ jobs:
         run: cargo doc --no-deps --locked
       - name: Release tests
         run: cargo test --release --quiet --locked --lib
+      - name: Gameplay quality gate
+        run: bash scripts/test.sh gameplay
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version 0.22.2
       - name: Dependency audit

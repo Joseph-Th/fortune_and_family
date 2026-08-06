@@ -59,6 +59,14 @@ cargo run --release --locked -- playtest \
 
 The report is written before a quality-gate failure is returned.
 
+The repository wrapper runs the same gate locally:
+
+```bash
+bash scripts/test.sh gameplay
+```
+
+CI runs this default release-mode matrix with a minimum overall score of 75 and fails on any critical finding. `bash scripts/test.sh all` includes the same gate. Focused command tests and CLI smoke coverage remain separate so report serialization, quality-gate failure behavior, and full gameplay quality are all verified independently.
+
 ## Configuration
 
 | Option | Meaning | Default |
@@ -131,6 +139,8 @@ Established dynasties may also commission intelligence reports. The canonical pl
 The report treats a commission followed by leverage within 180 days as one information-use pair even when other decisions intervene. A warning requires both a high completion share and a cadence of at least one commission every two campaign-years, which distinguishes scheduled maintenance from occasional, condition-driven investigation.
 
 Automated agents preserve twelve months of current office-duty costs plus a household liquidity buffer before taking discretionary spending actions. Emergency crisis and severe business-rehabilitation actions may override that reserve. This policy prevents the harness from manufacturing activity through predictable duty defaults; phase findings still report strategically quiet periods created by the conservative reserve.
+
+Crisis exploitation is intentionally not containment. It may be used once for immediate gain, leaves the crisis on its escalation trajectory, and still permits one later relief, reform, or suppression response. A containing response closes further player responses and starts monthly recovery.
 
 ## Phase quality
 
@@ -219,7 +229,7 @@ Findings use `Info`, `Warning`, or `Critical` severity. They cover conditions su
 - Near-universal institutional representation that erodes specialization
 - Long campaigns that do not reach stable succession
 
-Absence is interpreted against the configured horizon and prerequisite availability. Event-driven and office-power-dependent commands are not treated as broken before their trigger or mature authority exists. The report records actual law and public-work activation opportunities rather than inferring availability from campaign age alone.
+Absence is interpreted against the configured horizon and prerequisite availability. Event-driven and office-power-dependent commands are not treated as broken before their trigger or mature authority exists. A viable command that appears in fewer than three decision cycles but loses to a stronger alternative is informational; repeated viable non-selection remains a warning. The report records actual law and public-work activation opportunities rather than inferring availability from campaign age alone.
 
 ## Trace contract
 

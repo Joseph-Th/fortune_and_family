@@ -3834,6 +3834,124 @@ mod crises {
             "a second response must not spend funds or change crisis severity",
         );
     }
+
+    #[test]
+    fn crisis_can_be_contained_after_one_exploitation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: crate::core::CrisisKind::NobleDemand,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 8_000,
+                status: CrisisStatus::Active,
+                cause: "test crisis".to_owned(),
+            },
+        );
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Exploit,
+            },
+        )
+        .expect("one exploitation must succeed");
+        assert_eq!(
+            state
+                .crises
+                .get(&crisis_id)
+                .expect("crisis must exist")
+                .severity_basis_points,
+            8_500
+        );
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Reform,
+            },
+        )
+        .expect("an exploited crisis must still permit later containment");
+        assert_eq!(
+            state
+                .crises
+                .get(&crisis_id)
+                .expect("crisis must exist")
+                .severity_basis_points,
+            6_700
+        );
+
+        let before = state.clone();
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Suppress,
+            },
+        );
+        assert_eq!(
+            result,
+            Err(CommandError::CrisisAlreadyAddressed { crisis_id })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a containment response must still close further crisis actions",
+        );
+    }
+
+    #[test]
+    fn crisis_rejects_repeated_exploitation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: crate::core::CrisisKind::NobleDemand,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 4_000,
+                status: CrisisStatus::Active,
+                cause: "test crisis".to_owned(),
+            },
+        );
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Exploit,
+            },
+        )
+        .expect("first exploitation must succeed");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Exploit,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::CrisisAlreadyAddressed { crisis_id })
+        );
+        assert_state_unchanged(&before, &state, "a crisis must not be exploited repeatedly");
+    }
 }
 
 mod information {

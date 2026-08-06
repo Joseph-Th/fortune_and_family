@@ -5510,7 +5510,7 @@ fn advance_existing_crises(state: &mut AppState) {
     let addressed_subjects: BTreeSet<_> = state
         .audit_log
         .iter()
-        .filter(|record| record.kind() == AuditKind::CrisisResponse)
+        .filter(|record| crisis_response_contains_crisis(record))
         .map(|record| record.subject().to_owned())
         .collect();
     for crisis in state.crises.values_mut() {
@@ -5556,6 +5556,14 @@ fn advance_existing_crises(state: &mut AppState) {
             format!("The {kind:?} crisis has subsided below an active threat level."),
         );
     }
+}
+
+pub(crate) fn crisis_response_contains_crisis(record: &AuditRecord) -> bool {
+    record.kind() == AuditKind::CrisisResponse
+        && matches!(
+            record.detail(),
+            "response=Relief" | "response=Reform" | "response=Suppress"
+        )
 }
 
 fn has_active_crisis(state: &AppState, kind: CrisisKind) -> bool {

@@ -153,8 +153,8 @@ pub use strategic::{
 };
 pub(crate) use strategic::{
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, OFFICE_DUTY_COST_PER_POWER,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, dynasty_office_administrative_load,
-    initialize_strategic_state, institution_capability_score,
+    STANDARD_CONTRACT_BATCHES_PER_WEEK, crisis_response_contains_crisis,
+    dynasty_office_administrative_load, initialize_strategic_state, institution_capability_score,
 };
 pub use transactions::{
     SimulationError, ValidatedCashTransfer, transfer_business_cash, validate_business_cash_transfer,

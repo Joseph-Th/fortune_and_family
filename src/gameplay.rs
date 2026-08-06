@@ -29,11 +29,11 @@ use crate::systems::{
     WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT, advance_days,
     apply_player_command, available_household_workers, build_new_game,
-    has_established_player_office_power, institution_capability_score,
-    institution_membership_count, institution_support_day, institution_support_next_day,
-    office_nomination_next_day, player_contract_deliveries, quote_business_acquisition,
-    quote_information_leverage, quote_property_liquidation, required_office_power_for_law,
-    validate_invariants,
+    crisis_response_contains_crisis, has_established_player_office_power,
+    institution_capability_score, institution_membership_count, institution_support_day,
+    institution_support_next_day, office_nomination_next_day, player_contract_deliveries,
+    quote_business_acquisition, quote_information_leverage, quote_property_liquidation,
+    required_office_power_for_law, validate_invariants,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2922,13 +2922,13 @@ fn generate_reactive_candidates(
     candidates: &mut Vec<Candidate>,
 ) {
     for crisis in state.crises.values().filter(|crisis| {
-        crisis.status.is_active()
-            && !state.audit_log.iter().rev().any(|record| {
-                record.kind() == AuditKind::CrisisResponse
-                    && record.subject() == format!("crisis:{}", crisis.id)
-            })
+        crisis.status.is_active() && !crisis_has_containment_response(state, crisis.id)
     }) {
+        let was_exploited = crisis_was_exploited(state, crisis.id);
         for response in crisis_responses(persona) {
+            if response == CrisisResponse::Exploit && was_exploited {
+                continue;
+            }
             if !can_afford_crisis_response(state, crisis, response) {
                 continue;
             }
@@ -2989,6 +2989,24 @@ fn generate_reactive_candidates(
             0,
         );
     }
+}
+
+fn crisis_has_containment_response(state: &AppState, crisis_id: crate::ids::CrisisId) -> bool {
+    let subject = format!("crisis:{crisis_id}");
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .any(|record| record.subject() == subject && crisis_response_contains_crisis(record))
+}
+
+fn crisis_was_exploited(state: &AppState, crisis_id: crate::ids::CrisisId) -> bool {
+    let subject = format!("crisis:{crisis_id}");
+    state.audit_log.iter().rev().any(|record| {
+        record.kind() == AuditKind::CrisisResponse
+            && record.subject() == subject
+            && record.detail() == "response=Exploit"
+    })
 }
 
 fn can_afford_crisis_response(
@@ -7756,6 +7774,14 @@ fn add_command_findings(aggregate: &GameplayAggregate, findings: &mut Vec<Gamepl
                 (
                     GameplayFindingSeverity::Critical,
                     format!("{} was always rejected", kind.label()),
+                )
+            } else if stats.offered_cycles < 3 {
+                (
+                    GameplayFindingSeverity::Info,
+                    format!(
+                        "{} appeared only as a rare unselected alternative",
+                        kind.label()
+                    ),
                 )
             } else {
                 (

@@ -16,7 +16,8 @@ usage:
   $0 soak                run ignored deterministic soak tests
   $0 docs                run documentation consistency and doctests
   $0 cli                 run CLI smoke tests
-  $0 all                 run syntax, library, doc, soak, and CLI tests
+  $0 gameplay            run the release gameplay quality gate
+  $0 all                 run syntax, library, doc, soak, CLI, and gameplay tests
 EOF
   exit 2
 }
@@ -157,6 +158,15 @@ run_docs() {
   run_step 'Documentation tests' cargo test --quiet --locked --doc
 }
 
+run_gameplay() {
+  run_step 'Gameplay quality gate' \
+    cargo run --release --quiet --locked -- playtest \
+      --minimum-overall 75 \
+      --fail-on-critical \
+      --json \
+      --output target/gameplay-quality-gate.json
+}
+
 case "$mode" in
   fast)
     [[ $# -le 2 ]] || usage
@@ -186,6 +196,10 @@ case "$mode" in
     [[ $# -eq 1 ]] || usage
     run_step 'CLI smoke tests' bash scripts/verify_cli.sh
     ;;
+  gameplay)
+    [[ $# -eq 1 ]] || usage
+    run_gameplay
+    ;;
   all)
     [[ $# -eq 1 ]] || usage
     run_step 'Shell syntax checks' bash -n scripts/test.sh scripts/verify_cli.sh
@@ -193,6 +207,7 @@ case "$mode" in
     run_docs
     run_soak
     run_step 'CLI smoke tests' bash scripts/verify_cli.sh
+    run_gameplay
     ;;
   *)
     usage
