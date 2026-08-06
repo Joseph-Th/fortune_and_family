@@ -33,6 +33,8 @@ const OFFICE_DUTY_FORFEITURE_THRESHOLD: usize = 3;
 pub(crate) const DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS: i64 = 180;
 pub(crate) const PROPERTY_LIQUIDATION_BASIS_POINTS: i64 = 5_000;
 const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000);
+const UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS: u16 = 240;
+const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StrategicError {
@@ -5429,25 +5431,7 @@ fn update_external_route_risk(state: &mut AppState) {
 
 fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
     let day = state.clock.day();
-    let mut resolved = Vec::new();
-    for crisis in state.crises.values_mut() {
-        if !crisis.status.is_active() {
-            continue;
-        }
-        crisis.severity_basis_points = crisis.severity_basis_points.saturating_sub(120);
-        crisis.status = CrisisStatus::from_severity(crisis.severity_basis_points);
-        if crisis.status == CrisisStatus::Resolved {
-            resolved.push((crisis.id, crisis.kind));
-        }
-    }
-    for (crisis_id, kind) in resolved {
-        push_outbox(
-            state,
-            OutboxKind::Crisis,
-            format!("Crisis {crisis_id} resolved"),
-            format!("The {kind:?} crisis has subsided below an active threat level."),
-        );
-    }
+    advance_existing_crises(state);
     let has_grain_crisis = state
         .crises
         .values()
@@ -5518,6 +5502,60 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
         );
     }
     detect_periodic_crises(state, day);
+}
+
+fn advance_existing_crises(state: &mut AppState) {
+    let mut resolved = Vec::new();
+    let mut escalated = Vec::new();
+    let addressed_subjects: BTreeSet<_> = state
+        .audit_log
+        .iter()
+        .filter(|record| record.kind() == AuditKind::CrisisResponse)
+        .map(|record| record.subject().to_owned())
+        .collect();
+    for crisis in state.crises.values_mut() {
+        if !crisis.status.is_active() {
+            continue;
+        }
+        let previous_status = crisis.status;
+        let subject = format!("crisis:{}", crisis.id);
+        crisis.severity_basis_points = if addressed_subjects.contains(&subject) {
+            crisis
+                .severity_basis_points
+                .saturating_sub(ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS)
+        } else {
+            crisis
+                .severity_basis_points
+                .saturating_add(UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS)
+                .min(10_000)
+        };
+        crisis.status = CrisisStatus::from_severity(crisis.severity_basis_points);
+        if crisis.status == CrisisStatus::Resolved {
+            resolved.push((crisis.id, crisis.kind));
+        } else if previous_status != CrisisStatus::Escalated
+            && crisis.status == CrisisStatus::Escalated
+        {
+            escalated.push((crisis.id, crisis.kind));
+        }
+    }
+    for (crisis_id, kind) in escalated {
+        push_outbox(
+            state,
+            OutboxKind::Crisis,
+            format!("Crisis {crisis_id} escalated"),
+            format!(
+                "The {kind:?} crisis intensified because no effective response had contained it."
+            ),
+        );
+    }
+    for (crisis_id, kind) in resolved {
+        push_outbox(
+            state,
+            OutboxKind::Crisis,
+            format!("Crisis {crisis_id} resolved"),
+            format!("The {kind:?} crisis has subsided below an active threat level."),
+        );
+    }
 }
 
 fn has_active_crisis(state: &AppState, kind: CrisisKind) -> bool {

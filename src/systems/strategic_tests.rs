@@ -4101,7 +4101,39 @@ mod crises {
     }
 
     #[test]
-    fn natural_crisis_resolution_adds_durable_notification() {
+    fn unaddressed_crisis_intensifies_and_notifies_on_escalation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let crisis_id = insert_crisis(
+            &mut state,
+            CrisisKind::NobleDemand,
+            None,
+            7_900,
+            "test escalation",
+        );
+        let outbox_before = state.outbox.len();
+
+        detect_and_advance_crises(registry, &mut state);
+
+        let crisis = state.crises.get(&crisis_id).expect("crisis must exist");
+        assert_eq!(crisis.status, CrisisStatus::Escalated);
+        assert_eq!(
+            crisis.severity_basis_points,
+            7_900 + UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS
+        );
+        assert_eq!(state.outbox.len(), outbox_before + 1);
+        assert!(
+            state
+                .outbox
+                .last()
+                .expect("escalation notification must exist")
+                .subject
+                .contains("escalated")
+        );
+    }
+
+    #[test]
+    fn addressed_crisis_resolution_adds_durable_notification() {
         let registry = test_registry();
         let mut state = make_test_campaign();
         let crisis_id = insert_crisis(
@@ -4111,6 +4143,12 @@ mod crises {
             550,
             "test resolution",
         );
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::CrisisResponse,
+            subject: format!("crisis:{crisis_id}"),
+            detail: "test response".to_owned(),
+        });
         let outbox_before = state.outbox.len();
 
         detect_and_advance_crises(registry, &mut state);

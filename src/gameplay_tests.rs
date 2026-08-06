@@ -480,6 +480,30 @@ mod harness {
 mod candidates {
     use super::*;
 
+    fn establish_player_contract_market(state: &mut AppState) -> crate::ids::GoodId {
+        for _ in 0..180 {
+            state.clock.advance_one_day();
+        }
+        let player_business_ids: BTreeSet<_> = state
+            .businesses
+            .iter()
+            .filter(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            .map(crate::core::Business::id)
+            .collect();
+        for contract in state.contracts.values_mut().filter(|contract| {
+            player_business_ids.contains(&contract.buyer_business_id)
+                || player_business_ids.contains(&contract.seller_business_id)
+        }) {
+            contract.end_day = state.clock.day().saturating_add(360);
+        }
+        state
+            .contracts
+            .values()
+            .find(|contract| player_external_contract(state, contract))
+            .expect("player must have an external contract")
+            .good_id
+    }
+
     fn make_aged_player_lender_default() -> (AppState, DynastyId, crate::ids::LoanId, Money, Money)
     {
         let mut state = make_test_campaign();
@@ -1779,22 +1803,24 @@ mod candidates {
             candidates.is_empty(),
             "commissioned intelligence should enter the agent loop after initial commercial observation"
         );
-        for _ in 0..180 {
-            state.clock.advance_one_day();
-        }
-        let player_business_ids: BTreeSet<_> = state
-            .businesses
-            .iter()
-            .filter(|business| business.owner_dynasty_id() == state.player_dynasty_id)
-            .map(crate::core::Business::id)
-            .collect();
-        for contract in state.contracts.values_mut().filter(|contract| {
-            player_business_ids.contains(&contract.buyer_business_id)
-                || player_business_ids.contains(&contract.seller_business_id)
-        }) {
-            contract.end_day = state.clock.day().saturating_add(360);
-        }
+        let pressured_good_id = establish_player_contract_market(&mut state);
 
+        generate_information_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+        assert!(
+            candidates.is_empty(),
+            "calm market conditions should not produce scheduled intelligence work"
+        );
+        state
+            .market
+            .quotes
+            .get_mut(&pressured_good_id)
+            .expect("contract good must have a quote")
+            .stock = Quantity::ZERO;
         generate_information_candidates(
             registry,
             &state,
@@ -2892,6 +2918,79 @@ mod findings {
         finding_with_title(
             &findings,
             "Commissioned intelligence becomes a routine two-step ritual",
+        );
+    }
+
+    #[test]
+    fn findings_do_not_treat_occasional_intelligence_as_scheduled_maintenance() {
+        let mut report = cached_focused_report(30);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 18_000;
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::CommissionInformation)
+            .expect("commission statistics must exist")
+            .executed = 20;
+        campaign.commission_leverage_pairs = 20;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(
+            &findings,
+            "Commissioned intelligence becomes a routine two-step ritual",
+        );
+    }
+
+    #[test]
+    fn information_pair_tracking_survives_intervening_decisions() {
+        let mut accumulator = CampaignAccumulator::new();
+
+        accumulator.record_executed_command(GameplayCommandKind::CommissionInformation, 100);
+        accumulator.record_executed_command(GameplayCommandKind::SetBusinessPolicy, 130);
+        accumulator.record_executed_command(GameplayCommandKind::LeverageInformation, 190);
+
+        assert_eq!(accumulator.commission_leverage_pairs, 1);
+        assert_eq!(accumulator.last_information_commission_day, None);
+    }
+
+    #[test]
+    fn findings_surface_crisis_actions_without_delayed_trajectory_change() {
+        let mut report = cached_focused_report(30);
+        let stats = report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::RespondToCrisis)
+            .expect("crisis response statistics must exist");
+        stats.executed = 20;
+        stats.actions_with_delayed_consequences = 4;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Crisis responses rarely change the future trajectory",
+        );
+    }
+
+    #[test]
+    fn persistent_crisis_consequences_count_as_future_trajectory_change() {
+        let mut report = cached_focused_report(30);
+        let stats = report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::RespondToCrisis)
+            .expect("crisis response statistics must exist");
+        stats.executed = 20;
+        stats.actions_with_persistent_consequences = 20;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(
+            &findings,
+            "Crisis responses rarely change the future trajectory",
         );
     }
 

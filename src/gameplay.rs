@@ -90,7 +90,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 30;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 31;
 const CLOSE_CHOICE_SCORE_GAP: i64 = 300;
 const HEIR_CONFIRMATION_HEAD_AGE_YEARS: i64 = 52;
 const HEIR_CONFIRMATION_HEALTH_THRESHOLD: u16 = 5_000;
@@ -107,6 +107,13 @@ const AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS: i64 = 360;
 const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_000);
 const AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 720;
 const AGENT_INFORMATION_LEVERAGE_DELAY_DAYS: i64 = 90;
+const INFORMATION_ROUTINE_PAIR_WINDOW_DAYS: i64 = 180;
+const AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS: u64 = 1_000;
+const AGENT_INFORMATION_MARKET_SHORTAGE_BASIS_POINTS: u64 = 2_500;
+const AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD: u16 = 4_500;
+const AGENT_INFORMATION_DISTRICT_UNREST_THRESHOLD: u16 = 3_500;
+const AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD: u16 = 4_000;
+const AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD: u16 = 2_500;
 const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 14;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1561,6 +1568,7 @@ struct CampaignAccumulator {
     current_asset_rich_quiet_gap_days: u32,
     longest_asset_rich_quiet_gap_days: u32,
     commission_leverage_pairs: u16,
+    last_information_commission_day: Option<i64>,
     starting_generation: Option<u16>,
     fantasy_arc: GameplayFantasyArc,
 }
@@ -1607,6 +1615,7 @@ impl CampaignAccumulator {
             current_asset_rich_quiet_gap_days: 0,
             longest_asset_rich_quiet_gap_days: 0,
             commission_leverage_pairs: 0,
+            last_information_commission_day: None,
             starting_generation: None,
             fantasy_arc: GameplayFantasyArc::default(),
         }
@@ -1642,13 +1651,17 @@ impl CampaignAccumulator {
                 .first_city_shaping_action_day
                 .get_or_insert(day);
         }
-        if kind == GameplayCommandKind::LeverageInformation
-            && self.last_substantive_command == Some(GameplayCommandKind::CommissionInformation)
+        if kind == GameplayCommandKind::CommissionInformation {
+            self.last_information_commission_day = Some(day);
+        } else if kind == GameplayCommandKind::LeverageInformation
             && self
-                .last_substantive_command_day
-                .is_some_and(|previous_day| day.saturating_sub(previous_day) <= 60)
+                .last_information_commission_day
+                .is_some_and(|commission_day| {
+                    day.saturating_sub(commission_day) <= INFORMATION_ROUTINE_PAIR_WINDOW_DAYS
+                })
         {
             self.commission_leverage_pairs = self.commission_leverage_pairs.saturating_add(1);
+            self.last_information_commission_day = None;
         }
         let follows_recent_same_command = self.last_substantive_command == Some(kind)
             && self
@@ -4546,6 +4559,7 @@ fn preferred_market_information_focus(
         .contracts
         .values()
         .filter(|contract| player_external_contract(state, contract))
+        .filter(|contract| market_information_is_material(state, contract))
         .max_by_key(|contract| market_information_priority(state, contract))?;
     let good = registry.get_good(contract.good_id)?;
     Some((
@@ -4599,6 +4613,41 @@ fn market_information_priority(
     (price_change, shortage, std::cmp::Reverse(contract.good_id))
 }
 
+fn market_information_is_material(
+    state: &AppState,
+    contract: &crate::core::SupplyContract,
+) -> bool {
+    state
+        .market
+        .quotes
+        .get(&contract.good_id)
+        .is_some_and(|quote| {
+            let previous_price = quote.previous_price.copper().max(1).unsigned_abs();
+            let price_change = quote
+                .price
+                .copper()
+                .saturating_sub(quote.previous_price.copper())
+                .unsigned_abs();
+            let price_change_basis_points = price_change
+                .saturating_mul(10_000)
+                .checked_div(previous_price)
+                .unwrap_or(u64::MAX);
+            let target_stock = quote.target_stock.milliunits().max(1).unsigned_abs();
+            let shortage = quote
+                .target_stock
+                .milliunits()
+                .saturating_sub(quote.stock.milliunits())
+                .max(0)
+                .unsigned_abs();
+            let shortage_basis_points = shortage
+                .saturating_mul(10_000)
+                .checked_div(target_stock)
+                .unwrap_or(u64::MAX);
+            price_change_basis_points >= AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS
+                || shortage_basis_points >= AGENT_INFORMATION_MARKET_SHORTAGE_BASIS_POINTS
+        })
+}
+
 fn preferred_district_information_focus(
     registry: &Registry,
     state: &AppState,
@@ -4606,6 +4655,7 @@ fn preferred_district_information_focus(
     let (district_id, _) = state
         .districts
         .iter()
+        .filter(|(_, district)| district_information_is_material(district))
         .max_by_key(|(district_id, district)| {
             (
                 district_hardship(district),
@@ -4634,6 +4684,13 @@ fn district_hardship(district: &crate::core::DistrictRuntime) -> u32 {
         ))
 }
 
+fn district_information_is_material(district: &crate::core::DistrictRuntime) -> bool {
+    district.employment_basis_points < AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD
+        || district.sanitation_basis_points < AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD
+        || district.safety_basis_points < AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD
+        || district.unrest_basis_points >= AGENT_INFORMATION_DISTRICT_UNREST_THRESHOLD
+}
+
 fn preferred_counterparty_information_focus(
     state: &AppState,
     persona: GameplayPersona,
@@ -4645,6 +4702,7 @@ fn preferred_counterparty_information_focus(
             relationship.pair.first == state.player_dynasty_id
                 || relationship.pair.second == state.player_dynasty_id
         })
+        .filter(|relationship| counterparty_information_is_material(state, relationship, persona))
         .max_by_key(|relationship| {
             counterparty_information_priority(state, relationship, persona)
         })?;
@@ -4654,6 +4712,32 @@ fn preferred_counterparty_information_focus(
         InformationFocus::Counterparty { dynasty_id },
         format!("commission a house brief on House {}", dynasty.name()),
     ))
+}
+
+fn counterparty_information_is_material(
+    state: &AppState,
+    relationship: &crate::core::RelationshipState,
+    persona: GameplayPersona,
+) -> bool {
+    let strained = relationship.trust_basis_points
+        <= AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD
+        || relationship.resentment_basis_points
+            >= AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD;
+    if strained || persona != GameplayPersona::Opportunist {
+        return strained;
+    }
+    let Some(counterparty_id) = relationship_counterparty_id(relationship, state.player_dynasty_id)
+    else {
+        return false;
+    };
+    let player_treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .map_or(Money::ZERO, crate::core::Dynasty::treasury);
+    state
+        .dynasties
+        .get(&counterparty_id)
+        .is_some_and(|dynasty| dynasty.treasury() >= player_treasury.saturating_mul(2))
 }
 
 fn counterparty_information_priority(
@@ -7123,6 +7207,7 @@ fn derive_findings(
     add_institutional_campaign_concentration_finding(aggregate, &mut findings);
     add_repetitive_command_streak_finding(campaigns, &mut findings);
     add_information_routine_finding(campaigns, &mut findings);
+    add_crisis_trajectory_finding(aggregate, &mut findings);
     add_long_substantive_gap_finding(campaigns, &mut findings);
     add_asset_liquidity_drought_finding(campaigns, &mut findings);
     add_economic_recovery_dead_end_finding(campaigns, &mut findings);
@@ -7205,7 +7290,7 @@ fn add_strategic_cadence_finding(
 #[derive(Clone, Copy)]
 struct PhaseQualityThresholds {
     minimum_action_share: u64,
-    maximum_quiet_share: u64,
+    maximum_static_quiet_share: u64,
     minimum_multi_family_share: u64,
     minimum_average_choices_tenths: u64,
     minimum_average_families_tenths: u64,
@@ -7220,7 +7305,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
         "Establishment becomes a waiting phase",
         PhaseQualityThresholds {
             minimum_action_share: 60,
-            maximum_quiet_share: 40,
+            maximum_static_quiet_share: 40,
             minimum_multi_family_share: 25,
             minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 16,
@@ -7234,7 +7319,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
         "Institutional ascent lacks parallel political work",
         PhaseQualityThresholds {
             minimum_action_share: 60,
-            maximum_quiet_share: 35,
+            maximum_static_quiet_share: 35,
             minimum_multi_family_share: 25,
             minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 15,
@@ -7248,7 +7333,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
         "Dynastic governance remains intermittent and strategically narrow",
         PhaseQualityThresholds {
             minimum_action_share: 0,
-            maximum_quiet_share: 30,
+            maximum_static_quiet_share: 30,
             minimum_multi_family_share: 35,
             minimum_average_choices_tenths: 30,
             minimum_average_families_tenths: 20,
@@ -7282,6 +7367,14 @@ fn add_phase_quality_finding(
         u64::from(stats.decision_cycles),
         100,
     );
+    let static_quiet_cycles = stats
+        .quiet_cycles
+        .saturating_sub(stats.quiet_cycles_with_ambient_change);
+    let static_quiet_share = scaled_ratio_u64(
+        u64::from(static_quiet_cycles),
+        u64::from(stats.decision_cycles),
+        100,
+    );
     let multi_family_share = scaled_ratio_u64(
         u64::from(stats.cycles_with_multiple_viable_command_kinds),
         u64::from(stats.decision_cycles),
@@ -7302,7 +7395,7 @@ fn add_phase_quality_finding(
         >= thresholds.minimum_average_families_tenths
         || average_choices_tenths >= thresholds.minimum_average_choices_tenths;
     if action_share >= thresholds.minimum_action_share
-        && quiet_share < thresholds.maximum_quiet_share
+        && static_quiet_share < thresholds.maximum_static_quiet_share
         && multi_family_share >= thresholds.minimum_multi_family_share
         && choice_depth_is_sufficient
     {
@@ -7312,8 +7405,13 @@ fn add_phase_quality_finding(
         severity: GameplayFindingSeverity::Warning,
         title: title.to_owned(),
         evidence: format!(
-            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, multiple command families were viable in {multi_family_share}%, and actionable cycles averaged {} viable choices across {} families.",
+            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, multiple command families were viable in {multi_family_share}%, and actionable cycles averaged {} viable choices across {} families.",
             stats.decision_cycles,
+            scaled_ratio_u64(
+                u64::from(stats.quiet_cycles_with_ambient_change),
+                u64::from(stats.decision_cycles),
+                100,
+            ),
             format_tenths(average_choices_tenths),
             format_tenths(average_families_tenths)
         ),
@@ -7366,14 +7464,57 @@ fn add_information_routine_finding(
         .iter()
         .map(|campaign| u32::from(campaign.commission_leverage_pairs))
         .sum();
-    if commissions < 20 || pairs.saturating_mul(100) < commissions.saturating_mul(75) {
+    let simulated_days = campaigns.iter().fold(0_u64, |total, campaign| {
+        total.saturating_add(u64::from(campaign.simulated_days))
+    });
+    let commissions_per_hundred_campaign_years = scaled_ratio_u64(
+        u64::from(commissions).saturating_mul(360),
+        simulated_days.max(1),
+        100,
+    );
+    if commissions < 20
+        || pairs.saturating_mul(100) < commissions.saturating_mul(75)
+        || commissions_per_hundred_campaign_years < 50
+    {
         return;
     }
     findings.push(GameplayFinding {
         severity: GameplayFindingSeverity::Warning,
         title: "Commissioned intelligence becomes a routine two-step ritual".to_owned(),
         evidence: format!(
-            "{pairs} of {commissions} commissioned reports were leveraged within 60 days. Intelligence is functioning, but the repeated commission-then-spend sequence risks becoming scheduled maintenance rather than a response to uncertainty."
+            "{pairs} of {commissions} commissioned reports were leveraged within {INFORMATION_ROUTINE_PAIR_WINDOW_DAYS} days, at a rate of {commissions_per_hundred_campaign_years} commissions per 100 campaign-years. Intelligence is functioning, but the repeated commission-then-spend sequence risks becoming scheduled maintenance rather than a response to uncertainty."
+        ),
+    });
+}
+
+fn add_crisis_trajectory_finding(
+    aggregate: &GameplayAggregate,
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let stats = aggregate
+        .commands
+        .get(&GameplayCommandKind::RespondToCrisis)
+        .expect("crisis response statistics must exist");
+    if stats.executed < 20 {
+        return;
+    }
+    let future_consequences = stats
+        .actions_with_persistent_consequences
+        .max(stats.actions_with_delayed_consequences);
+    let future_share = scaled_ratio_u64(
+        u64::from(future_consequences),
+        u64::from(stats.executed),
+        100,
+    );
+    if future_share >= 50 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Crisis responses rarely change the future trajectory".to_owned(),
+        evidence: format!(
+            "At least {future_consequences} of {} crisis responses produced an action-attributable consequence that persisted or emerged after time advanced ({future_share}%). Crises are visible and actionable, but intervention seldom changes what happens after the immediate resolution step.",
+            stats.executed,
         ),
     });
 }

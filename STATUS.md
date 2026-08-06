@@ -13,7 +13,7 @@ Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code own
 | Minimum Rust version | 1.97 |
 | Save schema | 14 |
 | Supported save migrations | Versions 0 through 13 |
-| Gameplay report schema | 30 |
+| Gameplay report schema | 31 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |
@@ -50,7 +50,7 @@ The Rivergate campaign supports multi-generation deterministic continuation.
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, summary, creation, expiry, passive reports, and paid player-directed market, district, and counterparty intelligence. |
 | AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure. |
-| Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, response, effects, and resolution. |
+| Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, monthly escalation while unaddressed, response-driven recovery, effects, and resolution. |
 | Observability | Summary, projection, HTML dashboard, outbox, chronicle, audit history, validation, and gameplay reports. |
 
 ## Player commands
