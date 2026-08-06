@@ -11,9 +11,9 @@ Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code own
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 14 |
-| Supported save migrations | Versions 0 through 13 |
-| Gameplay report schema | 33 |
+| Save schema | 15 |
+| Supported save migrations | Versions 0 through 14 |
+| Gameplay report schema | 35 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |

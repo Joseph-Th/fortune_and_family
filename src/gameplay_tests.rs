@@ -2185,6 +2185,19 @@ mod metrics {
     use super::*;
 
     #[test]
+    fn succession_starts_a_distinct_legacy_phase() {
+        let mut arc = GameplayFantasyArc {
+            first_city_shaping_action_day: Some(1_000),
+            ..GameplayFantasyArc::default()
+        };
+        assert_eq!(gameplay_phase(&arc), GameplayPhase::DynasticGovernance);
+
+        arc.first_succession_day = Some(4_500);
+
+        assert_eq!(gameplay_phase(&arc), GameplayPhase::SuccessionLegacy);
+    }
+
+    #[test]
     fn snapshots_detect_information_refreshes_and_civic_identity_changes() {
         let mut state = make_test_campaign();
         let earlier = GameplaySnapshot::capture(&state);
@@ -2900,6 +2913,83 @@ mod findings {
     use super::*;
 
     #[test]
+    fn office_directives_without_later_effects_are_reported() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.campaigns = 1;
+        report.aggregate.simulated_days = 1_800;
+        let stats = report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::ExerciseOfficePower)
+            .expect("office-power statistics must exist");
+        stats.executed = 20;
+        stats.actions_with_delayed_consequences = 0;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Office directives rarely alter the later trajectory",
+        );
+    }
+
+    #[test]
+    fn flat_local_welfare_under_crisis_is_reported() {
+        let mut report = cached_focused_report(30);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = (0..4)
+            .map(|offset| {
+                let mut campaign = baseline.clone();
+                campaign.seed = campaign.seed.saturating_add(offset);
+                campaign.simulated_days = 1_800;
+                campaign.maximum_active_crises = 2;
+                campaign.minimum_district_food_satisfaction = 9_800;
+                campaign
+            })
+            .collect();
+        report.aggregate.campaigns = 4;
+        report.aggregate.simulated_days = 7_200;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Crises leave household welfare almost mechanically flat",
+        );
+    }
+
+    #[test]
+    fn generation_length_credit_without_distress_is_reported() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.campaigns = 1;
+        report.aggregate.simulated_days = 3_600;
+        report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::ExtendCredit)
+            .expect("credit statistics must exist")
+            .executed = 50;
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 3_600;
+        campaign.maximum_delinquent_loans = 0;
+        campaign.maximum_defaulted_loans = 0;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Long-horizon lending never encounters credit distress",
+        );
+    }
+
+    #[test]
     fn findings_surface_political_power_that_precedes_commercial_standing() {
         let mut report = cached_focused_report(360);
         let campaign = report
@@ -3135,6 +3225,8 @@ mod findings {
         campaign.end.insolvent_businesses = 0;
         campaign.end.player_properties = 0;
         campaign.end.defaulted_loans = 2;
+        campaign.longest_recovery_pressure_days = 360;
+        campaign.terminal_recovery_pressure_days = 360;
         campaign
             .commands
             .get_mut(&GameplayCommandKind::BorrowFunds)
@@ -3151,6 +3243,40 @@ mod findings {
         finding_with_title(
             &findings,
             "An individual dynasty remains trapped in recovery churn",
+        );
+    }
+
+    #[test]
+    fn endpoint_only_recovery_pressure_is_not_persistent_churn() {
+        let mut report = cached_focused_report(30);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.end.player_treasury = Money::ZERO;
+        campaign.end.active_businesses = 0;
+        campaign.end.distressed_businesses = 1;
+        campaign.end.player_properties = 0;
+        campaign.end.defaulted_loans = 2;
+        campaign.longest_recovery_pressure_days = 30;
+        campaign.terminal_recovery_pressure_days = 30;
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::BorrowFunds)
+            .expect("borrowing statistics must exist")
+            .executed = 4;
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::InvestInBusiness)
+            .expect("investment statistics must exist")
+            .executed = 3;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert!(
+            findings.iter().all(|finding| finding.title
+                != "An individual dynasty remains trapped in recovery churn"),
+            "a single endpoint interval must not be described as persistent recovery churn"
         );
     }
 
@@ -3794,9 +3920,12 @@ mod findings {
         );
         let office_finding =
             finding_with_title(&findings, "office-power was not exercised in this horizon");
+        let borrowing_finding =
+            finding_with_title(&findings, "borrow-funds was not exercised in this horizon");
 
         assert_eq!(labor_finding.severity, GameplayFindingSeverity::Info);
         assert_eq!(office_finding.severity, GameplayFindingSeverity::Info);
+        assert_eq!(borrowing_finding.severity, GameplayFindingSeverity::Info);
     }
 
     #[test]

@@ -1,7 +1,10 @@
 //! Persistence round-trip, migration, and release-mode validation tests.
 
 use super::*;
-use crate::core::{AuditKind, CivicDebt, CivicDebtStatus, EnactedLaw, FamilyLinkKind, LawKind};
+use crate::core::{
+    AuditKind, CivicDebt, CivicDebtStatus, EnactedLaw, FamilyLinkKind, LawKind,
+    OfficeDirectiveState, OfficePower,
+};
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
 use crate::money::{Money, Quantity};
 use crate::registry::Registry;
@@ -160,6 +163,31 @@ mod round_trip {
             &state,
             &loaded,
             "save/load must preserve municipal debt authorization and payment state",
+        );
+    }
+
+    #[test]
+    fn preserves_active_office_directive() {
+        let mut state = make_test_campaign();
+        let institution = state
+            .institutions
+            .values_mut()
+            .find(|institution| institution.powers.contains(&OfficePower::Inspections))
+            .expect("campaign must contain an institution with inspection power");
+        institution.active_directive = Some(OfficeDirectiveState {
+            power: OfficePower::Inspections,
+            expires_day: 180,
+        });
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("office-directive-campaign.json");
+
+        save_state(&path, &state).expect("office directive state must save");
+        let loaded = load_state(&path).expect("office directive state must load");
+
+        assert_state_eq(
+            &state,
+            &loaded,
+            "save/load must preserve active office directive momentum",
         );
     }
 
@@ -882,6 +910,58 @@ mod migrations {
     }
 
     #[test]
+    fn v14_adds_explicit_office_directive_state() {
+        let state = make_test_campaign();
+        let institution_id = state
+            .institutions
+            .values()
+            .find(|institution| institution.powers.contains(&OfficePower::Inspections))
+            .expect("campaign must contain an institution with inspection power")
+            .institution_id;
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(14);
+        for institution in value["institutions"]
+            .as_object_mut()
+            .expect("institutions must be an object")
+            .values_mut()
+        {
+            institution
+                .as_object_mut()
+                .expect("institution must be an object")
+                .remove("active_directive");
+        }
+        value["audit_log"]
+            .as_array_mut()
+            .expect("audit log must be an array")
+            .push(serde_json::json!({
+                "day": 0,
+                "kind": "OfficeDirective",
+                "subject": format!("institution:{institution_id}"),
+                "detail": "district=1;power=Inspections;legitimacy_cost=100"
+            }));
+
+        let migrated = migrate_to_current(value, Path::new("memory.json"))
+            .expect("version fourteen must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        assert_eq!(
+            loaded
+                .institutions
+                .get(&institution_id)
+                .expect("migrated institution must exist")
+                .active_directive,
+            Some(OfficeDirectiveState {
+                power: OfficePower::Inspections,
+                expires_day: 180,
+            }),
+            "recent legacy directives must retain their remaining policy duration"
+        );
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        validate_state(&loaded).expect("version-fourteen campaign must remain valid");
+    }
+
+    #[test]
     fn v1_hydrates_strategic_state() {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
@@ -1102,7 +1182,30 @@ mod validation {
         assert_invalid_state(
             load_state(&path),
             StateValidationKind::NumericRanges,
-            "invalid budget or term timing",
+            "invalid budget, term timing",
+        );
+    }
+
+    #[test]
+    fn rejects_office_directive_for_an_unavailable_power() {
+        let mut state = make_test_campaign();
+        let institution = state
+            .institutions
+            .values_mut()
+            .find(|institution| !institution.powers.contains(&OfficePower::Taxation))
+            .expect("campaign must contain an institution without taxation power");
+        institution.active_directive = Some(OfficeDirectiveState {
+            power: OfficePower::Taxation,
+            expires_day: 180,
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("invalid-office-directive-power.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid budget, term timing, or directive",
         );
     }
 
@@ -1534,7 +1637,7 @@ mod validation {
         assert_invalid_state(
             load_state(&path),
             StateValidationKind::NumericRanges,
-            "invalid budget or term timing",
+            "invalid budget, term timing",
         );
     }
 

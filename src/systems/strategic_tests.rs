@@ -861,6 +861,139 @@ mod gameplay_stability {
     }
 
     #[test]
+    fn dividends_share_the_owners_remaining_treasury_headroom() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        for business in state.businesses.iter_mut() {
+            business.finance.lifetime_revenue = Money::ZERO;
+            business.finance.lifetime_costs = Money::ZERO;
+        }
+        let (owner_id, business_ids) = state
+            .dynasties
+            .keys()
+            .find_map(|owner_id| {
+                let ids: Vec<_> = state
+                    .businesses
+                    .ids_for_owner(*owner_id)?
+                    .iter()
+                    .copied()
+                    .take(2)
+                    .collect();
+                (ids.len() == 2).then_some((*owner_id, ids))
+            })
+            .expect("campaign must contain a dynasty with two businesses");
+        for business_id in &business_ids {
+            let business = state
+                .businesses
+                .get_mut(*business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Active;
+            business.finance.cash = Money::from_copper(100_000);
+            business.finance.lifetime_revenue = Money::from_copper(200_000);
+            business.finance.lifetime_costs = Money::from_copper(10_000);
+        }
+        state
+            .dynasties
+            .get_mut(&owner_id)
+            .expect("owner dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX - 1_500);
+        let cash_before: Vec<_> = business_ids
+            .iter()
+            .map(|business_id| {
+                state
+                    .businesses
+                    .get(*business_id)
+                    .expect("selected business must exist")
+                    .cash()
+            })
+            .collect();
+
+        distribute_business_dividends(registry, &mut state)
+            .expect("shared owner headroom must bound dividends");
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&owner_id)
+                .expect("owner dynasty must exist")
+                .treasury(),
+            Money::from_copper(i64::MAX)
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(business_ids[0])
+                .expect("first business must exist")
+                .cash(),
+            cash_before[0].saturating_sub(Money::from_copper(1_000))
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(business_ids[1])
+                .expect("second business must exist")
+                .cash(),
+            cash_before[1].saturating_sub(Money::from_copper(500))
+        );
+    }
+
+    #[test]
+    fn dividend_finance_version_exhaustion_is_atomic() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        for business in state.businesses.iter_mut() {
+            business.finance.lifetime_revenue = Money::ZERO;
+            business.finance.lifetime_costs = Money::ZERO;
+        }
+        let business_ids = state
+            .dynasties
+            .keys()
+            .find_map(|owner_id| {
+                let ids: Vec<_> = state
+                    .businesses
+                    .ids_for_owner(*owner_id)?
+                    .iter()
+                    .copied()
+                    .take(2)
+                    .collect();
+                (ids.len() == 2).then_some(ids)
+            })
+            .expect("campaign must contain a dynasty with two businesses");
+        for business_id in &business_ids {
+            let business = state
+                .businesses
+                .get_mut(*business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Active;
+            business.finance.cash = Money::from_copper(100_000);
+            business.finance.lifetime_revenue = Money::from_copper(200_000);
+            business.finance.lifetime_costs = Money::from_copper(10_000);
+        }
+        state
+            .businesses
+            .get_mut(business_ids[1])
+            .expect("second business must exist")
+            .finance
+            .version = u64::MAX - 1;
+        let before = state.clone();
+
+        let result = distribute_business_dividends(registry, &mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::BusinessFinanceVersionExhausted {
+                business_id: business_ids[1],
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "dividend preflight must reject an exhausted ledger before any payout",
+        );
+    }
+
+    #[test]
     fn unoccupied_owned_property_generates_external_rent() {
         let mut state = make_test_campaign();
         let property_id = state
@@ -936,6 +1069,110 @@ mod gameplay_stability {
                 .cash()
                 > cash_before,
             "holding an office with city-contract power must affect the holder's economy"
+        );
+    }
+
+    #[test]
+    fn office_directive_momentum_changes_the_following_month() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        advance_days(registry, &mut state, 30)
+            .expect("campaign must advance to a monthly boundary");
+        let institution_id = registry
+            .get_institution_id("bakers_guild")
+            .expect("registry must define the bakers guild");
+        let district_id = registry
+            .get_institution(institution_id)
+            .expect("craft guild definition must exist")
+            .district_id();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.district_id() == district_id)
+            .expect("institution district must contain a business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.condition_basis_points = 5_000;
+            business.operations.quality_basis_points = 5_000;
+        }
+        let expires_day = state.clock.day().saturating_add(150);
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("directive institution must exist")
+            .active_directive = Some(crate::core::OfficeDirectiveState {
+            power: OfficePower::Inspections,
+            expires_day,
+        });
+
+        apply_active_office_directives(registry, &mut state)
+            .expect("active office directive must apply");
+
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("selected business must exist");
+        assert_eq!(business.operations.condition_basis_points, 5_015);
+        assert_eq!(business.operations.quality_basis_points, 5_025);
+    }
+
+    #[test]
+    fn expired_office_directive_is_cleared_without_effect() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        advance_days(registry, &mut state, 30)
+            .expect("campaign must advance to a monthly boundary");
+        let institution_id = registry
+            .get_institution_id("bakers_guild")
+            .expect("registry must define the bakers guild");
+        let district_id = registry
+            .get_institution(institution_id)
+            .expect("craft guild definition must exist")
+            .district_id();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.district_id() == district_id)
+            .expect("institution district must contain a business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.condition_basis_points = 5_000;
+            business.operations.quality_basis_points = 5_000;
+        }
+        let expires_day = state.clock.day().saturating_sub(1);
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("directive institution must exist")
+            .active_directive = Some(crate::core::OfficeDirectiveState {
+            power: OfficePower::Inspections,
+            expires_day,
+        });
+
+        apply_active_office_directives(registry, &mut state)
+            .expect("expired office directive cleanup must succeed");
+
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("selected business must exist");
+        assert_eq!(business.operations.condition_basis_points, 5_000);
+        assert_eq!(business.operations.quality_basis_points, 5_000);
+        assert!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("directive institution must exist")
+                .active_directive
+                .is_none()
         );
     }
 
@@ -4008,7 +4245,7 @@ mod laws {
             .stock;
 
         apply_route_laws(&mut state);
-        apply_external_route_supply(&mut state);
+        apply_external_route_supply(&mut state).expect("route supply must apply");
 
         let route = state
             .external_routes
@@ -4133,7 +4370,7 @@ mod laws {
             },
         );
 
-        apply_law_economic_effects(registry, &mut state);
+        apply_law_economic_effects(registry, &mut state).expect("emergency imports must apply");
 
         let quote = state
             .market
@@ -4211,6 +4448,68 @@ mod legal_cases {
 
 mod crises {
     use super::*;
+
+    #[test]
+    fn epidemic_pressure_is_local_and_material() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let affected_district = state
+            .households
+            .iter()
+            .next()
+            .expect("campaign must contain households")
+            .district_id();
+        let affected_household_id = state
+            .households
+            .iter()
+            .find(|household| household.district_id() == affected_district)
+            .expect("affected district must contain a household")
+            .id();
+        let unaffected_household_id = state
+            .households
+            .iter()
+            .find(|household| household.district_id() != affected_district)
+            .expect("campaign must contain another populated district")
+            .id();
+        let affected_before = state
+            .households
+            .get(affected_household_id)
+            .expect("affected household must exist")
+            .food_satisfaction_basis_points;
+        let unaffected_before = state
+            .households
+            .get(unaffected_household_id)
+            .expect("unaffected household must exist")
+            .food_satisfaction_basis_points;
+        insert_crisis(
+            &mut state,
+            CrisisKind::Epidemic,
+            Some(affected_district),
+            5_000,
+            "test epidemic",
+        );
+
+        apply_crisis_daily_effects(registry, &mut state).expect("daily crisis effects must apply");
+
+        assert_eq!(
+            state
+                .households
+                .get(affected_household_id)
+                .expect("affected household must exist")
+                .food_satisfaction_basis_points,
+            affected_before.saturating_sub(83),
+            "epidemic pressure must be large enough to survive daily welfare smoothing"
+        );
+        assert_eq!(
+            state
+                .households
+                .get(unaffected_household_id)
+                .expect("unaffected household must exist")
+                .food_satisfaction_basis_points,
+            unaffected_before,
+            "a district epidemic must not directly reduce welfare across the entire city"
+        );
+    }
 
     #[test]
     fn grain_shortage_adds_demand_without_changing_target_stock() {

@@ -16,7 +16,7 @@ usage:
   $0 soak                run ignored deterministic soak tests
   $0 docs                run documentation consistency and doctests
   $0 cli                 run CLI smoke tests
-  $0 gameplay            run the release gameplay quality gate
+  $0 gameplay            run release gameplay and generation-length quality gates
   $0 all                 run syntax, library, doc, soak, CLI, and gameplay tests
 EOF
   exit 2
@@ -167,6 +167,40 @@ run_gameplay() {
       --output target/gameplay-quality-gate.json
 }
 
+run_legacy_gameplay() {
+  local python_command
+  if python3 --version >/dev/null 2>&1; then
+    python_command=python3
+  elif python --version >/dev/null 2>&1; then
+    python_command=python
+  else
+    printf 'Python is required for generation-length gameplay validation\n' >&2
+    return 1
+  fi
+  run_step 'Generation-length gameplay gate' \
+    cargo run --release --quiet --locked -- playtest \
+      --days 7200 \
+      --persona steward \
+      --background baker \
+      --trace-limit 20 \
+      --minimum-overall 75 \
+      --fail-on-critical \
+      --json \
+      --output target/gameplay-legacy-gate.json
+  run_step 'Generation-length fantasy validation' "$python_command" -c '
+import json
+from pathlib import Path
+
+report = json.loads(Path("target/gameplay-legacy-gate.json").read_text(encoding="utf-8"))
+campaigns = report["campaigns"]
+if not campaigns or campaigns[0]["fantasy_arc"]["first_succession_day"] is None:
+    raise SystemExit("generation-length gameplay gate did not reach succession")
+phase = report["aggregate"]["phase_stats"].get("SuccessionLegacy", {})
+if phase.get("decision_cycles", 0) == 0:
+    raise SystemExit("generation-length gameplay gate did not observe succession-and-legacy decisions")
+'
+}
+
 case "$mode" in
   fast)
     [[ $# -le 2 ]] || usage
@@ -199,6 +233,7 @@ case "$mode" in
   gameplay)
     [[ $# -eq 1 ]] || usage
     run_gameplay
+    run_legacy_gameplay
     ;;
   all)
     [[ $# -eq 1 ]] || usage
@@ -208,6 +243,7 @@ case "$mode" in
     run_soak
     run_step 'CLI smoke tests' bash scripts/verify_cli.sh
     run_gameplay
+    run_legacy_gameplay
     ;;
   *)
     usage

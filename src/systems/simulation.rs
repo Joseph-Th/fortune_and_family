@@ -2,8 +2,8 @@
 
 use super::SimulationError;
 use super::transactions::{
-    credit_market_clearing_account, debit_market_clearing_account, next_business_finance_version,
-    next_family_charter_version,
+    add_market_supply, credit_market_clearing_account, debit_market_clearing_account,
+    next_business_finance_version, next_family_charter_version,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
@@ -754,15 +754,7 @@ fn apply_business_sales(
             business.finance.lifetime_revenue = resulting_lifetime_revenue;
             business.finance.version = next_finance_version;
         }
-        {
-            let quote = state
-                .market
-                .quotes
-                .get_mut(&good_id)
-                .expect("planned market sale quote must exist");
-            quote.stock = quote.stock.saturating_add(quantity);
-            quote.supply_today = quote.supply_today.saturating_add(quantity);
-        }
+        add_market_supply(state, good_id, quantity)?;
         debit_market_clearing_account(state, revenue)?;
         total_revenue = total_revenue.saturating_add(revenue);
         total_quantity = total_quantity.saturating_add(quantity);
@@ -1442,27 +1434,39 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
 }
 
 fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationError> {
-    let household_ids: Vec<_> = state
+    let payments: Vec<_> = state
         .households
         .iter()
-        .map(crate::core::Household::id)
+        .map(|household| {
+            (
+                household.id(),
+                household
+                    .weekly_income
+                    .min(household.cash.max_nonnegative_addend()),
+            )
+        })
         .collect();
     let mut total = Money::ZERO;
-    for household_id in household_ids {
+    for (_, paid) in &payments {
+        total = total
+            .checked_add(*paid)
+            .ok_or(SimulationError::WeeklyExternalIncomeOverflow {
+                accumulated: total,
+                incoming: *paid,
+            })?;
+    }
+    debit_market_clearing_account(state, total)?;
+
+    for (household_id, paid) in payments {
         let household = state
             .households
             .get_mut(household_id)
             .expect("weekly income household must exist");
-        let paid = household
-            .weekly_income
-            .min(household.cash.max_nonnegative_addend());
         household.cash = household
             .cash
             .checked_add(paid)
             .expect("bounded weekly income must fit household cash");
-        total = total.saturating_add(paid);
     }
-    debit_market_clearing_account(state, total)?;
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::LaborSettlement,

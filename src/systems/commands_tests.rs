@@ -3361,6 +3361,17 @@ mod politics {
         assert_eq!(district.unrest_basis_points, 4_850);
         assert_eq!(
             state
+                .institutions
+                .get(&institution_id)
+                .expect("watch institution must exist")
+                .active_directive,
+            Some(crate::core::OfficeDirectiveState {
+                power: OfficePower::WatchPriorities,
+                expires_day: OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
+            })
+        );
+        assert_eq!(
+            state
                 .dynasties
                 .get(&state.player_dynasty_id)
                 .expect("player dynasty must exist")

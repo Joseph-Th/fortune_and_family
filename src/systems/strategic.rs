@@ -2,7 +2,8 @@
 
 use super::SimulationError;
 use super::transactions::{
-    debit_market_clearing_account, next_business_finance_version, next_family_charter_version,
+    add_market_supply, debit_market_clearing_account, next_business_finance_version,
+    next_family_charter_version,
 };
 use crate::core::{
     AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
@@ -1857,6 +1858,7 @@ fn initialize_institutions(registry: &Registry, state: &mut AppState) {
                 term_started_day: 0,
                 next_selection_day: super::OFFICE_TERM_DAYS,
                 term_number: 1,
+                active_directive: None,
             },
         );
     }
@@ -2301,7 +2303,7 @@ pub(crate) fn run_daily_strategic_systems(
 ) -> Result<(), SimulationError> {
     apply_route_laws(state);
     apply_crisis_daily_effects(registry, state)?;
-    apply_external_route_supply(state);
+    apply_external_route_supply(state)?;
     Ok(())
 }
 
@@ -2323,7 +2325,7 @@ fn apply_route_laws(state: &mut AppState) {
     }
 }
 
-fn apply_external_route_supply(state: &mut AppState) {
+fn apply_external_route_supply(state: &mut AppState) -> Result<(), SimulationError> {
     let routes: Vec<_> = state
         .external_routes
         .values()
@@ -2341,14 +2343,9 @@ fn apply_external_route_supply(state: &mut AppState) {
         })
         .collect();
     for (good_id, quantity) in routes {
-        let quote = state
-            .market
-            .quotes
-            .get_mut(&good_id)
-            .expect("route good must have a market quote");
-        quote.stock = quote.stock.saturating_add(quantity);
-        quote.supply_today = quote.supply_today.saturating_add(quantity);
+        add_market_supply(state, good_id, quantity)?;
     }
+    Ok(())
 }
 
 pub(crate) fn apply_law_price_controls(registry: &Registry, state: &mut AppState) {
@@ -2412,10 +2409,13 @@ fn apply_crisis_daily_effects(
                 }
             }
             CrisisKind::Epidemic => {
-                for household in state.households.iter_mut() {
+                let daily_welfare_loss = (severity / 60).max(1);
+                for household in state.households.iter_mut().filter(|household| {
+                    district_id.is_none_or(|district_id| household.district_id() == district_id)
+                }) {
                     household.food_satisfaction_basis_points = household
                         .food_satisfaction_basis_points
-                        .saturating_sub((severity / 500).max(1));
+                        .saturating_sub(daily_welfare_loss);
                 }
             }
             CrisisKind::TradeDisruption => {
@@ -2505,7 +2505,7 @@ pub(crate) fn run_weekly_strategic_systems(
     progress_public_works(registry, state);
     update_relationships_from_obligations(state);
     update_quality_reputations(state);
-    apply_law_economic_effects(registry, state);
+    apply_law_economic_effects(registry, state)?;
     Ok(())
 }
 
@@ -3531,51 +3531,60 @@ fn distribute_business_dividends(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
-    let dividends: Vec<_> = state
-        .businesses
-        .iter()
-        .filter_map(|business| {
-            if business.status() != BusinessStatus::Active
-                || business.finance.lifetime_revenue <= business.finance.lifetime_costs
-            {
-                return None;
-            }
-            let recipe = registry
-                .get_recipe(business.recipe_id())
-                .expect("business recipe must exist");
-            let operating_floor = business
-                .policy
-                .minimum_cash_reserve
-                .saturating_add(recipe.daily_operating_cost().saturating_mul(21));
-            let excess = business.cash().saturating_sub(operating_floor);
-            let owner_headroom = state
+    let mut remaining_owner_headroom = BTreeMap::new();
+    let mut dividends = Vec::new();
+    for business in state.businesses.iter() {
+        if business.status() != BusinessStatus::Active
+            || business.finance.lifetime_revenue <= business.finance.lifetime_costs
+        {
+            continue;
+        }
+        let recipe = registry
+            .get_recipe(business.recipe_id())
+            .expect("business recipe must exist");
+        let operating_floor = business
+            .policy
+            .minimum_cash_reserve
+            .saturating_add(recipe.daily_operating_cost().saturating_mul(21));
+        let excess = business.cash().saturating_sub(operating_floor);
+        let owner_id = business.owner_dynasty_id();
+        let owner_headroom = remaining_owner_headroom.entry(owner_id).or_insert_with(|| {
+            state
                 .dynasties
-                .get(&business.owner_dynasty_id())
+                .get(&owner_id)
                 .expect("dividend owner dynasty must exist")
                 .treasury()
-                .max_nonnegative_addend();
-            let dividend = Money::from_copper(excess.copper() / 10)
-                .min(Money::from_copper(1_000))
-                .min(owner_headroom);
-            (dividend > Money::ZERO).then_some((
-                business.id(),
-                business.owner_dynasty_id(),
-                dividend,
-            ))
-        })
-        .collect();
-    let mut total = Money::ZERO;
-    for (business_id, owner_id, dividend) in dividends {
-        let business = state
-            .businesses
-            .get_mut(business_id)
-            .expect("dividend business must exist");
+                .max_nonnegative_addend()
+        });
+        let dividend = Money::from_copper(excess.copper() / 10)
+            .min(Money::from_copper(1_000))
+            .min(*owner_headroom);
+        if dividend <= Money::ZERO {
+            continue;
+        }
         let resulting_cash = business
             .finance
             .cash
             .checked_sub(dividend)
             .expect("planned dividend must fit business cash");
         let next_finance_version = next_business_finance_version(business)?;
+        *owner_headroom = owner_headroom
+            .checked_sub(dividend)
+            .expect("planned dividend must fit remaining owner headroom");
+        dividends.push((
+            business.id(),
+            owner_id,
+            dividend,
+            resulting_cash,
+            next_finance_version,
+        ));
+    }
+    let mut total = Money::ZERO;
+    for (business_id, owner_id, dividend, resulting_cash, next_finance_version) in dividends {
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("dividend business must exist");
         business.finance.cash = resulting_cash;
         business.finance.version = next_finance_version;
         let owner = state
@@ -4306,20 +4315,18 @@ fn adjust_basis_points(current: u16, delta: i16) -> u16 {
     .expect("clamped basis-point value must fit u16")
 }
 
-fn apply_law_economic_effects(registry: &Registry, state: &mut AppState) {
+fn apply_law_economic_effects(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let emergency_imports = active_law_value(state, LawKind::EmergencyImports)
         .map_or(Quantity::ZERO, |value| Quantity::from_units(value.max(0)));
     if emergency_imports > Quantity::ZERO
         && let Some(grain_id) = registry.get_good_id("grain")
     {
-        let quote = state
-            .market
-            .quotes
-            .get_mut(&grain_id)
-            .expect("grain quote must exist");
-        quote.stock = quote.stock.saturating_add(emergency_imports);
-        quote.supply_today = quote.supply_today.saturating_add(emergency_imports);
+        add_market_supply(state, grain_id, emergency_imports)?;
     }
+    Ok(())
 }
 
 pub(crate) fn run_monthly_strategic_systems(
@@ -4330,6 +4337,7 @@ pub(crate) fn run_monthly_strategic_systems(
     resolve_institution_selections(registry, state)?;
     apply_office_duties(state)?;
     apply_office_power_effects(registry, state)?;
+    apply_active_office_directives(registry, state)?;
     advance_ai_objectives(registry, state);
     update_information_reports(registry, state);
     advance_legal_case_hearings(state);
@@ -4338,6 +4346,130 @@ pub(crate) fn run_monthly_strategic_systems(
     detect_and_advance_crises(registry, state);
     recover_external_routes(state);
     Ok(())
+}
+
+fn apply_active_office_directives(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
+    let day = state.clock.day();
+    let directives: Vec<_> = state
+        .institutions
+        .values_mut()
+        .filter_map(|institution| {
+            let directive = institution.active_directive?;
+            if day > directive.expires_day {
+                institution.active_directive = None;
+                return None;
+            }
+            Some((institution.institution_id, directive.power))
+        })
+        .collect();
+    for (institution_id, power) in directives {
+        let district_id = registry
+            .get_institution(institution_id)
+            .expect("active office directive institution must remain registered")
+            .district_id();
+        apply_office_directive_momentum(registry, state, institution_id, district_id, power)?;
+    }
+    Ok(())
+}
+
+fn apply_office_directive_momentum(
+    registry: &Registry,
+    state: &mut AppState,
+    institution_id: InstitutionId,
+    district_id: DistrictId,
+    power: OfficePower,
+) -> Result<(), SimulationError> {
+    match power {
+        OfficePower::Licenses => adjust_directive_businesses(state, district_id, 10, 10),
+        OfficePower::Inspections => adjust_directive_businesses(state, district_id, 15, 25),
+        OfficePower::MarketTolls => adjust_directive_household_welfare(state, district_id, -15),
+        OfficePower::DebtEnforcement => {
+            for (pair, relationship) in &mut state.relationships {
+                if pair.first == state.player_dynasty_id || pair.second == state.player_dynasty_id {
+                    relationship.respect_basis_points = relationship
+                        .respect_basis_points
+                        .saturating_add(10)
+                        .min(10_000);
+                    relationship.fear_basis_points =
+                        relationship.fear_basis_points.saturating_add(5).min(10_000);
+                }
+            }
+        }
+        OfficePower::CityContracts => adjust_directive_businesses(state, district_id, 20, 10),
+        OfficePower::PublicWorks => adjust_directive_businesses(state, district_id, 20, 5),
+        OfficePower::WatchPriorities => {
+            adjust_directive_household_welfare(state, district_id, 10);
+            for crisis in state.crises.values_mut().filter(|crisis| {
+                crisis.district_id == Some(district_id) && crisis.status.is_active()
+            }) {
+                crisis.severity_basis_points = crisis.severity_basis_points.saturating_sub(60);
+            }
+        }
+        OfficePower::Taxation => adjust_directive_household_welfare(state, district_id, -20),
+        OfficePower::EmergencyImports => {
+            adjust_directive_household_welfare(state, district_id, 50);
+            if let Some(grain_id) = registry.get_good_id("grain") {
+                add_market_supply(state, grain_id, Quantity::from_units(5))?;
+            }
+        }
+    }
+    if matches!(power, OfficePower::MarketTolls | OfficePower::Taxation)
+        && let Some(institution) = state.institutions.get_mut(&institution_id)
+    {
+        institution.legitimacy_basis_points = institution
+            .legitimacy_basis_points
+            .saturating_add(10)
+            .min(10_000);
+    }
+    Ok(())
+}
+
+fn adjust_directive_businesses(
+    state: &mut AppState,
+    district_id: DistrictId,
+    condition: u16,
+    quality: u16,
+) {
+    for business in state.businesses.iter_mut().filter(|business| {
+        business.district_id() == district_id
+            && matches!(
+                business.status(),
+                BusinessStatus::Active | BusinessStatus::Distressed
+            )
+    }) {
+        business.operations.condition_basis_points = business
+            .operations
+            .condition_basis_points
+            .saturating_add(condition)
+            .min(10_000);
+        business.operations.quality_basis_points = business
+            .operations
+            .quality_basis_points
+            .saturating_add(quality)
+            .min(10_000);
+    }
+}
+
+fn adjust_directive_household_welfare(state: &mut AppState, district_id: DistrictId, delta: i16) {
+    for household in state
+        .households
+        .iter_mut()
+        .filter(|household| household.district_id() == district_id)
+    {
+        household.food_satisfaction_basis_points = if delta >= 0 {
+            household
+                .food_satisfaction_basis_points
+                .saturating_add(delta.unsigned_abs())
+                .min(10_000)
+        } else {
+            household
+                .food_satisfaction_basis_points
+                .saturating_sub(delta.unsigned_abs())
+        };
+    }
 }
 
 pub(crate) fn dynasty_office_administrative_load(state: &AppState, dynasty_id: DynastyId) -> u16 {
@@ -4735,14 +4867,8 @@ fn apply_office_power(
         }
         OfficePower::EmergencyImports => {
             if let Some(grain_id) = registry.get_good_id("grain") {
-                let quote = state
-                    .market
-                    .quotes
-                    .get_mut(&grain_id)
-                    .expect("grain quote must exist");
                 let quantity = Quantity::from_units(20);
-                quote.stock = quote.stock.saturating_add(quantity);
-                quote.supply_today = quote.supply_today.saturating_add(quantity);
+                add_market_supply(state, grain_id, quantity)?;
             }
         }
     }

@@ -65,7 +65,7 @@ The repository wrapper runs the same gate locally:
 bash scripts/test.sh gameplay
 ```
 
-CI runs this default release-mode matrix with a minimum overall score of 75 and fails on any critical finding. `bash scripts/test.sh all` includes the same gate. Focused command tests and CLI smoke coverage remain separate so report serialization, quality-gate failure behavior, and full gameplay quality are all verified independently.
+The repository wrapper runs two release-mode gates. The default 12-campaign matrix enforces the minimum overall score and critical-finding threshold. A focused 7,200-day campaign then verifies that succession occurs and that the succession-and-legacy phase contains real decision cycles. `bash scripts/test.sh all` includes both gates. Focused command tests and CLI smoke coverage remain separate so report serialization, quality-gate failure behavior, generation-length progression, and broad gameplay quality are verified independently.
 
 ## Configuration
 
@@ -154,8 +154,9 @@ The harness classifies each decision cycle by the furthest reached fantasy miles
 | Establishment | Reputation standing is reached. |
 | Institutional ascent | The first institutional support campaign is launched. |
 | Dynastic governance | The first city-shaping law or public work is sponsored. |
+| Succession and legacy | The first succession completes and the inherited organization begins operating under the next generation. |
 
-Each phase records action share, quiet and blocked cycles, how many quiet cycles still contain autonomous world change, viable option depth, viable command-family breadth, multi-family choice frequency, closely ranked alternatives, and whether alternatives produce distinct immediate and one-interval projected consequence profiles. Findings distinguish consequential time passage from genuinely static downtime. They warn when establishment or institutional ascent becomes mostly waiting, when apparently broad choices have one obvious winner, equivalent immediate effects, or convergent short-term trajectories, or when mature governance is static in at least 30% of cycles and lacks either meaningful option depth or broad command-family competition. Quiet observation while the world continues to change is reported but is not treated as dead time. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
+Each phase records action share, quiet and blocked cycles, how many quiet cycles still contain autonomous world change, viable option depth, viable command-family breadth, multi-family choice frequency, closely ranked alternatives, and whether alternatives produce distinct immediate and projected consequence profiles. Findings distinguish consequential time passage from genuinely static downtime. They warn when establishment or institutional ascent becomes mostly waiting, when apparently broad choices have one obvious winner, equivalent immediate effects, or convergent short-term trajectories, when mature governance is strategically narrow, or when succession produces no meaningful post-transition strategy. Quiet observation while the world continues to change is reported but is not treated as dead time. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
 
 ## Recovery routes
 
@@ -201,7 +202,7 @@ Scores range from 0 to 100.
 | Variety | Command-direction coverage, distribution, and viable alternatives. |
 | Interconnection | Distinct command-to-domain edges and consequence breadth. |
 | Feedback | Observable immediate and durable delayed results. |
-| Resilience | Business continuity, food access, liquidity, labor pressure, and crisis load. |
+| Resilience | Business continuity, citywide and worst-district food access, liquidity, labor pressure, and crisis load. |
 | Overall | Weighted summary of the component scores. |
 
 Use component scores and findings for diagnosis. The overall score is a coarse gate, not a complete design verdict.
@@ -216,14 +217,17 @@ Findings use `Info`, `Warning`, or `Critical` severity. They cover conditions su
 - Quiet decision cycles that produce neither a player action nor meaningful autonomous world change
 - Asset-rich but cash-poor quiet streaks measured while the liquidity condition is actually present, not inferred from unrelated endpoint wealth
 - Economic states with no viable recovery route
-- Active but ineffective recovery churn that ends without cash, property, or an operating business
+- Active but ineffective recovery churn that remains under severe financial pressure for at least one campaign-year through the endpoint
 - Persistent business, food, labor, credit, crisis, or notification failure
+- Household welfare that remains mechanically flat despite repeated crises
+- Mature office directives that create immediate effects but no later trajectory change
+- Generation-length matrices that never expose private-credit or civic-debt distress
 - Public-work or office-duty overload
 - Misordered, compressed, synchronized, or unreachable campaign milestones
 - Weak strategic variety or persona convergence
 - Multi-family cycles dominated by one obviously superior option
 - Viable alternatives with indistinguishable immediate consequence profiles
-- Viable alternatives whose simulated trajectories converge after one decision interval
+- Viable alternatives whose simulated trajectories converge after the command-specific attribution horizon
 - Commission-and-leverage information loops that become scheduled maintenance
 - Crisis responses that change the immediate record but rarely alter the future trajectory
 - Patronage and nomination administration consuming too much of substantive play

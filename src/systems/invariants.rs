@@ -483,6 +483,14 @@ fn validate_institutions(registry: &Registry, state: &AppState, ids: &RegistryId
             institution.legitimacy_basis_points <= 10_000,
             "Lifecycle Validity: institution legitimacy is outside basis-point range"
         );
+        debug_assert!(
+            institution.active_directive.is_none_or(|directive| {
+                directive.expires_day >= 0
+                    && directive.expires_day < i64::MAX
+                    && institution.powers.contains(&directive.power)
+            }),
+            "Lifecycle Validity: institution directive is invalid"
+        );
         for member_id in &institution.members {
             debug_assert!(
                 state

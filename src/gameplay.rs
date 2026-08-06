@@ -90,7 +90,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 33;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 35;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -370,6 +370,7 @@ impl GameplayCommandKind {
                 | Self::RespondToCrisis
                 | Self::ResolveLaborDispute
                 | Self::SellProperty
+                | Self::BorrowFunds
                 | Self::ExtendCredit
                 | Self::SetHouseGovernance
                 | Self::EnactLaw
@@ -558,6 +559,7 @@ pub struct GameplaySnapshot {
     pub player_completed_public_work_checksum: i64,
     pub public_work_state_checksum: u64,
     pub average_food_satisfaction: u16,
+    pub minimum_district_food_satisfaction: u16,
     pub average_district_unrest: u16,
     pub district_state_checksum: u64,
     pub open_legal_cases: u16,
@@ -1049,6 +1051,7 @@ impl CivicSnapshotPart {
 #[derive(Debug)]
 struct WorldSnapshotPart {
     average_food_satisfaction: u16,
+    minimum_district_food_satisfaction: u16,
     average_district_unrest: u16,
     open_legal_cases: u16,
     decided_legal_cases: u16,
@@ -1072,6 +1075,7 @@ impl WorldSnapshotPart {
                     state.households.iter(),
                 )
                 .unwrap_or(0),
+            minimum_district_food_satisfaction: minimum_district_food_satisfaction(state),
             average_district_unrest: average_u16(
                 state
                     .districts
@@ -1166,6 +1170,22 @@ impl WorldSnapshotPart {
             chronicle_entries: usize_to_u32(state.chronicle.len()),
         }
     }
+}
+
+fn minimum_district_food_satisfaction(state: &AppState) -> u16 {
+    state
+        .districts
+        .keys()
+        .filter_map(|district_id| {
+            crate::core::population_weighted_food_satisfaction_basis_points(
+                state
+                    .households
+                    .iter()
+                    .filter(|household| household.district_id() == *district_id),
+            )
+        })
+        .min()
+        .unwrap_or(0)
 }
 
 macro_rules! assemble_gameplay_snapshot {
@@ -1263,6 +1283,7 @@ macro_rules! assemble_gameplay_snapshot {
             player_completed_public_work_checksum: $civic.player_completed_public_work_checksum,
             public_work_state_checksum: stable_serialized_checksum(&$state.public_works),
             average_food_satisfaction: $world.average_food_satisfaction,
+            minimum_district_food_satisfaction: $world.minimum_district_food_satisfaction,
             average_district_unrest: $world.average_district_unrest,
             district_state_checksum: stable_serialized_checksum(&$state.districts),
             open_legal_cases: $world.open_legal_cases,
@@ -1450,6 +1471,7 @@ pub enum GameplayPhase {
     Establishment,
     InstitutionalAscent,
     DynasticGovernance,
+    SuccessionLegacy,
 }
 
 impl GameplayPhase {
@@ -1460,6 +1482,7 @@ impl GameplayPhase {
             Self::Establishment => "establishment",
             Self::InstitutionalAscent => "institutional-ascent",
             Self::DynasticGovernance => "dynastic-governance",
+            Self::SuccessionLegacy => "succession-legacy",
         }
     }
 }
@@ -1508,9 +1531,14 @@ pub struct GameplayCampaignReport {
     pub end: GameplaySnapshot,
     pub scores: GameplayScores,
     pub minimum_food_satisfaction: u16,
+    pub minimum_district_food_satisfaction: u16,
     pub minimum_operating_businesses: u16,
     pub maximum_disputed_employment: u16,
     pub maximum_player_disputed_employment: u16,
+    pub maximum_delinquent_loans: u16,
+    pub maximum_defaulted_loans: u16,
+    pub maximum_delinquent_civic_debts: u16,
+    pub maximum_defaulted_civic_debts: u16,
     pub maximum_offices_held: u16,
     pub maximum_unfinished_public_works: u16,
     pub maximum_active_crises: u16,
@@ -1519,6 +1547,8 @@ pub struct GameplayCampaignReport {
     pub longest_substantive_streak_command: Option<GameplayCommandKind>,
     pub longest_substantive_action_gap_days: u32,
     pub longest_asset_rich_quiet_gap_days: u32,
+    pub longest_recovery_pressure_days: u32,
+    pub terminal_recovery_pressure_days: u32,
     pub commission_leverage_pairs: u16,
     pub fantasy_arc: GameplayFantasyArc,
     pub trace: Vec<GameplayTraceStep>,
@@ -1754,9 +1784,14 @@ struct CampaignAccumulator {
     total_viable_choices: u32,
     total_viable_command_kinds: u32,
     minimum_food_satisfaction: u16,
+    minimum_district_food_satisfaction: u16,
     minimum_operating_businesses: u16,
     maximum_disputed_employment: u16,
     maximum_player_disputed_employment: u16,
+    maximum_delinquent_loans: u16,
+    maximum_defaulted_loans: u16,
+    maximum_delinquent_civic_debts: u16,
+    maximum_defaulted_civic_debts: u16,
     maximum_offices_held: u16,
     maximum_unfinished_public_works: u16,
     maximum_active_crises: u16,
@@ -1771,6 +1806,8 @@ struct CampaignAccumulator {
     longest_substantive_action_gap_days: u32,
     current_asset_rich_quiet_gap_days: u32,
     longest_asset_rich_quiet_gap_days: u32,
+    current_recovery_pressure_days: u32,
+    longest_recovery_pressure_days: u32,
     commission_leverage_pairs: u16,
     last_information_commission_day: Option<i64>,
     starting_generation: Option<u16>,
@@ -1801,9 +1838,14 @@ impl CampaignAccumulator {
             total_viable_choices: 0,
             total_viable_command_kinds: 0,
             minimum_food_satisfaction: u16::MAX,
+            minimum_district_food_satisfaction: u16::MAX,
             minimum_operating_businesses: u16::MAX,
             maximum_disputed_employment: 0,
             maximum_player_disputed_employment: 0,
+            maximum_delinquent_loans: 0,
+            maximum_defaulted_loans: 0,
+            maximum_delinquent_civic_debts: 0,
+            maximum_defaulted_civic_debts: 0,
             maximum_offices_held: 0,
             maximum_unfinished_public_works: 0,
             maximum_active_crises: 0,
@@ -1818,6 +1860,8 @@ impl CampaignAccumulator {
             longest_substantive_action_gap_days: 0,
             current_asset_rich_quiet_gap_days: 0,
             longest_asset_rich_quiet_gap_days: 0,
+            current_recovery_pressure_days: 0,
+            longest_recovery_pressure_days: 0,
             commission_leverage_pairs: 0,
             last_information_commission_day: None,
             starting_generation: None,
@@ -1920,6 +1964,27 @@ impl CampaignAccumulator {
         }
     }
 
+    fn record_recovery_pressure(&mut self, step_days: u32, snapshot: &GameplaySnapshot) {
+        let under_recovery_pressure = snapshot.player_treasury <= Money::ZERO
+            && snapshot.active_businesses == 0
+            && snapshot
+                .distressed_businesses
+                .saturating_add(snapshot.insolvent_businesses)
+                > 0
+            && snapshot.player_properties == 0
+            && snapshot.defaulted_loans > 0;
+        if under_recovery_pressure {
+            self.current_recovery_pressure_days = self
+                .current_recovery_pressure_days
+                .saturating_add(step_days);
+            self.longest_recovery_pressure_days = self
+                .longest_recovery_pressure_days
+                .max(self.current_recovery_pressure_days);
+        } else {
+            self.current_recovery_pressure_days = 0;
+        }
+    }
+
     fn record_phase_cycle(&mut self, phase: GameplayPhase, observation: PhaseCycleObservation) {
         let PhaseCycleObservation {
             action,
@@ -1984,6 +2049,9 @@ impl CampaignAccumulator {
         self.minimum_food_satisfaction = self
             .minimum_food_satisfaction
             .min(snapshot.average_food_satisfaction);
+        self.minimum_district_food_satisfaction = self
+            .minimum_district_food_satisfaction
+            .min(snapshot.minimum_district_food_satisfaction);
         self.observe_fantasy_arc(snapshot);
         self.observe_non_food_snapshot(snapshot);
     }
@@ -2037,6 +2105,15 @@ impl CampaignAccumulator {
         self.maximum_player_disputed_employment = self
             .maximum_player_disputed_employment
             .max(snapshot.player_disputed_employment);
+        self.maximum_delinquent_loans =
+            self.maximum_delinquent_loans.max(snapshot.delinquent_loans);
+        self.maximum_defaulted_loans = self.maximum_defaulted_loans.max(snapshot.defaulted_loans);
+        self.maximum_delinquent_civic_debts = self
+            .maximum_delinquent_civic_debts
+            .max(snapshot.delinquent_civic_debts);
+        self.maximum_defaulted_civic_debts = self
+            .maximum_defaulted_civic_debts
+            .max(snapshot.defaulted_civic_debts);
         self.maximum_offices_held = self.maximum_offices_held.max(snapshot.offices_held);
         self.maximum_unfinished_public_works = self.maximum_unfinished_public_works.max(
             snapshot
@@ -2182,9 +2259,14 @@ fn run_campaign(
         end,
         scores,
         minimum_food_satisfaction: accumulator.minimum_food_satisfaction,
+        minimum_district_food_satisfaction: accumulator.minimum_district_food_satisfaction,
         minimum_operating_businesses: accumulator.minimum_operating_businesses,
         maximum_disputed_employment: accumulator.maximum_disputed_employment,
         maximum_player_disputed_employment: accumulator.maximum_player_disputed_employment,
+        maximum_delinquent_loans: accumulator.maximum_delinquent_loans,
+        maximum_defaulted_loans: accumulator.maximum_defaulted_loans,
+        maximum_delinquent_civic_debts: accumulator.maximum_delinquent_civic_debts,
+        maximum_defaulted_civic_debts: accumulator.maximum_defaulted_civic_debts,
         maximum_offices_held: accumulator.maximum_offices_held,
         maximum_unfinished_public_works: accumulator.maximum_unfinished_public_works,
         maximum_active_crises: accumulator.maximum_active_crises,
@@ -2193,6 +2275,8 @@ fn run_campaign(
         longest_substantive_streak_command: accumulator.longest_substantive_streak_command,
         longest_substantive_action_gap_days: accumulator.longest_substantive_action_gap_days,
         longest_asset_rich_quiet_gap_days: accumulator.longest_asset_rich_quiet_gap_days,
+        longest_recovery_pressure_days: accumulator.longest_recovery_pressure_days,
+        terminal_recovery_pressure_days: accumulator.current_recovery_pressure_days,
         commission_leverage_pairs: accumulator.commission_leverage_pairs,
         fantasy_arc: accumulator.fantasy_arc,
         trace,
@@ -2247,6 +2331,7 @@ fn run_decision_cycle(
     advance_days(registry, state, step_days)?;
     let campaign_after_time = GameplaySnapshot::capture(state);
     accumulator.observe_snapshot(&campaign_after_time);
+    accumulator.record_recovery_pressure(step_days, &campaign_after_time);
     let after_time = if let Some(consequence_state) = consequence_state.as_mut() {
         advance_days(registry, consequence_state, consequence_horizon)?;
         GameplaySnapshot::capture(consequence_state)
@@ -2403,7 +2488,9 @@ fn apply_notification_housekeeping(
 }
 
 fn gameplay_phase(arc: &GameplayFantasyArc) -> GameplayPhase {
-    if arc.first_city_shaping_action_day.is_some() {
+    if arc.first_succession_day.is_some() {
+        GameplayPhase::SuccessionLegacy
+    } else if arc.first_city_shaping_action_day.is_some() {
         GameplayPhase::DynasticGovernance
     } else if arc.first_institution_support_day.is_some() {
         GameplayPhase::InstitutionalAscent
@@ -2424,14 +2511,18 @@ fn consequence_horizon_days(
             GameplayCommandKind::SetHouseGovernance
             | GameplayCommandKind::DesignateHeir
             | GameplayCommandKind::AdoptWard
-            | GameplayCommandKind::EducateFamilyMember,
+            | GameplayCommandKind::EducateFamilyMember
+            | GameplayCommandKind::StartPublicWork,
         ) => 360,
+        Some(GameplayCommandKind::NominateForOffice) => 120,
         Some(
-            GameplayCommandKind::NominateForOffice
-            | GameplayCommandKind::CultivateInstitutionSupport
-            | GameplayCommandKind::StartPublicWork
-            | GameplayCommandKind::FileLegalCase,
-        ) => 60,
+            GameplayCommandKind::CultivateInstitutionSupport
+            | GameplayCommandKind::FileLegalCase
+            | GameplayCommandKind::EnactLaw
+            | GameplayCommandKind::ExerciseOfficePower
+            | GameplayCommandKind::RespondToCrisis
+            | GameplayCommandKind::WithdrawFromInstitution,
+        ) => 180,
         Some(
             GameplayCommandKind::TransferBusinessCash
             | GameplayCommandKind::AcquireBusiness
@@ -2443,16 +2534,11 @@ fn consequence_horizon_days(
             | GameplayCommandKind::ExtendCredit
             | GameplayCommandKind::BuyProperty
             | GameplayCommandKind::SellProperty
-            | GameplayCommandKind::EnactLaw
-            | GameplayCommandKind::ExerciseOfficePower
             | GameplayCommandKind::CommissionInformation
             | GameplayCommandKind::LeverageInformation,
         ) => 30,
         Some(
-            GameplayCommandKind::RespondToCrisis
-            | GameplayCommandKind::ResolveLaborDispute
-            | GameplayCommandKind::WithdrawFromInstitution
-            | GameplayCommandKind::AcknowledgeNotification,
+            GameplayCommandKind::ResolveLaborDispute | GameplayCommandKind::AcknowledgeNotification,
         )
         | None => step_days,
     };
@@ -7070,6 +7156,11 @@ const fn simulation_error_category(error: &SimulationError) -> &'static str {
             "simulation: institution term number exhausted"
         }
         SimulationError::MarketQuoteMissing { .. } => "simulation: missing market quote",
+        SimulationError::MarketStockOverflow { .. } => "simulation: market stock overflow",
+        SimulationError::MarketSupplyOverflow { .. } => "simulation: market supply overflow",
+        SimulationError::WeeklyExternalIncomeOverflow { .. } => {
+            "simulation: weekly external income overflow"
+        }
         SimulationError::LoanBalanceOverflow { .. } => "simulation: loan balance overflow",
         SimulationError::CivicDebtBalanceOverflow { .. } => {
             "simulation: civic debt balance overflow"
@@ -7204,6 +7295,7 @@ fn resilience_score(
     let crisis = if end.escalated_crises == 0 { 100 } else { 35 };
     let trajectory = average_scores(&[
         accumulator.minimum_food_satisfaction / 100,
+        accumulator.minimum_district_food_satisfaction / 100,
         if accumulator.minimum_operating_businesses > 0 {
             100
         } else {
@@ -7520,6 +7612,9 @@ fn derive_findings(
     add_repetitive_command_streak_finding(campaigns, &mut findings);
     add_information_routine_finding(campaigns, &mut findings);
     add_crisis_trajectory_finding(aggregate, &mut findings);
+    add_office_directive_trajectory_finding(aggregate, &mut findings);
+    add_welfare_dynamism_finding(aggregate, campaigns, &mut findings);
+    add_long_horizon_risk_findings(aggregate, campaigns, &mut findings);
     add_long_substantive_gap_finding(campaigns, &mut findings);
     add_asset_liquidity_drought_finding(campaigns, &mut findings);
     add_economic_recovery_dead_end_finding(campaigns, &mut findings);
@@ -7649,6 +7744,20 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
             minimum_multi_family_share: 35,
             minimum_average_choices_tenths: 30,
             minimum_average_families_tenths: 20,
+        },
+    );
+    add_phase_quality_finding(
+        aggregate,
+        findings,
+        GameplayPhase::SuccessionLegacy,
+        "succession and legacy",
+        "Succession and legacy lack post-transition strategy",
+        PhaseQualityThresholds {
+            minimum_action_share: 55,
+            maximum_static_quiet_share: 35,
+            minimum_multi_family_share: 30,
+            minimum_average_choices_tenths: 25,
+            minimum_average_families_tenths: 18,
         },
     );
 }
@@ -7831,6 +7940,129 @@ fn add_crisis_trajectory_finding(
     });
 }
 
+fn add_office_directive_trajectory_finding(
+    aggregate: &GameplayAggregate,
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if average_campaign_days(aggregate) < 1_800 {
+        return;
+    }
+    let stats = aggregate
+        .commands
+        .get(&GameplayCommandKind::ExerciseOfficePower)
+        .expect("office-power statistics must exist");
+    if stats.executed < 20 {
+        return;
+    }
+    let delayed_share = scaled_ratio_u64(
+        u64::from(stats.actions_with_delayed_consequences),
+        u64::from(stats.executed),
+        100,
+    );
+    if delayed_share >= 15 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Office directives rarely alter the later trajectory".to_owned(),
+        evidence: format!(
+            "Only {} of {} office directives produced a newly attributable consequence after time advanced ({delayed_share}%). Directives create immediate visible effects, but mature political power is not consistently changing later system behavior.",
+            stats.actions_with_delayed_consequences,
+            stats.executed,
+        ),
+    });
+}
+
+fn add_welfare_dynamism_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if average_campaign_days(aggregate) < 1_800 || campaigns.is_empty() {
+        return;
+    }
+    let crisis_exposed: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| campaign.maximum_active_crises > 0)
+        .collect();
+    if crisis_exposed.len() < 4 {
+        return;
+    }
+    let mechanically_stable = crisis_exposed
+        .iter()
+        .filter(|campaign| campaign.minimum_district_food_satisfaction >= 9_500)
+        .count();
+    if scaled_ratio_usize(mechanically_stable, crisis_exposed.len(), 100) < 75 {
+        return;
+    }
+    let minimum = crisis_exposed
+        .iter()
+        .map(|campaign| campaign.minimum_district_food_satisfaction)
+        .min()
+        .unwrap_or(10_000);
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Crises leave household welfare almost mechanically flat".to_owned(),
+        evidence: format!(
+            "{mechanically_stable} of {} crisis-exposed campaigns kept their worst district at or above 95% food satisfaction; the lowest observed district value was {:.2}%. The city reacts in logs and crisis counters, but ordinary households experience little material disruption.",
+            crisis_exposed.len(),
+            f64::from(minimum) / 100.0,
+        ),
+    });
+}
+
+fn add_long_horizon_risk_findings(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if average_campaign_days(aggregate) < 3_600 || campaigns.is_empty() {
+        return;
+    }
+    let credit_actions = aggregate
+        .commands
+        .get(&GameplayCommandKind::ExtendCredit)
+        .map_or(0, |stats| stats.executed);
+    let credit_distress = campaigns.iter().any(|campaign| {
+        campaign.maximum_delinquent_loans > 0 || campaign.maximum_defaulted_loans > 0
+    });
+    if credit_actions >= 50 && !credit_distress {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Long-horizon lending never encounters credit distress".to_owned(),
+            evidence: format!(
+                "Agents extended credit {credit_actions} times, but no campaign ever recorded a delinquent or defaulted private loan. Credit is profitable and relational, but its downside remained untested."
+            ),
+        });
+    }
+
+    let civic_actions = aggregate
+        .commands
+        .get(&GameplayCommandKind::StartPublicWork)
+        .map_or(0, |stats| stats.executed)
+        .saturating_add(
+            aggregate
+                .commands
+                .get(&GameplayCommandKind::EnactLaw)
+                .map_or(0, |stats| stats.executed),
+        );
+    let civic_debt_activity = campaigns.iter().any(|campaign| {
+        campaign.maximum_delinquent_civic_debts > 0
+            || campaign.maximum_defaulted_civic_debts > 0
+            || campaign.end.current_civic_debts > 0
+            || campaign.end.repaid_civic_debts > 0
+    });
+    if civic_actions >= 20 && !civic_debt_activity {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Mature civic ambition never activates municipal finance".to_owned(),
+            evidence: format!(
+                "Agents enacted laws or sponsored public works {civic_actions} times without issuing, repaying, or distressing civic debt. City-shaping expenditure is not testing the municipal financing layer."
+            ),
+        });
+    }
+}
+
 fn add_long_substantive_gap_finding(
     campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
@@ -7943,17 +8175,10 @@ fn add_economic_recovery_dead_end_finding(
         });
     }
 
-    if let Some(campaign) = campaigns.iter().find(|campaign| {
-        campaign.end.player_treasury <= Money::ZERO
-            && campaign.end.active_businesses == 0
-            && campaign
-                .end
-                .distressed_businesses
-                .saturating_add(campaign.end.insolvent_businesses)
-                > 0
-            && campaign.end.player_properties == 0
-            && campaign.end.defaulted_loans > 0
-    }) {
+    if let Some(campaign) = campaigns
+        .iter()
+        .find(|campaign| campaign.terminal_recovery_pressure_days >= 360)
+    {
         let borrowing = campaign
             .commands
             .get(&GameplayCommandKind::BorrowFunds)
@@ -7966,10 +8191,11 @@ fn add_economic_recovery_dead_end_finding(
             severity: GameplayFindingSeverity::Warning,
             title: "An individual dynasty remains trapped in recovery churn".to_owned(),
             evidence: format!(
-                "Seed {}, {} {:?} ended with no treasury, property, or active business and {} defaulted loans despite {borrowing} borrowing or restructuring actions and {investment} recapitalizations. Activity continued, but it did not produce a credible recovery path.",
+                "Seed {}, {} {:?} remained under recovery pressure for {} consecutive days through the campaign endpoint, with no treasury, property, or active business and {} defaulted loans despite {borrowing} borrowing or restructuring actions and {investment} recapitalizations. Activity continued, but it did not produce a credible recovery path.",
                 campaign.seed,
                 campaign.persona.label(),
                 campaign.background,
+                campaign.terminal_recovery_pressure_days,
                 campaign.end.defaulted_loans
             ),
         });
@@ -9699,6 +9925,7 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
         GameplayPhase::Establishment,
         GameplayPhase::InstitutionalAscent,
         GameplayPhase::DynasticGovernance,
+        GameplayPhase::SuccessionLegacy,
     ] {
         let stats = report
             .aggregate
@@ -9800,91 +10027,196 @@ fn milestone_day(day: Option<i64>) -> String {
     day.map_or_else(|| "not reached".to_owned(), |day| format!("day {day}"))
 }
 
-fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
-    let Some(first) = report.campaigns.first() else {
-        return;
-    };
-    let mut minimum_food = (
-        first.minimum_food_satisfaction,
-        first.minimum_food_satisfaction,
-    );
-    let mut operating_businesses = (
-        first.minimum_operating_businesses,
-        first.minimum_operating_businesses,
-    );
-    let mut peak_offices = (first.maximum_offices_held, first.maximum_offices_held);
-    let mut peak_unread = (
-        first.maximum_unread_notifications,
-        first.maximum_unread_notifications,
-    );
-    let mut available_offices = first.end.available_offices;
-    let mut represented_institutions = (
-        first.end.player_institutions_represented,
-        first.end.player_institutions_represented,
-    );
-    let mut fulfilled_contracts = 0_u64;
-    let mut breached_contracts = 0_u64;
-    let mut repaid_loans = 0_u64;
-    let mut defaulted_loans = 0_u64;
-    let mut repaid_civic_debts = 0_u64;
-    let mut defaulted_civic_debts = 0_u64;
-    let mut completed_works = 0_u64;
-    let mut suspended_works = 0_u64;
-    for campaign in &report.campaigns {
-        minimum_food.0 = minimum_food.0.min(campaign.minimum_food_satisfaction);
-        minimum_food.1 = minimum_food.1.max(campaign.minimum_food_satisfaction);
-        operating_businesses.0 = operating_businesses
+#[derive(Clone, Copy, Debug)]
+struct HealthSummary {
+    minimum_food: (u16, u16),
+    minimum_district_food: (u16, u16),
+    operating_businesses: (u16, u16),
+    peak_offices: (u16, u16),
+    peak_unread: (u16, u16),
+    peak_private_credit_distress: (u16, u16),
+    peak_civic_credit_distress: (u16, u16),
+    available_offices: u16,
+    represented_institutions: (u16, u16),
+    fulfilled_contracts: u64,
+    breached_contracts: u64,
+    repaid_loans: u64,
+    defaulted_loans: u64,
+    repaid_civic_debts: u64,
+    defaulted_civic_debts: u64,
+    completed_works: u64,
+    suspended_works: u64,
+}
+
+impl HealthSummary {
+    fn new(first: &GameplayCampaignReport) -> Self {
+        Self {
+            minimum_food: (
+                first.minimum_food_satisfaction,
+                first.minimum_food_satisfaction,
+            ),
+            minimum_district_food: (
+                first.minimum_district_food_satisfaction,
+                first.minimum_district_food_satisfaction,
+            ),
+            operating_businesses: (
+                first.minimum_operating_businesses,
+                first.minimum_operating_businesses,
+            ),
+            peak_offices: (first.maximum_offices_held, first.maximum_offices_held),
+            peak_unread: (
+                first.maximum_unread_notifications,
+                first.maximum_unread_notifications,
+            ),
+            peak_private_credit_distress: (0, 0),
+            peak_civic_credit_distress: (0, 0),
+            available_offices: first.end.available_offices,
+            represented_institutions: (
+                first.end.player_institutions_represented,
+                first.end.player_institutions_represented,
+            ),
+            fulfilled_contracts: 0,
+            breached_contracts: 0,
+            repaid_loans: 0,
+            defaulted_loans: 0,
+            repaid_civic_debts: 0,
+            defaulted_civic_debts: 0,
+            completed_works: 0,
+            suspended_works: 0,
+        }
+    }
+
+    fn observe(&mut self, campaign: &GameplayCampaignReport) {
+        self.minimum_food.0 = self.minimum_food.0.min(campaign.minimum_food_satisfaction);
+        self.minimum_food.1 = self.minimum_food.1.max(campaign.minimum_food_satisfaction);
+        self.minimum_district_food.0 = self
+            .minimum_district_food
+            .0
+            .min(campaign.minimum_district_food_satisfaction);
+        self.minimum_district_food.1 = self
+            .minimum_district_food
+            .1
+            .max(campaign.minimum_district_food_satisfaction);
+        self.operating_businesses.0 = self
+            .operating_businesses
             .0
             .min(campaign.minimum_operating_businesses);
-        operating_businesses.1 = operating_businesses
+        self.operating_businesses.1 = self
+            .operating_businesses
             .1
             .max(campaign.minimum_operating_businesses);
-        peak_offices.0 = peak_offices.0.min(campaign.maximum_offices_held);
-        peak_offices.1 = peak_offices.1.max(campaign.maximum_offices_held);
-        peak_unread.0 = peak_unread.0.min(campaign.maximum_unread_notifications);
-        peak_unread.1 = peak_unread.1.max(campaign.maximum_unread_notifications);
-        available_offices = available_offices.max(campaign.end.available_offices);
-        represented_institutions.0 = represented_institutions
+        self.peak_offices.0 = self.peak_offices.0.min(campaign.maximum_offices_held);
+        self.peak_offices.1 = self.peak_offices.1.max(campaign.maximum_offices_held);
+        self.peak_unread.0 = self
+            .peak_unread
+            .0
+            .min(campaign.maximum_unread_notifications);
+        self.peak_unread.1 = self
+            .peak_unread
+            .1
+            .max(campaign.maximum_unread_notifications);
+        self.peak_private_credit_distress.0 = self
+            .peak_private_credit_distress
+            .0
+            .max(campaign.maximum_delinquent_loans);
+        self.peak_private_credit_distress.1 = self
+            .peak_private_credit_distress
+            .1
+            .max(campaign.maximum_defaulted_loans);
+        self.peak_civic_credit_distress.0 = self
+            .peak_civic_credit_distress
+            .0
+            .max(campaign.maximum_delinquent_civic_debts);
+        self.peak_civic_credit_distress.1 = self
+            .peak_civic_credit_distress
+            .1
+            .max(campaign.maximum_defaulted_civic_debts);
+        self.available_offices = self.available_offices.max(campaign.end.available_offices);
+        self.represented_institutions.0 = self
+            .represented_institutions
             .0
             .min(campaign.end.player_institutions_represented);
-        represented_institutions.1 = represented_institutions
+        self.represented_institutions.1 = self
+            .represented_institutions
             .1
             .max(campaign.end.player_institutions_represented);
-        fulfilled_contracts =
-            fulfilled_contracts.saturating_add(u64::from(campaign.end.player_fulfilled_contracts));
-        breached_contracts =
-            breached_contracts.saturating_add(u64::from(campaign.end.player_breached_contracts));
-        repaid_loans = repaid_loans.saturating_add(u64::from(campaign.end.repaid_loans));
-        defaulted_loans = defaulted_loans.saturating_add(u64::from(campaign.end.defaulted_loans));
-        repaid_civic_debts =
-            repaid_civic_debts.saturating_add(u64::from(campaign.end.repaid_civic_debts));
-        defaulted_civic_debts =
-            defaulted_civic_debts.saturating_add(u64::from(campaign.end.defaulted_civic_debts));
-        completed_works =
-            completed_works.saturating_add(u64::from(campaign.end.completed_public_works));
-        suspended_works =
-            suspended_works.saturating_add(u64::from(campaign.end.suspended_public_works));
+        self.fulfilled_contracts = self
+            .fulfilled_contracts
+            .saturating_add(u64::from(campaign.end.player_fulfilled_contracts));
+        self.breached_contracts = self
+            .breached_contracts
+            .saturating_add(u64::from(campaign.end.player_breached_contracts));
+        self.repaid_loans = self
+            .repaid_loans
+            .saturating_add(u64::from(campaign.end.repaid_loans));
+        self.defaulted_loans = self
+            .defaulted_loans
+            .saturating_add(u64::from(campaign.end.defaulted_loans));
+        self.repaid_civic_debts = self
+            .repaid_civic_debts
+            .saturating_add(u64::from(campaign.end.repaid_civic_debts));
+        self.defaulted_civic_debts = self
+            .defaulted_civic_debts
+            .saturating_add(u64::from(campaign.end.defaulted_civic_debts));
+        self.completed_works = self
+            .completed_works
+            .saturating_add(u64::from(campaign.end.completed_public_works));
+        self.suspended_works = self
+            .suspended_works
+            .saturating_add(u64::from(campaign.end.suspended_public_works));
     }
+}
+
+fn summarize_health(campaigns: &[GameplayCampaignReport]) -> Option<HealthSummary> {
+    let mut summary = HealthSummary::new(campaigns.first()?);
+    for campaign in campaigns {
+        summary.observe(campaign);
+    }
+    Some(summary)
+}
+
+fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
+    let Some(summary) = summarize_health(&report.campaigns) else {
+        return;
+    };
     let _ = writeln!(output, "Experience health");
     let _ = writeln!(
         output,
-        "  trajectory ranges: food {:.2}-{:.2}% | operating businesses {}-{} | peak offices {}-{}/{} | represented institutions {}-{}/{} | peak unread {}-{}",
-        f64::from(minimum_food.0) / 100.0,
-        f64::from(minimum_food.1) / 100.0,
-        operating_businesses.0,
-        operating_businesses.1,
-        peak_offices.0,
-        peak_offices.1,
-        available_offices,
-        represented_institutions.0,
-        represented_institutions.1,
-        available_offices,
-        peak_unread.0,
-        peak_unread.1
+        "  trajectory ranges: city food {:.2}-{:.2}% | worst district food {:.2}-{:.2}% | operating businesses {}-{} | peak offices {}-{}/{} | represented institutions {}-{}/{} | peak unread {}-{}",
+        f64::from(summary.minimum_food.0) / 100.0,
+        f64::from(summary.minimum_food.1) / 100.0,
+        f64::from(summary.minimum_district_food.0) / 100.0,
+        f64::from(summary.minimum_district_food.1) / 100.0,
+        summary.operating_businesses.0,
+        summary.operating_businesses.1,
+        summary.peak_offices.0,
+        summary.peak_offices.1,
+        summary.available_offices,
+        summary.represented_institutions.0,
+        summary.represented_institutions.1,
+        summary.available_offices,
+        summary.peak_unread.0,
+        summary.peak_unread.1
     );
     let _ = writeln!(
         output,
-        "  outcomes: player contracts {fulfilled_contracts} fulfilled / {breached_contracts} breached | private loans {repaid_loans} repaid / {defaulted_loans} defaulted | civic debts {repaid_civic_debts} repaid / {defaulted_civic_debts} defaulted | public works {completed_works} completed / {suspended_works} suspended\n"
+        "  outcomes: player contracts {} fulfilled / {} breached | private loans {} repaid / {} defaulted | civic debts {} repaid / {} defaulted | public works {} completed / {} suspended\n",
+        summary.fulfilled_contracts,
+        summary.breached_contracts,
+        summary.repaid_loans,
+        summary.defaulted_loans,
+        summary.repaid_civic_debts,
+        summary.defaulted_civic_debts,
+        summary.completed_works,
+        summary.suspended_works,
+    );
+    let _ = writeln!(
+        output,
+        "  peak credit distress in one campaign: private {} delinquent / {} defaulted | civic {} delinquent / {} defaulted\n",
+        summary.peak_private_credit_distress.0,
+        summary.peak_private_credit_distress.1,
+        summary.peak_civic_credit_distress.0,
+        summary.peak_civic_credit_distress.1,
     );
 }
 
@@ -10372,6 +10704,7 @@ fn compare_dynasty_and_civic(
         domains.insert(GameplayDomain::Law);
     }
     if earlier.average_food_satisfaction != later.average_food_satisfaction
+        || earlier.minimum_district_food_satisfaction != later.minimum_district_food_satisfaction
         || earlier.average_district_unrest != later.average_district_unrest
         || earlier.public_work_progress_total != later.public_work_progress_total
         || earlier.building_public_works != later.building_public_works
@@ -10434,6 +10767,7 @@ fn initialized_phase_stats() -> BTreeMap<GameplayPhase, GameplayPhaseStats> {
         GameplayPhase::Establishment,
         GameplayPhase::InstitutionalAscent,
         GameplayPhase::DynasticGovernance,
+        GameplayPhase::SuccessionLegacy,
     ]
     .into_iter()
     .map(|phase| (phase, GameplayPhaseStats::default()))

@@ -248,6 +248,12 @@ pub enum OfficePower {
     EmergencyImports,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfficeDirectiveState {
+    pub(crate) power: OfficePower,
+    pub(crate) expires_day: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstitutionRuntime {
     pub(crate) institution_id: InstitutionId,
@@ -259,6 +265,7 @@ pub struct InstitutionRuntime {
     pub(crate) term_started_day: i64,
     pub(crate) next_selection_day: i64,
     pub(crate) term_number: u32,
+    pub(crate) active_directive: Option<OfficeDirectiveState>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

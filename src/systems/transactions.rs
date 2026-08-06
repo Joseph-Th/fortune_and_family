@@ -2,7 +2,7 @@
 
 use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};
 use crate::ids::{BusinessId, CivicDebtId, DynastyId, GoodId, InstitutionId, LoanId};
-use crate::money::Money;
+use crate::money::{Money, Quantity};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -86,6 +86,26 @@ pub enum SimulationError {
     #[error("market quote is missing for good {good_id}")]
     MarketQuoteMissing { good_id: GoodId },
     #[error(
+        "market stock for good {good_id} cannot receive {incoming}; current stock {current} would exceed the supported quantity range"
+    )]
+    MarketStockOverflow {
+        good_id: GoodId,
+        current: Quantity,
+        incoming: Quantity,
+    },
+    #[error(
+        "market supply flow for good {good_id} cannot receive {incoming}; current supply {current} would exceed the supported quantity range"
+    )]
+    MarketSupplyOverflow {
+        good_id: GoodId,
+        current: Quantity,
+        incoming: Quantity,
+    },
+    #[error(
+        "weekly external income cannot include payment {incoming}; accumulated total {accumulated} would exceed the supported money range"
+    )]
+    WeeklyExternalIncomeOverflow { accumulated: Money, incoming: Money },
+    #[error(
         "loan {loan_id} cannot accrue interest {incoming}; current balance {current} would exceed the supported money range"
     )]
     LoanBalanceOverflow {
@@ -133,6 +153,43 @@ pub(crate) fn debit_market_clearing_account(
     state.market.clearing_account = current
         .checked_sub(outgoing)
         .ok_or(SimulationError::MarketClearingAccountOverflow { current, change })?;
+    Ok(())
+}
+
+pub(crate) fn add_market_supply(
+    state: &mut AppState,
+    good_id: GoodId,
+    incoming: Quantity,
+) -> Result<(), SimulationError> {
+    debug_assert!(
+        incoming >= Quantity::ZERO,
+        "market supply must be nonnegative"
+    );
+    let quote = state
+        .market
+        .quotes
+        .get_mut(&good_id)
+        .ok_or(SimulationError::MarketQuoteMissing { good_id })?;
+    let resulting_stock =
+        quote
+            .stock
+            .checked_add(incoming)
+            .ok_or(SimulationError::MarketStockOverflow {
+                good_id,
+                current: quote.stock,
+                incoming,
+            })?;
+    let resulting_supply =
+        quote
+            .supply_today
+            .checked_add(incoming)
+            .ok_or(SimulationError::MarketSupplyOverflow {
+                good_id,
+                current: quote.supply_today,
+                incoming,
+            })?;
+    quote.stock = resulting_stock;
+    quote.supply_today = resulting_supply;
     Ok(())
 }
 
@@ -378,6 +435,77 @@ mod tests {
             &before,
             &state,
             "overflowing market debits must not clamp the external account",
+        );
+    }
+
+    #[test]
+    fn rejects_market_stock_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        let good_id = *state
+            .market
+            .quotes
+            .keys()
+            .next()
+            .expect("campaign must contain a market quote");
+        state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("market quote must exist")
+            .stock = Quantity::from_milliunits(i64::MAX);
+        let incoming = Quantity::from_milliunits(1);
+        let before = state.clone();
+
+        let result = add_market_supply(&mut state, good_id, incoming);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::MarketStockOverflow {
+                good_id,
+                current: Quantity::from_milliunits(i64::MAX),
+                incoming,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing market stock must not alter stock or daily supply",
+        );
+    }
+
+    #[test]
+    fn rejects_market_supply_flow_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        let good_id = *state
+            .market
+            .quotes
+            .keys()
+            .next()
+            .expect("campaign must contain a market quote");
+        let quote = state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("market quote must exist");
+        quote.stock = Quantity::ZERO;
+        quote.supply_today = Quantity::from_milliunits(i64::MAX);
+        let incoming = Quantity::from_milliunits(1);
+        let before = state.clone();
+
+        let result = add_market_supply(&mut state, good_id, incoming);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::MarketSupplyOverflow {
+                good_id,
+                current: Quantity::from_milliunits(i64::MAX),
+                incoming,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overflowing daily supply must not commit the otherwise valid stock addition",
         );
     }
 

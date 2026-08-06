@@ -211,6 +211,43 @@ mod preflight {
             "revenue overflow must fail before inventory, cash, market, or audit mutation",
         );
     }
+
+    #[test]
+    fn external_route_stock_overflow_aborts_the_requested_day() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let good_id = state
+            .external_routes
+            .values()
+            .find(|route| route.active && route.daily_capacity > Quantity::ZERO)
+            .expect("campaign must contain an active supply route")
+            .good_id;
+        state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("route good must have a quote")
+            .stock = Quantity::from_milliunits(i64::MAX);
+        let before = state.clone();
+
+        let result = advance_days(registry, &mut state, 1);
+
+        assert!(
+            matches!(
+                result,
+                Err(SimulationError::MarketStockOverflow {
+                    good_id: failed_good_id,
+                    ..
+                }) if failed_good_id == good_id
+            ),
+            "route stock overflow must return a typed error, received {result:?}"
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "route stock overflow must not commit any part of the requested day",
+        );
+    }
 }
 
 mod transfer_boundaries {
@@ -249,6 +286,52 @@ mod transfer_boundaries {
             Money::from_copper(i64::MAX)
         );
         assert_eq!(state.market.clearing_account, clearing_before);
+    }
+
+    #[test]
+    fn external_income_aggregate_overflow_is_atomic() {
+        let mut state = make_test_campaign();
+        for household in state.households.iter_mut() {
+            household.cash = Money::ZERO;
+            household.weekly_income = Money::ZERO;
+        }
+        let household_ids: Vec<_> = state
+            .households
+            .iter()
+            .take(2)
+            .map(crate::core::Household::id)
+            .collect();
+        let [first_id, second_id] = household_ids.as_slice() else {
+            panic!("campaign must contain at least two households");
+        };
+        let payment = Money::from_copper(i64::MAX / 2 + 1);
+        state
+            .households
+            .get_mut(*first_id)
+            .expect("first household must exist")
+            .weekly_income = payment;
+        state
+            .households
+            .get_mut(*second_id)
+            .expect("second household must exist")
+            .weekly_income = payment;
+        state.market.clearing_account = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = settle_weekly_external_income(&mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::WeeklyExternalIncomeOverflow {
+                accumulated: payment,
+                incoming: payment,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "aggregate income overflow must fail before crediting any household",
+        );
     }
 }
 

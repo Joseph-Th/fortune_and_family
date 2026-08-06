@@ -459,9 +459,14 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
             || institution.term_number == u32::MAX
             || institution.term_started_day > state.clock.day()
             || institution.next_selection_day < institution.term_started_day
+            || institution.active_directive.is_some_and(|directive| {
+                directive.expires_day < 0
+                    || directive.expires_day == i64::MAX
+                    || !institution.powers.contains(&directive.power)
+            })
         {
             return Err(format!(
-                "institution {} has an invalid budget or term timing",
+                "institution {} has an invalid budget, term timing, or directive",
                 institution.institution_id
             ));
         }
@@ -1528,6 +1533,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             11 => migrate_v11_to_v12(value)?,
             12 => migrate_v12_to_v13(value)?,
             13 => migrate_v13_to_v14(value)?,
+            14 => migrate_v14_to_v15(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -2103,6 +2109,133 @@ fn migrate_v13_to_v14(mut value: Value) -> Result<Value, PersistenceError> {
     migrate_v13_parent_child_chronology(object)?;
     object.insert("schema_version".to_owned(), Value::from(14));
     Ok(value)
+}
+
+fn migrate_v14_to_v15(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 14,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let active_directives = v14_active_office_directives(object)?;
+    let institutions = object
+        .get_mut("institutions")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 14,
+            reason: "save institutions must be an object".to_owned(),
+        })?;
+    for institution in institutions.values_mut() {
+        let institution =
+            institution
+                .as_object_mut()
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 14,
+                    reason: "save institution must be an object".to_owned(),
+                })?;
+        let institution_id = institution
+            .get("institution_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 14,
+                reason: "save institution has an invalid institution_id".to_owned(),
+            })?;
+        institution.insert(
+            "active_directive".to_owned(),
+            active_directives
+                .get(&institution_id)
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+    }
+    object.insert("schema_version".to_owned(), Value::from(15));
+    Ok(value)
+}
+
+fn v14_active_office_directives(
+    object: &serde_json::Map<String, Value>,
+) -> Result<BTreeMap<u64, Value>, PersistenceError> {
+    let current_day = object
+        .get("clock")
+        .and_then(Value::as_object)
+        .and_then(|clock| clock.get("day"))
+        .and_then(Value::as_i64)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 14,
+            reason: "save clock has an invalid day".to_owned(),
+        })?;
+    let audit_log = object
+        .get("audit_log")
+        .and_then(Value::as_array)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 14,
+            reason: "save audit_log must be an array".to_owned(),
+        })?;
+    let mut active = BTreeMap::<u64, (i64, Value)>::new();
+    for record in audit_log {
+        let Some(record) = record.as_object() else {
+            continue;
+        };
+        if record.get("kind").and_then(Value::as_str) != Some("OfficeDirective") {
+            continue;
+        }
+        let Some(day) = record.get("day").and_then(Value::as_i64) else {
+            continue;
+        };
+        let expires_day = day.saturating_add(crate::systems::OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS);
+        if current_day > expires_day {
+            continue;
+        }
+        let Some(institution_id) = record
+            .get("subject")
+            .and_then(Value::as_str)
+            .and_then(|subject| subject.strip_prefix("institution:"))
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let Some(power) = record
+            .get("detail")
+            .and_then(Value::as_str)
+            .and_then(v14_directive_power)
+        else {
+            continue;
+        };
+        let directive = serde_json::json!({
+            "power": power,
+            "expires_day": expires_day,
+        });
+        let replace = active
+            .get(&institution_id)
+            .is_none_or(|(prior_day, _)| day >= *prior_day);
+        if replace {
+            active.insert(institution_id, (day, directive));
+        }
+    }
+    Ok(active
+        .into_iter()
+        .map(|(institution_id, (_, directive))| (institution_id, directive))
+        .collect())
+}
+
+fn v14_directive_power(detail: &str) -> Option<&str> {
+    let power = detail
+        .split(';')
+        .find_map(|field| field.strip_prefix("power="))?;
+    matches!(
+        power,
+        "Licenses"
+            | "Inspections"
+            | "MarketTolls"
+            | "DebtEnforcement"
+            | "CityContracts"
+            | "PublicWorks"
+            | "WatchPriorities"
+            | "Taxation"
+            | "EmergencyImports"
+    )
+    .then_some(power)
 }
 
 fn migrate_v13_information_targets(

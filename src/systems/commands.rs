@@ -12,7 +12,8 @@ use crate::core::{
     ChronicleKind, CivicDebt, CivicDebtStatus, ContractStatus, CrisisStatus, DynastyPair,
     EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind, HouseGovernance,
     InformationConfidence, InformationReport, InformationTarget, LawKind, LegalCase, LegalCaseKind,
-    LegalCaseStatus, OfficePower, OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
+    LegalCaseStatus, OfficeDirectiveState, OfficePower, OutboxKind, PublicWork, PublicWorkKind,
+    PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId,
@@ -2524,6 +2525,18 @@ fn apply_office_power_directive(
         .checked_sub(OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST)
         .expect("validated office directive legitimacy cost must fit");
     apply_office_power_directive_effect(state, institution_id, district_id, power);
+    let directive_expires_day = state
+        .clock
+        .day()
+        .saturating_add(OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS);
+    state
+        .institutions
+        .get_mut(&institution_id)
+        .expect("validated directive institution must exist")
+        .active_directive = Some(OfficeDirectiveState {
+        power,
+        expires_day: directive_expires_day,
+    });
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::OfficeDirective,

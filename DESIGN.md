@@ -74,7 +74,7 @@ Commercial credibility creates access to guilds, offices, courts, laws, public w
 
 ### Dynastic governance
 
-The player manages a portfolio of businesses, property, offices, obligations, family roles, and public commitments. The unit of decision shifts from individual operation to institutional governance. Officeholding must provide active directives with visible district tradeoffs, not only passive periodic bonuses.
+The player manages a portfolio of businesses, property, offices, obligations, family roles, and public commitments. The unit of decision shifts from individual operation to institutional governance. Officeholding must provide active directives with visible district tradeoffs, not only passive periodic bonuses. A directive creates six months of institutional momentum, so political choices continue changing businesses, households, markets, relationships, or crises after the initial order.
 
 ### Succession and legacy
 
