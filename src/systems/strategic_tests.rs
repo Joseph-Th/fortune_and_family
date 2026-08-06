@@ -324,7 +324,7 @@ mod arithmetic_boundaries {
     }
 
     #[test]
-    fn acquisition_rejects_exhausted_business_finance_version_without_mutation() {
+    fn acquisition_rejects_reserved_business_finance_version_without_mutation() {
         let registry = test_registry();
         let mut state = make_test_campaign();
         let business_id = state
@@ -339,7 +339,7 @@ mod arithmetic_boundaries {
             .expect("selected business must exist");
         business.operations.status = BusinessStatus::Distressed;
         business.finance.cash = Money::ZERO;
-        business.finance.version = u64::MAX;
+        business.finance.version = u64::MAX - 1;
         let manager_id = state
             .dynasties
             .get(&state.player_dynasty_id)
@@ -377,6 +377,150 @@ mod arithmetic_boundaries {
             &state,
             "exhausted business finance versions must fail before funds or ownership move",
         );
+    }
+
+    #[test]
+    fn acquisition_rejects_buyer_administrative_load_overflow_without_mutation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let administrative_load = {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.finance.cash = Money::ZERO;
+            registry
+                .get_recipe(business.recipe_id())
+                .expect("business recipe must exist")
+                .administrative_load()
+        };
+        let manager_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an eligible manager");
+        let quote =
+            quote_business_acquisition(registry, &state, state.player_dynasty_id, business_id)
+                .expect("distressed business must remain quotable");
+        let buyer_dynasty_id = state.player_dynasty_id;
+        let buyer = state
+            .dynasties
+            .get_mut(&buyer_dynasty_id)
+            .expect("player dynasty must exist");
+        buyer.resources.treasury = quote
+            .purchase_price
+            .checked_add(quote.minimum_recapitalization)
+            .expect("test acquisition cost must fit");
+        buyer.resources.administrative_load = u16::MAX;
+        let before = state.clone();
+
+        let result = acquire_business(
+            registry,
+            &mut state,
+            buyer_dynasty_id,
+            business_id,
+            manager_id,
+            quote.minimum_recapitalization,
+        );
+
+        assert_eq!(
+            result,
+            Err(StrategicError::DynastyAdministrativeLoadOverflow {
+                dynasty_id: buyer_dynasty_id,
+                current: u16::MAX,
+                incoming: administrative_load,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "administrative-load overflow must fail before funds or ownership move",
+        );
+    }
+
+    #[test]
+    fn acquisition_cancels_contracts_that_become_internal() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let (contract_id, business_id) = state
+            .contracts
+            .iter()
+            .filter(|(_, contract)| contract.status == ContractStatus::Active)
+            .find_map(|(contract_id, contract)| {
+                let buyer = state
+                    .businesses
+                    .get(contract.buyer_business_id)
+                    .expect("contract buyer must exist");
+                let seller = state
+                    .businesses
+                    .get(contract.seller_business_id)
+                    .expect("contract seller must exist");
+                match (
+                    buyer.owner_dynasty_id() == state.player_dynasty_id,
+                    seller.owner_dynasty_id() == state.player_dynasty_id,
+                ) {
+                    (true, false) => Some((*contract_id, seller.id())),
+                    (false, true) => Some((*contract_id, buyer.id())),
+                    _ => None,
+                }
+            })
+            .expect("campaign must contain an external contract involving the player");
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("acquisition business must exist");
+        business.operations.status = BusinessStatus::Distressed;
+        business.finance.cash = Money::ZERO;
+        let manager_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an eligible manager");
+        let quote =
+            quote_business_acquisition(registry, &state, state.player_dynasty_id, business_id)
+                .expect("distressed counterparty must be acquirable");
+        let buyer_dynasty_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&buyer_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = quote
+            .purchase_price
+            .checked_add(quote.minimum_recapitalization)
+            .expect("test acquisition cost must fit");
+
+        acquire_business(
+            registry,
+            &mut state,
+            buyer_dynasty_id,
+            business_id,
+            manager_id,
+            quote.minimum_recapitalization,
+        )
+        .expect("acquisition must succeed");
+
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("internalized contract must remain recorded")
+                .status,
+            ContractStatus::Cancelled
+        );
+        assert!(state.outbox.iter().any(|message| {
+            message.kind() == OutboxKind::Contract
+                && message.body().contains(&contract_id.to_string())
+                && message.body().contains("external commercial performance")
+        }));
+        validate_invariants(registry, &state);
     }
 }
 
@@ -1169,7 +1313,7 @@ mod gameplay_stability {
     }
 
     #[test]
-    fn exhausted_institution_term_number_rejects_selection_atomically() {
+    fn reserved_institution_term_number_rejects_selection_atomically() {
         let registry = test_registry();
         let mut state = make_test_campaign();
         let institution_id = *state
@@ -1186,7 +1330,7 @@ mod gameplay_stability {
             .get_mut(&institution_id)
             .expect("selected institution must exist");
         institution.next_selection_day = day;
-        institution.term_number = u32::MAX;
+        institution.term_number = u32::MAX - 1;
         let before = state.clone();
 
         let result = resolve_institution_selections(registry, &mut state);
@@ -1311,6 +1455,34 @@ mod contracts {
         assert_eq!(
             result.expect_err("identical contract parties must be rejected"),
             StrategicError::SameContractParty
+        );
+    }
+
+    #[test]
+    fn rejects_contracts_between_businesses_of_the_same_dynasty() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let terms = make_test_contract_terms(&state);
+        let buyer = state
+            .businesses
+            .get(terms.buyer_business_id)
+            .expect("contract buyer must exist");
+        let owner_id = buyer.owner_dynasty_id();
+        let manager_id = buyer.manager_id();
+        let seller = state
+            .businesses
+            .get_mut(terms.seller_business_id)
+            .expect("contract seller must exist");
+        seller.identity.owner_dynasty_id = owner_id;
+        seller.operations.manager_id = manager_id;
+
+        let result = validate_supply_contract(registry, &state, terms);
+
+        assert_eq!(
+            result.expect_err("self-dealing contracts must not create commercial credit"),
+            StrategicError::SameContractOwner {
+                dynasty_id: owner_id,
+            }
         );
     }
 
@@ -4146,7 +4318,7 @@ mod crises {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
-            subject: format!("crisis:{crisis_id}"),
+            subject: format!("crisis:{crisis_id}").into(),
             detail: "response=Exploit".to_owned(),
         });
 
@@ -4174,7 +4346,7 @@ mod crises {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
-            subject: format!("crisis:{crisis_id}"),
+            subject: format!("crisis:{crisis_id}").into(),
             detail: "response=Reform".to_owned(),
         });
         let outbox_before = state.outbox.len();

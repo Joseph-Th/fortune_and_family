@@ -1471,6 +1471,111 @@ mod validation {
     }
 
     #[test]
+    fn rejects_exhausted_simulation_day() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["clock"]["day"] = Value::from(i64::MAX);
+        let (_directory, path) = write_test_json_fixture("exhausted-day.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid or exhausted elapsed day",
+        );
+    }
+
+    #[test]
+    fn rejects_exhausted_dynasty_generation() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let dynasty = value["dynasties"]
+            .as_object_mut()
+            .and_then(|dynasties| dynasties.values_mut().next())
+            .expect("serialized state must contain a dynasty");
+        dynasty["runtime"]["generation"] = Value::from(u16::MAX);
+        let (_directory, path) = write_test_json_fixture("exhausted-generation.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid resource value",
+        );
+    }
+
+    #[test]
+    fn rejects_exhausted_business_finance_version() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let business = value["businesses"]["records"]
+            .as_object_mut()
+            .and_then(|records| records.values_mut().next())
+            .expect("serialized state must contain a business");
+        business["finance"]["version"] = Value::from(u64::MAX);
+        let (_directory, path) = write_test_json_fixture("exhausted-business-version.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid economic value",
+        );
+    }
+
+    #[test]
+    fn rejects_exhausted_institution_term_number() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let institution = value["institutions"]
+            .as_object_mut()
+            .and_then(|institutions| institutions.values_mut().next())
+            .expect("serialized state must contain an institution");
+        institution["term_number"] = Value::from(u32::MAX);
+        let (_directory, path) = write_test_json_fixture("exhausted-institution-term.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid budget or term timing",
+        );
+    }
+
+    #[test]
+    fn rejects_exhausted_family_charter_version() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let council = value["family_councils"]
+            .as_object_mut()
+            .and_then(|councils| councils.values_mut().next())
+            .expect("serialized state must contain a family council");
+        council["charter_version"] = Value::from(u64::MAX);
+        let (_directory, path) = write_test_json_fixture("exhausted-charter.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "exhausted charter version",
+        );
+    }
+
+    #[test]
+    fn rejects_active_character_with_zero_health() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let character = value["characters"]["records"]
+            .as_object_mut()
+            .and_then(|records| records.values_mut().next())
+            .expect("serialized state must contain a character");
+        character["runtime"]["status"] = Value::String("Active".to_owned());
+        character["runtime"]["health_basis_points"] = Value::from(0);
+        let (_directory, path) = write_test_json_fixture("active-zero-health.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid birth date, capability, or basis-point value",
+        );
+    }
+
+    #[test]
     fn rejects_unsettled_zero_balance_loan() {
         let state = make_test_campaign();
         let mut value = serde_json::to_value(state).expect("state must serialize");
@@ -1549,6 +1654,74 @@ mod validation {
         contract.next_due_day = contract.end_day.saturating_add(1);
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) = write_test_json_fixture("late-active-contract.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "incompatible with its parties or term",
+        );
+    }
+
+    #[test]
+    fn rejects_active_contract_between_businesses_of_the_same_dynasty() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let contract = state
+            .contracts
+            .values()
+            .find(|contract| contract.status == crate::core::ContractStatus::Active)
+            .expect("campaign must contain an active contract");
+        let buyer_business_id = contract.buyer_business_id;
+        let seller_business_id = contract.seller_business_id;
+        let buyer = state
+            .businesses
+            .get(buyer_business_id)
+            .expect("contract buyer must exist");
+        let buyer_dynasty_id = buyer.owner_dynasty_id();
+        let buyer_manager_id = buyer.manager_id();
+        let seller_dynasty_id = state
+            .businesses
+            .get(seller_business_id)
+            .expect("contract seller must exist")
+            .owner_dynasty_id();
+        let administrative_load = registry
+            .get_recipe(
+                state
+                    .businesses
+                    .get(seller_business_id)
+                    .expect("contract seller must exist")
+                    .recipe_id(),
+            )
+            .expect("seller recipe must exist")
+            .administrative_load();
+        state
+            .businesses
+            .transfer_ownership(seller_business_id, buyer_dynasty_id, buyer_manager_id)
+            .expect("seller business must transfer");
+        state
+            .dynasties
+            .get_mut(&seller_dynasty_id)
+            .expect("seller dynasty must exist")
+            .resources
+            .administrative_load -= administrative_load;
+        state
+            .dynasties
+            .get_mut(&buyer_dynasty_id)
+            .expect("buyer dynasty must exist")
+            .resources
+            .administrative_load += administrative_load;
+        for property in state
+            .properties
+            .values_mut()
+            .filter(|property| property.occupant_business_id == Some(seller_business_id))
+        {
+            property.tenant_dynasty_id = property
+                .owner_dynasty_id
+                .filter(|owner_id| *owner_id != buyer_dynasty_id)
+                .map(|_| buyer_dynasty_id);
+        }
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("internal-active-contract.json", &value);
 
         assert_invalid_state(
             load_state(&path),

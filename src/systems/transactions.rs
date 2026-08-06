@@ -137,11 +137,14 @@ pub(crate) fn debit_market_clearing_account(
 }
 
 pub(crate) fn next_business_finance_version(business: &Business) -> Result<u64, SimulationError> {
-    business.finance.version.checked_add(1).ok_or(
-        SimulationError::BusinessFinanceVersionExhausted {
+    business
+        .finance
+        .version
+        .checked_add(1)
+        .filter(|next| *next < u64::MAX)
+        .ok_or(SimulationError::BusinessFinanceVersionExhausted {
             business_id: business.id(),
-        },
-    )
+        })
 }
 
 pub(crate) fn next_family_charter_version(
@@ -150,6 +153,7 @@ pub(crate) fn next_family_charter_version(
 ) -> Result<u64, SimulationError> {
     current
         .checked_add(1)
+        .filter(|next| *next < u64::MAX)
         .ok_or(SimulationError::FamilyCharterVersionExhausted { dynasty_id })
 }
 
@@ -235,7 +239,7 @@ impl ValidatedCashTransfer {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::CashTransfer,
-            subject: format!("business:{from_business_id}->business:{to_business_id}"),
+            subject: format!("business:{from_business_id}->business:{to_business_id}").into(),
             detail: format!("amount={}", amount.copper()),
         });
         Ok(())
@@ -316,16 +320,8 @@ pub fn validate_business_cash_transfer(
             incoming: amount,
         });
     }
-    if source.finance.version == u64::MAX {
-        return Err(SimulationError::BusinessFinanceVersionExhausted {
-            business_id: from_business_id,
-        });
-    }
-    if target.finance.version == u64::MAX {
-        return Err(SimulationError::BusinessFinanceVersionExhausted {
-            business_id: to_business_id,
-        });
-    }
+    next_business_finance_version(source)?;
+    next_business_finance_version(target)?;
 
     Ok(ValidatedCashTransfer {
         from_business_id,
@@ -512,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_exhausted_finance_version_without_mutation() {
+    fn rejects_reserved_finance_version_without_mutation() {
         let mut state = make_test_campaign();
         let (from_business_id, to_business_id) = {
             let mut businesses = state.businesses().iter().map(crate::core::Business::id);
@@ -526,7 +522,7 @@ mod tests {
             .get_mut(from_business_id)
             .expect("source business must exist")
             .finance
-            .version = u64::MAX;
+            .version = u64::MAX - 1;
         let before = state.clone();
 
         let result = transfer_business_cash(

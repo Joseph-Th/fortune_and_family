@@ -202,6 +202,62 @@ mod harness {
     }
 
     #[test]
+    fn every_serialized_app_state_component_is_reviewed_by_the_harness() {
+        let state = make_test_campaign();
+        let serialized = serde_json::to_value(&state).expect("campaign state must serialize");
+        let actual: BTreeSet<String> = serialized
+            .as_object()
+            .expect("app state must serialize as an object")
+            .keys()
+            .cloned()
+            .collect();
+        let observed: BTreeSet<String> = HARNESS_OBSERVED_STATE_COMPONENTS
+            .iter()
+            .map(|component| (*component).to_owned())
+            .collect();
+        let intentionally_unobserved: BTreeSet<String> =
+            HARNESS_INTENTIONALLY_UNOBSERVED_STATE_COMPONENTS
+                .iter()
+                .map(|component| (*component).to_owned())
+                .collect();
+
+        assert!(
+            observed.is_disjoint(&intentionally_unobserved),
+            "state components cannot be both observed and intentionally unobserved"
+        );
+        assert_set_eq(
+            &actual,
+            &observed.union(&intentionally_unobserved).cloned().collect(),
+            "adding or removing AppState fields requires an explicit gameplay-harness review",
+        );
+    }
+
+    #[test]
+    fn mislabeled_player_command_candidates_fail_before_probing() {
+        let state = make_test_campaign();
+        let candidates = vec![Candidate {
+            kind: GameplayCommandKind::BuyProperty,
+            command: PlayerCommand::SetHouseGovernance {
+                governance: HouseGovernance::Primogeniture,
+            },
+            description: "deliberately stale route".to_owned(),
+            score: 0,
+        }];
+
+        let error = validate_candidate_classifications(&state, &candidates)
+            .expect_err("mislabeled candidates must fail");
+
+        assert!(matches!(
+            error,
+            GameplayHarnessError::CandidateKindMismatch {
+                declared: GameplayCommandKind::BuyProperty,
+                actual: GameplayCommandKind::SetHouseGovernance,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn scaled_ratios_use_wide_intermediates() {
         assert_eq!(
             scaled_ratio_u64(u64::MAX, u64::MAX, 100),
@@ -958,6 +1014,43 @@ mod candidates {
     }
 
     #[test]
+    fn opportunist_growth_policy_accepts_maintenance_exposure() {
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("player business must exist");
+        business.operations.condition_basis_points = 9_000;
+        business.finance.cash = Money::from_copper(20_000);
+        let mut candidates = Vec::new();
+
+        generate_business_policy_candidates(
+            &state,
+            GameplayPersona::Opportunist,
+            state
+                .businesses
+                .get(business_id)
+                .expect("player business must exist"),
+            &mut candidates,
+        );
+
+        let candidate = single_candidate(&candidates, "opportunist growth policy");
+        assert!(matches!(
+            candidate.command,
+            PlayerCommand::SetBusinessPolicy {
+                maintenance_basis_points: 400,
+                minimum_cash_reserve,
+                ..
+            } if minimum_cash_reserve == Money::from_copper(1_000)
+        ));
+    }
+
+    #[test]
     fn healthy_businesses_offer_bounded_annual_modernization() {
         let mut state = make_test_campaign();
         let business_id = *state
@@ -994,7 +1087,7 @@ mod candidates {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::BusinessCapitalization,
-            subject: format!("business:{business_id}"),
+            subject: format!("business:{business_id}").into(),
             detail: "amount=6000;rehabilitation_basis_points=3000".to_owned(),
         });
         candidates.clear();
@@ -1140,7 +1233,7 @@ mod candidates {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::CashTransfer,
-            subject: format!("business:{source_id}->business:{target_id}"),
+            subject: format!("business:{source_id}->business:{target_id}").into(),
             detail: "amount=1000".to_owned(),
         });
         let businesses: Vec<_> = business_ids
@@ -1241,7 +1334,7 @@ mod candidates {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
-            subject: format!("crisis:{crisis_id}"),
+            subject: format!("crisis:{crisis_id}").into(),
             detail: "response=Exploit".to_owned(),
         });
         let mut candidates = Vec::new();
@@ -1266,7 +1359,7 @@ mod candidates {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
-            subject: format!("crisis:{crisis_id}"),
+            subject: format!("crisis:{crisis_id}").into(),
             detail: "response=Reform".to_owned(),
         });
         candidates.clear();
@@ -1509,7 +1602,7 @@ mod candidates {
             state.audit_log.push(AuditRecord {
                 day: state.clock.day(),
                 kind,
-                subject: "institution:3;dynasty:10".to_owned(),
+                subject: "institution:3;dynasty:10".into(),
                 detail: "different dynasty".to_owned(),
             });
         }
@@ -1524,7 +1617,7 @@ mod candidates {
             state.audit_log.push(AuditRecord {
                 day: state.clock.day(),
                 kind,
-                subject: "institution:3;dynasty:1".to_owned(),
+                subject: "institution:3;dynasty:1".into(),
                 detail: "player dynasty".to_owned(),
             });
         }
@@ -1962,6 +2055,130 @@ mod candidates {
             "a power broker must not sacrifice campaign and office reserves to habitual lending"
         );
     }
+
+    #[test]
+    fn opportunist_credit_uses_short_term_high_yield_terms() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let mut candidates = Vec::new();
+
+        add_lend_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::ExtendCredit)
+            .expect("opportunist must receive a lending candidate");
+        let PlayerCommand::IssueLoan { terms } = &candidate.command else {
+            panic!("extend-credit candidate must issue a loan");
+        };
+        assert_eq!(
+            terms.interest_basis_points,
+            AGENT_OPPORTUNIST_LOAN_INTEREST_BASIS_POINTS
+        );
+        assert_eq!(
+            terms.weekly_payment,
+            Money::from_copper(
+                (terms.principal.copper() / AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS).max(1)
+            )
+        );
+        assert!(candidate.description.contains("high-yield short-term loan"));
+    }
+
+    #[test]
+    fn delinquent_player_credit_creates_a_legal_grievance() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let borrower_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| {
+                *dynasty_id != player_id
+                    && !same_pair_credit_blocks_new_loan(&state, player_id, *dynasty_id)
+            })
+            .expect("campaign must contain a rival available for new player credit");
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::IssueLoan {
+                terms: LoanTerms {
+                    lender_dynasty_id: player_id,
+                    borrower_dynasty_id: borrower_id,
+                    principal: Money::from_copper(5_000),
+                    weekly_payment: Money::from_copper(500),
+                    interest_basis_points: 1_800,
+                    collateral_property_id: None,
+                },
+            },
+        )
+        .expect("test loan must be executable");
+        state
+            .loans
+            .values_mut()
+            .find(|loan| {
+                loan.lender_dynasty_id == player_id && loan.borrower_dynasty_id == borrower_id
+            })
+            .expect("test loan must exist")
+            .status = LoanStatus::Delinquent;
+        state
+            .legal_cases
+            .retain(|_, legal_case| legal_case.plaintiff_dynasty_id != player_id);
+
+        assert_eq!(
+            legal_grievance_kind(&state, borrower_id),
+            Some(LegalCaseKind::Debt)
+        );
+        let mut candidates = Vec::new();
+        generate_legal_candidates(&state, GameplayPersona::Opportunist, &mut candidates);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.kind == GameplayCommandKind::FileLegalCase
+                && matches!(
+                    candidate.command,
+                    PlayerCommand::FileLegalCase {
+                        defendant_dynasty_id,
+                        kind: LegalCaseKind::Debt,
+                        ..
+                    } if defendant_dynasty_id == borrower_id
+                )
+        }));
+    }
+
+    #[test]
+    fn established_office_power_is_recorded_as_an_activation_opportunity() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let mut accumulator = CampaignAccumulator::new();
+
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut accumulator,
+        );
+
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::ExerciseOfficePower)
+                .expect("office-power statistics must exist")
+                .activation_opportunities,
+            1
+        );
+    }
 }
 
 mod metrics {
@@ -2006,6 +2223,136 @@ mod metrics {
                 .changed_domains(&debt_change)
                 .contains(&GameplayDomain::Loans),
             "municipal debt changes must be attributed to the finance domain"
+        );
+    }
+
+    #[test]
+    fn snapshots_detect_district_changes_that_do_not_move_average_unrest() {
+        let mut state = make_test_campaign();
+        let earlier = GameplaySnapshot::capture(&state);
+        state
+            .districts
+            .values_mut()
+            .next()
+            .expect("campaign must contain a district")
+            .sanitation_basis_points += 1;
+        let later = GameplaySnapshot::capture(&state);
+
+        assert!(
+            earlier
+                .changed_domains(&later)
+                .contains(&GameplayDomain::Districts)
+        );
+    }
+
+    #[test]
+    fn snapshots_detect_external_route_changes_before_market_totals_move() {
+        let mut state = make_test_campaign();
+        let earlier = GameplaySnapshot::capture(&state);
+        state
+            .external_routes
+            .values_mut()
+            .next()
+            .expect("campaign must contain an external route")
+            .disruption_basis_points += 1;
+        let later = GameplaySnapshot::capture(&state);
+
+        assert!(
+            earlier
+                .changed_domains(&later)
+                .contains(&GameplayDomain::Market)
+        );
+    }
+
+    #[test]
+    fn snapshots_attribute_new_player_collateral_to_property() {
+        let mut state = make_test_campaign();
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(state.player_dynasty_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("campaign must contain an unpledged player property")
+            .id;
+        let loan_id = *state
+            .loans
+            .keys()
+            .next()
+            .expect("campaign must contain a loan");
+        let earlier = GameplaySnapshot::capture(&state);
+        state
+            .properties
+            .get_mut(&property_id)
+            .expect("player property must exist")
+            .collateral_loan_id = Some(loan_id);
+        let later = GameplaySnapshot::capture(&state);
+
+        assert_eq!(
+            later.player_pledged_properties,
+            earlier.player_pledged_properties.saturating_add(1)
+        );
+        assert!(
+            earlier
+                .changed_domains(&later)
+                .contains(&GameplayDomain::Property)
+        );
+    }
+
+    #[test]
+    fn snapshots_detect_persistent_audit_history_that_changes_future_routes() {
+        let mut state = make_test_campaign();
+        let earlier = GameplaySnapshot::capture(&state);
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            .expect("player must own a business")
+            .id();
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::BusinessPolicyChange,
+            subject: format!("business:{business_id}").into(),
+            detail: "synthetic cooldown marker".to_owned(),
+        });
+        let later = GameplaySnapshot::capture(&state);
+
+        assert_ne!(earlier.audit_state_checksum, later.audit_state_checksum);
+        assert!(persistent_history_changed(
+            &earlier, &later, &later, &earlier
+        ));
+        assert!(
+            !earlier
+                .changed_domains(&later)
+                .contains(&GameplayDomain::Feedback),
+            "internal audit history must not be mislabeled as user-facing feedback"
+        );
+    }
+
+    #[test]
+    fn snapshots_detect_legal_hearing_progress_with_unchanged_case_counts() {
+        let mut state = make_test_campaign();
+        let legal_case = state
+            .legal_cases
+            .values_mut()
+            .next()
+            .expect("campaign must contain a legal case");
+        legal_case.status = LegalCaseStatus::Filed;
+        let earlier = GameplaySnapshot::capture(&state);
+        state
+            .legal_cases
+            .values_mut()
+            .next()
+            .expect("campaign must contain a legal case")
+            .status = LegalCaseStatus::Hearing;
+        let later = GameplaySnapshot::capture(&state);
+
+        assert_eq!(earlier.open_legal_cases, later.open_legal_cases);
+        assert!(
+            earlier
+                .changed_domains(&later)
+                .contains(&GameplayDomain::Legal)
         );
     }
 
@@ -3441,12 +3788,15 @@ mod findings {
         report.aggregate.simulated_days = 7_200;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
-        let finding = finding_with_title(
+        let labor_finding = finding_with_title(
             &findings,
             "labor-response was not exercised in this horizon",
         );
+        let office_finding =
+            finding_with_title(&findings, "office-power was not exercised in this horizon");
 
-        assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+        assert_eq!(labor_finding.severity, GameplayFindingSeverity::Info);
+        assert_eq!(office_finding.severity, GameplayFindingSeverity::Info);
     }
 
     #[test]
@@ -3743,7 +4093,7 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
             state.audit_log.push(AuditRecord {
                 day: support_day,
                 kind: AuditKind::InstitutionPatronage,
-                subject: format!("institution:{institution_id}:character:{character_id}"),
+                subject: format!("institution:{institution_id}:character:{character_id}").into(),
                 detail: "test support".to_owned(),
             });
         }

@@ -301,9 +301,9 @@ fn validate_numeric_ranges(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
-    if state.clock.day() < 0 {
+    if state.clock.day() < 0 || state.clock.day() == i64::MAX {
         return Err(format!(
-            "simulation clock has negative elapsed day {}",
+            "simulation clock has invalid or exhausted elapsed day {}",
             state.clock.day()
         ));
     }
@@ -314,6 +314,7 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
             || dynasty.resources.reputation_quality_basis_points > 10_000
             || dynasty.resources.reputation_reliability_basis_points > 10_000
             || dynasty.runtime.generation == 0
+            || dynasty.runtime.generation == u16::MAX
             || dynasty.runtime.succession_risk_basis_points > 10_000
         {
             return Err(format!(
@@ -325,6 +326,8 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
     for character in state.characters.iter() {
         if character.birth_day() > state.clock.day()
             || character.runtime.health_basis_points > 10_000
+            || (character.status() == crate::core::CharacterStatus::Active
+                && character.runtime.health_basis_points == 0)
             || character.runtime.loyalty_basis_points > 10_000
             || character.capabilities.administration > 100
             || character.capabilities.commerce > 100
@@ -363,6 +366,7 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
             || business.policy.minimum_cash_reserve < Money::ZERO
             || business.policy.maintenance_basis_points > 10_000
             || business.policy.quality_target_basis_points > 10_000
+            || business.finance.version == u64::MAX
             || business
                 .inventory()
                 .values()
@@ -452,6 +456,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         if institution.budget < Money::ZERO
             || institution.legitimacy_basis_points > 10_000
             || institution.term_number == 0
+            || institution.term_number == u32::MAX
             || institution.term_started_day > state.clock.day()
             || institution.next_selection_day < institution.term_started_day
         {
@@ -474,9 +479,9 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
         }
     }
     for council in state.family_councils.values() {
-        if council.unity_basis_points > 10_000 {
+        if council.unity_basis_points > 10_000 || council.charter_version == u64::MAX {
             return Err(format!(
-                "family council {} has invalid unity",
+                "family council {} has invalid unity or an exhausted charter version",
                 council.dynasty_id
             ));
         }
@@ -754,7 +759,7 @@ fn validate_business_records(
 ) -> Result<(), String> {
     let mut owner_index: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
     let mut district_index: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
-    let mut administrative_load = BTreeMap::<_, u16>::new();
+    let mut administrative_load = BTreeMap::<_, u64>::new();
     for (business_id, business) in state.businesses.records() {
         let owner_id = business.owner_dynasty_id();
         if business.id() != *business_id
@@ -805,8 +810,8 @@ fn validate_business_records(
             .expect("validated business recipe must exist");
         administrative_load
             .entry(owner_id)
-            .and_modify(|load| *load = load.saturating_add(recipe.administrative_load()))
-            .or_insert(recipe.administrative_load());
+            .and_modify(|load| *load += u64::from(recipe.administrative_load()))
+            .or_insert(u64::from(recipe.administrative_load()));
     }
     if &owner_index != state.businesses.owner_index()
         || &district_index != state.businesses.district_index()
@@ -815,7 +820,7 @@ fn validate_business_records(
     }
     for dynasty in state.dynasties.values() {
         let expected = administrative_load.get(&dynasty.id()).copied().unwrap_or(0);
-        if dynasty.administrative_load() != expected {
+        if u64::from(dynasty.administrative_load()) != expected {
             return Err(format!(
                 "dynasty {} administrative load {} does not match derived load {expected}",
                 dynasty.id(),
@@ -830,47 +835,7 @@ fn validate_strategic_records(
     registry: &crate::registry::Registry,
     state: &AppState,
 ) -> Result<(), String> {
-    for (contract_id, contract) in &state.contracts {
-        let buyer = state.businesses.get(contract.buyer_business_id);
-        let seller = state.businesses.get(contract.seller_business_id);
-        if contract.id != *contract_id
-            || contract.buyer_business_id == contract.seller_business_id
-            || buyer.is_none()
-            || seller.is_none()
-            || !state.market.quotes.contains_key(&contract.good_id)
-        {
-            return Err(format!(
-                "supply contract {contract_id} has an invalid reference"
-            ));
-        }
-        let buyer = buyer.expect("validated contract buyer must exist");
-        let seller = seller.expect("validated contract seller must exist");
-        let buyer_recipe = registry
-            .get_recipe(buyer.recipe_id())
-            .expect("validated business recipe must exist");
-        let seller_recipe = registry
-            .get_recipe(seller.recipe_id())
-            .expect("validated business recipe must exist");
-        let valid_breach_attribution = contract.breaching_dynasty_id.is_none_or(|dynasty_id| {
-            contract.status == crate::core::ContractStatus::Breached
-                && state.dynasties.contains_key(&dynasty_id)
-        });
-        let valid_delivery_attribution = contract_delivery_attribution_is_valid(state, contract);
-        if seller_recipe.output_good_id() != contract.good_id
-            || !buyer_recipe
-                .inputs()
-                .iter()
-                .any(|input| input.good_id() == contract.good_id)
-            || (contract.status == crate::core::ContractStatus::Active
-                && contract.next_due_day > contract.end_day)
-            || !valid_breach_attribution
-            || !valid_delivery_attribution
-        {
-            return Err(format!(
-                "supply contract {contract_id} is incompatible with its parties or term"
-            ));
-        }
-    }
+    validate_contract_records(registry, state)?;
     let mut occupied_businesses = BTreeSet::new();
     for (property_id, property) in &state.properties {
         if property.id != *property_id || !state.districts.contains_key(&property.district_id) {
@@ -931,6 +896,56 @@ fn validate_strategic_records(
     validate_finance_and_organization_records(state)
 }
 
+fn validate_contract_records(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<(), String> {
+    for (contract_id, contract) in &state.contracts {
+        let buyer = state.businesses.get(contract.buyer_business_id);
+        let seller = state.businesses.get(contract.seller_business_id);
+        if contract.id != *contract_id
+            || contract.buyer_business_id == contract.seller_business_id
+            || buyer.is_none()
+            || seller.is_none()
+            || !state.market.quotes.contains_key(&contract.good_id)
+        {
+            return Err(format!(
+                "supply contract {contract_id} has an invalid reference"
+            ));
+        }
+        let buyer = buyer.expect("validated contract buyer must exist");
+        let seller = seller.expect("validated contract seller must exist");
+        let buyer_recipe = registry
+            .get_recipe(buyer.recipe_id())
+            .expect("validated business recipe must exist");
+        let seller_recipe = registry
+            .get_recipe(seller.recipe_id())
+            .expect("validated business recipe must exist");
+        let valid_breach_attribution = contract.breaching_dynasty_id.is_none_or(|dynasty_id| {
+            contract.status == crate::core::ContractStatus::Breached
+                && state.dynasties.contains_key(&dynasty_id)
+        });
+        let valid_delivery_attribution = contract_delivery_attribution_is_valid(state, contract);
+        if seller_recipe.output_good_id() != contract.good_id
+            || !buyer_recipe
+                .inputs()
+                .iter()
+                .any(|input| input.good_id() == contract.good_id)
+            || (contract.status == crate::core::ContractStatus::Active
+                && buyer.owner_dynasty_id() == seller.owner_dynasty_id())
+            || (contract.status == crate::core::ContractStatus::Active
+                && contract.next_due_day > contract.end_day)
+            || !valid_breach_attribution
+            || !valid_delivery_attribution
+        {
+            return Err(format!(
+                "supply contract {contract_id} is incompatible with its parties or term"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn contract_delivery_attribution_is_valid(
     state: &AppState,
     contract: &crate::core::SupplyContract,
@@ -938,10 +953,9 @@ fn contract_delivery_attribution_is_valid(
     let attributed_deliveries = contract
         .fulfilled_deliveries_by_dynasty
         .values()
-        .fold(0_u32, |total, deliveries| {
-            total.saturating_add(u32::from(*deliveries))
-        });
-    let fulfilled_deliveries = u32::from(contract.fulfilled_deliveries);
+        .map(|deliveries| u64::from(*deliveries))
+        .sum::<u64>();
+    let fulfilled_deliveries = u64::from(contract.fulfilled_deliveries);
     contract
         .fulfilled_deliveries_by_dynasty
         .iter()
@@ -954,7 +968,7 @@ fn contract_delivery_attribution_is_valid(
             contract.fulfilled_deliveries_by_dynasty.is_empty()
         } else {
             attributed_deliveries >= fulfilled_deliveries
-                && attributed_deliveries <= fulfilled_deliveries.saturating_mul(2)
+                && attributed_deliveries <= fulfilled_deliveries * 2
         }
 }
 
@@ -1082,8 +1096,8 @@ fn validate_loan_records(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_employment_records(state: &AppState) -> Result<(), String> {
-    let mut workers_by_business = BTreeMap::<BusinessId, u32>::new();
-    let mut workers_by_household = BTreeMap::<HouseholdId, u32>::new();
+    let mut workers_by_business = BTreeMap::<BusinessId, u64>::new();
+    let mut workers_by_household = BTreeMap::<HouseholdId, u64>::new();
     for (employment_id, agreement) in &state.employment {
         let business = state.businesses.get(agreement.business_id);
         if agreement.id != *employment_id
@@ -1106,16 +1120,12 @@ fn validate_employment_records(state: &AppState) -> Result<(), String> {
         if agreement.status != crate::core::EmploymentStatus::Ended {
             workers_by_business
                 .entry(agreement.business_id)
-                .and_modify(|workers| {
-                    *workers = workers.saturating_add(u32::from(agreement.workers));
-                })
-                .or_insert(u32::from(agreement.workers));
+                .and_modify(|workers| *workers += u64::from(agreement.workers))
+                .or_insert(u64::from(agreement.workers));
             workers_by_household
                 .entry(agreement.household_id)
-                .and_modify(|workers| {
-                    *workers = workers.saturating_add(u32::from(agreement.workers));
-                })
-                .or_insert(u32::from(agreement.workers));
+                .and_modify(|workers| *workers += u64::from(agreement.workers))
+                .or_insert(u64::from(agreement.workers));
         }
     }
     for (business_id, workers) in workers_by_business {
@@ -1124,7 +1134,7 @@ fn validate_employment_records(state: &AppState) -> Result<(), String> {
             .get(business_id)
             .expect("validated employment business must exist");
         let supported_workers = crate::systems::supported_worker_capacity(business);
-        if workers > supported_workers {
+        if workers > u64::from(supported_workers) {
             return Err(format!(
                 "business {business_id} employment exceeds operating capacity"
             ));
@@ -1136,7 +1146,7 @@ fn validate_employment_records(state: &AppState) -> Result<(), String> {
             .get(household_id)
             .expect("validated employment household must exist")
             .members();
-        if workers > u32::from(members) {
+        if workers > u64::from(members) {
             return Err(format!(
                 "household {household_id} employment exceeds household labor capacity"
             ));
@@ -1248,8 +1258,9 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
                 })
                 && !state.audit_log.iter().any(|record| {
                     record.kind() == AuditKind::InstitutionPatronage
-                        && record.subject()
-                            == format!("institution:{institution_id}:character:{character_id}")
+                        && record
+                            .audit_subject()
+                            .references_institution_character(*institution_id, *character_id)
                 })
         });
         if institution.institution_id != *institution_id

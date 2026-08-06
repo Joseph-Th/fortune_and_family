@@ -43,8 +43,8 @@ impl RegistryIds {
 pub fn validate_invariants(registry: &Registry, state: &AppState) {
     let ids = RegistryIds::new(registry);
     debug_assert!(
-        state.clock.day() >= 0,
-        "Lifecycle Validity: simulation clock cannot be negative"
+        state.clock.day() >= 0 && state.clock.day() < i64::MAX,
+        "Lifecycle Validity: simulation clock must be nonnegative and retain advancement headroom"
     );
     debug_assert_eq!(
         state.scenario_key,
@@ -136,8 +136,10 @@ fn validate_characters(state: &AppState) {
             character.dynasty_id()
         );
         debug_assert!(
-            character.runtime.health_basis_points <= 10_000,
-            "Lifecycle Validity: character {} health is outside basis-point range",
+            character.runtime.health_basis_points <= 10_000
+                && (character.status() != CharacterStatus::Active
+                    || character.runtime.health_basis_points > 0),
+            "Lifecycle Validity: active character {} must have positive in-range health",
             character.id()
         );
         debug_assert!(
@@ -223,8 +225,8 @@ fn validate_dynasties(state: &AppState) {
             "Lifecycle Validity: dynasty reputation or succession risk is outside basis-point range"
         );
         debug_assert!(
-            dynasty.runtime.generation > 0,
-            "Lifecycle Validity: dynasty generation must be positive"
+            dynasty.runtime.generation > 0 && dynasty.runtime.generation < u16::MAX,
+            "Lifecycle Validity: dynasty generation must be positive and retain succession headroom"
         );
     }
 }
@@ -260,7 +262,7 @@ fn validate_heir(state: &AppState, dynasty_id: DynastyId, heir_id: Option<Charac
 fn validate_businesses(registry: &Registry, state: &AppState, ids: &RegistryIds) {
     let mut owner_index: BTreeMap<DynastyId, BTreeSet<BusinessId>> = BTreeMap::new();
     let mut district_index: BTreeMap<DistrictId, BTreeSet<BusinessId>> = BTreeMap::new();
-    let mut administrative_load: BTreeMap<DynastyId, u16> = BTreeMap::new();
+    let mut administrative_load: BTreeMap<DynastyId, u64> = BTreeMap::new();
 
     for business in state.businesses.records().values() {
         validate_business_record(state, business, ids);
@@ -277,8 +279,8 @@ fn validate_businesses(registry: &Registry, state: &AppState, ids: &RegistryIds)
             .expect("validated business recipe must exist");
         administrative_load
             .entry(business.owner_dynasty_id())
-            .and_modify(|load| *load = load.saturating_add(recipe.administrative_load()))
-            .or_insert(recipe.administrative_load());
+            .and_modify(|load| *load += u64::from(recipe.administrative_load()))
+            .or_insert(u64::from(recipe.administrative_load()));
     }
 
     debug_assert_eq!(
@@ -350,6 +352,11 @@ fn validate_business_record(state: &AppState, business: &Business, ids: &Registr
         "Lifecycle Validity: business {} policy is outside supported ranges",
         business.id()
     );
+    debug_assert!(
+        business.finance.version < u64::MAX,
+        "Lifecycle Validity: business {} finance version is exhausted",
+        business.id()
+    );
     for (good_id, quantity) in business.inventory() {
         debug_assert!(
             ids.goods.contains(good_id),
@@ -388,11 +395,11 @@ fn validate_manager(state: &AppState, business: &Business) {
     }
 }
 
-fn validate_administrative_load(state: &AppState, expected: &BTreeMap<DynastyId, u16>) {
+fn validate_administrative_load(state: &AppState, expected: &BTreeMap<DynastyId, u64>) {
     for dynasty in state.dynasties.values() {
         let load = expected.get(&dynasty.id()).copied().unwrap_or(0);
         debug_assert_eq!(
-            dynasty.administrative_load(),
+            u64::from(dynasty.administrative_load()),
             load,
             "Derived Data Consistency: dynasty {} administrative load is stale",
             dynasty.id()
@@ -467,6 +474,7 @@ fn validate_institutions(registry: &Registry, state: &AppState, ids: &RegistryId
         debug_assert!(
             !institution.budget.is_negative()
                 && institution.term_number > 0
+                && institution.term_number < u32::MAX
                 && institution.term_started_day <= state.clock.day()
                 && institution.next_selection_day >= institution.term_started_day,
             "Lifecycle Validity: institution budget or term timing is invalid"
@@ -489,11 +497,12 @@ fn validate_institutions(registry: &Registry, state: &AppState, ids: &RegistryId
                 .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
                 && institution.office_holder_id != Some(*member_id)
             {
-                let subject = format!("institution:{institution_id}:character:{member_id}");
                 debug_assert!(
                     state.audit_log.iter().any(|record| {
                         record.kind() == AuditKind::InstitutionPatronage
-                            && record.subject() == subject
+                            && record
+                                .audit_subject()
+                                .references_institution_character(*institution_id, *member_id)
                     }),
                     "Canonical Mutation: player institution membership requires cultivated support"
                 );
@@ -553,6 +562,15 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             contract.buyer_business_id, contract.seller_business_id,
             "Ownership Exclusivity: contract buyer and seller must differ"
         );
+        if contract.status == ContractStatus::Active
+            && let (Some(buyer), Some(seller)) = (buyer, seller)
+        {
+            debug_assert_ne!(
+                buyer.owner_dynasty_id(),
+                seller.owner_dynasty_id(),
+                "Ownership Exclusivity: contract businesses must belong to different dynasties"
+            );
+        }
         debug_assert!(
             ids.goods.contains(&contract.good_id),
             "Registry Reference Validity: contract good does not exist"
@@ -572,10 +590,9 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
         let attributed_deliveries = contract
             .fulfilled_deliveries_by_dynasty
             .values()
-            .fold(0_u32, |total, deliveries| {
-                total.saturating_add(u32::from(*deliveries))
-            });
-        let fulfilled_deliveries = u32::from(contract.fulfilled_deliveries);
+            .map(|deliveries| u64::from(*deliveries))
+            .sum::<u64>();
+        let fulfilled_deliveries = u64::from(contract.fulfilled_deliveries);
         debug_assert!(
             contract
                 .fulfilled_deliveries_by_dynasty
@@ -592,7 +609,7 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
                 contract.fulfilled_deliveries_by_dynasty.is_empty()
             } else {
                 attributed_deliveries >= fulfilled_deliveries
-                    && attributed_deliveries <= fulfilled_deliveries.saturating_mul(2)
+                    && attributed_deliveries <= fulfilled_deliveries * 2
             },
             "Derived Data Consistency: contract delivery attribution does not match fulfillment"
         );
@@ -885,8 +902,8 @@ fn validate_civic_debts(state: &AppState) {
 }
 
 fn validate_employment(state: &AppState) {
-    let mut workers_by_business: BTreeMap<BusinessId, u32> = BTreeMap::new();
-    let mut workers_by_household: BTreeMap<HouseholdId, u32> = BTreeMap::new();
+    let mut workers_by_business: BTreeMap<BusinessId, u64> = BTreeMap::new();
+    let mut workers_by_household: BTreeMap<HouseholdId, u64> = BTreeMap::new();
     for (employment_id, agreement) in &state.employment {
         debug_assert_eq!(
             *employment_id, agreement.id,
@@ -911,16 +928,12 @@ fn validate_employment(state: &AppState) {
         if agreement.status != EmploymentStatus::Ended {
             workers_by_business
                 .entry(agreement.business_id)
-                .and_modify(|workers| {
-                    *workers = workers.saturating_add(u32::from(agreement.workers));
-                })
-                .or_insert(u32::from(agreement.workers));
+                .and_modify(|workers| *workers += u64::from(agreement.workers))
+                .or_insert(u64::from(agreement.workers));
             workers_by_household
                 .entry(agreement.household_id)
-                .and_modify(|workers| {
-                    *workers = workers.saturating_add(u32::from(agreement.workers));
-                })
-                .or_insert(u32::from(agreement.workers));
+                .and_modify(|workers| *workers += u64::from(agreement.workers))
+                .or_insert(u64::from(agreement.workers));
         }
         if let Some(business) = state.businesses.get(agreement.business_id) {
             debug_assert!(
@@ -936,7 +949,7 @@ fn validate_employment(state: &AppState) {
             .unwrap_or(0);
         let supported_workers = super::supported_worker_capacity(business);
         debug_assert!(
-            workers <= supported_workers,
+            workers <= u64::from(supported_workers),
             "Lifecycle Validity: employment exceeds business operating capacity"
         );
     }
@@ -947,7 +960,7 @@ fn validate_employment(state: &AppState) {
             .expect("validated employment household must exist")
             .members();
         debug_assert!(
-            workers <= u32::from(members),
+            workers <= u64::from(members),
             "Lifecycle Validity: employment exceeds household labor capacity"
         );
     }
@@ -1013,8 +1026,8 @@ fn validate_family_state(state: &AppState) {
             "Record Reference Validity: family council dynasty does not exist"
         );
         debug_assert!(
-            council.unity_basis_points <= 10_000,
-            "Lifecycle Validity: family unity is outside basis-point range"
+            council.unity_basis_points <= 10_000 && council.charter_version < u64::MAX,
+            "Lifecycle Validity: family unity or charter version is invalid"
         );
         let dynasty = state
             .dynasties

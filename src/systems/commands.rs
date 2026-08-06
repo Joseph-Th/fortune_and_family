@@ -835,7 +835,7 @@ fn apply_business_investment(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::BusinessCapitalization,
-        subject: format!("business:{business_id}"),
+        subject: format!("business:{business_id}").into(),
         detail: format!(
             "amount={};rehabilitation_basis_points={rehabilitation}",
             amount.copper()
@@ -931,7 +931,7 @@ fn apply_business_policy(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::BusinessPolicyChange,
-        subject,
+        subject: subject.into(),
         detail: format!(
             "input_days={target_input_days}; output_days={target_output_days}; reserve={}; maintenance={maintenance_basis_points}; quality={quality_target_basis_points}",
             minimum_cash_reserve.copper()
@@ -1335,7 +1335,7 @@ fn apply_public_work(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::PublicWorkStarted,
-        subject,
+        subject: subject.into(),
         detail: format!(
             "district={};kind={kind:?};budget={};contribution={}",
             district_id.value(),
@@ -1533,7 +1533,7 @@ fn apply_governance(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::HouseGovernanceChange,
-        subject,
+        subject: subject.into(),
         detail: format!("governance={governance:?}"),
     });
     super::strategic::push_outbox(
@@ -1681,7 +1681,7 @@ fn apply_heir(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::HeirDesignation,
-        subject,
+        subject: subject.into(),
         detail: format!(
             "prior_heir={};heir={character_id};confirmation={confirmation};legitimacy_cost={HEIR_DESIGNATION_LEGITIMACY_COST};unity_cost={HEIR_DESIGNATION_UNITY_COST}",
             prior_heir_id.map_or_else(|| "none".to_owned(), |id| id.to_string())
@@ -1878,7 +1878,7 @@ fn record_ward_adoption(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::WardAdoption,
-        subject: format!("dynasty:{dynasty_id}:character:{ward_id}"),
+        subject: format!("dynasty:{dynasty_id}:character:{ward_id}").into(),
         detail: format!("focus={focus:?};cost={}", WARD_ADOPTION_COST.copper()),
     });
     let chronicle_id = state.next_ids.chronicle();
@@ -1996,7 +1996,8 @@ fn apply_family_education(
         subject: format!(
             "dynasty:{}:character:{character_id}",
             state.player_dynasty_id
-        ),
+        )
+        .into(),
         detail: format!("focus={focus:?};cost={}", FAMILY_EDUCATION_COST.copper()),
     });
     super::strategic::push_outbox(
@@ -2159,7 +2160,7 @@ fn finish_institution_patronage(
     state.audit_log.push(AuditRecord {
         day,
         kind: AuditKind::InstitutionPatronage,
-        subject,
+        subject: subject.into(),
         detail: format!("contribution={}", INSTITUTION_SUPPORT_COST.copper()),
     });
     let established_day = day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS);
@@ -2286,7 +2287,7 @@ fn apply_office_nomination(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::OfficeNomination,
-        subject,
+        subject: subject.into(),
         detail: format!("campaign_cost={}", campaign_cost.copper()),
     });
     super::strategic::push_outbox(
@@ -2526,7 +2527,7 @@ fn apply_office_power_directive(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::OfficeDirective,
-        subject,
+        subject: subject.into(),
         detail: format!(
             "district={district_id};power={power:?};legitimacy_cost={OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST}"
         ),
@@ -2753,7 +2754,7 @@ fn apply_crisis_response(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::CrisisResponse,
-        subject,
+        subject: subject.into(),
         detail: format!("response={response:?}"),
     });
     Ok(CommandOutcome {
@@ -3059,7 +3060,7 @@ fn commission_information(
     state.audit_log.push(AuditRecord {
         day,
         kind: AuditKind::InformationCommission,
-        subject: format!("dynasty:{}", state.player_dynasty_id),
+        subject: format!("dynasty:{}", state.player_dynasty_id).into(),
         detail: format!("report={id};subject={}", plan.subject),
     });
     super::strategic::push_outbox(
@@ -3512,7 +3513,7 @@ fn leverage_information(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::InformationLeverage,
-        subject: format!("information-report:{report_id}"),
+        subject: format!("information-report:{report_id}").into(),
         detail: plan.quote.description.clone(),
     });
     super::strategic::push_outbox(

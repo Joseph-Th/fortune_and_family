@@ -55,6 +55,8 @@ pub enum StrategicError {
     MissingProperty { property_id: PropertyId },
     #[error("contract parties must be different businesses")]
     SameContractParty,
+    #[error("contract businesses must belong to different dynasties, both belong to {dynasty_id}")]
+    SameContractOwner { dynasty_id: DynastyId },
     #[error("loan parties must be different dynasties")]
     SameLoanParty,
     #[error(
@@ -125,6 +127,22 @@ pub enum StrategicError {
     },
     #[error("business {business_id} finance version is exhausted")]
     BusinessFinanceVersionExhausted { business_id: BusinessId },
+    #[error(
+        "dynasty {dynasty_id} cannot remove administrative load {outgoing}; current load is {current}"
+    )]
+    DynastyAdministrativeLoadUnderflow {
+        dynasty_id: DynastyId,
+        current: u16,
+        outgoing: u16,
+    },
+    #[error(
+        "dynasty {dynasty_id} cannot add administrative load {incoming}; current load {current} exceeds the supported range"
+    )]
+    DynastyAdministrativeLoadOverflow {
+        dynasty_id: DynastyId,
+        current: u16,
+        incoming: u16,
+    },
     #[error(
         "business acquisition cost overflows the supported money range: price {purchase_price}, recapitalization {recapitalization}"
     )]
@@ -657,6 +675,11 @@ fn validate_supply_contract_terms(
             .ok_or(StrategicError::MissingBusiness {
                 business_id: terms.seller_business_id,
             })?;
+    if buyer.owner_dynasty_id() == seller.owner_dynasty_id() {
+        return Err(StrategicError::SameContractOwner {
+            dynasty_id: buyer.owner_dynasty_id(),
+        });
+    }
     for business in [buyer, seller] {
         if matches!(
             business.status(),
@@ -1414,7 +1437,8 @@ struct ValidatedBusinessAcquisition {
     seller_treasury_after: Money,
     business_cash_after: Money,
     business_finance_version_after: u64,
-    administrative_load: u16,
+    seller_administrative_load_after: u16,
+    buyer_administrative_load_after: u16,
 }
 
 /// Acquires a troubled business, installs an eligible manager, and supplies enough working
@@ -1530,12 +1554,20 @@ fn validate_business_acquisition(
         .finance
         .version
         .checked_add(1)
+        .filter(|next| *next < u64::MAX)
         .ok_or(StrategicError::BusinessFinanceVersionExhausted { business_id })?;
     let recipe_id = business.recipe_id();
     let administrative_load = registry
         .get_recipe(recipe_id)
         .expect("business recipe references must be validated")
         .administrative_load();
+    let (seller_administrative_load_after, buyer_administrative_load_after) =
+        validate_acquisition_administrative_load(
+            state,
+            quote.seller_dynasty_id,
+            buyer_dynasty_id,
+            administrative_load,
+        )?;
     Ok(ValidatedBusinessAcquisition {
         quote,
         buyer_treasury,
@@ -1543,8 +1575,42 @@ fn validate_business_acquisition(
         seller_treasury_after,
         business_cash_after,
         business_finance_version_after,
-        administrative_load,
+        seller_administrative_load_after,
+        buyer_administrative_load_after,
     })
+}
+
+fn validate_acquisition_administrative_load(
+    state: &AppState,
+    seller_dynasty_id: DynastyId,
+    buyer_dynasty_id: DynastyId,
+    administrative_load: u16,
+) -> Result<(u16, u16), StrategicError> {
+    let seller_current = state
+        .dynasties
+        .get(&seller_dynasty_id)
+        .expect("business owner dynasty must exist")
+        .administrative_load();
+    let seller_after = seller_current.checked_sub(administrative_load).ok_or(
+        StrategicError::DynastyAdministrativeLoadUnderflow {
+            dynasty_id: seller_dynasty_id,
+            current: seller_current,
+            outgoing: administrative_load,
+        },
+    )?;
+    let buyer_current = state
+        .dynasties
+        .get(&buyer_dynasty_id)
+        .expect("quoted buyer dynasty must exist")
+        .administrative_load();
+    let buyer_after = buyer_current.checked_add(administrative_load).ok_or(
+        StrategicError::DynastyAdministrativeLoadOverflow {
+            dynasty_id: buyer_dynasty_id,
+            current: buyer_current,
+            incoming: administrative_load,
+        },
+    )?;
+    Ok((seller_after, buyer_after))
 }
 
 fn commit_business_acquisition(
@@ -1570,18 +1636,12 @@ fn commit_business_acquisition(
         .get_mut(&quote.seller_dynasty_id)
         .expect("business owner dynasty must exist");
     seller.resources.treasury = validated.seller_treasury_after;
-    seller.resources.administrative_load = seller
-        .resources
-        .administrative_load
-        .saturating_sub(validated.administrative_load);
+    seller.resources.administrative_load = validated.seller_administrative_load_after;
     let buyer = state
         .dynasties
         .get_mut(&buyer_dynasty_id)
         .expect("validated buyer must exist");
-    buyer.resources.administrative_load = buyer
-        .resources
-        .administrative_load
-        .saturating_add(validated.administrative_load);
+    buyer.resources.administrative_load = validated.buyer_administrative_load_after;
 
     let prior_owner = state
         .businesses
@@ -1609,8 +1669,60 @@ fn commit_business_acquisition(
     business.operations.status = BusinessStatus::Active;
     synchronize_business_property_tenancy(state, business_id, buyer_dynasty_id);
     super::synchronize_employment_for_business_status(state, business_id, BusinessStatus::Active);
+    cancel_internalized_contracts(state, business_id, buyer_dynasty_id);
 
     record_business_acquisition(state, buyer_dynasty_id, manager_id, recapitalization, quote);
+}
+
+fn cancel_internalized_contracts(
+    state: &mut AppState,
+    acquired_business_id: BusinessId,
+    buyer_dynasty_id: DynastyId,
+) {
+    let contract_ids: Vec<_> = state
+        .contracts
+        .iter()
+        .filter_map(|(contract_id, contract)| {
+            if contract.status != ContractStatus::Active {
+                return None;
+            }
+            let counterparty_business_id = if contract.buyer_business_id == acquired_business_id {
+                contract.seller_business_id
+            } else if contract.seller_business_id == acquired_business_id {
+                contract.buyer_business_id
+            } else {
+                return None;
+            };
+            state
+                .businesses
+                .get(counterparty_business_id)
+                .is_some_and(|business| business.owner_dynasty_id() == buyer_dynasty_id)
+                .then_some(*contract_id)
+        })
+        .collect();
+
+    for contract_id in &contract_ids {
+        state
+            .contracts
+            .get_mut(contract_id)
+            .expect("selected internalized contract must exist")
+            .status = ContractStatus::Cancelled;
+    }
+    if !contract_ids.is_empty() {
+        let ids = contract_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        push_outbox(
+            state,
+            OutboxKind::Contract,
+            format!("Contracts cancelled after business {acquired_business_id} acquisition"),
+            format!(
+                "Contracts {ids} became internal to dynasty {buyer_dynasty_id} and were cancelled rather than counted as external commercial performance."
+            ),
+        );
+    }
 }
 
 fn synchronize_business_property_tenancy(
@@ -1651,7 +1763,7 @@ fn record_business_acquisition(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::BusinessAcquisition,
-        subject: format!("business:{business_id}"),
+        subject: format!("business:{business_id}").into(),
         detail: format!(
             "buyer={buyer_dynasty_id}; seller={}; price={}; recapitalization={}; manager={manager_id}",
             quote.seller_dynasty_id,
@@ -3481,7 +3593,7 @@ fn distribute_business_dividends(
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::BusinessDividend,
-            subject: "business-portfolio".to_owned(),
+            subject: "business-portfolio".into(),
             detail: format!("dividends={}", total.copper()),
         });
     }
@@ -4363,7 +4475,7 @@ fn record_office_duty_shortfall(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::OfficeDutyShortfall,
-        subject: subject.clone(),
+        subject: subject.clone().into(),
         detail: format!("required={required};paid={paid};shortfall={shortfall}"),
     });
     let forfeited = recent_shortfalls.saturating_add(1) >= OFFICE_DUTY_FORFEITURE_THRESHOLD;
@@ -4459,7 +4571,7 @@ fn forfeit_office_for_unmet_duties(
     state.audit_log.push(AuditRecord {
         day,
         kind: AuditKind::OfficeDutyForfeiture,
-        subject: subject.to_owned(),
+        subject: subject.into(),
         detail: format!("office forfeited after {recent_shortfalls} recent duty shortfalls"),
     });
 }
@@ -4832,6 +4944,7 @@ fn resolve_institution_selections(
         let term_number = institution
             .term_number
             .checked_add(1)
+            .filter(|next| *next < u32::MAX)
             .ok_or(SimulationError::InstitutionTermNumberExhausted { institution_id })?;
         if let Some(winner) = winner {
             planned_office_holders.insert(winner);
@@ -5939,7 +6052,7 @@ fn update_family_councils(state: &mut AppState) -> Result<(), SimulationError> {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::HouseGovernanceChange,
-            subject: format!("dynasty:{dynasty_id}"),
+            subject: format!("dynasty:{dynasty_id}").into(),
             detail: format!(
                 "automatic=true;from={prior:?};governance={governance:?};reason=low_unity"
             ),

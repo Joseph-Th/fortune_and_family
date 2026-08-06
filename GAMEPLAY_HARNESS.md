@@ -96,9 +96,11 @@ The harness uses four deterministic priority models:
 | `steward` | Continuity, worker conditions, relief, administration, reform, and public works. |
 | `entrepreneur` | Business policy, contracts, property, commercial education, market intelligence, credit, and expansion. |
 | `power-broker` | Family capacity, house intelligence, taxation, laws, courts, public works, and governance. |
-| `opportunist` | Leverage, acquisition, counterparty intelligence, legal pressure, crisis exploitation, and replacement labor. |
+| `opportunist` | Leverage, acquisition, high-yield short-term credit, counterparty intelligence, legal pressure, crisis exploitation, and replacement labor. |
 
 Personas are diagnostic policies, not optimal strategies. Their purpose is to expose whether the command surface supports distinct priorities and outcomes.
+
+The opportunist deliberately accepts greater operating and credit exposure than the other personas. Its growth policy spends less on maintenance, and its new lending uses shorter, higher-yield terms. This is a stress strategy rather than a balance recommendation: it gives the harness a credible route into delinquency, litigation, labor pressure, and relationship fallout so safe automated play cannot hide those systems.
 
 ## Decision cycle
 
@@ -271,6 +273,18 @@ The current schema version is listed in `STATUS.md`. Consumers should reject unk
 
 Increment the gameplay report schema when fields or semantics change for automated readers.
 
+## Drift protection
+
+The harness is coupled to the real game at the canonical boundaries rather than reimplementing them: campaigns use `build_new_game`, candidate probes and selected actions use `apply_player_command`, and all elapsed time uses `advance_days`.
+
+Additional tests make stale coverage fail visibly:
+
+- An exhaustive classifier maps every `PlayerCommand` variant back to its harness command family. Adding an actual player command requires updating that match to compile.
+- Every generated candidate is checked against that classifier before probing. Incorrect labels, including supply-versus-sale and borrowing-versus-lending splits, abort the harness.
+- The serialized top-level `AppState` component manifest is compared with an explicit observed or intentionally unobserved list. Adding a new state subsystem requires a harness review. Persistent audit history is observed because cooldowns, office-duty forfeiture, and candidate availability depend on it.
+- Domain snapshots include deterministic structural checksums for businesses, households, markets, routes, contracts, finance, property, labor, relationships, characters, family state, institutions, laws, districts, public works, legal cases, crises, information, AI objectives, notifications, chronicle history, and audit history. Equal aggregate totals cannot conceal a material state transition. Audit-only changes are represented as a typed persistent-history signal rather than being mislabeled as player-facing feedback.
+- Focused tests cover changes that were previously easy to miss, including district sanitation, route disruption, legal hearing progression, and pledged collateral.
+
 ## Integration checklist
 
 A new or changed player command is harness-integrated only when all applicable items are updated:
@@ -296,7 +310,9 @@ The harness can evaluate deterministic state and command behavior. It cannot est
 - Whether incomplete information is presented clearly
 - Whether real-time pacing feels appropriate
 - Whether mechanically distinct options feel emotionally or narratively meaningful
+- Whether intentionally risky stress strategies are legible or attractive to a human player
 - Whether a player recognizes which rival caused a setback or understands that rival's intent
 - How every unchosen branch develops beyond the first decision interval and across its full delayed consequence horizon
+- Whether persistent state and chronicle changes feel like a coherent remembered family legacy
 
 Use human playtesting for those questions.

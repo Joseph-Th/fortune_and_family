@@ -9,12 +9,12 @@ use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
     CharacterCapabilities, CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus,
     ChronicleEntry, ChronicleKind, CrisisKind, EmploymentStatus, FamilyLink, FamilyLinkKind,
-    HouseGovernance, MarketCause, SocialClass,
+    HouseGovernance, MarketCause, OutboxKind, SocialClass,
 };
 use crate::ids::{BusinessId, CharacterId, DynastyId, GoodId};
 use crate::money::{Money, Quantity, affordable_quantity, cost_for};
 use crate::registry::{GoodCategory, RecipeDef, Registry};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 struct BusinessPurchaseLine {
@@ -111,7 +111,12 @@ pub fn advance_days(
     if days == 0 {
         return Err(SimulationError::InvalidDayCount { days });
     }
-    if state.clock.day().checked_add(i64::from(days)).is_none() {
+    if state
+        .clock
+        .day()
+        .checked_add(i64::from(days))
+        .is_none_or(|final_day| final_day == i64::MAX)
+    {
         return Err(SimulationError::DayRangeExhausted {
             current_day: state.clock.day(),
             requested_days: days,
@@ -184,7 +189,7 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::DayAdvanced,
-        subject: "simulation".to_owned(),
+        subject: "simulation".into(),
         detail: format!("day={}", state.clock.day()),
     });
     Ok(())
@@ -338,7 +343,7 @@ fn apply_business_purchases(
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::MarketPurchase,
-            subject: "businesses".to_owned(),
+            subject: "businesses".into(),
             detail: format!(
                 "quantity={}; cost={}",
                 total_quantity.milliunits(),
@@ -600,7 +605,7 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), Si
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::Production,
-            subject: "businesses".to_owned(),
+            subject: "businesses".into(),
             detail: format!(
                 "output={}; operating_cost={}",
                 total_output.milliunits(),
@@ -766,7 +771,7 @@ fn apply_business_sales(
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::MarketSale,
-            subject: "businesses".to_owned(),
+            subject: "businesses".into(),
             detail: format!(
                 "quantity={}; revenue={}",
                 total_quantity.milliunits(),
@@ -985,7 +990,7 @@ fn apply_household_consumption(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::HouseholdConsumption,
-        subject: "households".to_owned(),
+        subject: "households".into(),
         detail: format!(
             "quantity={}; spending={}",
             total_quantity.milliunits(),
@@ -1142,7 +1147,7 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::Maintenance,
-            subject: "businesses".to_owned(),
+            subject: "businesses".into(),
             detail: format!("cost={}", total_cost.copper()),
         });
     }
@@ -1461,7 +1466,7 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::LaborSettlement,
-        subject: "external-economy".to_owned(),
+        subject: "external-economy".into(),
         detail: format!("weekly_income={}", total.copper()),
     });
     Ok(())
@@ -1493,15 +1498,109 @@ fn update_character_health(state: &mut AppState) {
         .max()
         .unwrap_or(0);
     let day = state.clock.day();
+    let head_ids: BTreeSet<_> = state
+        .dynasties
+        .values()
+        .map(crate::core::Dynasty::head_id)
+        .collect();
+    let heir_ids: BTreeSet<_> = state
+        .dynasties
+        .values()
+        .filter_map(crate::core::Dynasty::heir_id)
+        .collect();
+    let mut newly_incapacitated = Vec::new();
     for character in state.characters.iter_mut() {
         if character.status() != CharacterStatus::Active {
             continue;
         }
         let age_years = day.saturating_sub(character.birth_day()) / 360;
-        character.runtime.health_basis_points = resolve_annual_health(
+        let resolved_health = resolve_annual_health(
             character.runtime.health_basis_points,
             age_years,
             epidemic_severity,
+        );
+        character.runtime.health_basis_points =
+            if resolved_health == 0 && heir_ids.contains(&character.id()) {
+                1
+            } else {
+                resolved_health
+            };
+        if character.runtime.health_basis_points == 0 && !head_ids.contains(&character.id()) {
+            character.runtime.status = CharacterStatus::Incapacitated;
+            newly_incapacitated.push((
+                character.id(),
+                character.dynasty_id(),
+                character.name().to_owned(),
+            ));
+        }
+    }
+    for (character_id, dynasty_id, character_name) in newly_incapacitated {
+        synchronize_character_incapacitation(state, character_id, dynasty_id, &character_name);
+    }
+}
+
+fn synchronize_character_incapacitation(
+    state: &mut AppState,
+    character_id: CharacterId,
+    dynasty_id: DynastyId,
+    character_name: &str,
+) {
+    for link in state.family_links.values_mut().filter(|link| {
+        link.active
+            && link.kind == FamilyLinkKind::Ward
+            && (link.first_character_id == character_id || link.second_character_id == character_id)
+    }) {
+        link.active = false;
+    }
+    state
+        .family_councils
+        .get_mut(&dynasty_id)
+        .expect("character dynasty must have a family council")
+        .members
+        .remove(&character_id);
+    for institution in state.institutions.values_mut() {
+        institution.members.remove(&character_id);
+        if institution.office_holder_id == Some(character_id) {
+            institution.office_holder_id = None;
+            institution.next_selection_day = institution
+                .next_selection_day
+                .min(state.clock.day().saturating_add(30));
+        }
+    }
+    let replacement_manager_id = state
+        .dynasties
+        .get(&dynasty_id)
+        .expect("character dynasty must exist")
+        .head_id();
+    let managed_business_ids: Vec<_> = state
+        .businesses
+        .ids_for_owner(dynasty_id)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|business_id| {
+            state
+                .businesses
+                .get(*business_id)
+                .is_some_and(|business| business.manager_id() == character_id)
+        })
+        .collect();
+    for business_id in managed_business_ids {
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owner business index must resolve")
+            .operations
+            .manager_id = replacement_manager_id;
+    }
+    if dynasty_id == state.player_dynasty_id {
+        super::strategic::push_outbox(
+            state,
+            OutboxKind::Family,
+            format!("{character_name} became incapacitated"),
+            format!(
+                "Character {character_id} left active family, institutional, and business duties because their health reached zero."
+            ),
         );
     }
 }
@@ -1624,6 +1723,7 @@ fn decide_successions(state: &mut AppState) -> Result<Vec<SuccessionLine>, Simul
         }
         let next_generation = generation
             .checked_add(1)
+            .filter(|next| *next < u16::MAX)
             .ok_or(SimulationError::DynastyGenerationExhausted { dynasty_id })?;
         let current_charter_version = state
             .family_councils

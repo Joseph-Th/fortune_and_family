@@ -1,7 +1,8 @@
 //! Concrete runtime records; sibling systems own validation and business logic.
 
 use crate::ids::{
-    BusinessId, CharacterId, ChronicleEntryId, DistrictId, DynastyId, GoodId, RecipeId,
+    BusinessId, CharacterId, ChronicleEntryId, DistrictId, DynastyId, GoodId, InstitutionId,
+    RecipeId,
 };
 use crate::money::{Money, Quantity};
 use serde::{Deserialize, Serialize};
@@ -597,11 +598,62 @@ pub enum AuditKind {
     InformationLeverage,
 }
 
+/// Serialized audit subject text wrapped as a domain type so runtime identity is not represented
+/// by an unclassified `String` field. The transparent representation preserves save compatibility.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AuditSubject(String);
+
+impl AuditSubject {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn references_dynasty(&self, dynasty_id: DynastyId) -> bool {
+        self.0.split(';').any(|segment| {
+            segment
+                .strip_prefix("dynasty:")
+                .and_then(|value| value.parse::<u32>().ok())
+                == Some(dynasty_id.value())
+        })
+    }
+
+    #[must_use]
+    pub fn references_institution_character(
+        &self,
+        institution_id: InstitutionId,
+        character_id: CharacterId,
+    ) -> bool {
+        let mut segments = self.0.split(':');
+        segments.next() == Some("institution")
+            && segments.next().and_then(|value| value.parse::<u32>().ok())
+                == Some(institution_id.value())
+            && segments.next() == Some("character")
+            && segments.next().and_then(|value| value.parse::<u32>().ok())
+                == Some(character_id.value())
+            && segments.next().is_none()
+    }
+}
+
+impl From<String> for AuditSubject {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for AuditSubject {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRecord {
     pub(crate) day: i64,
     pub(crate) kind: AuditKind,
-    pub(crate) subject: String,
+    pub(crate) subject: AuditSubject,
     pub(crate) detail: String,
 }
 
@@ -618,11 +670,60 @@ impl AuditRecord {
 
     #[must_use]
     pub fn subject(&self) -> &str {
+        self.subject.as_str()
+    }
+
+    #[must_use]
+    pub const fn audit_subject(&self) -> &AuditSubject {
         &self.subject
     }
 
     #[must_use]
     pub fn detail(&self) -> &str {
         &self.detail
+    }
+}
+
+#[cfg(test)]
+mod audit_subject_tests {
+    use super::*;
+
+    #[test]
+    fn transparent_serialization_preserves_the_existing_save_shape() {
+        let subject = AuditSubject::from("institution:3;dynasty:10");
+
+        let value = serde_json::to_value(&subject).expect("audit subject must serialize");
+        let restored: AuditSubject =
+            serde_json::from_value(value.clone()).expect("audit subject must deserialize");
+
+        assert_eq!(
+            value,
+            serde_json::Value::String(subject.as_str().to_owned())
+        );
+        assert_eq!(restored, subject);
+    }
+
+    #[test]
+    fn dynasty_matching_uses_exact_typed_segments() {
+        let subject = AuditSubject::from("institution:3;dynasty:10");
+
+        assert!(subject.references_dynasty(DynastyId::new(10)));
+        assert!(!subject.references_dynasty(DynastyId::new(1)));
+    }
+
+    #[test]
+    fn institution_character_matching_requires_the_complete_typed_shape() {
+        let subject = AuditSubject::from("institution:3:character:10");
+
+        assert!(
+            subject.references_institution_character(InstitutionId::new(3), CharacterId::new(10))
+        );
+        assert!(
+            !subject.references_institution_character(InstitutionId::new(3), CharacterId::new(1))
+        );
+        assert!(
+            !AuditSubject::from("institution:3:character:10:extra")
+                .references_institution_character(InstitutionId::new(3), CharacterId::new(10))
+        );
     }
 }

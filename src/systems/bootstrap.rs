@@ -292,7 +292,7 @@ fn record_campaign_foundation(
     state.audit_log.push(AuditRecord {
         day: 0,
         kind: AuditKind::CampaignCreated,
-        subject: format!("dynasty:{player_id}"),
+        subject: format!("dynasty:{player_id}").into(),
         detail: format!("seed={seed}; background={background:?}"),
     });
 }

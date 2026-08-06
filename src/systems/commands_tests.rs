@@ -123,7 +123,7 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
             state.audit_log.push(AuditRecord {
                 day: support_day,
                 kind: AuditKind::InstitutionPatronage,
-                subject: institution_support_subject(institution_id, *character_id),
+                subject: institution_support_subject(institution_id, *character_id).into(),
                 detail: "test support".to_owned(),
             });
         }
@@ -2943,7 +2943,7 @@ mod politics {
     }
 
     #[test]
-    fn exhausted_family_charter_rejects_governance_change_atomically() {
+    fn reserved_family_charter_version_rejects_governance_change_atomically() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let dynasty_id = state.player_dynasty_id;
@@ -2964,7 +2964,7 @@ mod politics {
             .family_councils
             .get_mut(&dynasty_id)
             .expect("player family council must exist")
-            .charter_version = u64::MAX;
+            .charter_version = u64::MAX - 1;
         let before = state.clone();
 
         let result = apply_player_command(

@@ -16,9 +16,10 @@ pub use extended::{
 
 pub(crate) use extended::MIN_PARENT_CHILD_AGE_GAP_DAYS;
 pub use records::{
-    AuditKind, AuditRecord, Business, BusinessPolicy, BusinessStatus, CampaignPhase, Character,
-    CharacterRole, CharacterStatus, ChronicleEntry, ChronicleKind, Dynasty, Household, MarketCause,
-    MarketQuote, MarketState, ParseStartingBackgroundError, SocialClass, StartingBackground,
+    AuditKind, AuditRecord, AuditSubject, Business, BusinessPolicy, BusinessStatus, CampaignPhase,
+    Character, CharacterRole, CharacterStatus, ChronicleEntry, ChronicleKind, Dynasty, Household,
+    MarketCause, MarketQuote, MarketState, ParseStartingBackgroundError, SocialClass,
+    StartingBackground,
 };
 pub(crate) use records::{
     BusinessFinance, BusinessIdentity, BusinessOperations, CharacterCapabilities,

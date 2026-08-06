@@ -4,6 +4,7 @@ use super::*;
 use crate::core::{
     BusinessStatus, ContractStatus, EnactedLaw, LawKind, NewGameConfig, StartingBackground,
 };
+use crate::ids::{FamilyLinkId, InstitutionId};
 use crate::systems::{build_new_game, validate_invariants};
 use crate::test_support::{
     assert_state_unchanged, make_test_campaign, rivergate_registry_for_test,
@@ -35,6 +36,32 @@ mod preflight {
             &before,
             &state,
             "day-range exhaustion must leave the entire campaign unchanged",
+        );
+    }
+
+    #[test]
+    fn reserved_final_day_fails_before_day_mutation() {
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("campaign must serialize");
+        value["clock"]["day"] = serde_json::Value::from(i64::MAX - 1);
+        let mut state: AppState =
+            serde_json::from_value(value).expect("modified campaign must deserialize");
+        let before = state.clone();
+
+        let result = advance_days(registry, &mut state, 1);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::DayRangeExhausted {
+                current_day: i64::MAX - 1,
+                requested_days: 1,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "the exhausted day sentinel must remain unreachable",
         );
     }
 
@@ -1593,7 +1620,7 @@ mod health_and_succession {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::InstitutionPatronage,
-            subject: format!("institution:{institution_id}:character:{outgoing_head_id}"),
+            subject: format!("institution:{institution_id}:character:{outgoing_head_id}").into(),
             detail: "test cultivated support".to_owned(),
         });
         state
@@ -1669,7 +1696,7 @@ mod health_and_succession {
     }
 
     #[test]
-    fn exhausted_generation_rejects_forced_succession() {
+    fn reserved_generation_rejects_forced_succession() {
         let mut state = make_test_campaign();
         let dynasty_id = state.player_dynasty_id;
         let head_id = state
@@ -1688,7 +1715,7 @@ mod health_and_succession {
             .get_mut(&dynasty_id)
             .expect("player dynasty must exist")
             .runtime
-            .generation = u16::MAX;
+            .generation = u16::MAX - 1;
         let before = state.clone();
 
         let result = decide_successions(&mut state);
@@ -1728,6 +1755,245 @@ mod health_and_succession {
             7_800,
             "an active epidemic should compound age-related health loss"
         );
+    }
+
+    struct IncapacitationFixture {
+        state: AppState,
+        dynasty_id: DynastyId,
+        head_id: CharacterId,
+        character_id: CharacterId,
+        ward_link_id: FamilyLinkId,
+        kinship_link_id: FamilyLinkId,
+        institution_id: InstitutionId,
+        business_id: BusinessId,
+    }
+
+    fn make_incapacitation_fixture() -> IncapacitationFixture {
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let head_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let character_id = state.next_ids.character();
+        state.characters.insert(Character {
+            identity: CharacterIdentity {
+                id: character_id,
+                dynasty_id,
+                name: "Ailing Steward".to_owned(),
+                birth_day: state.clock.day().saturating_sub(30 * 360),
+            },
+            capabilities: CharacterCapabilities {
+                administration: 70,
+                commerce: 60,
+                social: 50,
+                craft: 40,
+            },
+            runtime: CharacterRuntime {
+                status: CharacterStatus::Active,
+                health_basis_points: 1,
+                loyalty_basis_points: 8_000,
+                role: CharacterRole::BusinessManager,
+            },
+        });
+        state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("player dynasty must have a family council")
+            .members
+            .insert(character_id);
+        let (ward_link_id, kinship_link_id) =
+            insert_incapacitation_family_links(&mut state, head_id, character_id);
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        let institution = state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("institution must exist");
+        institution.members.insert(character_id);
+        institution.office_holder_id = Some(character_id);
+        let business_id = state
+            .businesses
+            .ids_for_owner(dynasty_id)
+            .and_then(|businesses| businesses.iter().next())
+            .copied()
+            .expect("player dynasty must own a business");
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("player business must exist")
+            .operations
+            .manager_id = character_id;
+        insert_test_epidemic(&mut state);
+        IncapacitationFixture {
+            state,
+            dynasty_id,
+            head_id,
+            character_id,
+            ward_link_id,
+            kinship_link_id,
+            institution_id,
+            business_id,
+        }
+    }
+
+    fn insert_incapacitation_family_links(
+        state: &mut AppState,
+        head_id: CharacterId,
+        character_id: CharacterId,
+    ) -> (FamilyLinkId, FamilyLinkId) {
+        let ward_link_id = state.next_ids.family_link();
+        state.family_links.insert(
+            ward_link_id,
+            FamilyLink {
+                id: ward_link_id,
+                first_character_id: head_id,
+                second_character_id: character_id,
+                kind: FamilyLinkKind::Ward,
+                active: true,
+                property_claim_basis_points: 1_000,
+            },
+        );
+        let kinship_link_id = state.next_ids.family_link();
+        state.family_links.insert(
+            kinship_link_id,
+            FamilyLink {
+                id: kinship_link_id,
+                first_character_id: head_id,
+                second_character_id: character_id,
+                kind: FamilyLinkKind::Sibling,
+                active: true,
+                property_claim_basis_points: 500,
+            },
+        );
+        (ward_link_id, kinship_link_id)
+    }
+
+    fn insert_test_epidemic(state: &mut AppState) {
+        let crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: CrisisKind::Epidemic,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 10_000,
+                status: crate::core::CrisisStatus::Escalated,
+                cause: "test epidemic".to_owned(),
+            },
+        );
+    }
+
+    #[test]
+    fn zero_health_incapacitation_synchronizes_dependent_records() {
+        let registry = rivergate_registry_for_test();
+        let IncapacitationFixture {
+            mut state,
+            dynasty_id,
+            head_id,
+            character_id,
+            ward_link_id,
+            kinship_link_id,
+            institution_id,
+            business_id,
+        } = make_incapacitation_fixture();
+
+        update_character_health(&mut state);
+
+        let character = state
+            .characters
+            .get(character_id)
+            .expect("test character must remain recorded");
+        assert_eq!(character.status(), CharacterStatus::Incapacitated);
+        assert_eq!(character.runtime.health_basis_points, 0);
+        assert!(
+            !state
+                .family_councils
+                .get(&dynasty_id)
+                .expect("family council must exist")
+                .members
+                .contains(&character_id)
+        );
+        assert!(
+            !state
+                .family_links
+                .get(&ward_link_id)
+                .expect("ward link must remain recorded")
+                .active
+        );
+        assert!(
+            state
+                .family_links
+                .get(&kinship_link_id)
+                .expect("kinship link must remain recorded")
+                .active,
+            "incapacitation must not erase historical kinship"
+        );
+        let institution = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist");
+        assert!(!institution.members.contains(&character_id));
+        assert_eq!(institution.office_holder_id, None);
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("player business must exist")
+                .manager_id(),
+            head_id
+        );
+        assert!(state.outbox.iter().any(|message| {
+            message.kind() == OutboxKind::Family
+                && message.body().contains(&character_id.to_string())
+                && message.body().contains("health reached zero")
+        }));
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn designated_heir_retains_minimum_health_until_succession_can_replace_them() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let heir_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        state
+            .characters
+            .get_mut(heir_id)
+            .expect("player heir must exist")
+            .runtime
+            .health_basis_points = 1;
+        let crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: CrisisKind::Epidemic,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 10_000,
+                status: crate::core::CrisisStatus::Escalated,
+                cause: "test epidemic".to_owned(),
+            },
+        );
+
+        update_character_health(&mut state);
+
+        let heir = state
+            .characters
+            .get(heir_id)
+            .expect("player heir must remain recorded");
+        assert_eq!(heir.status(), CharacterStatus::Active);
+        assert_eq!(heir.runtime.health_basis_points, 1);
+        validate_invariants(registry, &state);
     }
 
     #[test]
