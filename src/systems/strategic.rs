@@ -18,7 +18,7 @@ use crate::ids::{
     BusinessId, CharacterId, CivicDebtId, DistrictId, DynastyId, EmploymentId, GoodId, HouseholdId,
     InstitutionId, PropertyId,
 };
-use crate::money::{Money, Quantity, checked_cost_for, cost_for};
+use crate::money::{Money, Quantity, checked_cost_for, cost_for, rounded_cost_copper_wide};
 use crate::registry::{InstitutionKind, Registry};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -130,6 +130,10 @@ pub enum StrategicError {
         purchase_price: Money,
         recapitalization: Money,
     },
+    #[error(
+        "business {business_id} valuation exceeds the supported money range after applying the acquisition discount"
+    )]
+    BusinessValuationOverflow { business_id: BusinessId },
     #[error("loan interest {interest_basis_points} is outside the 0..=10000 basis-point range")]
     InterestOutOfRange { interest_basis_points: u16 },
     #[error("property {property_id} is not owned by borrower dynasty {borrower_dynasty_id}")]
@@ -1276,7 +1280,8 @@ pub fn sell_owned_property(
 /// # Errors
 ///
 /// Returns an error when the business or buyer is missing, the buyer already owns the business,
-/// or the business is still active and therefore not available for acquisition.
+/// the business is still active and therefore not available for acquisition, or the discounted
+/// valuation cannot fit the supported money range.
 ///
 /// # Panics
 ///
@@ -1315,42 +1320,11 @@ pub fn quote_business_acquisition(
             });
         }
     };
+    let purchase_price =
+        resolve_business_purchase_price(registry, state, business, discount_basis_points)?;
     let recipe = registry
         .get_recipe(business.recipe_id())
         .expect("business recipe references must be validated");
-    let inventory_value =
-        business
-            .inventory()
-            .iter()
-            .fold(Money::ZERO, |total, (good_id, quantity)| {
-                let unit_price = state
-                    .market
-                    .quotes
-                    .get(good_id)
-                    .expect("business inventory good must have a market quote")
-                    .price;
-                total.saturating_add(cost_for(*quantity, unit_price))
-            });
-    let capacity = i64::from(business.operations.capacity_batches_per_day);
-    let equipment_scale = capacity.saturating_mul(60).saturating_mul(i64::from(
-        business.operations.condition_basis_points.max(1_000),
-    ));
-    let equipment_value = recipe
-        .daily_operating_cost()
-        .saturating_mul_ratio(equipment_scale, 10_000);
-    let goodwill_scale = capacity
-        .saturating_mul(30)
-        .saturating_mul(i64::from(business.operations.quality_basis_points));
-    let goodwill_value = recipe
-        .daily_operating_cost()
-        .saturating_mul_ratio(goodwill_scale, 10_000);
-    let gross_value = business
-        .cash()
-        .saturating_add(inventory_value)
-        .saturating_add(equipment_value)
-        .saturating_add(goodwill_value);
-    let discounted_value = gross_value.saturating_mul_ratio(discount_basis_points, 10_000);
-    let purchase_price = Money::from_copper(discounted_value.copper().max(500));
     let operating_floor = recipe.daily_operating_cost().saturating_mul(2);
     let minimum_recapitalization = Money::from_copper(
         operating_floor
@@ -1364,6 +1338,70 @@ pub fn quote_business_acquisition(
         purchase_price,
         minimum_recapitalization,
     })
+}
+
+fn resolve_business_purchase_price(
+    registry: &Registry,
+    state: &AppState,
+    business: &crate::core::Business,
+    discount_basis_points: i64,
+) -> Result<Money, StrategicError> {
+    let business_id = business.id();
+    let overflow = || StrategicError::BusinessValuationOverflow { business_id };
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("business recipe references must be validated");
+    let mut gross_value = i128::from(business.cash().copper());
+
+    for (good_id, quantity) in business.inventory() {
+        let unit_price = state
+            .market
+            .quotes
+            .get(good_id)
+            .expect("business inventory good must have a market quote")
+            .price;
+        let inventory_value = rounded_cost_copper_wide(*quantity, unit_price);
+        gross_value = gross_value
+            .checked_add(inventory_value)
+            .ok_or_else(&overflow)?;
+    }
+
+    let capacity = i128::from(business.operations.capacity_batches_per_day);
+    let equipment_scale = capacity
+        .checked_mul(60)
+        .and_then(|value| {
+            value.checked_mul(i128::from(
+                business.operations.condition_basis_points.max(1_000),
+            ))
+        })
+        .ok_or_else(&overflow)?;
+    let operating_cost = i128::from(recipe.daily_operating_cost().copper());
+    let equipment_value = operating_cost
+        .checked_mul(equipment_scale)
+        .ok_or_else(&overflow)?
+        / 10_000;
+    gross_value = gross_value
+        .checked_add(equipment_value)
+        .ok_or_else(&overflow)?;
+
+    let goodwill_scale = capacity
+        .checked_mul(30)
+        .and_then(|value| value.checked_mul(i128::from(business.operations.quality_basis_points)))
+        .ok_or_else(&overflow)?;
+    let goodwill_value = operating_cost
+        .checked_mul(goodwill_scale)
+        .ok_or_else(&overflow)?
+        / 10_000;
+    gross_value = gross_value
+        .checked_add(goodwill_value)
+        .ok_or_else(&overflow)?;
+
+    let discounted_value = gross_value
+        .checked_mul(i128::from(discount_basis_points))
+        .ok_or_else(&overflow)?
+        / 10_000;
+    let purchase_price = i64::try_from(discounted_value.max(500)).map_err(|_| overflow())?;
+    Ok(Money::from_copper(purchase_price))
 }
 
 #[derive(Clone, Copy, Debug)]

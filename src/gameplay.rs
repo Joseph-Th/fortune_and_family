@@ -6605,6 +6605,9 @@ const fn strategic_error_category(error: &StrategicError) -> &'static str {
             "strategic: business finance version exhausted"
         }
         StrategicError::AcquisitionCostOverflow { .. } => "strategic: acquisition cost overflow",
+        StrategicError::BusinessValuationOverflow { .. } => {
+            "strategic: business valuation overflow"
+        }
         StrategicError::InterestOutOfRange { .. } => "strategic: interest out of range",
         StrategicError::CollateralNotOwned { .. } => "strategic: collateral not owned",
         StrategicError::PropertyAlreadyPledged { .. } => "strategic: property already pledged",

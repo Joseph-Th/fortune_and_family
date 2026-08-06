@@ -253,7 +253,7 @@ impl fmt::Display for Quantity {
 
 #[must_use]
 pub fn cost_for(quantity: Quantity, unit_price: Money) -> Money {
-    Money::from_copper(saturating_i128_to_i64(rounded_cost_copper(
+    Money::from_copper(saturating_i128_to_i64(rounded_cost_copper_wide(
         quantity, unit_price,
     )))
 }
@@ -263,10 +263,10 @@ pub fn cost_for(quantity: Quantity, unit_price: Money) -> Money {
 /// Positive fractional copper is rounded upward, matching [`cost_for`].
 #[must_use]
 pub fn checked_cost_for(quantity: Quantity, unit_price: Money) -> Option<Money> {
-    checked_i128_to_i64(rounded_cost_copper(quantity, unit_price)).map(Money::from_copper)
+    checked_i128_to_i64(rounded_cost_copper_wide(quantity, unit_price)).map(Money::from_copper)
 }
 
-fn rounded_cost_copper(quantity: Quantity, unit_price: Money) -> i128 {
+pub(crate) fn rounded_cost_copper_wide(quantity: Quantity, unit_price: Money) -> i128 {
     let product = i128::from(quantity.milliunits()) * i128::from(unit_price.copper());
     let whole_copper = product / 1_000;
     let positive_remainder = product > 0 && product % 1_000 != 0;

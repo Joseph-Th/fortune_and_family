@@ -194,14 +194,30 @@ mod arithmetic_boundaries {
             .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
             .expect("campaign must contain a non-player business")
             .id();
-        let business = state
-            .businesses
-            .get_mut(business_id)
-            .expect("selected business must exist");
-        business.operations.status = BusinessStatus::Distressed;
-        business.finance.cash = Money::from_copper(i64::MAX);
+        let (recipe_id, capacity) = {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.operations.condition_basis_points = 0;
+            business.operations.quality_basis_points = 0;
+            business.finance.cash = Money::from_copper(i64::MAX);
+            business.inventory.clear();
+            (
+                business.recipe_id(),
+                business.operations.capacity_batches_per_day,
+            )
+        };
+        let operating_cost = registry
+            .get_recipe(recipe_id)
+            .expect("business recipe must exist")
+            .daily_operating_cost()
+            .copper();
+        let equipment_value =
+            i128::from(operating_cost) * i128::from(capacity) * 60 * 1_000 / 10_000;
         let expected = Money::from_copper(
-            i64::try_from(i128::from(i64::MAX) * 7_000 / 10_000)
+            i64::try_from((i128::from(i64::MAX) + equipment_value) * 7_000 / 10_000)
                 .expect("discounted maximum business value must fit money"),
         );
 
@@ -210,6 +226,101 @@ mod arithmetic_boundaries {
                 .expect("distressed business must be acquirable");
 
         assert_eq!(quote.purchase_price, expected);
+    }
+
+    #[test]
+    fn acquisition_discount_uses_a_wide_aggregate_before_discounting() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let good_id = registry
+            .get_good_id("grain")
+            .expect("Rivergate must define grain");
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let (recipe_id, capacity) = {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Closed;
+            business.operations.condition_basis_points = 0;
+            business.operations.quality_basis_points = 0;
+            business.finance.cash = Money::from_copper(i64::MAX);
+            business.inventory.clear();
+            business.inventory.insert(good_id, Quantity::ONE);
+            (
+                business.recipe_id(),
+                business.operations.capacity_batches_per_day,
+            )
+        };
+        state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("grain quote must exist")
+            .price = Money::from_copper(i64::MAX);
+        let operating_cost = registry
+            .get_recipe(recipe_id)
+            .expect("business recipe must exist")
+            .daily_operating_cost()
+            .copper();
+        let equipment_value =
+            i128::from(operating_cost) * i128::from(capacity) * 60 * 1_000 / 10_000;
+        let expected_copper = (i128::from(i64::MAX) * 2 + equipment_value) * 2_500 / 10_000;
+        let expected = Money::from_copper(
+            i64::try_from(expected_copper).expect("discounted wide valuation must fit money"),
+        );
+
+        let quote =
+            quote_business_acquisition(registry, &state, state.player_dynasty_id, business_id)
+                .expect("closed business valuation must remain representable after discounting");
+
+        assert_eq!(quote.purchase_price, expected);
+    }
+
+    #[test]
+    fn acquisition_quote_rejects_an_unrepresentable_discounted_valuation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let good_id = registry
+            .get_good_id("grain")
+            .expect("Rivergate must define grain");
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.operations.condition_basis_points = 0;
+            business.operations.quality_basis_points = 0;
+            business.finance.cash = Money::from_copper(i64::MAX);
+            business.inventory.clear();
+            business.inventory.insert(good_id, Quantity::ONE);
+        }
+        state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("grain quote must exist")
+            .price = Money::from_copper(i64::MAX);
+
+        let result =
+            quote_business_acquisition(registry, &state, state.player_dynasty_id, business_id);
+
+        assert_eq!(
+            result,
+            Err(StrategicError::BusinessValuationOverflow { business_id })
+        );
     }
 
     #[test]
