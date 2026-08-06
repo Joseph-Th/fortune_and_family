@@ -1937,6 +1937,77 @@ mod politics {
     }
 
     #[test]
+    fn withdrawn_institution_support_can_be_rebuilt_after_the_cooldown() {
+        let registry = rivergate_registry_for_test();
+        let (mut state, player_id, character_id, institution_id, _, _) = make_patronage_fixture();
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("initial patronage must succeed");
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::WithdrawFromInstitution {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("supported member must be able to withdraw");
+        for _ in 0..INSTITUTION_SUPPORT_INTERVAL_DAYS {
+            state.clock.advance_one_day();
+        }
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(10_000);
+        let subject = institution_support_subject(institution_id, character_id);
+        let patronage_records_before = state
+            .audit_log
+            .iter()
+            .filter(|record| {
+                record.kind() == AuditKind::InstitutionPatronage && record.subject() == subject
+            })
+            .count();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("withdrawn support must be rebuildable after the cooldown");
+
+        assert!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .members
+                .contains(&character_id)
+        );
+        assert_eq!(
+            state
+                .audit_log
+                .iter()
+                .filter(|record| {
+                    record.kind() == AuditKind::InstitutionPatronage && record.subject() == subject
+                })
+                .count(),
+            patronage_records_before + 1
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn nonmember_cannot_withdraw_from_an_institution() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -2230,11 +2301,17 @@ mod politics {
                 .get(&institution_id)
                 .expect("institution must exist")
                 .next_selection_day
-                <= 60,
+                <= OFFICE_NOMINATION_RESOLUTION_DAYS,
             "nomination must schedule a timely contest"
         );
 
-        advance_days(registry, &mut state, 60).expect("campaign must reach the selection");
+        advance_days(
+            registry,
+            &mut state,
+            u32::try_from(OFFICE_NOMINATION_RESOLUTION_DAYS)
+                .expect("office nomination resolution must fit u32"),
+        )
+        .expect("campaign must reach the selection");
 
         assert_eq!(
             state
@@ -2303,7 +2380,7 @@ mod politics {
                 .get(&institution_id)
                 .expect("institution must exist")
                 .next_selection_day,
-            current_day.saturating_add(60),
+            current_day.saturating_add(OFFICE_NOMINATION_RESOLUTION_DAYS),
             "nomination should still schedule a timely contest"
         );
         assert_eq!(
@@ -2833,6 +2910,50 @@ mod politics {
     }
 
     #[test]
+    fn exhausted_family_charter_rejects_governance_change_atomically() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let current = state
+            .family_councils
+            .get(&dynasty_id)
+            .expect("player family council must exist")
+            .governance;
+        let governance = [
+            HouseGovernance::Primogeniture,
+            HouseGovernance::FamilyPartnership,
+            HouseGovernance::BranchFederation,
+        ]
+        .into_iter()
+        .find(|governance| *governance != current)
+        .expect("fixture must expose an alternative governance");
+        state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("player family council must exist")
+            .charter_version = u64::MAX;
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetHouseGovernance { governance },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Simulation(
+                crate::systems::SimulationError::FamilyCharterVersionExhausted { dynasty_id }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "charter exhaustion must not partially amend governance or family unity",
+        );
+    }
+
+    #[test]
     fn governance_cannot_be_rewritten_twice_within_five_years() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -2984,6 +3105,108 @@ mod politics {
             entry.kind() == ChronicleKind::SuccessionPrepared
                 && entry.summary().contains(&candidate_id.to_string())
         }));
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn default_heir_can_be_formally_confirmed_once() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let heir_id = state
+            .dynasties
+            .get(&player_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points = 1_000;
+        let unity_before = state
+            .family_councils
+            .get(&player_id)
+            .expect("player family council must exist")
+            .unity_basis_points;
+        let charter_before = state
+            .family_councils
+            .get(&player_id)
+            .expect("player family council must exist")
+            .charter_version;
+
+        let outcome = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::DesignateHeir {
+                character_id: heir_id,
+            },
+        )
+        .expect("the default heir must be formally confirmable before any charter designation");
+
+        assert!(outcome.summary.contains("confirmed"));
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .and_then(crate::core::Dynasty::heir_id),
+            Some(heir_id)
+        );
+        assert_eq!(
+            state
+                .characters
+                .get(heir_id)
+                .expect("heir must exist")
+                .role(),
+            CharacterRole::Heir
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .resources
+                .legitimacy_basis_points,
+            1_000 - HEIR_DESIGNATION_LEGITIMACY_COST
+        );
+        let council = state
+            .family_councils
+            .get(&player_id)
+            .expect("player family council must exist");
+        assert_eq!(
+            council.unity_basis_points,
+            unity_before.saturating_sub(HEIR_DESIGNATION_UNITY_COST)
+        );
+        assert_eq!(council.charter_version, charter_before.saturating_add(1));
+        assert!(state.audit_log.iter().any(|record| {
+            record.kind() == AuditKind::HeirDesignation
+                && record.detail().contains("confirmation=true")
+        }));
+        assert!(state.chronicle.iter().any(|entry| {
+            entry.kind() == ChronicleKind::SuccessionPrepared
+                && entry.summary().contains("formally confirmed")
+        }));
+        let before_repeat = state.clone();
+
+        let repeat = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::DesignateHeir {
+                character_id: heir_id,
+            },
+        );
+
+        assert_eq!(
+            repeat,
+            Err(CommandError::UnchangedHeir {
+                character_id: heir_id
+            })
+        );
+        assert_state_unchanged(
+            &before_repeat,
+            &state,
+            "a formally confirmed heir must not be confirmed repeatedly",
+        );
         validate_invariants(registry, &state);
     }
 
@@ -3790,6 +4013,17 @@ mod information {
         )
         .expect("market commission must succeed");
         let report_id = commissioned_report_id(&state);
+        let report = state
+            .information_reports
+            .get_mut(&report_id)
+            .expect("commissioned report must exist");
+        assert_eq!(
+            report.target,
+            Some(crate::core::InformationTarget::Market {
+                good_id: fixture.contract.good_id,
+            })
+        );
+        report.subject = "Presentation text changed after commissioning".to_owned();
         let treasury_before = state
             .dynasties
             .get(&player_id)

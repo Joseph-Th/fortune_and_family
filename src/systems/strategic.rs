@@ -1,15 +1,17 @@
 //! Strategic initialization, periodic systems, and validated cross-record operations.
 
 use super::SimulationError;
-use super::transactions::{debit_market_clearing_account, next_business_finance_version};
+use super::transactions::{
+    debit_market_clearing_account, next_business_finance_version, next_family_charter_version,
+};
 use crate::core::{
     AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
     ChronicleEntry, ChronicleKind, CivicDebtStatus, ContractStatus, Crisis, CrisisKind,
     CrisisStatus, DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw,
     ExternalRoute, FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance,
-    InformationConfidence, InformationReport, InstitutionRuntime, LawKind, LegalCase,
-    LegalCaseKind, LegalCaseStatus, Loan, LoanStatus, ObjectiveKind, ObjectiveStatus, OfficePower,
-    OutboxKind, OutboxMessage, Property, PropertyKind, PublicWork, PublicWorkKind,
+    InformationConfidence, InformationReport, InformationTarget, InstitutionRuntime, LawKind,
+    LegalCase, LegalCaseKind, LegalCaseStatus, Loan, LoanStatus, ObjectiveKind, ObjectiveStatus,
+    OfficePower, OutboxKind, OutboxMessage, Property, PropertyKind, PublicWork, PublicWorkKind,
     PublicWorkStatus, RelationshipState, SupplyContract,
 };
 use crate::ids::{
@@ -2118,6 +2120,7 @@ fn initialize_information(state: &mut AppState) {
         InformationReport {
             id,
             owner_dynasty_id: state.player_dynasty_id,
+            target: None,
             subject: "Rivergate opening conditions".to_owned(),
             confidence: InformationConfidence::Confirmed,
             created_day: 0,
@@ -4073,6 +4076,9 @@ pub(crate) fn record_counterparty_information(
         .dynasties
         .get(&counterparty_id)
         .expect("counterparty dynasty must exist");
+    let target = InformationTarget::Counterparty {
+        dynasty_id: counterparty_id,
+    };
     let subject = format!("Counterparty report: House {}", counterparty.name());
     let reliability = counterparty.resources.reputation_reliability_basis_points;
     let pair = DynastyPair::new(player_dynasty_id, counterparty_id);
@@ -4088,7 +4094,7 @@ pub(crate) fn record_counterparty_information(
         relationship.obligation
     );
     state.information_reports.retain(|_, report| {
-        report.owner_dynasty_id != player_dynasty_id || report.subject != subject
+        report.owner_dynasty_id != player_dynasty_id || report.target != Some(target)
     });
     let id = state.next_ids.information_report();
     let day = state.clock.day();
@@ -4097,6 +4103,7 @@ pub(crate) fn record_counterparty_information(
         InformationReport {
             id,
             owner_dynasty_id: player_dynasty_id,
+            target: Some(target),
             subject,
             confidence: InformationConfidence::Probable,
             created_day: day,
@@ -4137,7 +4144,7 @@ pub(crate) fn run_monthly_strategic_systems(
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
     update_district_conditions(state);
-    resolve_institution_selections(registry, state);
+    resolve_institution_selections(registry, state)?;
     apply_office_duties(state);
     apply_office_power_effects(registry, state)?;
     advance_ai_objectives(registry, state);
@@ -4663,7 +4670,10 @@ fn update_district_conditions(state: &mut AppState) {
     }
 }
 
-fn resolve_institution_selections(registry: &Registry, state: &mut AppState) {
+fn resolve_institution_selections(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let day = state.clock.day();
     let due: Vec<_> = state
         .institutions
@@ -4671,6 +4681,8 @@ fn resolve_institution_selections(registry: &Registry, state: &mut AppState) {
         .filter(|institution| institution.next_selection_day <= day)
         .map(|institution| institution.institution_id)
         .collect();
+    let mut selections = Vec::new();
+    let mut planned_office_holders = BTreeSet::new();
     for institution_id in due {
         let institution_kind = registry
             .get_institution(institution_id)
@@ -4686,6 +4698,7 @@ fn resolve_institution_selections(registry: &Registry, state: &mut AppState) {
             .iter()
             .filter_map(|character_id| state.characters.get(*character_id))
             .filter(|character| character.status() == crate::core::CharacterStatus::Active)
+            .filter(|character| !planned_office_holders.contains(&character.id()))
             .filter(|character| {
                 !state.institutions.values().any(|other| {
                     other.institution_id != institution_id
@@ -4726,17 +4739,25 @@ fn resolve_institution_selections(registry: &Registry, state: &mut AppState) {
             .into_iter()
             .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
             .map(|(_, character_id)| character_id);
-        let term_number = {
-            let institution = state
-                .institutions
-                .get_mut(&institution_id)
-                .expect("institution runtime must exist");
-            institution.office_holder_id = winner;
-            institution.term_started_day = day;
-            institution.next_selection_day = day.saturating_add(super::OFFICE_TERM_DAYS);
-            institution.term_number = institution.term_number.saturating_add(1);
-            institution.term_number
-        };
+        let term_number = institution
+            .term_number
+            .checked_add(1)
+            .ok_or(SimulationError::InstitutionTermNumberExhausted { institution_id })?;
+        if let Some(winner) = winner {
+            planned_office_holders.insert(winner);
+        }
+        selections.push((institution_id, winner, term_number));
+    }
+
+    for (institution_id, winner, term_number) in selections {
+        let institution = state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("institution runtime must exist");
+        institution.office_holder_id = winner;
+        institution.term_started_day = day;
+        institution.next_selection_day = day.saturating_add(super::OFFICE_TERM_DAYS);
+        institution.term_number = term_number;
         if let Some(winner) = winner {
             push_outbox(
                 state,
@@ -4746,6 +4767,7 @@ fn resolve_institution_selections(registry: &Registry, state: &mut AppState) {
             );
         }
     }
+    Ok(())
 }
 
 pub(crate) fn institution_capability_score(
@@ -5129,12 +5151,13 @@ fn update_information_reports(registry: &Registry, state: &mut AppState) {
         let change = (quote.price().copper() - prior).unsigned_abs();
         Some((
             change,
+            good.id(),
             good.name().to_owned(),
             quote.price(),
             quote.causes().to_vec(),
         ))
     });
-    let Some((_, name, price, causes)) = most_changed.max_by_key(|item| item.0) else {
+    let Some((_, good_id, name, price, causes)) = most_changed.max_by_key(|item| item.0) else {
         return;
     };
     let id = state.next_ids.information_report();
@@ -5143,6 +5166,7 @@ fn update_information_reports(registry: &Registry, state: &mut AppState) {
         InformationReport {
             id,
             owner_dynasty_id: state.player_dynasty_id,
+            target: Some(InformationTarget::Market { good_id }),
             subject: format!("Monthly market report: {name}"),
             confidence: InformationConfidence::Confirmed,
             created_day: day,
@@ -5595,10 +5619,11 @@ fn insert_crisis(
     id
 }
 
-pub(crate) fn run_annual_strategic_systems(state: &mut AppState) {
+pub(crate) fn run_annual_strategic_systems(state: &mut AppState) -> Result<(), SimulationError> {
     educate_family_members(state);
     form_dynastic_marriage(state);
-    update_family_councils(state);
+    update_family_councils(state)?;
+    Ok(())
 }
 
 fn educate_family_members(state: &mut AppState) {
@@ -5692,7 +5717,7 @@ fn form_dynastic_marriage(state: &mut AppState) {
     );
 }
 
-fn update_family_councils(state: &mut AppState) {
+fn update_family_councils(state: &mut AppState) -> Result<(), SimulationError> {
     let loyalty_adjustments: Vec<_> = state
         .family_councils
         .values()
@@ -5719,11 +5744,11 @@ fn update_family_councils(state: &mut AppState) {
         })
         .collect();
 
-    let mut governance_changes = Vec::new();
+    let mut updates = Vec::new();
     for (dynasty_id, loyalty_adjustment) in loyalty_adjustments {
         let council = state
             .family_councils
-            .get_mut(&dynasty_id)
+            .get(&dynasty_id)
             .expect("family council must exist");
         let members = u16::try_from(council.members.len()).unwrap_or(u16::MAX);
         let branch_pressure = i32::from(members.saturating_sub(2).saturating_mul(80));
@@ -5734,7 +5759,7 @@ fn update_family_councils(state: &mut AppState) {
             HouseGovernance::BranchFederation => 120,
             HouseGovernance::ElectedHead => -50,
         };
-        council.unity_basis_points = i32::from(council.unity_basis_points)
+        let unity_basis_points = i32::from(council.unity_basis_points)
             .saturating_sub(branch_pressure)
             .saturating_add(50)
             .saturating_add(loyalty_adjustment)
@@ -5742,13 +5767,30 @@ fn update_family_councils(state: &mut AppState) {
             .clamp(0, 10_000)
             .try_into()
             .expect("clamped family unity must fit u16");
-        if council.unity_basis_points < 3_000
-            && council.governance == HouseGovernance::Primogeniture
-        {
-            let prior = council.governance;
-            council.governance = HouseGovernance::FamilyPartnership;
-            council.charter_version = council.charter_version.saturating_add(1);
-            governance_changes.push((dynasty_id, prior, council.governance));
+        let governance_change =
+            if unity_basis_points < 3_000 && council.governance == HouseGovernance::Primogeniture {
+                Some((
+                    council.governance,
+                    HouseGovernance::FamilyPartnership,
+                    next_family_charter_version(dynasty_id, council.charter_version)?,
+                ))
+            } else {
+                None
+            };
+        updates.push((dynasty_id, unity_basis_points, governance_change));
+    }
+
+    let mut governance_changes = Vec::new();
+    for (dynasty_id, unity_basis_points, governance_change) in updates {
+        let council = state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("family council must exist");
+        council.unity_basis_points = unity_basis_points;
+        if let Some((prior, governance, next_charter_version)) = governance_change {
+            council.governance = governance;
+            council.charter_version = next_charter_version;
+            governance_changes.push((dynasty_id, prior, governance));
         }
     }
     for (dynasty_id, prior, governance) in governance_changes {
@@ -5769,6 +5811,7 @@ fn update_family_councils(state: &mut AppState) {
             ),
         );
     }
+    Ok(())
 }
 
 pub(crate) fn push_outbox(state: &mut AppState, kind: OutboxKind, subject: String, body: String) {

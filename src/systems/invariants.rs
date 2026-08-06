@@ -493,7 +493,7 @@ fn validate_strategic_state(registry: &Registry, state: &AppState, ids: &Registr
     validate_employment(state);
     validate_family_state(state);
     validate_laws_and_relationships(state);
-    validate_information_and_ai(state);
+    validate_information_and_ai(state, ids);
     validate_districts_and_public_works(state, ids);
     validate_legal_cases(state);
     validate_routes_and_crises(state, ids);
@@ -939,6 +939,7 @@ fn validate_family_state(state: &AppState) {
             link.property_claim_basis_points <= 10_000,
             "Lifecycle Validity: family property claim is outside basis-point range"
         );
+        validate_parent_child_chronology(state, link);
         if matches!(link.kind, FamilyLinkKind::Adoptive | FamilyLinkKind::Ward) {
             let first = state
                 .characters
@@ -1011,6 +1012,25 @@ fn validate_family_state(state: &AppState) {
     }
 }
 
+fn validate_parent_child_chronology(state: &AppState, link: &crate::core::FamilyLink) {
+    if link.kind != FamilyLinkKind::ParentChild {
+        return;
+    }
+    let parent = state
+        .characters
+        .get(link.first_character_id)
+        .expect("validated family link character must exist");
+    let child = state
+        .characters
+        .get(link.second_character_id)
+        .expect("validated family link character must exist");
+    debug_assert!(
+        child.birth_day().saturating_sub(parent.birth_day())
+            >= crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS,
+        "Lifecycle Validity: parent-child family link has impossible chronology"
+    );
+}
+
 fn validate_laws_and_relationships(state: &AppState) {
     let mut active_law_kinds = Vec::new();
     for (law_id, law) in &state.laws {
@@ -1071,7 +1091,7 @@ fn validate_laws_and_relationships(state: &AppState) {
     }
 }
 
-fn validate_information_and_ai(state: &AppState) {
+fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
     for (report_id, report) in &state.information_reports {
         debug_assert_eq!(
             *report_id, report.id,
@@ -1084,6 +1104,18 @@ fn validate_information_and_ai(state: &AppState) {
         debug_assert!(
             report.created_day <= state.clock.day() && report.expires_day >= report.created_day,
             "Lifecycle Validity: information report dates are invalid"
+        );
+        debug_assert!(
+            report.target.is_none_or(|target| match target {
+                crate::core::InformationTarget::Market { good_id } => ids.goods.contains(&good_id),
+                crate::core::InformationTarget::Counterparty { dynasty_id } => {
+                    state.dynasties.contains_key(&dynasty_id)
+                }
+                crate::core::InformationTarget::District { district_id } => {
+                    ids.districts.contains(&district_id)
+                }
+            }),
+            "Record Reference Validity: information report target does not exist"
         );
     }
     for (objective_id, objective) in &state.ai_objectives {

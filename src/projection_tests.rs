@@ -168,6 +168,18 @@ mod coverage {
                 .count(),
             "information projection must include only player-owned reports"
         );
+        assert!(
+            projection
+                .information
+                .iter()
+                .zip(
+                    state
+                        .information_reports
+                        .values()
+                        .filter(|report| report.owner_dynasty_id == state.player_dynasty_id)
+                )
+                .all(|(projected, report)| projected.target == report.target)
+        );
         assert_eq!(
             projection.notifications.len(),
             state.outbox.len().min(50),

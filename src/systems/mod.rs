@@ -12,7 +12,7 @@ pub(crate) const EMPLOYMENT_RECOVERY_BASIS_POINTS: u16 = 3_000;
 pub(crate) const MIN_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 7_000;
 pub(crate) const MAX_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 14_000;
 pub(crate) const OFFICE_TERM_DAYS: i64 = 360;
-pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 180;
+pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 240;
 
 pub(crate) fn supported_worker_capacity(business: &crate::core::Business) -> u32 {
     u32::from(business.operations.capacity_batches_per_day)

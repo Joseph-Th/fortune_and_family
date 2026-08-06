@@ -8,12 +8,13 @@ pub use extended::{
     AiObjective, CivicDebt, CivicDebtStatus, ContractStatus, Crisis, CrisisKind, CrisisStatus,
     DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw, ExternalRoute,
     FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance, InformationConfidence,
-    InformationReport, InstitutionRuntime, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus,
-    Loan, LoanStatus, ObjectiveKind, ObjectiveStatus, OfficePower, OutboxKind, OutboxMessage,
-    Property, PropertyKind, PublicWork, PublicWorkKind, PublicWorkStatus, RelationshipState,
-    SupplyContract,
+    InformationReport, InformationTarget, InstitutionRuntime, LawKind, LegalCase, LegalCaseKind,
+    LegalCaseStatus, Loan, LoanStatus, ObjectiveKind, ObjectiveStatus, OfficePower, OutboxKind,
+    OutboxMessage, Property, PropertyKind, PublicWork, PublicWorkKind, PublicWorkStatus,
+    RelationshipState, SupplyContract,
 };
 
+pub(crate) use extended::MIN_PARENT_CHILD_AGE_GAP_DAYS;
 pub use records::{
     AuditKind, AuditRecord, Business, BusinessPolicy, BusinessStatus, CampaignPhase, Character,
     CharacterRole, CharacterStatus, ChronicleEntry, ChronicleKind, Dynasty, Household, MarketCause,

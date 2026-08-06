@@ -3,6 +3,7 @@
 use super::SimulationError;
 use super::transactions::{
     credit_market_clearing_account, debit_market_clearing_account, next_business_finance_version,
+    next_family_charter_version,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
@@ -89,6 +90,9 @@ struct SuccessionLine {
     incoming_head_id: CharacterId,
     new_heir_name: String,
     new_heir_birth_day: i64,
+    new_heir_link_kind: FamilyLinkKind,
+    next_generation: u16,
+    next_charter_version: u64,
     new_heir_capabilities: CharacterCapabilities,
 }
 
@@ -173,8 +177,8 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
         super::strategic::run_monthly_strategic_systems(registry, state)?;
     }
     if state.clock.is_year_boundary() {
-        process_year_boundary(registry, state);
-        super::strategic::run_annual_strategic_systems(state);
+        process_year_boundary(registry, state)?;
+        super::strategic::run_annual_strategic_systems(state)?;
     }
 
     state.audit_log.push(AuditRecord {
@@ -1432,7 +1436,7 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
     Ok(())
 }
 
-fn process_year_boundary(registry: &Registry, state: &mut AppState) {
+fn process_year_boundary(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     let year = state.clock.year(registry.scenario().start_year());
     let id = state.next_ids.chronicle();
     state.chronicle.push(ChronicleEntry {
@@ -1444,8 +1448,9 @@ fn process_year_boundary(registry: &Registry, state: &mut AppState) {
 
     update_campaign_phases(state);
     update_character_health(state);
-    let succession_plan = decide_successions(state);
+    let succession_plan = decide_successions(state)?;
     apply_successions(state, succession_plan);
+    Ok(())
 }
 
 fn update_character_health(state: &mut AppState) {
@@ -1546,7 +1551,7 @@ fn update_campaign_phases(state: &mut AppState) {
     }
 }
 
-fn decide_successions(state: &mut AppState) -> Vec<SuccessionLine> {
+fn decide_successions(state: &mut AppState) -> Result<Vec<SuccessionLine>, SimulationError> {
     let snapshots: Vec<_> = state
         .dynasties
         .values()
@@ -1586,13 +1591,46 @@ fn decide_successions(state: &mut AppState) -> Vec<SuccessionLine> {
         if !health_forces_succession && !state.rng.is_chance_success(annual_chance) {
             continue;
         }
-        let next_generation = generation.saturating_add(1);
+        let next_generation = generation
+            .checked_add(1)
+            .ok_or(SimulationError::DynastyGenerationExhausted { dynasty_id })?;
+        let current_charter_version = state
+            .family_councils
+            .get(&dynasty_id)
+            .expect("succession dynasty must have a family council")
+            .charter_version;
+        let next_charter_version =
+            next_family_charter_version(dynasty_id, current_charter_version)?;
+        let incoming_age_days = state.clock.day().saturating_sub(
+            state
+                .characters
+                .get(heir_id)
+                .expect("dynasty heir reference must be valid")
+                .birth_day(),
+        );
+        let parent_child_age_requirement =
+            (20 * 360_i64).saturating_add(crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS);
+        let (new_heir_birth_day, new_heir_link_kind) =
+            if incoming_age_days >= parent_child_age_requirement {
+                (
+                    state.clock.day().saturating_sub(20 * 360),
+                    FamilyLinkKind::ParentChild,
+                )
+            } else {
+                (
+                    state.clock.day().saturating_sub(18 * 360),
+                    FamilyLinkKind::Sibling,
+                )
+            };
         lines.push(SuccessionLine {
             dynasty_id,
             outgoing_head_id: head_id,
             incoming_head_id: heir_id,
             new_heir_name: format!("{dynasty_name} Heir {next_generation}"),
-            new_heir_birth_day: state.clock.day().saturating_sub(20 * 360),
+            new_heir_birth_day,
+            new_heir_link_kind,
+            next_generation,
+            next_charter_version,
             new_heir_capabilities: CharacterCapabilities {
                 administration: 40_u16.saturating_add(
                     u16::try_from(state.rng.range_u32(50)).expect("random value fits u16"),
@@ -1610,7 +1648,7 @@ fn decide_successions(state: &mut AppState) -> Vec<SuccessionLine> {
         });
     }
 
-    lines
+    Ok(lines)
 }
 
 fn succession_chance_basis_points(
@@ -1650,15 +1688,9 @@ fn retire_outgoing_head(state: &mut AppState, outgoing_head_id: CharacterId) {
     }
 }
 
-fn update_institutions_for_succession(
-    state: &mut AppState,
-    outgoing_head_id: CharacterId,
-    incoming_head_id: CharacterId,
-) {
+fn update_institutions_for_succession(state: &mut AppState, outgoing_head_id: CharacterId) {
     for institution in state.institutions.values_mut() {
-        if institution.members.remove(&outgoing_head_id) {
-            institution.members.insert(incoming_head_id);
-        }
+        institution.members.remove(&outgoing_head_id);
         if institution.office_holder_id == Some(outgoing_head_id) {
             institution.office_holder_id = None;
             institution.next_selection_day = institution
@@ -1676,6 +1708,9 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
             incoming_head_id,
             new_heir_name,
             new_heir_birth_day,
+            new_heir_link_kind,
+            next_generation,
+            next_charter_version,
             new_heir_capabilities,
         } = line;
         retire_outgoing_head(state, outgoing_head_id);
@@ -1688,7 +1723,7 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
             incoming.runtime.loyalty_basis_points = 10_000;
         }
 
-        update_institutions_for_succession(state, outgoing_head_id, incoming_head_id);
+        update_institutions_for_succession(state, outgoing_head_id);
 
         let managed_business_ids: Vec<_> = state
             .businesses
@@ -1736,7 +1771,7 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
                 id: family_link_id,
                 first_character_id: incoming_head_id,
                 second_character_id: new_heir_id,
-                kind: FamilyLinkKind::ParentChild,
+                kind: new_heir_link_kind,
                 active: true,
                 property_claim_basis_points: 8_000,
             },
@@ -1748,6 +1783,7 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
         council.members.remove(&outgoing_head_id);
         council.members.insert(incoming_head_id);
         council.members.insert(new_heir_id);
+        council.charter_version = next_charter_version;
 
         let dynasty = state
             .dynasties
@@ -1755,7 +1791,7 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
             .expect("succession dynasty must exist");
         dynasty.relationships.head_id = incoming_head_id;
         dynasty.relationships.heir_id = Some(new_heir_id);
-        dynasty.runtime.generation = dynasty.runtime.generation.saturating_add(1);
+        dynasty.runtime.generation = next_generation;
         dynasty.resources.legitimacy_basis_points = dynasty
             .resources
             .legitimacy_basis_points

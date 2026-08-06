@@ -1,6 +1,6 @@
 //! JSON persistence adapter with explicit schema migration and contextual errors.
 
-use crate::core::{AppState, AuditKind, CURRENT_SCHEMA_VERSION, FamilyLinkKind};
+use crate::core::{AppState, AuditKind, CURRENT_SCHEMA_VERSION, FamilyLinkKind, InformationTarget};
 use crate::ids::{BusinessId, HouseholdId};
 use crate::money::{Money, Quantity, checked_cost_for};
 use serde_json::Value;
@@ -1148,6 +1148,23 @@ fn validate_family_records(state: &AppState) -> Result<(), String> {
                 ));
             }
         }
+        if link.kind == FamilyLinkKind::ParentChild {
+            let parent = state
+                .characters
+                .get(link.first_character_id)
+                .expect("validated family link character must exist");
+            let child = state
+                .characters
+                .get(link.second_character_id)
+                .expect("validated family link character must exist");
+            if child.birth_day().saturating_sub(parent.birth_day())
+                < crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS
+            {
+                return Err(format!(
+                    "family link {link_id} has impossible parent-child chronology"
+                ));
+            }
+        }
     }
     if state.family_councils.len() != state.dynasties.len() {
         return Err("every dynasty must have exactly one family council".to_owned());
@@ -1284,6 +1301,20 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
         {
             return Err(format!(
                 "information report {report_id} has an invalid reference"
+            ));
+        }
+        let target_exists = report.target.is_none_or(|target| match target {
+            InformationTarget::Market { good_id } => state.market.quotes.contains_key(&good_id),
+            InformationTarget::Counterparty { dynasty_id } => {
+                state.dynasties.contains_key(&dynasty_id)
+            }
+            InformationTarget::District { district_id } => {
+                state.districts.contains_key(&district_id)
+            }
+        });
+        if !target_exists {
+            return Err(format!(
+                "information report {report_id} targets a missing record"
             ));
         }
     }
@@ -1445,6 +1476,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             10 => migrate_v10_to_v11(value)?,
             11 => migrate_v11_to_v12(value)?,
             12 => migrate_v12_to_v13(value)?,
+            13 => migrate_v13_to_v14(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -2007,6 +2039,251 @@ fn migrate_v12_to_v13(mut value: Value) -> Result<Value, PersistenceError> {
     append_migrated_patronage_records(object, supported_subjects);
     object.insert("schema_version".to_owned(), Value::from(13));
     Ok(value)
+}
+
+fn migrate_v13_to_v14(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 13,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    migrate_v13_information_targets(object)?;
+    migrate_v13_parent_child_chronology(object)?;
+    object.insert("schema_version".to_owned(), Value::from(14));
+    Ok(value)
+}
+
+fn migrate_v13_information_targets(
+    object: &mut serde_json::Map<String, Value>,
+) -> Result<(), PersistenceError> {
+    let player_dynasty_id = object
+        .get("player_dynasty_id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 13,
+            reason: "save has an invalid player dynasty".to_owned(),
+        })?;
+    let dynasty_ids_by_name = v13_dynasty_ids_by_name(object)?;
+    let registry = crate::registry::build_rivergate_registry();
+    let good_ids_by_name: BTreeMap<_, _> = registry
+        .goods()
+        .iter()
+        .map(|good| (good.name().to_owned(), u64::from(good.id().value())))
+        .collect();
+    let district_ids_by_name: BTreeMap<_, _> = registry
+        .districts()
+        .iter()
+        .map(|district| (district.name().to_owned(), u64::from(district.id().value())))
+        .collect();
+    let reports = object
+        .get_mut("information_reports")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 13,
+            reason: "save information_reports must be an object".to_owned(),
+        })?;
+    for report in reports.values_mut() {
+        let report = report
+            .as_object_mut()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 13,
+                reason: "save information report must be an object".to_owned(),
+            })?;
+        let subject = report
+            .get("subject")
+            .and_then(Value::as_str)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 13,
+                reason: "save information report has an invalid subject".to_owned(),
+            })?;
+        let target = infer_v13_information_target(
+            subject,
+            player_dynasty_id,
+            &good_ids_by_name,
+            &dynasty_ids_by_name,
+            &district_ids_by_name,
+        );
+        report.insert("target".to_owned(), target.unwrap_or(Value::Null));
+    }
+    Ok(())
+}
+
+fn infer_v13_information_target(
+    subject: &str,
+    player_dynasty_id: u64,
+    good_ids_by_name: &BTreeMap<String, u64>,
+    dynasty_ids_by_name: &BTreeMap<String, Vec<u64>>,
+    district_ids_by_name: &BTreeMap<String, u64>,
+) -> Option<Value> {
+    let market_name = subject
+        .strip_prefix("Commissioned market brief: ")
+        .or_else(|| subject.strip_prefix("Monthly market report: "));
+    if let Some(name) = market_name {
+        let good_id = good_ids_by_name.get(name)?;
+        return Some(serde_json::json!({ "Market": { "good_id": good_id } }));
+    }
+    let dynasty_name = subject
+        .strip_prefix("Commissioned house brief: House ")
+        .or_else(|| subject.strip_prefix("Counterparty report: House "));
+    if let Some(name) = dynasty_name {
+        let dynasty_id = dynasty_ids_by_name
+            .get(name)?
+            .iter()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_dynasty_id)?;
+        return Some(serde_json::json!({
+            "Counterparty": { "dynasty_id": dynasty_id }
+        }));
+    }
+    if let Some(name) = subject.strip_prefix("Commissioned district brief: ") {
+        let district_id = district_ids_by_name.get(name)?;
+        return Some(serde_json::json!({
+            "District": { "district_id": district_id }
+        }));
+    }
+    None
+}
+
+fn v13_dynasty_ids_by_name(
+    object: &serde_json::Map<String, Value>,
+) -> Result<BTreeMap<String, Vec<u64>>, PersistenceError> {
+    let dynasties = object
+        .get("dynasties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 13,
+            reason: "save dynasties must be an object".to_owned(),
+        })?;
+    let mut ids_by_name: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for dynasty in dynasties.values() {
+        let identity = dynasty
+            .get("identity")
+            .and_then(Value::as_object)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 13,
+                reason: "save dynasty has an invalid identity".to_owned(),
+            })?;
+        let dynasty_id = identity.get("id").and_then(Value::as_u64).ok_or_else(|| {
+            PersistenceError::Migration {
+                version: 13,
+                reason: "save dynasty has an invalid ID".to_owned(),
+            }
+        })?;
+        let name = identity
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 13,
+                reason: format!("save dynasty {dynasty_id} has an invalid name"),
+            })?;
+        ids_by_name
+            .entry(name.to_owned())
+            .or_default()
+            .push(dynasty_id);
+    }
+    Ok(ids_by_name)
+}
+
+fn migrate_v13_parent_child_chronology(
+    object: &mut serde_json::Map<String, Value>,
+) -> Result<(), PersistenceError> {
+    let births = v13_character_birth_days(object)?;
+    let links = object
+        .get_mut("family_links")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 13,
+            reason: "save family_links must be an object".to_owned(),
+        })?;
+    for link in links.values_mut() {
+        let link = link
+            .as_object_mut()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 13,
+                reason: "save family link must be an object".to_owned(),
+            })?;
+        if link.get("kind").and_then(Value::as_str) != Some("ParentChild") {
+            continue;
+        }
+        let first_id = link
+            .get("first_character_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 13,
+                reason: "save parent-child link has an invalid first character".to_owned(),
+            })?;
+        let second_id = link
+            .get("second_character_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 13,
+                reason: "save parent-child link has an invalid second character".to_owned(),
+            })?;
+        let first_birth =
+            births
+                .get(&first_id)
+                .copied()
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 13,
+                    reason: format!(
+                        "save parent-child link references missing character {first_id}"
+                    ),
+                })?;
+        let second_birth =
+            births
+                .get(&second_id)
+                .copied()
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 13,
+                    reason: format!(
+                        "save parent-child link references missing character {second_id}"
+                    ),
+                })?;
+        if second_birth.saturating_sub(first_birth) < crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS {
+            link.insert("kind".to_owned(), Value::String("Sibling".to_owned()));
+        }
+    }
+    Ok(())
+}
+
+fn v13_character_birth_days(
+    object: &serde_json::Map<String, Value>,
+) -> Result<BTreeMap<u64, i64>, PersistenceError> {
+    object
+        .get("characters")
+        .and_then(Value::as_object)
+        .and_then(|characters| characters.get("records"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 13,
+            reason: "save characters.records must be an object".to_owned(),
+        })?
+        .values()
+        .map(|character| {
+            let identity = character
+                .get("identity")
+                .and_then(Value::as_object)
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 13,
+                    reason: "save character has an invalid identity".to_owned(),
+                })?;
+            let id = identity.get("id").and_then(Value::as_u64).ok_or_else(|| {
+                PersistenceError::Migration {
+                    version: 13,
+                    reason: "save character has an invalid ID".to_owned(),
+                }
+            })?;
+            let birth_day = identity
+                .get("birth_day")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| PersistenceError::Migration {
+                    version: 13,
+                    reason: format!("save character {id} has an invalid birth day"),
+                })?;
+            Ok((id, birth_day))
+        })
+        .collect()
 }
 
 fn v12_nominated_support(

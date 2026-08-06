@@ -4,7 +4,7 @@ use super::*;
 use crate::core::{
     BusinessStatus, ContractStatus, EnactedLaw, LawKind, NewGameConfig, StartingBackground,
 };
-use crate::systems::build_new_game;
+use crate::systems::{build_new_game, validate_invariants};
 use crate::test_support::{
     assert_state_unchanged, make_test_campaign, rivergate_registry_for_test,
 };
@@ -1567,6 +1567,60 @@ mod health_and_succession {
     use super::*;
 
     #[test]
+    fn succession_does_not_inherit_personal_institution_memberships() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let dynasty = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist");
+        let outgoing_head_id = dynasty.head_id();
+        let incoming_head_id = dynasty.heir_id().expect("player dynasty must have an heir");
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        {
+            let institution = state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("institution must exist");
+            institution.members.insert(outgoing_head_id);
+            institution.office_holder_id = Some(outgoing_head_id);
+        }
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionPatronage,
+            subject: format!("institution:{institution_id}:character:{outgoing_head_id}"),
+            detail: "test cultivated support".to_owned(),
+        });
+        state
+            .characters
+            .get_mut(outgoing_head_id)
+            .expect("outgoing head must exist")
+            .runtime
+            .health_basis_points = 0;
+
+        let successions =
+            decide_successions(&mut state).expect("forced succession must remain representable");
+        apply_successions(&mut state, successions);
+
+        let institution = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist");
+        assert!(!institution.members.contains(&outgoing_head_id));
+        assert!(
+            !institution.members.contains(&incoming_head_id),
+            "personal patronage must not transfer automatically to a successor"
+        );
+        assert_eq!(institution.office_holder_id, None);
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn zero_health_forces_succession_before_normal_retirement_age() {
         let mut state = make_test_campaign();
         let dynasty_id = state.player_dynasty_id;
@@ -1590,12 +1644,65 @@ mod health_and_succession {
             .runtime
             .health_basis_points = 0;
 
-        let successions = decide_successions(&mut state);
+        let successions =
+            decide_successions(&mut state).expect("forced succession must remain representable");
 
+        let line = successions
+            .iter()
+            .find(|line| line.dynasty_id == dynasty_id && line.outgoing_head_id == head_id)
+            .expect("zero health must force the player succession");
+        assert_eq!(
+            line.new_heir_link_kind,
+            FamilyLinkKind::Sibling,
+            "a young incoming head must receive a collateral heir rather than an impossible adult child"
+        );
+        let incoming_birth_day = state
+            .characters
+            .get(line.incoming_head_id)
+            .expect("incoming head must exist")
+            .birth_day();
         assert!(
-            successions
-                .iter()
-                .any(|line| { line.dynasty_id == dynasty_id && line.outgoing_head_id == head_id })
+            line.new_heir_birth_day.saturating_sub(incoming_birth_day)
+                < crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS,
+            "the fixture must exercise the chronology that cannot be represented as parent-child"
+        );
+    }
+
+    #[test]
+    fn exhausted_generation_rejects_forced_succession() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let head_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        state
+            .characters
+            .get_mut(head_id)
+            .expect("dynasty head must exist")
+            .runtime
+            .health_basis_points = 0;
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("player dynasty must exist")
+            .runtime
+            .generation = u16::MAX;
+        let before = state.clone();
+
+        let result = decide_successions(&mut state);
+
+        assert!(matches!(
+            result,
+            Err(SimulationError::DynastyGenerationExhausted {
+                dynasty_id: exhausted_dynasty_id,
+            }) if exhausted_dynasty_id == dynasty_id
+        ));
+        assert_state_unchanged(
+            &before,
+            &state,
+            "generation exhaustion must not partially plan or apply succession",
         );
     }
 

@@ -78,7 +78,7 @@ The player manages a portfolio of businesses, property, offices, obligations, fa
 
 ### Succession and legacy
 
-A succession tests whether control depends on one exceptional person or on a durable organization. The player can prepare that test by choosing an adult council member as heir, accepting legitimacy and family-unity costs for a successor aligned with the dynasty's strategy. Legacy evaluates both family outcomes and civic consequences.
+A succession tests whether control depends on one exceptional person or on a durable organization. The player can prepare that test by formally confirming the default adult heir or choosing another adult council member, accepting legitimacy and family-unity costs to bind the succession into the family charter. Legacy evaluates both family outcomes and civic consequences.
 
 These phases may overlap, but they should remain strategically distinct. Political authority should not arrive before sustained commercial performance, and late play should not remain an enlarged version of the opening business loop.
 

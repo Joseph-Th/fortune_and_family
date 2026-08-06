@@ -90,7 +90,10 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 27;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 28;
+const CLOSE_CHOICE_SCORE_GAP: i64 = 300;
+const HEIR_CONFIRMATION_HEAD_AGE_YEARS: i64 = 52;
+const HEIR_CONFIRMATION_HEALTH_THRESHOLD: u16 = 5_000;
 const COMMERCIAL_STANDING_REPUTATION_REQUIREMENT: u16 = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
 const NOTIFICATION_BATCH_THRESHOLD: usize = 8;
 const AGENT_LOAN_AMORTIZATION_WEEKS: i64 = 104;
@@ -482,6 +485,7 @@ pub struct GameplaySnapshot {
     pub player_family_capability_checksum: u32,
     pub player_office_checksum: i64,
     pub institution_memberships: u16,
+    pub player_institutions_represented: u16,
     pub institution_budget_total: Money,
     pub active_laws: u16,
     pub law_value_checksum: i64,
@@ -858,6 +862,7 @@ struct CivicSnapshotPart {
     player_family_capability_checksum: u32,
     player_office_checksum: i64,
     institution_memberships: u16,
+    player_institutions_represented: u16,
     institution_budget_total: Money,
     active_laws: u16,
     law_value_checksum: i64,
@@ -905,6 +910,9 @@ impl CivicSnapshotPart {
                     total.saturating_add(i64::from(institution.institution_id.value()))
                 }),
             institution_memberships: count_player_memberships(state, player_id),
+            player_institutions_represented: count_player_institutions_represented(
+                state, player_id,
+            ),
             institution_budget_total: state
                 .institutions
                 .values()
@@ -1160,6 +1168,7 @@ impl GameplaySnapshot {
             player_family_capability_checksum: civic.player_family_capability_checksum,
             player_office_checksum: civic.player_office_checksum,
             institution_memberships: civic.institution_memberships,
+            player_institutions_represented: civic.player_institutions_represented,
             institution_budget_total: civic.institution_budget_total,
             active_laws: civic.active_laws,
             law_value_checksum: civic.law_value_checksum,
@@ -1265,6 +1274,14 @@ impl From<&GameplaySnapshot> for GameplayDecisionContext {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameplayViableOption {
+    pub command: GameplayCommandKind,
+    pub score: i64,
+    pub description: String,
+    pub immediate_domains: BTreeSet<GameplayDomain>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameplayTraceStep {
     pub day: i64,
     pub context: GameplayDecisionContext,
@@ -1273,6 +1290,9 @@ pub struct GameplayTraceStep {
     pub substantive_viable_candidates: u16,
     pub viable_command_kinds: BTreeSet<GameplayCommandKind>,
     pub ranked_candidates: Vec<GameplayCandidateRanking>,
+    pub viable_options: Vec<GameplayViableOption>,
+    pub close_choice_score_gap: Option<i64>,
+    pub distinct_immediate_choice_profiles: u16,
     pub selected_command: Option<GameplayCommandKind>,
     pub command_description: Option<String>,
     pub outcome: Option<String>,
@@ -1332,6 +1352,8 @@ pub struct GameplayPhaseStats {
     pub quiet_cycles: u32,
     pub blocked_cycles: u32,
     pub cycles_with_multiple_viable_command_kinds: u32,
+    pub cycles_with_close_viable_command_kinds: u32,
+    pub cycles_with_distinct_immediate_consequences: u32,
     pub total_viable_command_kinds: u32,
 }
 
@@ -1344,6 +1366,8 @@ pub struct GameplayCampaignReport {
     pub decision_cycles: u32,
     pub cycles_with_viable_choices: u32,
     pub cycles_with_multiple_viable_command_kinds: u32,
+    pub cycles_with_close_viable_command_kinds: u32,
+    pub cycles_with_distinct_immediate_consequences: u32,
     pub no_action_cycles: u32,
     pub quiet_cycles: u32,
     pub blocked_cycles: u32,
@@ -1404,6 +1428,8 @@ pub struct GameplayAggregate {
     pub quiet_cycles: u64,
     pub blocked_cycles: u64,
     pub cycles_with_multiple_viable_command_kinds: u64,
+    pub cycles_with_close_viable_command_kinds: u64,
+    pub cycles_with_distinct_immediate_consequences: u64,
     pub command_coverage: u16,
     pub domain_coverage: u16,
     pub commands: BTreeMap<GameplayCommandKind, GameplayCommandStats>,
@@ -1452,6 +1478,33 @@ struct Candidate {
 }
 
 #[derive(Debug)]
+struct ProbeResult {
+    selected: Option<Candidate>,
+    viable_count: usize,
+    substantive_viable_count: usize,
+    viable_command_kinds: BTreeSet<GameplayCommandKind>,
+    viable_options: Vec<GameplayViableOption>,
+    close_choice_score_gap: Option<i64>,
+    distinct_immediate_choice_profiles: usize,
+    rejections: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChoiceCycleMetrics {
+    substantive_candidate_count: usize,
+    substantive_viable_count: usize,
+    viable_command_kind_count: usize,
+    close_choice: bool,
+    distinct_immediate_choices: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PhaseCycleObservation {
+    action: Option<GameplayCommandKind>,
+    choices: ChoiceCycleMetrics,
+}
+
+#[derive(Debug)]
 struct CampaignAccumulator {
     commands: BTreeMap<GameplayCommandKind, GameplayCommandStats>,
     phase_stats: BTreeMap<GameplayPhase, GameplayPhaseStats>,
@@ -1464,6 +1517,8 @@ struct CampaignAccumulator {
     decision_cycles: u32,
     cycles_with_viable_choices: u32,
     cycles_with_multiple_viable_command_kinds: u32,
+    cycles_with_close_viable_command_kinds: u32,
+    cycles_with_distinct_immediate_consequences: u32,
     no_action_cycles: u32,
     quiet_cycles: u32,
     blocked_cycles: u32,
@@ -1505,6 +1560,8 @@ impl CampaignAccumulator {
             decision_cycles: 0,
             cycles_with_viable_choices: 0,
             cycles_with_multiple_viable_command_kinds: 0,
+            cycles_with_close_viable_command_kinds: 0,
+            cycles_with_distinct_immediate_consequences: 0,
             no_action_cycles: 0,
             quiet_cycles: 0,
             blocked_cycles: 0,
@@ -1616,14 +1673,8 @@ impl CampaignAccumulator {
         }
     }
 
-    fn record_phase_cycle(
-        &mut self,
-        phase: GameplayPhase,
-        action: Option<GameplayCommandKind>,
-        substantive_candidate_count: usize,
-        substantive_viable_count: usize,
-        viable_command_kind_count: usize,
-    ) {
+    fn record_phase_cycle(&mut self, phase: GameplayPhase, observation: PhaseCycleObservation) {
+        let PhaseCycleObservation { action, choices } = observation;
         let stats = self
             .phase_stats
             .get_mut(&phase)
@@ -1631,19 +1682,29 @@ impl CampaignAccumulator {
         stats.decision_cycles = stats.decision_cycles.saturating_add(1);
         stats.total_viable_command_kinds = stats
             .total_viable_command_kinds
-            .saturating_add(usize_to_u32(viable_command_kind_count));
+            .saturating_add(usize_to_u32(choices.viable_command_kind_count));
         if action.is_some_and(|kind| kind != GameplayCommandKind::AcknowledgeNotification) {
             stats.substantive_actions = stats.substantive_actions.saturating_add(1);
-        } else if substantive_viable_count == 0 {
-            if substantive_candidate_count == 0 {
+        } else if choices.substantive_viable_count == 0 {
+            if choices.substantive_candidate_count == 0 {
                 stats.quiet_cycles = stats.quiet_cycles.saturating_add(1);
             } else {
                 stats.blocked_cycles = stats.blocked_cycles.saturating_add(1);
             }
         }
-        if viable_command_kind_count >= 2 {
+        if choices.viable_command_kind_count >= 2 {
             stats.cycles_with_multiple_viable_command_kinds = stats
                 .cycles_with_multiple_viable_command_kinds
+                .saturating_add(1);
+        }
+        if choices.close_choice {
+            stats.cycles_with_close_viable_command_kinds = stats
+                .cycles_with_close_viable_command_kinds
+                .saturating_add(1);
+        }
+        if choices.distinct_immediate_choices {
+            stats.cycles_with_distinct_immediate_consequences = stats
+                .cycles_with_distinct_immediate_consequences
                 .saturating_add(1);
         }
     }
@@ -1776,6 +1837,9 @@ fn gameplay_harness_limitations() -> Vec<String> {
         "Automated agents measure reachability and systemic outcomes, not whether a human understands the interface or enjoys the decisions.".to_owned(),
         "The report cannot measure emotional investment, narrative quality, or the cognitive burden of comparing choices.".to_owned(),
         "Agents inspect authoritative simulation state when choosing what to investigate; commissioned reports can unlock traceable follow-up actions, but the harness does not measure whether a human can interpret the report or identify the best use.".to_owned(),
+        "Alternative-choice profiles compare immediate snapshot effects; the harness does not advance every unchosen branch through its full delayed consequence horizon.".to_owned(),
+        "Deterministic personas follow fixed priorities and do not model experimentation, misunderstanding, changing preferences, or interface friction.".to_owned(),
+        "AI-objective progress measures rival activity, but the harness cannot prove that a human recognizes which house caused a setback or understands that rival's intent.".to_owned(),
         "Counterfactual attribution can only detect consequences represented by the report snapshot and configured consequence horizon.".to_owned(),
     ]
 }
@@ -1829,6 +1893,9 @@ fn run_campaign(
         cycles_with_viable_choices: accumulator.cycles_with_viable_choices,
         cycles_with_multiple_viable_command_kinds: accumulator
             .cycles_with_multiple_viable_command_kinds,
+        cycles_with_close_viable_command_kinds: accumulator.cycles_with_close_viable_command_kinds,
+        cycles_with_distinct_immediate_consequences: accumulator
+            .cycles_with_distinct_immediate_consequences,
         no_action_cycles: accumulator.no_action_cycles,
         quiet_cycles: accumulator.quiet_cycles,
         blocked_cycles: accumulator.blocked_cycles,
@@ -1886,43 +1953,22 @@ fn run_decision_cycle(
     let candidates_to_probe =
         select_probe_candidates(candidates, usize::from(config.max_candidate_probes));
     let probe_limit = candidates_to_probe.len();
-    let (selected, viable_count, substantive_viable_count, viable_command_kinds, rejections) =
-        probe_candidates(
-            registry,
-            state,
-            candidates_to_probe.into_iter(),
-            accumulator,
-        );
-    accumulator.total_viable_choices = accumulator
-        .total_viable_choices
-        .saturating_add(usize_to_u32(substantive_viable_count));
-    accumulator.total_viable_command_kinds = accumulator
-        .total_viable_command_kinds
-        .saturating_add(usize_to_u32(viable_command_kinds.len()));
-    if substantive_viable_count > 0 {
-        accumulator.cycles_with_viable_choices =
-            accumulator.cycles_with_viable_choices.saturating_add(1);
-    } else {
-        accumulator.no_action_cycles = accumulator.no_action_cycles.saturating_add(1);
-        if substantive_candidate_count == 0 {
-            accumulator.quiet_cycles = accumulator.quiet_cycles.saturating_add(1);
-        } else {
-            accumulator.blocked_cycles = accumulator.blocked_cycles.saturating_add(1);
-        }
-    }
-    if viable_command_kinds.len() >= 2 {
-        accumulator.cycles_with_multiple_viable_command_kinds = accumulator
-            .cycles_with_multiple_viable_command_kinds
-            .saturating_add(1);
-    }
-    let action = apply_selected_candidate(registry, state, selected, accumulator)?;
+    let probe = probe_candidates(
+        registry,
+        state,
+        candidates_to_probe.into_iter(),
+        accumulator,
+    );
+    let choice_metrics =
+        record_choice_cycle_metrics(accumulator, substantive_candidate_count, &probe);
+    let action = apply_selected_candidate(registry, state, probe.selected, accumulator)?;
     let action_kind = action.as_ref().map(|action| action.kind);
     accumulator.record_phase_cycle(
         phase,
-        action_kind,
-        substantive_candidate_count,
-        substantive_viable_count,
-        viable_command_kinds.len(),
+        PhaseCycleObservation {
+            action: action_kind,
+            choices: choice_metrics,
+        },
     );
     accumulator.record_action_gap(action_kind, step_days, &before);
     let after_command = GameplaySnapshot::capture(state);
@@ -1950,16 +1996,69 @@ fn run_decision_cycle(
             after_time: &after_time,
             baseline_after_time: &baseline_after_time,
             considered: probe_limit,
-            viable: viable_count,
-            substantive_viable: substantive_viable_count,
-            viable_command_kinds,
+            viable: probe.viable_count,
+            substantive_viable: probe.substantive_viable_count,
+            viable_command_kinds: probe.viable_command_kinds,
             ranked_candidates,
-            rejections,
+            viable_options: probe.viable_options,
+            close_choice_score_gap: probe.close_choice_score_gap,
+            distinct_immediate_choice_profiles: probe.distinct_immediate_choice_profiles,
+            rejections: probe.rejections,
             action,
         },
         accumulator,
     );
     Ok(())
+}
+
+fn record_choice_cycle_metrics(
+    accumulator: &mut CampaignAccumulator,
+    substantive_candidate_count: usize,
+    probe: &ProbeResult,
+) -> ChoiceCycleMetrics {
+    let close_choice = probe
+        .close_choice_score_gap
+        .is_some_and(|gap| gap <= CLOSE_CHOICE_SCORE_GAP);
+    let distinct_immediate_choices = probe.distinct_immediate_choice_profiles >= 2;
+    accumulator.total_viable_choices = accumulator
+        .total_viable_choices
+        .saturating_add(usize_to_u32(probe.substantive_viable_count));
+    accumulator.total_viable_command_kinds = accumulator
+        .total_viable_command_kinds
+        .saturating_add(usize_to_u32(probe.viable_command_kinds.len()));
+    if probe.substantive_viable_count > 0 {
+        accumulator.cycles_with_viable_choices =
+            accumulator.cycles_with_viable_choices.saturating_add(1);
+    } else {
+        accumulator.no_action_cycles = accumulator.no_action_cycles.saturating_add(1);
+        if substantive_candidate_count == 0 {
+            accumulator.quiet_cycles = accumulator.quiet_cycles.saturating_add(1);
+        } else {
+            accumulator.blocked_cycles = accumulator.blocked_cycles.saturating_add(1);
+        }
+    }
+    if probe.viable_command_kinds.len() >= 2 {
+        accumulator.cycles_with_multiple_viable_command_kinds = accumulator
+            .cycles_with_multiple_viable_command_kinds
+            .saturating_add(1);
+    }
+    if close_choice {
+        accumulator.cycles_with_close_viable_command_kinds = accumulator
+            .cycles_with_close_viable_command_kinds
+            .saturating_add(1);
+    }
+    if distinct_immediate_choices {
+        accumulator.cycles_with_distinct_immediate_consequences = accumulator
+            .cycles_with_distinct_immediate_consequences
+            .saturating_add(1);
+    }
+    ChoiceCycleMetrics {
+        substantive_candidate_count,
+        substantive_viable_count: probe.substantive_viable_count,
+        viable_command_kind_count: probe.viable_command_kinds.len(),
+        close_choice,
+        distinct_immediate_choices,
+    }
 }
 
 fn apply_notification_housekeeping(
@@ -2243,18 +2342,15 @@ fn probe_candidates(
     state: &AppState,
     candidates: impl Iterator<Item = Candidate>,
     accumulator: &mut CampaignAccumulator,
-) -> (
-    Option<Candidate>,
-    usize,
-    usize,
-    BTreeSet<GameplayCommandKind>,
-    Vec<String>,
-) {
+) -> ProbeResult {
+    let baseline = GameplaySnapshot::capture(state);
     let mut selected = None;
     let mut housekeeping_fallback = None;
     let mut viable_count = 0_usize;
     let mut substantive_viable_count = 0_usize;
     let mut viable_command_kinds = BTreeSet::new();
+    let mut viable_options = Vec::new();
+    let mut immediate_profiles = BTreeSet::new();
     let mut rejections = Vec::new();
     for candidate in candidates {
         let command_stats = accumulator
@@ -2269,7 +2365,17 @@ fn probe_candidates(
                 viable_count = viable_count.saturating_add(1);
                 if candidate.kind != GameplayCommandKind::AcknowledgeNotification {
                     substantive_viable_count = substantive_viable_count.saturating_add(1);
-                    viable_command_kinds.insert(candidate.kind);
+                    if viable_command_kinds.insert(candidate.kind) {
+                        let immediate_domains =
+                            baseline.changed_domains(&GameplaySnapshot::capture(&probe));
+                        immediate_profiles.insert(immediate_domains.clone());
+                        viable_options.push(GameplayViableOption {
+                            command: candidate.kind,
+                            score: candidate.score,
+                            description: candidate.description.clone(),
+                            immediate_domains,
+                        });
+                    }
                     if selected.is_none() {
                         selected = Some(candidate);
                     }
@@ -2290,13 +2396,20 @@ fn probe_candidates(
             }
         }
     }
-    (
-        selected.or(housekeeping_fallback),
+    let close_choice_score_gap = viable_options
+        .first()
+        .zip(viable_options.get(1))
+        .map(|(first, second)| first.score.saturating_sub(second.score));
+    ProbeResult {
+        selected: selected.or(housekeeping_fallback),
         viable_count,
         substantive_viable_count,
         viable_command_kinds,
+        viable_options,
+        close_choice_score_gap,
+        distinct_immediate_choice_profiles: immediate_profiles.len(),
         rejections,
-    )
+    }
 }
 
 struct CycleObservation<'a> {
@@ -2309,6 +2422,9 @@ struct CycleObservation<'a> {
     substantive_viable: usize,
     viable_command_kinds: BTreeSet<GameplayCommandKind>,
     ranked_candidates: Vec<GameplayCandidateRanking>,
+    viable_options: Vec<GameplayViableOption>,
+    close_choice_score_gap: Option<i64>,
+    distinct_immediate_choice_profiles: usize,
     rejections: Vec<String>,
     action: Option<ExecutedAction>,
 }
@@ -2324,6 +2440,9 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         substantive_viable,
         viable_command_kinds,
         ranked_candidates,
+        viable_options,
+        close_choice_score_gap,
+        distinct_immediate_choice_profiles,
         rejections,
         action,
     } = observation;
@@ -2396,6 +2515,9 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         substantive_viable_candidates: usize_to_u16(substantive_viable),
         viable_command_kinds,
         ranked_candidates,
+        viable_options,
+        close_choice_score_gap,
+        distinct_immediate_choice_profiles: usize_to_u16(distinct_immediate_choice_profiles),
         selected_command: action.as_ref().map(|action| action.kind),
         command_description: action.as_ref().map(|action| action.description.clone()),
         outcome: action.map(|action| action.outcome),
@@ -4882,14 +5004,18 @@ fn generate_heir_designation_candidates(
     if dynasty.resources.legitimacy_basis_points < HEIR_DESIGNATION_LEGITIMACY_COST {
         return;
     }
-    let designation_available = state
+    let designation_subject = format!("dynasty:{}", state.player_dynasty_id);
+    let last_designation_day = state
         .audit_log
         .iter()
         .rev()
-        .find(|record| record.kind() == AuditKind::HeirDesignation)
-        .is_none_or(|record| {
-            state.clock.day() >= record.day().saturating_add(HEIR_DESIGNATION_INTERVAL_DAYS)
-        });
+        .find(|record| {
+            record.kind() == AuditKind::HeirDesignation && record.subject() == designation_subject
+        })
+        .map(AuditRecord::day);
+    let designation_available = last_designation_day.is_none_or(|last_day| {
+        state.clock.day() >= last_day.saturating_add(HEIR_DESIGNATION_INTERVAL_DAYS)
+    });
     if !designation_available {
         return;
     }
@@ -4899,9 +5025,7 @@ fn generate_heir_designation_candidates(
     let Some(current_heir) = state.characters.get(current_heir_id) else {
         return;
     };
-    let head_age = state.characters.get(dynasty.head_id()).map_or(0, |head| {
-        state.clock.day().saturating_sub(head.birth_day()) / 360
-    });
+    let (head_age, head_health) = character_age_and_health(state, dynasty.head_id());
     if head_age < 48 && dynasty.runtime.succession_risk_basis_points < 2_000 {
         return;
     }
@@ -4928,28 +5052,58 @@ fn generate_heir_designation_candidates(
                 character.id(),
             )
         });
-    let Some(replacement) = replacement else {
-        return;
-    };
-    let replacement_score = successor_score(replacement, persona);
-    let replacement_primary = successor_primary_capability(replacement, persona);
-    let broadly_superior = replacement_score >= current_score.saturating_add(20);
-    let strategically_specialized = replacement_primary >= current_primary.saturating_add(5);
-    if !broadly_superior && !strategically_specialized {
+    if let Some(replacement) = replacement {
+        let replacement_score = successor_score(replacement, persona);
+        let replacement_primary = successor_primary_capability(replacement, persona);
+        let broadly_superior = replacement_score >= current_score.saturating_add(20);
+        let strategically_specialized = replacement_primary >= current_primary.saturating_add(5);
+        if broadly_superior || strategically_specialized {
+            push_candidate(
+                candidates,
+                GameplayCommandKind::DesignateHeir,
+                PlayerCommand::DesignateHeir {
+                    character_id: replacement.id(),
+                },
+                format!(
+                    "designate character {} as heir for the {persona:?} succession strategy",
+                    replacement.id()
+                ),
+                1_000_i64.saturating_add(head_age.saturating_sub(47).saturating_mul(20)),
+            );
+            return;
+        }
+    }
+    let current_heir_is_eligible = current_heir.status() == CharacterStatus::Active
+        && state.clock.day().saturating_sub(current_heir.birth_day()) >= 18 * 360
+        && council.members.contains(&current_heir_id);
+    let confirmation_pressure = head_age >= HEIR_CONFIRMATION_HEAD_AGE_YEARS
+        || head_health <= HEIR_CONFIRMATION_HEALTH_THRESHOLD;
+    if last_designation_day.is_some() || !current_heir_is_eligible || !confirmation_pressure {
         return;
     }
     push_candidate(
         candidates,
         GameplayCommandKind::DesignateHeir,
         PlayerCommand::DesignateHeir {
-            character_id: replacement.id(),
+            character_id: current_heir_id,
         },
         format!(
-            "designate character {} as heir for the {persona:?} succession strategy",
-            replacement.id()
+            "formally confirm character {current_heir_id} as heir for the {persona:?} succession strategy"
         ),
-        1_000_i64.saturating_add(head_age.saturating_sub(47).saturating_mul(20)),
+        900_i64.saturating_add(head_age.saturating_sub(47).saturating_mul(20)),
     );
+}
+
+fn character_age_and_health(state: &AppState, character_id: CharacterId) -> (i64, u16) {
+    state
+        .characters
+        .get(character_id)
+        .map_or((0, 10_000), |character| {
+            (
+                state.clock.day().saturating_sub(character.birth_day()) / 360,
+                character.runtime.health_basis_points,
+            )
+        })
 }
 
 const fn successor_primary_capability(
@@ -6315,6 +6469,15 @@ const fn simulation_error_category(error: &SimulationError) -> &'static str {
         SimulationError::BusinessFinanceVersionExhausted { .. } => {
             "simulation: business finance version exhausted"
         }
+        SimulationError::FamilyCharterVersionExhausted { .. } => {
+            "simulation: family charter version exhausted"
+        }
+        SimulationError::DynastyGenerationExhausted { .. } => {
+            "simulation: dynasty generation exhausted"
+        }
+        SimulationError::InstitutionTermNumberExhausted { .. } => {
+            "simulation: institution term number exhausted"
+        }
         SimulationError::MarketQuoteMissing { .. } => "simulation: missing market quote",
         SimulationError::LoanBalanceOverflow { .. } => "simulation: loan balance overflow",
         SimulationError::CivicDebtBalanceOverflow { .. } => {
@@ -6484,6 +6647,57 @@ fn weighted_overall(
     u16::try_from(total / 100).unwrap_or(100).min(100)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct AggregateCycleTotals {
+    simulated_days: u64,
+    decision_cycles: u64,
+    viable_choices: u64,
+    viable_command_kinds: u64,
+    no_action_cycles: u64,
+    quiet_cycles: u64,
+    blocked_cycles: u64,
+    multiple_viable_command_kinds: u64,
+    close_viable_command_kinds: u64,
+    distinct_immediate_consequences: u64,
+}
+
+impl AggregateCycleTotals {
+    fn add_campaign(&mut self, campaign: &GameplayCampaignReport) {
+        self.simulated_days = self
+            .simulated_days
+            .saturating_add(u64::from(campaign.simulated_days));
+        self.decision_cycles = self
+            .decision_cycles
+            .saturating_add(u64::from(campaign.decision_cycles));
+        self.viable_choices = self
+            .viable_choices
+            .saturating_add(u64::from(campaign.total_viable_choices));
+        self.viable_command_kinds = self
+            .viable_command_kinds
+            .saturating_add(u64::from(campaign.total_viable_command_kinds));
+        self.no_action_cycles = self
+            .no_action_cycles
+            .saturating_add(u64::from(campaign.no_action_cycles));
+        self.quiet_cycles = self
+            .quiet_cycles
+            .saturating_add(u64::from(campaign.quiet_cycles));
+        self.blocked_cycles = self
+            .blocked_cycles
+            .saturating_add(u64::from(campaign.blocked_cycles));
+        self.multiple_viable_command_kinds = self.multiple_viable_command_kinds.saturating_add(
+            u64::from(campaign.cycles_with_multiple_viable_command_kinds),
+        );
+        self.close_viable_command_kinds = self
+            .close_viable_command_kinds
+            .saturating_add(u64::from(campaign.cycles_with_close_viable_command_kinds));
+        self.distinct_immediate_consequences =
+            self.distinct_immediate_consequences
+                .saturating_add(u64::from(
+                    campaign.cycles_with_distinct_immediate_consequences,
+                ));
+    }
+}
+
 fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregate {
     let mut commands = initialized_command_stats();
     let mut phase_stats = initialized_phase_stats();
@@ -6492,14 +6706,7 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
     let mut causal_domain_changes = initialized_domain_counts();
     let mut ambient_domain_changes = initialized_domain_counts();
     let mut interactions = BTreeMap::new();
-    let mut simulated_days = 0_u64;
-    let mut decision_cycles = 0_u64;
-    let mut viable_choices = 0_u64;
-    let mut viable_command_kinds = 0_u64;
-    let mut no_action_cycles = 0_u64;
-    let mut quiet_cycles = 0_u64;
-    let mut blocked_cycles = 0_u64;
-    let mut cycles_with_multiple_viable_command_kinds = 0_u64;
+    let mut totals = AggregateCycleTotals::default();
     for campaign in campaigns {
         merge_phase_stats(campaign, &mut phase_stats);
         merge_campaign(
@@ -6511,18 +6718,7 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
             &mut ambient_domain_changes,
             &mut interactions,
         );
-        simulated_days = simulated_days.saturating_add(u64::from(campaign.simulated_days));
-        decision_cycles = decision_cycles.saturating_add(u64::from(campaign.decision_cycles));
-        viable_choices = viable_choices.saturating_add(u64::from(campaign.total_viable_choices));
-        viable_command_kinds =
-            viable_command_kinds.saturating_add(u64::from(campaign.total_viable_command_kinds));
-        no_action_cycles = no_action_cycles.saturating_add(u64::from(campaign.no_action_cycles));
-        quiet_cycles = quiet_cycles.saturating_add(u64::from(campaign.quiet_cycles));
-        blocked_cycles = blocked_cycles.saturating_add(u64::from(campaign.blocked_cycles));
-        cycles_with_multiple_viable_command_kinds = cycles_with_multiple_viable_command_kinds
-            .saturating_add(u64::from(
-                campaign.cycles_with_multiple_viable_command_kinds,
-            ));
+        totals.add_campaign(campaign);
     }
     let successful_actions = commands
         .values()
@@ -6555,18 +6751,20 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
     let scores = aggregate_scores(campaigns);
     GameplayAggregate {
         campaigns: usize_to_u32(campaigns.len()),
-        simulated_days,
-        decision_cycles,
+        simulated_days: totals.simulated_days,
+        decision_cycles: totals.decision_cycles,
         successful_actions,
         substantive_actions,
         candidate_probes,
-        viable_choices,
-        viable_command_kinds,
+        viable_choices: totals.viable_choices,
+        viable_command_kinds: totals.viable_command_kinds,
         phase_stats,
-        no_action_cycles,
-        quiet_cycles,
-        blocked_cycles,
-        cycles_with_multiple_viable_command_kinds,
+        no_action_cycles: totals.no_action_cycles,
+        quiet_cycles: totals.quiet_cycles,
+        blocked_cycles: totals.blocked_cycles,
+        cycles_with_multiple_viable_command_kinds: totals.multiple_viable_command_kinds,
+        cycles_with_close_viable_command_kinds: totals.close_viable_command_kinds,
+        cycles_with_distinct_immediate_consequences: totals.distinct_immediate_consequences,
         command_coverage,
         domain_coverage,
         commands,
@@ -6600,6 +6798,12 @@ fn merge_phase_stats(
         target.cycles_with_multiple_viable_command_kinds = target
             .cycles_with_multiple_viable_command_kinds
             .saturating_add(source.cycles_with_multiple_viable_command_kinds);
+        target.cycles_with_close_viable_command_kinds = target
+            .cycles_with_close_viable_command_kinds
+            .saturating_add(source.cycles_with_close_viable_command_kinds);
+        target.cycles_with_distinct_immediate_consequences = target
+            .cycles_with_distinct_immediate_consequences
+            .saturating_add(source.cycles_with_distinct_immediate_consequences);
         target.total_viable_command_kinds = target
             .total_viable_command_kinds
             .saturating_add(source.total_viable_command_kinds);
@@ -6709,6 +6913,7 @@ fn derive_findings(
     add_business_survival_finding(campaigns, &mut findings);
     add_system_health_findings(aggregate, campaigns, &mut findings);
     add_choice_quality_finding(aggregate, &mut findings);
+    add_institutional_reach_finding(campaigns, &mut findings);
     add_strategic_cadence_finding(aggregate, campaigns, &mut findings);
     add_phase_quality_findings(aggregate, &mut findings);
     add_core_fantasy_findings(aggregate, campaigns, &mut findings);
@@ -7477,6 +7682,16 @@ fn add_choice_quality_finding(aggregate: &GameplayAggregate, findings: &mut Vec<
         opportunity_cycles,
         100,
     );
+    let close_share = scaled_ratio_u64(
+        aggregate.cycles_with_close_viable_command_kinds,
+        aggregate.cycles_with_multiple_viable_command_kinds,
+        100,
+    );
+    let distinct_share = scaled_ratio_u64(
+        aggregate.cycles_with_distinct_immediate_consequences,
+        aggregate.cycles_with_multiple_viable_command_kinds,
+        100,
+    );
     if average_choices_tenths < 20 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
@@ -7508,6 +7723,29 @@ fn add_choice_quality_finding(aggregate: &GameplayAggregate, findings: &mut Vec<
             ),
         });
     }
+    if aggregate.cycles_with_multiple_viable_command_kinds >= 20 && close_share < 20 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Most multi-option cycles still have an obvious winner".to_owned(),
+            evidence: format!(
+                "Only {} of {} cycles with multiple viable command families placed the two highest-ranked viable families within {CLOSE_CHOICE_SCORE_GAP} score points ({close_share}%). The harness sees breadth, but the agent rarely faces a close strategic tradeoff.",
+                aggregate.cycles_with_close_viable_command_kinds,
+                aggregate.cycles_with_multiple_viable_command_kinds
+            ),
+        });
+    }
+    if aggregate.cycles_with_multiple_viable_command_kinds >= 20 && distinct_share < 50 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Viable alternatives often share the same immediate consequence profile"
+                .to_owned(),
+            evidence: format!(
+                "Only {} of {} multi-family cycles exposed at least two distinct immediate domain-change profiles ({distinct_share}%). Delayed effects may still diverge, but the first-order feedback risks making different commands feel interchangeable.",
+                aggregate.cycles_with_distinct_immediate_consequences,
+                aggregate.cycles_with_multiple_viable_command_kinds
+            ),
+        });
+    }
     let blocked_share = scaled_ratio_u64(aggregate.blocked_cycles, opportunity_cycles, 100);
     if blocked_share >= 10 {
         findings.push(GameplayFinding {
@@ -7516,6 +7754,37 @@ fn add_choice_quality_finding(aggregate: &GameplayAggregate, findings: &mut Vec<
             evidence: format!(
                 "{} of {opportunity_cycles} cycles with substantive candidates ended without a viable action ({blocked_share}%).",
                 aggregate.blocked_cycles
+            ),
+        });
+    }
+}
+
+fn add_institutional_reach_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let eligible: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| campaign.simulated_days >= 1_800 && campaign.end.available_offices >= 5)
+        .collect();
+    if eligible.is_empty() {
+        return;
+    }
+    let near_universal = eligible
+        .iter()
+        .filter(|campaign| {
+            u32::from(campaign.end.player_institutions_represented).saturating_mul(100)
+                >= u32::from(campaign.end.available_offices).saturating_mul(80)
+        })
+        .count();
+    let share = scaled_ratio_usize(near_universal, eligible.len(), 100);
+    if share >= 50 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Dynasty networks become institutionally universal".to_owned(),
+            evidence: format!(
+                "{near_universal} of {} mature campaigns ended with player representation in at least 80% of institutions ({share}%). Family growth should create parallel strategies, but near-universal access weakens specialization, coalition choice, and the cost of succession.",
+                eligible.len()
             ),
         });
     }
@@ -8635,6 +8904,16 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             u64::from(stats.decision_cycles),
             100,
         );
+        let close_choice_share = scaled_ratio_u64(
+            u64::from(stats.cycles_with_close_viable_command_kinds),
+            u64::from(stats.cycles_with_multiple_viable_command_kinds),
+            100,
+        );
+        let distinct_choice_share = scaled_ratio_u64(
+            u64::from(stats.cycles_with_distinct_immediate_consequences),
+            u64::from(stats.cycles_with_multiple_viable_command_kinds),
+            100,
+        );
         let opportunity_cycles = stats.decision_cycles.saturating_sub(stats.quiet_cycles);
         let average_families_tenths = scaled_ratio_u64(
             u64::from(stats.total_viable_command_kinds),
@@ -8643,11 +8922,13 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
         );
         let _ = writeln!(
             output,
-            "  {:<22} cycles {:>5} | action {:>3}% | multi-family {:>3}% | families {}.{} | quiet {:>5} | blocked {:>5}",
+            "  {:<22} cycles {:>5} | action {:>3}% | multi {:>3}% | close {:>3}% | distinct {:>3}% | families {}.{} | quiet {:>5} | blocked {:>5}",
             phase.label(),
             stats.decision_cycles,
             action_share,
             multi_family_share,
+            close_choice_share,
+            distinct_choice_share,
             average_families_tenths / 10,
             average_families_tenths % 10,
             stats.quiet_cycles,
@@ -8711,6 +8992,10 @@ fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
         first.maximum_unread_notifications,
     );
     let mut available_offices = first.end.available_offices;
+    let mut represented_institutions = (
+        first.end.player_institutions_represented,
+        first.end.player_institutions_represented,
+    );
     let mut fulfilled_contracts = 0_u64;
     let mut breached_contracts = 0_u64;
     let mut repaid_loans = 0_u64;
@@ -8733,6 +9018,12 @@ fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
         peak_unread.0 = peak_unread.0.min(campaign.maximum_unread_notifications);
         peak_unread.1 = peak_unread.1.max(campaign.maximum_unread_notifications);
         available_offices = available_offices.max(campaign.end.available_offices);
+        represented_institutions.0 = represented_institutions
+            .0
+            .min(campaign.end.player_institutions_represented);
+        represented_institutions.1 = represented_institutions
+            .1
+            .max(campaign.end.player_institutions_represented);
         fulfilled_contracts =
             fulfilled_contracts.saturating_add(u64::from(campaign.end.player_fulfilled_contracts));
         breached_contracts =
@@ -8751,13 +9042,16 @@ fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
     let _ = writeln!(output, "Experience health");
     let _ = writeln!(
         output,
-        "  trajectory ranges: food {:.2}-{:.2}% | operating businesses {}-{} | peak offices {}-{}/{} | peak unread {}-{}",
+        "  trajectory ranges: food {:.2}-{:.2}% | operating businesses {}-{} | peak offices {}-{}/{} | represented institutions {}-{}/{} | peak unread {}-{}",
         f64::from(minimum_food.0) / 100.0,
         f64::from(minimum_food.1) / 100.0,
         operating_businesses.0,
         operating_businesses.1,
         peak_offices.0,
         peak_offices.1,
+        available_offices,
+        represented_institutions.0,
+        represented_institutions.1,
         available_offices,
         peak_unread.0,
         peak_unread.1
@@ -8820,8 +9114,10 @@ fn render_report_header(report: &GameplayHarnessReport, output: &mut String) {
     let average_choices = format_tenths(average_choices_tenths);
     let _ = writeln!(
         output,
-        "choice quality: {average_choices} viable choices / {average_families} command families per actionable cycle | {} cycles with multiple families\n",
-        aggregate.cycles_with_multiple_viable_command_kinds
+        "choice quality: {average_choices} viable choices / {average_families} command families per actionable cycle | {} multi-family | {} close-ranked | {} distinct immediate profiles\n",
+        aggregate.cycles_with_multiple_viable_command_kinds,
+        aggregate.cycles_with_close_viable_command_kinds,
+        aggregate.cycles_with_distinct_immediate_consequences
     );
 }
 
@@ -8981,18 +9277,25 @@ fn render_trace_samples(report: &GameplayHarnessReport, output: &mut String) {
             .map_or("none", GameplayCommandKind::label);
         let _ = writeln!(
             output,
-            "  seed {} {:<12} {:?} day {:>4}: {:<18} ranked [{}] immediate [{}] delayed [{}] ambient [{}]",
+            "  seed {} {:<12} {:?} day {:>4}: {:<18} viable [{}] gap {:?} profiles {} immediate [{}] delayed [{}] ambient [{}]",
             campaign.seed,
             campaign.persona.label(),
             campaign.background,
             step.day,
             command,
-            step.ranked_candidates
+            step.viable_options
                 .iter()
                 .take(3)
-                .map(|candidate| format!("{}:{}", candidate.command.label(), candidate.score))
+                .map(|candidate| format!(
+                    "{}:{}:{}",
+                    candidate.command.label(),
+                    candidate.score,
+                    domain_labels(&candidate.immediate_domains)
+                ))
                 .collect::<Vec<_>>()
                 .join(","),
+            step.close_choice_score_gap,
+            step.distinct_immediate_choice_profiles,
             domain_labels(&step.immediate_domains),
             domain_labels(&step.delayed_domains),
             domain_labels(&step.ambient_domains)
@@ -9119,6 +9422,7 @@ fn compare_dynasty_and_civic(
         || earlier.eligible_officeholders != later.eligible_officeholders
         || earlier.player_office_checksum != later.player_office_checksum
         || earlier.institution_memberships != later.institution_memberships
+        || earlier.player_institutions_represented != later.player_institutions_represented
         || earlier.institution_budget_total != later.institution_budget_total
         || earlier.player_civic_contributions != later.player_civic_contributions
         || earlier.player_unmet_office_duties != later.player_unmet_office_duties
@@ -9373,6 +9677,23 @@ fn count_player_memberships(state: &AppState, player_id: DynastyId) -> u16 {
                     .count()
             })
             .sum(),
+    )
+}
+
+fn count_player_institutions_represented(state: &AppState, player_id: DynastyId) -> u16 {
+    usize_to_u16(
+        state
+            .institutions
+            .values()
+            .filter(|institution| {
+                institution.members.iter().any(|character_id| {
+                    state
+                        .characters
+                        .get(*character_id)
+                        .is_some_and(|character| character.dynasty_id() == player_id)
+                })
+            })
+            .count(),
     )
 }
 

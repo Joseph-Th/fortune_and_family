@@ -198,6 +198,8 @@ pub enum FamilyLinkKind {
     Adoptive,
 }
 
+pub(crate) const MIN_PARENT_CHILD_AGE_GAP_DAYS: i64 = 12 * 360;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FamilyLink {
     pub(crate) id: FamilyLinkId,
@@ -436,10 +438,18 @@ pub enum InformationConfidence {
     Confirmed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InformationTarget {
+    Market { good_id: GoodId },
+    Counterparty { dynasty_id: DynastyId },
+    District { district_id: DistrictId },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InformationReport {
     pub(crate) id: InformationReportId,
     pub(crate) owner_dynasty_id: DynastyId,
+    pub(crate) target: Option<InformationTarget>,
     pub(crate) subject: String,
     pub(crate) confidence: InformationConfidence,
     pub(crate) created_day: i64,

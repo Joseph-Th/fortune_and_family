@@ -1,6 +1,6 @@
 //! Canonical player-command validation and dispatch across simulation subsystems.
 
-use super::transactions::next_business_finance_version;
+use super::transactions::{next_business_finance_version, next_family_charter_version};
 use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
     acquire_business, buy_unowned_property, issue_loan, sell_owned_property, sign_supply_contract,
@@ -11,8 +11,8 @@ use crate::core::{
     CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry,
     ChronicleKind, CivicDebt, CivicDebtStatus, ContractStatus, CrisisStatus, DynastyPair,
     EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind, HouseGovernance,
-    InformationConfidence, InformationReport, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus,
-    OfficePower, OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
+    InformationConfidence, InformationReport, InformationTarget, LawKind, LegalCase, LegalCaseKind,
+    LegalCaseStatus, OfficePower, OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId,
@@ -188,14 +188,14 @@ const HEIR_MINIMUM_AGE_DAYS: i64 = 18 * 360;
 pub(crate) const OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS: i64 = 180;
 pub(crate) const OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST: u16 = 100;
 pub(crate) const INSTITUTION_SUPPORT_INTERVAL_DAYS: i64 = 360;
-pub(crate) const INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS: i64 = 90;
+pub(crate) const INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS: i64 = 180;
 pub(crate) const INSTITUTION_SUPPORT_COST: Money = Money::from_copper(1_200);
 pub(crate) const INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT: u16 = 5_500;
 pub(crate) const INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT: u32 = 78;
 pub(crate) const MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER: usize = 2;
 pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_RECOVERY_DAYS: i64 = 720;
-const OFFICE_NOMINATION_RESOLUTION_DAYS: i64 = 60;
+const OFFICE_NOMINATION_RESOLUTION_DAYS: i64 = 120;
 pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
 pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 78;
 pub(crate) const WARD_ADOPTION_INTERVAL_DAYS: i64 = 720;
@@ -509,21 +509,15 @@ pub fn apply_player_command(
     state: &mut AppState,
     command: PlayerCommand,
 ) -> Result<CommandOutcome, CommandError> {
-    #[cfg(debug_assertions)]
-    let state_before = state.clone();
-
-    let result = dispatch_player_command(registry, state, command);
-
-    #[cfg(debug_assertions)]
-    match &result {
-        Ok(_) => super::validate_invariants(registry, state),
-        Err(_) => debug_assert_eq!(
-            state, &state_before,
-            "Canonical Mutation: rejected player command changed campaign state"
-        ),
+    let mut candidate = state.clone();
+    match dispatch_player_command(registry, &mut candidate, command) {
+        Ok(outcome) => {
+            super::validate_invariants(registry, &candidate);
+            *state = candidate;
+            Ok(outcome)
+        }
+        Err(error) => Err(error),
     }
-
-    result
 }
 
 fn dispatch_player_command(
@@ -1556,12 +1550,13 @@ fn apply_house_governance(
             return Err(CommandError::HouseGovernanceCooldown { next_change_day });
         }
     }
+    let next_charter_version = next_family_charter_version(dynasty_id, council.charter_version)?;
     let council = state
         .family_councils
         .get_mut(&dynasty_id)
         .expect("validated family council must exist");
     council.governance = governance;
-    council.charter_version = council.charter_version.saturating_add(1);
+    council.charter_version = next_charter_version;
     council.unity_basis_points = council.unity_basis_points.saturating_sub(250);
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
@@ -1587,6 +1582,8 @@ struct HeirDesignationPlan {
     dynasty_id: DynastyId,
     prior_heir_id: Option<CharacterId>,
     legitimacy: u16,
+    next_charter_version: u64,
+    confirmation: bool,
     subject: String,
 }
 
@@ -1606,7 +1603,15 @@ fn validate_heir_designation(
             dynasty.resources.legitimacy_basis_points,
         )
     };
-    if prior_heir_id == Some(character_id) {
+    let subject = format!("dynasty:{dynasty_id}");
+    let last_designation_day = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::HeirDesignation && record.subject() == subject)
+        .map(AuditRecord::day);
+    let confirmation = prior_heir_id == Some(character_id);
+    if confirmation && last_designation_day.is_some() {
         return Err(CommandError::UnchangedHeir { character_id });
     }
     let candidate = state
@@ -1632,14 +1637,7 @@ fn validate_heir_designation(
             required: HEIR_DESIGNATION_LEGITIMACY_COST,
         });
     }
-    let subject = format!("dynasty:{dynasty_id}");
-    if let Some(last_designation_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::HeirDesignation && record.subject() == subject)
-        .map(AuditRecord::day)
-    {
+    if let Some(last_designation_day) = last_designation_day {
         let next_designation_day =
             last_designation_day.saturating_add(HEIR_DESIGNATION_INTERVAL_DAYS);
         if state.clock.day() < next_designation_day {
@@ -1648,11 +1646,14 @@ fn validate_heir_designation(
             });
         }
     }
+    let next_charter_version = next_family_charter_version(dynasty_id, council.charter_version)?;
 
     Ok(HeirDesignationPlan {
         dynasty_id,
         prior_heir_id,
         legitimacy,
+        next_charter_version,
+        confirmation,
         subject,
     })
 }
@@ -1665,26 +1666,30 @@ fn apply_heir_designation(
         dynasty_id,
         prior_heir_id,
         legitimacy,
+        next_charter_version,
+        confirmation,
         subject,
     } = validate_heir_designation(state, character_id)?;
 
-    if let Some(prior_heir_id) = prior_heir_id {
-        let prior_heir = state
-            .characters
-            .get_mut(prior_heir_id)
-            .expect("designated heir must exist");
-        if prior_heir.status() == CharacterStatus::Active
-            && prior_heir.role() == CharacterRole::Heir
-        {
-            prior_heir.runtime.role = CharacterRole::Clerk;
+    if !confirmation {
+        if let Some(prior_heir_id) = prior_heir_id {
+            let prior_heir = state
+                .characters
+                .get_mut(prior_heir_id)
+                .expect("designated heir must exist");
+            if prior_heir.status() == CharacterStatus::Active
+                && prior_heir.role() == CharacterRole::Heir
+            {
+                prior_heir.runtime.role = CharacterRole::Clerk;
+            }
         }
+        state
+            .characters
+            .get_mut(character_id)
+            .expect("validated heir candidate must exist")
+            .runtime
+            .role = CharacterRole::Heir;
     }
-    state
-        .characters
-        .get_mut(character_id)
-        .expect("validated heir candidate must exist")
-        .runtime
-        .role = CharacterRole::Heir;
     let dynasty = state
         .dynasties
         .get_mut(&dynasty_id)
@@ -1700,39 +1705,53 @@ fn apply_heir_designation(
     council.unity_basis_points = council
         .unity_basis_points
         .saturating_sub(HEIR_DESIGNATION_UNITY_COST);
-    council.charter_version = council.charter_version.saturating_add(1);
+    council.charter_version = next_charter_version;
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::HeirDesignation,
         subject,
         detail: format!(
-            "prior_heir={};heir={character_id};legitimacy_cost={HEIR_DESIGNATION_LEGITIMACY_COST};unity_cost={HEIR_DESIGNATION_UNITY_COST}",
+            "prior_heir={};heir={character_id};confirmation={confirmation};legitimacy_cost={HEIR_DESIGNATION_LEGITIMACY_COST};unity_cost={HEIR_DESIGNATION_UNITY_COST}",
             prior_heir_id.map_or_else(|| "none".to_owned(), |id| id.to_string())
         ),
     });
     let chronicle_id = state.next_ids.chronicle();
-    state.chronicle.push(ChronicleEntry {
-        id: chronicle_id,
-        day: state.clock.day(),
-        kind: ChronicleKind::SuccessionPrepared,
-        summary: format!(
+    let chronicle_summary = if confirmation {
+        format!("Dynasty {dynasty_id} formally confirmed character {character_id} as heir.")
+    } else {
+        format!(
             "Dynasty {dynasty_id} designated character {character_id} as heir, replacing {}.",
             prior_heir_id.map_or_else(
                 || "no prior heir".to_owned(),
                 |id| format!("character {id}")
             )
-        ),
+        )
+    };
+    state.chronicle.push(ChronicleEntry {
+        id: chronicle_id,
+        day: state.clock.day(),
+        kind: ChronicleKind::SuccessionPrepared,
+        summary: chronicle_summary,
     });
+    let outcome_summary = if confirmation {
+        format!("Formally confirmed character {character_id} as heir.")
+    } else {
+        format!("Designated character {character_id} as heir.")
+    };
     super::strategic::push_outbox(
         state,
         OutboxKind::Family,
-        format!("Character {character_id} designated as heir"),
+        if confirmation {
+            format!("Character {character_id} confirmed as heir")
+        } else {
+            format!("Character {character_id} designated as heir")
+        },
         format!(
             "The family charter now names character {character_id} as successor. The change cost {HEIR_DESIGNATION_LEGITIMACY_COST} legitimacy and {HEIR_DESIGNATION_UNITY_COST} family unity."
         ),
     );
     Ok(CommandOutcome {
-        summary: format!("Designated character {character_id} as heir."),
+        summary: outcome_summary,
     })
 }
 
@@ -2064,10 +2083,12 @@ fn apply_institution_support(
         return Err(CommandError::InvalidNominee { character_id });
     }
     validate_institution_support_standing(state)?;
+    let institution = state
+        .institutions
+        .get(&institution_id)
+        .ok_or(CommandError::MissingInstitution { institution_id })?;
     let subject = institution_support_subject(institution_id, character_id);
-    if state.audit_log.iter().any(|record| {
-        record.kind() == AuditKind::InstitutionPatronage && record.subject() == subject
-    }) {
+    if institution.members.contains(&character_id) {
         return Err(CommandError::InstitutionSupportAlreadyEstablished {
             institution_id,
             character_id,
@@ -2086,10 +2107,6 @@ fn apply_institution_support(
     {
         return Err(CommandError::InstitutionSupportCooldown { next_support_day });
     }
-    let institution = state
-        .institutions
-        .get(&institution_id)
-        .ok_or(CommandError::MissingInstitution { institution_id })?;
     let budget_after = institution
         .budget
         .checked_add(INSTITUTION_SUPPORT_COST)
@@ -2274,7 +2291,10 @@ fn apply_office_nomination(
     }
     let campaign_cost = Money::from_copper(300);
     spend_player_treasury(state, campaign_cost)?;
-    let selection_day = state.clock.day().saturating_add(60);
+    let selection_day = state
+        .clock
+        .day()
+        .saturating_add(OFFICE_NOMINATION_RESOLUTION_DAYS);
     let institution = state
         .institutions
         .get_mut(&institution_id)
@@ -3016,6 +3036,7 @@ fn spend_player_treasury(state: &mut AppState, amount: Money) -> Result<(), Comm
 
 #[derive(Debug)]
 struct InformationCommissionPlan {
+    target: InformationTarget,
     subject: String,
     summary: String,
 }
@@ -3028,7 +3049,7 @@ fn apply_information_commission(
     let plan = resolve_information_commission(registry, state, focus)?;
     spend_player_treasury(state, INFORMATION_COMMISSION_COST)?;
     state.information_reports.retain(|_, report| {
-        report.owner_dynasty_id != state.player_dynasty_id || report.subject != plan.subject
+        report.owner_dynasty_id != state.player_dynasty_id || report.target != Some(plan.target)
     });
     let id = state.next_ids.information_report();
     let day = state.clock.day();
@@ -3037,6 +3058,7 @@ fn apply_information_commission(
         InformationReport {
             id,
             owner_dynasty_id: state.player_dynasty_id,
+            target: Some(plan.target),
             subject: plan.subject.clone(),
             confidence: InformationConfidence::Confirmed,
             created_day: day,
@@ -3132,6 +3154,7 @@ fn resolve_market_information(
         .get(&good_id)
         .ok_or(CommandError::MissingMarketQuote { good_id })?;
     Ok(InformationCommissionPlan {
+        target: InformationTarget::Market { good_id },
         subject: format!("Commissioned market brief: {}", good.name()),
         summary: format!(
             "Price {}; previous price {}; stock {}; target stock {}; today's demand {}; today's supply {}; recorded causes {:?}.",
@@ -3173,6 +3196,7 @@ fn resolve_counterparty_information(
         })
         .count();
     Ok(InformationCommissionPlan {
+        target: InformationTarget::Counterparty { dynasty_id },
         subject: format!("Commissioned house brief: House {}", dynasty.name()),
         summary: format!(
             "Treasury {}; reliability {} bp; trust {} bp; respect {} bp; fear {} bp; resentment {} bp; obligation {}; unsettled bilateral credit {}.",
@@ -3201,6 +3225,7 @@ fn resolve_district_information(
         .get(&district_id)
         .ok_or(CommandError::MissingDistrict { district_id })?;
     Ok(InformationCommissionPlan {
+        target: InformationTarget::District { district_id },
         subject: format!("Commissioned district brief: {}", district.name()),
         summary: format!(
             "Rent index {} bp; employment {} bp; sanitation {} bp; safety {} bp; unrest {} bp; population {}.",
@@ -3304,32 +3329,28 @@ fn resolve_information_leverage(
         });
     }
 
-    if let Some(good_name) = report.subject.strip_prefix("Commissioned market brief: ") {
-        return resolve_market_information_leverage(registry, state, report_id, good_name);
+    match report.target {
+        Some(InformationTarget::Market { good_id }) => {
+            resolve_market_information_leverage(registry, state, report_id, good_id)
+        }
+        Some(InformationTarget::Counterparty { dynasty_id }) => {
+            resolve_counterparty_information_leverage(state, report_id, dynasty_id)
+        }
+        Some(InformationTarget::District { district_id }) => {
+            resolve_district_information_leverage(registry, state, report_id, district_id)
+        }
+        None => Err(CommandError::InformationReportHasNoLeverage { report_id }),
     }
-    if let Some(dynasty_name) = report
-        .subject
-        .strip_prefix("Commissioned house brief: House ")
-    {
-        return resolve_counterparty_information_leverage(state, report_id, dynasty_name);
-    }
-    if let Some(district_name) = report.subject.strip_prefix("Commissioned district brief: ") {
-        return resolve_district_information_leverage(registry, state, report_id, district_name);
-    }
-    Err(CommandError::InformationReportHasNoLeverage { report_id })
 }
 
 fn resolve_market_information_leverage(
     registry: &Registry,
     state: &AppState,
     report_id: InformationReportId,
-    good_name: &str,
+    good_id: GoodId,
 ) -> Result<InformationLeveragePlan, CommandError> {
-    let good_id = registry
-        .goods()
-        .iter()
-        .find(|good| good.name() == good_name)
-        .map(crate::registry::GoodDef::id)
+    let good = registry
+        .get_good(good_id)
         .ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
     let player_id = state.player_dynasty_id;
     let contract = state.contracts.values().find(|contract| {
@@ -3391,8 +3412,11 @@ fn resolve_market_information_leverage(
         return Err(CommandError::InformationReportHasNoLeverage { report_id });
     }
     let description = format!(
-        "use report {report_id} to renegotiate contract {} from {} to {} per unit",
-        contract.id, contract.unit_price, new_price
+        "use report {report_id} to renegotiate {} contract {} from {} to {} per unit",
+        good.name(),
+        contract.id,
+        contract.unit_price,
+        new_price
     );
     Ok(InformationLeveragePlan {
         quote: InformationLeverageQuote {
@@ -3412,14 +3436,12 @@ fn resolve_market_information_leverage(
 fn resolve_counterparty_information_leverage(
     state: &AppState,
     report_id: InformationReportId,
-    dynasty_name: &str,
+    dynasty_id: DynastyId,
 ) -> Result<InformationLeveragePlan, CommandError> {
-    let dynasty_id = state
+    let dynasty = state
         .dynasties
-        .values()
-        .find(|dynasty| dynasty.name() == dynasty_name)
-        .map(crate::core::Dynasty::id)
-        .filter(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+        .get(&dynasty_id)
+        .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
         .ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
     let pair = DynastyPair::new(state.player_dynasty_id, dynasty_id);
     if !state.relationships.contains_key(&pair) {
@@ -3430,7 +3452,8 @@ fn resolve_counterparty_information_leverage(
             report_id,
             cost: INFORMATION_LEVERAGE_COST,
             description: format!(
-                "use report {report_id} for targeted outreach to House {dynasty_name}"
+                "use report {report_id} for targeted outreach to House {}",
+                dynasty.name()
             ),
         },
         effect: InformationLeverageEffect::Counterparty { dynasty_id },
@@ -3441,13 +3464,10 @@ fn resolve_district_information_leverage(
     registry: &Registry,
     state: &AppState,
     report_id: InformationReportId,
-    district_name: &str,
+    district_id: DistrictId,
 ) -> Result<InformationLeveragePlan, CommandError> {
-    let district_id = registry
-        .districts()
-        .iter()
-        .find(|district| district.name() == district_name)
-        .map(crate::registry::DistrictDef::id)
+    let district_definition = registry
+        .get_district(district_id)
         .ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
     let district = state
         .districts
@@ -3476,8 +3496,9 @@ fn resolve_district_information_leverage(
             report_id,
             cost: INFORMATION_LEVERAGE_COST,
             description: format!(
-                "use report {report_id} to fund a targeted {} initiative in {district_name}",
-                initiative.label()
+                "use report {report_id} to fund a targeted {} initiative in {}",
+                initiative.label(),
+                district_definition.name()
             ),
         },
         effect: InformationLeverageEffect::District {

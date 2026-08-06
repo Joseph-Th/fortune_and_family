@@ -108,6 +108,9 @@ mod harness {
             crate::core::InformationReport {
                 id: report_id,
                 owner_dynasty_id: state.player_dynasty_id,
+                target: Some(crate::core::InformationTarget::Counterparty {
+                    dynasty_id: counterparty_id,
+                }),
                 subject: format!("Commissioned house brief: House {counterparty_name}"),
                 confidence: crate::core::InformationConfidence::Confirmed,
                 created_day: state.clock.day(),
@@ -317,6 +320,22 @@ mod harness {
                 .iter()
                 .any(|step| !step.ambient_domains.is_empty()),
             "trace must distinguish autonomous simulation activity"
+        );
+        assert!(
+            campaign.trace.iter().all(|step| {
+                step.viable_options
+                    .iter()
+                    .all(|option| step.viable_command_kinds.contains(&option.command))
+            }),
+            "reported alternatives must be successfully probed command families"
+        );
+        assert!(
+            report.aggregate.cycles_with_close_viable_command_kinds
+                <= report.aggregate.cycles_with_multiple_viable_command_kinds
+        );
+        assert!(
+            report.aggregate.cycles_with_distinct_immediate_consequences
+                <= report.aggregate.cycles_with_multiple_viable_command_kinds
         );
     }
 
@@ -1525,6 +1544,50 @@ mod candidates {
     }
 
     #[test]
+    fn succession_pressure_offers_formal_confirmation_when_no_better_heir_exists() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let (head_id, heir_id) = {
+            let dynasty = state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist");
+            (
+                dynasty.head_id(),
+                dynasty.heir_id().expect("player dynasty must have an heir"),
+            )
+        };
+        state
+            .characters
+            .get_mut(head_id)
+            .expect("player head must exist")
+            .identity
+            .birth_day = state.clock.day().saturating_sub(55 * 360);
+        state
+            .family_councils
+            .get_mut(&player_id)
+            .expect("player family council must exist")
+            .members
+            .retain(|character_id| *character_id == head_id || *character_id == heir_id);
+        let mut candidates = Vec::new();
+
+        generate_heir_designation_candidates(&state, GameplayPersona::Steward, &mut candidates);
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::DesignateHeir)
+            .expect("succession pressure must expose a formal preparation decision");
+        assert!(candidate.description.contains("formally confirm"));
+        assert!(matches!(
+            candidate.command,
+            PlayerCommand::DesignateHeir { character_id } if character_id == heir_id
+        ));
+        apply_player_command(registry, &mut state, candidate.command.clone())
+            .expect("formal confirmation candidate must be executable");
+    }
+
+    #[test]
     fn legal_candidates_require_a_simulated_grievance_and_do_not_repeat_it() {
         let mut state = make_test_campaign();
         state.legal_cases.clear();
@@ -1958,24 +2021,24 @@ mod metrics {
         governance.score = -10_000;
         let mut accumulator = CampaignAccumulator::new();
 
-        let (selected, viable, substantive, kinds, rejections) = probe_candidates(
+        let probe = probe_candidates(
             registry,
             &state,
             [acknowledgement, governance].into_iter(),
             &mut accumulator,
         );
 
-        assert_eq!(viable, 2);
-        assert_eq!(substantive, 1);
-        assert!(rejections.is_empty());
+        assert_eq!(probe.viable_count, 2);
+        assert_eq!(probe.substantive_viable_count, 1);
+        assert!(probe.rejections.is_empty());
         assert_eq!(
-            kinds,
+            probe.viable_command_kinds,
             [GameplayCommandKind::SetHouseGovernance]
                 .into_iter()
                 .collect()
         );
         assert_eq!(
-            selected.expect("a candidate must be selected").kind,
+            probe.selected.expect("a candidate must be selected").kind,
             GameplayCommandKind::SetHouseGovernance,
             "housekeeping may be a fallback but must not consume a strategic decision cycle"
         );
@@ -2466,6 +2529,8 @@ mod findings {
                 quiet_cycles: 45,
                 blocked_cycles: 0,
                 cycles_with_multiple_viable_command_kinds: 20,
+                cycles_with_close_viable_command_kinds: 0,
+                cycles_with_distinct_immediate_consequences: 0,
                 total_viable_command_kinds: 80,
             },
         );
@@ -2477,6 +2542,8 @@ mod findings {
                 quiet_cycles: 35,
                 blocked_cycles: 0,
                 cycles_with_multiple_viable_command_kinds: 29,
+                cycles_with_close_viable_command_kinds: 0,
+                cycles_with_distinct_immediate_consequences: 0,
                 total_viable_command_kinds: 110,
             },
         );
@@ -2621,6 +2688,63 @@ mod findings {
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Info);
         assert_finding_absent(&findings, "Actionable cycles are usually single-track");
+    }
+
+    #[test]
+    fn findings_surface_multi_option_cycles_with_an_obvious_winner() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.decision_cycles = 100;
+        report.aggregate.quiet_cycles = 0;
+        report.aggregate.viable_choices = 300;
+        report.aggregate.viable_command_kinds = 250;
+        report.aggregate.cycles_with_multiple_viable_command_kinds = 80;
+        report.aggregate.cycles_with_close_viable_command_kinds = 10;
+        report.aggregate.cycles_with_distinct_immediate_consequences = 80;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Most multi-option cycles still have an obvious winner",
+        );
+    }
+
+    #[test]
+    fn findings_surface_alternatives_with_identical_immediate_profiles() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.decision_cycles = 100;
+        report.aggregate.quiet_cycles = 0;
+        report.aggregate.viable_choices = 300;
+        report.aggregate.viable_command_kinds = 250;
+        report.aggregate.cycles_with_multiple_viable_command_kinds = 80;
+        report.aggregate.cycles_with_close_viable_command_kinds = 80;
+        report.aggregate.cycles_with_distinct_immediate_consequences = 20;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Viable alternatives often share the same immediate consequence profile",
+        );
+    }
+
+    #[test]
+    fn findings_surface_near_universal_institutional_reach() {
+        let mut report = cached_focused_report(30);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 3_600;
+        campaign.end.available_offices = 10;
+        campaign.end.player_institutions_represented = 9;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Dynasty networks become institutionally universal",
+        );
     }
 
     #[test]

@@ -803,6 +803,85 @@ mod migrations {
     }
 
     #[test]
+    fn v13_adds_typed_information_targets_and_repairs_impossible_parentage() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let good_id = registry
+            .goods()
+            .first()
+            .expect("registry must contain a good")
+            .id();
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CommissionInformation {
+                focus: crate::systems::InformationFocus::Market { good_id },
+            },
+        )
+        .expect("market commission must succeed");
+        let report_id = state
+            .information_reports
+            .values()
+            .find(|report| report.subject.starts_with("Commissioned market brief:"))
+            .expect("commissioned report must exist")
+            .id();
+        let parent_link = state
+            .family_links
+            .values()
+            .find(|link| link.kind == FamilyLinkKind::ParentChild)
+            .expect("campaign must contain a parent-child link")
+            .clone();
+        let parent_birth_day = state
+            .characters
+            .get(parent_link.first_character_id)
+            .expect("parent must exist")
+            .birth_day();
+        state
+            .characters
+            .get_mut(parent_link.second_character_id)
+            .expect("child must exist")
+            .identity
+            .birth_day = parent_birth_day.saturating_add(1);
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(13);
+        for report in value["information_reports"]
+            .as_object_mut()
+            .expect("information reports must be an object")
+            .values_mut()
+        {
+            report
+                .as_object_mut()
+                .expect("information report must be an object")
+                .remove("target");
+        }
+
+        let migrated = migrate_to_current(value, Path::new("memory.json"))
+            .expect("version thirteen must migrate");
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+
+        assert_eq!(
+            loaded
+                .information_reports
+                .get(&report_id)
+                .expect("commissioned report must survive migration")
+                .target,
+            Some(crate::core::InformationTarget::Market { good_id })
+        );
+        assert_eq!(
+            loaded
+                .family_links
+                .get(&parent_link.id)
+                .expect("family link must survive migration")
+                .kind,
+            FamilyLinkKind::Sibling,
+            "legacy impossible parentage must become a collateral-family relationship"
+        );
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        validate_state(&loaded).expect("version-thirteen campaign must remain valid");
+    }
+
+    #[test]
     fn v1_hydrates_strategic_state() {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();

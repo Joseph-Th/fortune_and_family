@@ -927,7 +927,8 @@ mod gameplay_stability {
             state.clock.advance_one_day();
         }
 
-        resolve_institution_selections(registry, &mut state);
+        resolve_institution_selections(registry, &mut state)
+            .expect("replacement selection must remain representable");
 
         let winner_id = state
             .institutions
@@ -979,7 +980,8 @@ mod gameplay_stability {
             .expect("selected institution must exist")
             .next_selection_day = day;
 
-        resolve_institution_selections(test_registry(), &mut state);
+        resolve_institution_selections(test_registry(), &mut state)
+            .expect("office selection must remain representable");
 
         let winner_id = state
             .institutions
@@ -995,6 +997,40 @@ mod gameplay_stability {
                 .dynasty_id(),
             player_id,
             "membership and raw statistics must not grant passive player political power"
+        );
+    }
+
+    #[test]
+    fn exhausted_institution_term_number_rejects_selection_atomically() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        let day = state.clock.day();
+        for institution in state.institutions.values_mut() {
+            institution.next_selection_day = day.saturating_add(1);
+        }
+        let institution = state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("selected institution must exist");
+        institution.next_selection_day = day;
+        institution.term_number = u32::MAX;
+        let before = state.clone();
+
+        let result = resolve_institution_selections(registry, &mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::InstitutionTermNumberExhausted { institution_id })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "term-number exhaustion must not partially select or announce an officeholder",
         );
     }
 }
@@ -1715,7 +1751,8 @@ mod family_councils {
         let audit_before = state.audit_log.len();
         let outbox_before = state.outbox.len();
 
-        update_family_councils(&mut state);
+        update_family_councils(&mut state)
+            .expect("forced governance change must remain representable");
 
         assert_eq!(
             state
@@ -1778,8 +1815,9 @@ mod family_councils {
                 .loyalty_basis_points = 10_000;
         }
 
-        update_family_councils(&mut disloyal);
-        update_family_councils(&mut loyal);
+        update_family_councils(&mut disloyal)
+            .expect("disloyal council update must remain representable");
+        update_family_councils(&mut loyal).expect("loyal council update must remain representable");
 
         assert!(
             loyal

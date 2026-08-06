@@ -1,7 +1,7 @@
 //! Validated multi-record transactions and shared simulation errors.
 
 use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};
-use crate::ids::{BusinessId, CivicDebtId, GoodId, LoanId};
+use crate::ids::{BusinessId, CivicDebtId, DynastyId, GoodId, InstitutionId, LoanId};
 use crate::money::Money;
 use thiserror::Error;
 
@@ -69,6 +69,12 @@ pub enum SimulationError {
     },
     #[error("business {business_id} finance version is exhausted")]
     BusinessFinanceVersionExhausted { business_id: BusinessId },
+    #[error("dynasty {dynasty_id} family charter version is exhausted")]
+    FamilyCharterVersionExhausted { dynasty_id: DynastyId },
+    #[error("dynasty {dynasty_id} generation is exhausted")]
+    DynastyGenerationExhausted { dynasty_id: DynastyId },
+    #[error("institution {institution_id} term number is exhausted")]
+    InstitutionTermNumberExhausted { institution_id: InstitutionId },
     #[error("market quote is missing for good {good_id}")]
     MarketQuoteMissing { good_id: GoodId },
     #[error(
@@ -128,6 +134,15 @@ pub(crate) fn next_business_finance_version(business: &Business) -> Result<u64, 
             business_id: business.id(),
         },
     )
+}
+
+pub(crate) fn next_family_charter_version(
+    dynasty_id: DynastyId,
+    current: u64,
+) -> Result<u64, SimulationError> {
+    current
+        .checked_add(1)
+        .ok_or(SimulationError::FamilyCharterVersionExhausted { dynasty_id })
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -122,9 +122,9 @@ The harness records separate fantasy milestones:
 - First player labor dispute
 - First succession
 
-Institutional patronage becomes available after full commercial standing: established reputation and 78 credited contract deliveries, representing roughly 18 months of reliable weekly trade for a single-contract business. Patronage transfers treasury into an institution, creates membership, improves support among member houses, and must mature for 90 days. Patronage and nomination cooldowns are tracked per character, so a larger trained family can pursue several political projects in parallel. An active nomination locks that character for one year; after the contest resolves, another nomination requires a two-year recovery from the original campaign date. Each character may belong to at most two institutions, which keeps political identity focused and makes additional trained relatives the source of broader dynastic reach. Office nomination requires established support in the target institution. Office powers become available after a separate 180-day establishment period. Officeholders then face recurring duties, administrative load, and possible forfeiture.
+Institutional patronage becomes available after full commercial standing: established reputation and 78 credited contract deliveries, representing roughly 18 months of reliable weekly trade for a single-contract business. Patronage transfers treasury into an institution, creates membership, improves support among member houses, and must mature for 180 days. Patronage and nomination cooldowns are tracked per character, so a larger trained family can pursue several political projects in parallel. A funded nomination resolves after a 120-day campaign. An active nomination locks that character for one year; after the contest resolves, another nomination requires a two-year recovery from the original campaign date. Each character may belong to at most two institutions, which keeps political identity focused and makes additional trained relatives the source of broader dynastic reach. Office nomination requires established support in the target institution. Office powers become available after a separate 240-day establishment period. Officeholders then face recurring duties, administrative load, and possible forfeiture.
 
-Family growth remains player-directed through governance, ward adoption, and focused education. Commercial maturity gates the advanced family routes.
+Family growth remains player-directed through governance, ward adoption, and focused education. Under meaningful succession pressure, the harness either selects a strategically superior adult council member or formally confirms the default heir when no better replacement exists. A default heir may be formally confirmed once; repeated unchanged designations remain invalid. Commercial maturity gates the advanced family routes.
 
 Established dynasties may also commission annual intelligence reports. The focus is persona-specific in automated runs: markets for entrepreneurs, district conditions for stewards, and rival-house conditions for political or opportunistic agents.
 
@@ -141,7 +141,7 @@ The harness classifies each decision cycle by the furthest reached fantasy miles
 | Institutional ascent | The first institutional support campaign is launched. |
 | Dynastic governance | The first city-shaping law or public work is sponsored. |
 
-Each phase records action share, quiet and blocked cycles, viable command-family breadth, and multi-family choice frequency. Findings warn when establishment or institutional ascent becomes mostly waiting, or when mature governance is quiet in at least 30% of cycles or averages fewer than two viable command families in actionable cycles. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
+Each phase records action share, quiet and blocked cycles, viable command-family breadth, multi-family choice frequency, closely ranked alternatives, and whether alternatives produce distinct immediate consequence profiles. Findings warn when establishment or institutional ascent becomes mostly waiting, when apparently broad choices have one obvious winner or equivalent immediate effects, or when mature governance is quiet in at least 30% of cycles or averages fewer than two viable command families in actionable cycles. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
 
 ## Recovery routes
 
@@ -205,8 +205,11 @@ Findings use `Info`, `Warning`, or `Critical` severity. They cover conditions su
 - Public-work or office-duty overload
 - Misordered, compressed, synchronized, or unreachable campaign milestones
 - Weak strategic variety or persona convergence
+- Multi-family cycles dominated by one obviously superior option
+- Viable alternatives with indistinguishable immediate consequence profiles
 - Patronage and nomination administration consuming too much of substantive play
 - Political growth without family capacity
+- Near-universal institutional representation that erodes specialization
 - Long campaigns that do not reach stable succession
 
 Absence is interpreted against the configured horizon and prerequisite availability. Event-driven and office-power-dependent commands are not treated as broken before their trigger or mature authority exists. The report records actual law and public-work activation opportunities rather than inferring availability from campaign age alone.
@@ -220,12 +223,15 @@ Each retained step includes:
 - Considered, viable, and substantive candidate counts
 - Distinct viable command families
 - Ranked candidates and scores
+- Successfully probed viable alternatives, their scores, descriptions, and immediate consequence domains
+- Score distance between the strongest two command families
+- Number of distinct immediate consequence profiles among viable command families
 - Selected command and outcome
 - Rejection summary
 - Immediate, persistent, delayed, and ambient domains
 - World-feedback flags
 
-Context includes treasury, business cash and condition, deliveries, loan states, property and collateral, reputation, legitimacy, offices, laws, public works, wards, family unity, generation, labor disputes, crises, and notifications.
+Context includes treasury, business cash and condition, deliveries, loan states, property and collateral, reputation, legitimacy, offices, total institutional memberships, distinct institutions represented, laws, public works, wards, family unity, generation, labor disputes, crises, and notifications.
 
 The trace sampler retains representative opening, closing, and high-consequence decisions. `--trace-limit` affects diagnostics only.
 
@@ -236,7 +242,7 @@ The JSON report contains:
 - `schema_version`
 - Harness configuration
 - Aggregate counters, scores, command statistics, and interaction edges
-- Per-phase actionability and command-family breadth
+- Per-phase actionability, command-family breadth, close-choice frequency, and immediate consequence differentiation
 - Per-campaign start and end snapshots
 - Fantasy-arc milestones
 - Findings and limitations
@@ -270,6 +276,8 @@ The harness can evaluate deterministic state and command behavior. It cannot est
 - Whether prose creates attachment or urgency
 - Whether incomplete information is presented clearly
 - Whether real-time pacing feels appropriate
-- Whether mechanically distinct options feel meaningfully distinct
+- Whether mechanically distinct options feel emotionally or narratively meaningful
+- Whether a player recognizes which rival caused a setback or understands that rival's intent
+- How every unchosen branch develops across its full delayed consequence horizon
 
 Use human playtesting for those questions.

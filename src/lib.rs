@@ -28,7 +28,7 @@ pub use gameplay::{
     GameplayFantasyArc, GameplayFinding, GameplayFindingSeverity, GameplayHarnessConfig,
     GameplayHarnessError, GameplayHarnessReport, GameplayInteractionEdge, GameplayPersona,
     GameplayPhase, GameplayPhaseStats, GameplayScores, GameplaySnapshot, GameplayTraceStep,
-    render_gameplay_report, run_gameplay_harness,
+    GameplayViableOption, render_gameplay_report, run_gameplay_harness,
 };
 pub use persistence::{PersistenceError, StateValidationKind, load_state, save_state};
 pub use projection::{

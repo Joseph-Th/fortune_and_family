@@ -2,8 +2,8 @@
 
 use crate::core::{
     AppState, BusinessStatus, CampaignPhase, CivicDebtStatus, ContractStatus, CrisisKind,
-    CrisisStatus, InformationConfidence, LawKind, LegalCaseStatus, LoanStatus, MarketCause,
-    ObjectiveKind, ObjectiveStatus, OutboxKind, PublicWorkKind, PublicWorkStatus,
+    CrisisStatus, InformationConfidence, InformationTarget, LawKind, LegalCaseStatus, LoanStatus,
+    MarketCause, ObjectiveKind, ObjectiveStatus, OutboxKind, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CivicDebtId, ContractId, CrisisId, DistrictId, DynastyId, InstitutionId, LawId,
@@ -405,6 +405,7 @@ pub struct RelationshipProjection {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct InformationProjection {
+    pub target: Option<InformationTarget>,
     pub subject: String,
     pub confidence: InformationConfidence,
     pub source: String,
@@ -470,6 +471,7 @@ pub fn build_campaign_projection(registry: &Registry, state: &AppState) -> Campa
             .values()
             .filter(|report| report.owner_dynasty_id == state.player_dynasty_id)
             .map(|report| InformationProjection {
+                target: report.target,
                 subject: report.subject.clone(),
                 confidence: report.confidence,
                 source: report.source.clone(),

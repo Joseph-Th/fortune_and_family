@@ -11,9 +11,9 @@ Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code own
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 13 |
-| Supported save migrations | Versions 0 through 12 |
-| Gameplay report schema | 27 |
+| Save schema | 14 |
+| Supported save migrations | Versions 0 through 13 |
+| Gameplay report schema | 28 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |
@@ -45,7 +45,7 @@ The Rivergate campaign supports multi-generation deterministic continuation.
 | Property | Ownership, value, tenancy, occupancy, rent, purchase, collateral, voluntary liquidation, lien settlement, and distressed civic guarantees. |
 | Labor | Employment agreements, wages, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. |
 | Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with earned patronage-based membership, budgets, legitimacy, powers, terms, and deterministic selection. |
-| Political office | Commercial eligibility, paid institutional patronage, a 90-day support-establishment period, nomination, office-specific competence, a 180-day power-establishment period, recurring duties, administrative load, voluntary withdrawal, forfeiture, and re-election limits. |
+| Political office | Commercial eligibility, paid institutional patronage, a 180-day support-establishment period, nomination with a 120-day campaign resolution, office-specific competence, a 240-day power-establishment period, recurring duties, administrative load, voluntary withdrawal, forfeiture, and re-election limits. |
 | Civic systems | Laws, public works, district conditions, legal cases, crisis response, and municipal debt. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, summary, creation, expiry, passive reports, and paid player-directed market, district, and counterparty intelligence. |
