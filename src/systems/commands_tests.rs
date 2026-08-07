@@ -4813,6 +4813,132 @@ mod information {
     }
 
     #[test]
+    fn market_intelligence_rejects_a_renegotiation_that_would_overflow_the_weekly_invoice() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let contract = state
+            .contracts
+            .values()
+            .find(|contract| {
+                let buyer_owner = state
+                    .businesses
+                    .get(contract.buyer_business_id)
+                    .map(crate::core::Business::owner_dynasty_id);
+                let seller_owner = state
+                    .businesses
+                    .get(contract.seller_business_id)
+                    .map(crate::core::Business::owner_dynasty_id);
+                contract.status == ContractStatus::Active
+                    && buyer_owner == Some(player_id)
+                    && seller_owner.is_some_and(|owner| owner != player_id)
+            })
+            .expect("campaign must contain a player-buyer contract")
+            .clone();
+        let counterparty_id = state
+            .businesses
+            .get(contract.seller_business_id)
+            .expect("contract seller must exist")
+            .owner_dynasty_id();
+        let counterparty_manager_id = state
+            .dynasties
+            .get(&counterparty_id)
+            .expect("counterparty dynasty must exist")
+            .head_id();
+        let player_manager_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        state.businesses.transfer_ownership(
+            contract.buyer_business_id,
+            counterparty_id,
+            counterparty_manager_id,
+        );
+        state.businesses.transfer_ownership(
+            contract.seller_business_id,
+            player_id,
+            player_manager_id,
+        );
+        {
+            let contract = state
+                .contracts
+                .get_mut(&contract.id)
+                .expect("selected contract must exist");
+            contract.quantity_per_week = Quantity::from_units(2);
+            contract.unit_price = Money::from_copper(i64::MAX / 2);
+            assert!(
+                crate::money::checked_cost_for(contract.quantity_per_week, contract.unit_price)
+                    .is_some(),
+                "arranged contract must begin with a representable weekly invoice"
+            );
+        }
+        let contract = state
+            .contracts
+            .get(&contract.id)
+            .expect("selected contract must remain present");
+
+        assert_eq!(
+            market_contract_leverage_terms(&state, player_id, contract),
+            None
+        );
+    }
+
+    #[test]
+    fn market_intelligence_skips_an_unactionable_contract_for_a_later_viable_one() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let fixture = market_leverage_fixture(&state);
+        let first_id = fixture.contract.id;
+        let good_id = fixture.contract.good_id;
+        let unrelated_matching_ids: Vec<_> = state
+            .contracts
+            .values()
+            .filter(|contract| {
+                contract.id != first_id
+                    && contract.status == ContractStatus::Active
+                    && contract.good_id == good_id
+                    && state
+                        .businesses
+                        .get(contract.buyer_business_id)
+                        .is_some_and(|business| business.owner_dynasty_id() == player_id)
+                        != state
+                            .businesses
+                            .get(contract.seller_business_id)
+                            .is_some_and(|business| business.owner_dynasty_id() == player_id)
+            })
+            .map(|contract| contract.id)
+            .collect();
+        for contract_id in unrelated_matching_ids {
+            state.contracts.remove(&contract_id);
+        }
+        let second_id = state.next_ids.contract();
+        let mut second_contract = fixture.contract.clone();
+        second_contract.id = second_id;
+        second_contract.unit_price = Money::from_copper(100);
+        state.contracts.insert(second_id, second_contract);
+        let first_contract = state
+            .contracts
+            .get_mut(&first_id)
+            .expect("fixture contract must remain present");
+        if fixture.buyer_owner == player_id {
+            first_contract.unit_price = Money::from_copper(1);
+        } else {
+            first_contract.quantity_per_week = Quantity::from_units(2);
+            first_contract.unit_price = Money::from_copper(i64::MAX / 2);
+        }
+        let report_id = InformationReportId::new(u32::MAX);
+
+        let plan = resolve_market_information_leverage(registry, &state, report_id, good_id)
+            .expect("a later actionable contract must remain leverageable");
+
+        let InformationLeverageEffect::Contract { contract_id, .. } = plan.effect else {
+            panic!("market intelligence must resolve to a contract effect");
+        };
+        assert_eq!(contract_id, second_id);
+    }
+
+    #[test]
     fn counterparty_intelligence_improves_targeted_relationships() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

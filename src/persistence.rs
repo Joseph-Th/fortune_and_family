@@ -1459,10 +1459,14 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
 
 fn validate_persisted_history(state: &AppState) -> Result<(), String> {
     let mut outbox_ids = BTreeSet::new();
+    let mut prior_outbox_id = None;
     let mut prior_outbox_day = i64::MIN;
     for message in &state.outbox {
         if !outbox_ids.insert(message.id) {
             return Err("outbox contains duplicate message IDs".to_owned());
+        }
+        if prior_outbox_id.is_some_and(|prior_id| message.id <= prior_id) {
+            return Err("outbox message IDs are not strictly increasing".to_owned());
         }
         if message.day < prior_outbox_day || message.day > state.clock.day() {
             return Err("outbox messages are not chronologically valid".to_owned());
@@ -1470,6 +1474,7 @@ fn validate_persisted_history(state: &AppState) -> Result<(), String> {
         if message.subject.trim().is_empty() || message.body.trim().is_empty() {
             return Err("outbox message lacks user-facing content".to_owned());
         }
+        prior_outbox_id = Some(message.id);
         prior_outbox_day = message.day;
     }
 

@@ -2266,6 +2266,73 @@ mod candidates {
     }
 
     #[test]
+    fn entrepreneur_market_intelligence_reacts_to_an_adverse_contract_gap() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let good_id = establish_player_contract_market(&mut state);
+        let player_id = state.player_dynasty_id;
+        let contract_id = state
+            .contracts
+            .values()
+            .find(|contract| {
+                player_external_contract(&state, contract) && contract.good_id == good_id
+            })
+            .expect("player must have an external contract for the selected good")
+            .id;
+        let market_price = state
+            .market
+            .quotes
+            .get(&good_id)
+            .expect("contract good must have a market quote")
+            .price;
+        {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&good_id)
+                .expect("contract good must have a market quote");
+            quote.previous_price = quote.price;
+            quote.stock = quote.target_stock;
+        }
+        let contract = state
+            .contracts
+            .get_mut(&contract_id)
+            .expect("selected contract must remain present");
+        let buyer_is_player = state
+            .businesses
+            .get(contract.buyer_business_id)
+            .is_some_and(|business| business.owner_dynasty_id() == player_id);
+        contract.unit_price = if buyer_is_player {
+            market_price
+                .checked_mul_ratio(120, 100)
+                .expect("test contract premium must fit")
+        } else {
+            market_price
+                .checked_mul_ratio(80, 100)
+                .expect("test contract discount must fit")
+                .max(Money::from_copper(1))
+        };
+        let mut candidates = Vec::new();
+
+        generate_information_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+
+        assert!(candidates.iter().any(|candidate| {
+            candidate.kind == GameplayCommandKind::CommissionInformation
+                && matches!(
+                    candidate.command,
+                    PlayerCommand::CommissionInformation {
+                        focus: InformationFocus::Market { good_id: candidate_good_id }
+                    } if candidate_good_id == good_id
+                )
+        }));
+    }
+
+    #[test]
     fn power_broker_preserves_political_reserves_before_extending_credit() {
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
@@ -3886,6 +3953,47 @@ mod findings {
     }
 
     #[test]
+    fn passive_information_changes_without_a_material_trigger_do_not_imply_missing_player_agency() {
+        let mut report = cached_focused_report(30);
+        *report
+            .aggregate
+            .ambient_domain_changes
+            .get_mut(&GameplayDomain::Information)
+            .expect("information domain statistics must exist") = 20;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(&findings, "Commercial intelligence is not player-directed");
+    }
+
+    #[test]
+    fn material_information_opportunities_without_commissioning_are_reported() {
+        let mut report = cached_focused_report(30);
+        *report
+            .aggregate
+            .ambient_domain_changes
+            .get_mut(&GameplayDomain::Information)
+            .expect("information domain statistics must exist") = 20;
+        report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::CommissionInformation)
+            .expect("commission statistics must exist")
+            .activation_opportunities = 4;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding =
+            finding_with_title(&findings, "Commercial intelligence is not player-directed");
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        assert!(
+            finding
+                .evidence
+                .contains("4 material intelligence opportunities")
+        );
+    }
+
+    #[test]
     fn information_pair_tracking_survives_intervening_decisions() {
         let mut accumulator = CampaignAccumulator::new();
 
@@ -4345,6 +4453,45 @@ mod findings {
         assert_eq!(labor_finding.severity, GameplayFindingSeverity::Info);
         assert_eq!(office_finding.severity, GameplayFindingSeverity::Info);
         assert_eq!(borrowing_finding.severity, GameplayFindingSeverity::Info);
+    }
+
+    #[test]
+    fn condition_driven_information_routes_without_a_trigger_remain_informational() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 7_200;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let commission = finding_with_title(
+            &findings,
+            "commission-intelligence was not exercised in this horizon",
+        );
+        let leverage = finding_with_title(
+            &findings,
+            "leverage-intelligence was not exercised in this horizon",
+        );
+
+        assert_eq!(commission.severity, GameplayFindingSeverity::Info);
+        assert_eq!(leverage.severity, GameplayFindingSeverity::Info);
+    }
+
+    #[test]
+    fn triggered_information_route_without_a_candidate_is_critical() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 7_200;
+        report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::CommissionInformation)
+            .expect("all command statistics must exist")
+            .activation_opportunities = 1;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "commission-intelligence had no reachable candidate",
+        );
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Critical);
     }
 
     #[test]

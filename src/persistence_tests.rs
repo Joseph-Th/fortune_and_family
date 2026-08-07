@@ -2069,6 +2069,30 @@ mod validation {
     }
 
     #[test]
+    fn rejects_outbox_ids_that_do_not_follow_notification_order() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let messages = value["outbox"]
+            .as_array_mut()
+            .expect("serialized state must contain an outbox array");
+        assert!(
+            messages.len() >= 2,
+            "campaign fixture must contain at least two notifications"
+        );
+        let first_id = messages[0]["id"].clone();
+        let second_id = messages[1]["id"].clone();
+        messages[0]["id"] = second_id;
+        messages[1]["id"] = first_id;
+        let (_directory, path) = write_test_json_fixture("out-of-order-outbox-ids.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "message IDs are not strictly increasing",
+        );
+    }
+
+    #[test]
     fn rejects_household_labor_overallocation() {
         let state = make_test_campaign();
         let agreement = state

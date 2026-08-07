@@ -94,7 +94,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 37;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 38;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -150,6 +150,7 @@ const AGENT_INFORMATION_LEVERAGE_DELAY_DAYS: i64 = 90;
 const INFORMATION_ROUTINE_PAIR_WINDOW_DAYS: i64 = 180;
 const AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS: u64 = 1_000;
 const AGENT_INFORMATION_MARKET_SHORTAGE_BASIS_POINTS: u64 = 2_500;
+const AGENT_INFORMATION_MARKET_CONTRACT_GAP_BASIS_POINTS: u64 = 500;
 const AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD: u16 = 4_500;
 const AGENT_INFORMATION_DISTRICT_UNREST_THRESHOLD: u16 = 3_500;
 const AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD: u16 = 4_000;
@@ -386,6 +387,8 @@ impl GameplayCommandKind {
                 | Self::StartPublicWork
                 | Self::ExerciseOfficePower
                 | Self::WithdrawFromInstitution
+                | Self::CommissionInformation
+                | Self::LeverageInformation
         )
     }
 }
@@ -2792,6 +2795,14 @@ fn record_activation_opportunities(
     let office_power_opportunity = civic_candidates
         .iter()
         .any(|candidate| candidate.kind == GameplayCommandKind::ExerciseOfficePower);
+    let mut information_candidates = Vec::new();
+    generate_information_candidates(registry, state, persona, &mut information_candidates);
+    let information_commission_opportunity = information_candidates
+        .iter()
+        .any(|candidate| candidate.kind == GameplayCommandKind::CommissionInformation);
+    let information_leverage_opportunity = information_candidates
+        .iter()
+        .any(|candidate| candidate.kind == GameplayCommandKind::LeverageInformation);
     for (kind, available) in [
         (GameplayCommandKind::RespondToCrisis, crisis_opportunity),
         (GameplayCommandKind::ResolveLaborDispute, labor_opportunity),
@@ -2821,6 +2832,14 @@ fn record_activation_opportunities(
         (
             GameplayCommandKind::ExerciseOfficePower,
             office_power_opportunity,
+        ),
+        (
+            GameplayCommandKind::CommissionInformation,
+            information_commission_opportunity,
+        ),
+        (
+            GameplayCommandKind::LeverageInformation,
+            information_leverage_opportunity,
         ),
     ] {
         if available {
@@ -5206,8 +5225,35 @@ fn market_information_is_material(
                 .saturating_mul(10_000)
                 .checked_div(target_stock)
                 .unwrap_or(u64::MAX);
+            let buyer_is_player = state
+                .businesses
+                .get(contract.buyer_business_id)
+                .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id);
+            let seller_is_player = state
+                .businesses
+                .get(contract.seller_business_id)
+                .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id);
+            let current_market_price = quote.price.copper().max(1);
+            let adverse_contract_gap = if buyer_is_player && !seller_is_player {
+                contract
+                    .unit_price
+                    .copper()
+                    .saturating_sub(current_market_price)
+            } else if seller_is_player && !buyer_is_player {
+                current_market_price.saturating_sub(contract.unit_price.copper())
+            } else {
+                0
+            }
+            .max(0)
+            .unsigned_abs();
+            let adverse_contract_gap_basis_points = adverse_contract_gap
+                .saturating_mul(10_000)
+                .checked_div(current_market_price.unsigned_abs())
+                .unwrap_or(u64::MAX);
             price_change_basis_points >= AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS
                 || shortage_basis_points >= AGENT_INFORMATION_MARKET_SHORTAGE_BASIS_POINTS
+                || adverse_contract_gap_basis_points
+                    >= AGENT_INFORMATION_MARKET_CONTRACT_GAP_BASIS_POINTS
         })
 }
 
@@ -9958,25 +10004,33 @@ fn add_information_agency_finding(
         .commands
         .get(&GameplayCommandKind::CommissionInformation)
         .map_or(0, |stats| stats.executed);
+    let commission_opportunities = aggregate
+        .commands
+        .get(&GameplayCommandKind::CommissionInformation)
+        .map_or(0, |stats| stats.activation_opportunities);
     let leverage_actions = aggregate
         .commands
         .get(&GameplayCommandKind::LeverageInformation)
         .map_or(0, |stats| stats.executed);
-    if information_changes > 0 && (player_information_changes == 0 || commissions == 0) {
+    let leverage_opportunities = aggregate
+        .commands
+        .get(&GameplayCommandKind::LeverageInformation)
+        .map_or(0, |stats| stats.activation_opportunities);
+    if commission_opportunities > 0 && commissions == 0 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Commercial intelligence is not player-directed".to_owned(),
             evidence: format!(
-                "Information reports changed in {information_changes} baseline observations; agents commissioned {commissions} reports and produced {player_information_changes} causally attributed information changes."
+                "The harness observed {commission_opportunities} material intelligence opportunities and {information_changes} baseline information changes, but agents commissioned {commissions} reports and produced {player_information_changes} causally attributed information changes."
             ),
         });
     }
-    if commissions > 0 && leverage_actions == 0 {
+    if leverage_opportunities > 0 && leverage_actions == 0 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Commissioned intelligence does not become action".to_owned(),
             evidence: format!(
-                "Agents commissioned {commissions} reports, but never converted one into a contract renegotiation, targeted outreach, or district initiative."
+                "Agents commissioned {commissions} reports and observed {leverage_opportunities} actionable leverage opportunities, but never converted one into a contract renegotiation, targeted outreach, or district initiative."
             ),
         });
     }

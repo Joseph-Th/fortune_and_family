@@ -3792,64 +3792,15 @@ fn resolve_market_information_leverage(
         .get_good(good_id)
         .ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
     let player_id = state.player_dynasty_id;
-    let contract = state.contracts.values().find(|contract| {
-        if contract.status != ContractStatus::Active || contract.good_id != good_id {
-            return false;
-        }
-        let buyer_owner = state
-            .businesses
-            .get(contract.buyer_business_id)
-            .map(crate::core::Business::owner_dynasty_id);
-        let seller_owner = state
-            .businesses
-            .get(contract.seller_business_id)
-            .map(crate::core::Business::owner_dynasty_id);
-        matches!(
-            (buyer_owner, seller_owner),
-            (Some(buyer), Some(seller))
-                if (buyer == player_id && seller != player_id)
-                    || (seller == player_id && buyer != player_id)
-        )
-    });
-    let contract = contract.ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
-    let buyer_owner = state
-        .businesses
-        .get(contract.buyer_business_id)
-        .expect("validated contract buyer must exist")
-        .owner_dynasty_id();
-    let seller_owner = state
-        .businesses
-        .get(contract.seller_business_id)
-        .expect("validated contract seller must exist")
-        .owner_dynasty_id();
-    let one_copper = Money::from_copper(1);
-    let (counterparty_id, new_price) = if buyer_owner == player_id {
-        let discounted = contract
-            .unit_price
-            .checked_mul_ratio(95, 100)
-            .ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
-        let one_copper_less = contract
-            .unit_price
-            .checked_sub(one_copper)
-            .ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
-        (
-            seller_owner,
-            discounted.min(one_copper_less).max(one_copper),
-        )
-    } else {
-        let increased = contract
-            .unit_price
-            .checked_mul_ratio(105, 100)
-            .ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
-        let one_copper_more = contract
-            .unit_price
-            .checked_add(one_copper)
-            .ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
-        (buyer_owner, increased.max(one_copper_more))
-    };
-    if new_price == contract.unit_price {
-        return Err(CommandError::InformationReportHasNoLeverage { report_id });
-    }
+    let (contract, counterparty_id, new_price) = state
+        .contracts
+        .values()
+        .filter(|contract| contract.status == ContractStatus::Active && contract.good_id == good_id)
+        .find_map(|contract| {
+            market_contract_leverage_terms(state, player_id, contract)
+                .map(|(counterparty_id, new_price)| (contract, counterparty_id, new_price))
+        })
+        .ok_or(CommandError::InformationReportHasNoLeverage { report_id })?;
     let description = format!(
         "use report {report_id} to renegotiate {} contract {} from {} to {} per unit",
         good.name(),
@@ -3870,6 +3821,42 @@ fn resolve_market_information_leverage(
             new_price,
         },
     })
+}
+
+fn market_contract_leverage_terms(
+    state: &AppState,
+    player_id: DynastyId,
+    contract: &crate::core::SupplyContract,
+) -> Option<(DynastyId, Money)> {
+    let buyer_owner = state
+        .businesses
+        .get(contract.buyer_business_id)?
+        .owner_dynasty_id();
+    let seller_owner = state
+        .businesses
+        .get(contract.seller_business_id)?
+        .owner_dynasty_id();
+    let one_copper = Money::from_copper(1);
+    let (counterparty_id, new_price) = if buyer_owner == player_id && seller_owner != player_id {
+        let discounted = contract.unit_price.checked_mul_ratio(95, 100)?;
+        let one_copper_less = contract.unit_price.checked_sub(one_copper)?;
+        (
+            seller_owner,
+            discounted.min(one_copper_less).max(one_copper),
+        )
+    } else if seller_owner == player_id && buyer_owner != player_id {
+        let increased = contract.unit_price.checked_mul_ratio(105, 100)?;
+        let one_copper_more = contract.unit_price.checked_add(one_copper)?;
+        (buyer_owner, increased.max(one_copper_more))
+    } else {
+        return None;
+    };
+    if new_price == contract.unit_price
+        || crate::money::checked_cost_for(contract.quantity_per_week, new_price).is_none()
+    {
+        return None;
+    }
+    Some((counterparty_id, new_price))
 }
 
 fn resolve_counterparty_information_leverage(

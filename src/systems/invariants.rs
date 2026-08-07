@@ -1382,11 +1382,16 @@ fn validate_routes_and_crises(state: &AppState, ids: &RegistryIds) {
 
 fn validate_outbox(state: &AppState) {
     let mut ids = BTreeSet::new();
+    let mut prior_id = None;
     let mut prior_day = i64::MIN;
     for message in &state.outbox {
         debug_assert!(
             ids.insert(message.id),
             "Index Uniqueness: duplicate outbox message ID"
+        );
+        debug_assert!(
+            prior_id.is_none_or(|prior_id| message.id > prior_id),
+            "Deterministic Decision Ordering: outbox message IDs are not strictly increasing"
         );
         debug_assert!(
             message.day >= prior_day && message.day <= state.clock.day(),
@@ -1396,6 +1401,7 @@ fn validate_outbox(state: &AppState) {
             !message.subject.trim().is_empty() && !message.body.trim().is_empty(),
             "No Lost Runtime State: outbox message lacks user-facing content"
         );
+        prior_id = Some(message.id);
         prior_day = message.day;
     }
 }
