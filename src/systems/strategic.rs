@@ -2,8 +2,8 @@
 
 use super::SimulationError;
 use super::transactions::{
-    add_market_supply, debit_market_clearing_account, next_business_finance_version,
-    next_family_charter_version,
+    add_market_supply, checked_next_business_finance_version, debit_market_clearing_account,
+    next_business_finance_version, next_family_charter_version,
 };
 use crate::core::{
     AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
@@ -1319,10 +1319,7 @@ pub(crate) fn capitalize_owned_business(
                 current: business.cash(),
                 incoming: amount,
             })?;
-    let finance_version = business
-        .finance
-        .version
-        .checked_add(1)
+    let finance_version = checked_next_business_finance_version(business)
         .ok_or(StrategicError::BusinessFinanceVersionExhausted { business_id })?;
     let rehabilitation = u16::try_from((amount.copper() / 2).clamp(0, 3_000))
         .expect("bounded rehabilitation must fit u16");
@@ -1751,11 +1748,7 @@ fn validate_business_acquisition(
             incoming: recapitalization,
         },
     )?;
-    let business_finance_version_after = business
-        .finance
-        .version
-        .checked_add(1)
-        .filter(|next| *next < u64::MAX)
+    let business_finance_version_after = checked_next_business_finance_version(business)
         .ok_or(StrategicError::BusinessFinanceVersionExhausted { business_id })?;
     let recipe_id = business.recipe_id();
     let administrative_load = registry
@@ -4569,7 +4562,7 @@ fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
             .businesses
             .get(business_id)
             .expect("indexed AI business must exist");
-        if business.finance.version == u64::MAX {
+        if checked_next_business_finance_version(business).is_none() {
             continue;
         }
         let owner_dynasty_id = business.owner_dynasty_id();
@@ -5215,18 +5208,19 @@ fn update_district_conditions(state: &mut AppState) {
             households.iter().copied(),
         )
         .unwrap_or(5_000);
-        let active_jobs: u32 = state
-            .employment
-            .values()
-            .filter(|employment| {
-                employment.status == EmploymentStatus::Active
-                    && state
-                        .businesses
-                        .get(employment.business_id)
-                        .is_some_and(|business| business.district_id() == district_id)
-            })
-            .map(|employment| u32::from(employment.workers))
-            .sum();
+        let active_jobs = super::saturating_worker_count(
+            state
+                .employment
+                .values()
+                .filter(|employment| {
+                    employment.status == EmploymentStatus::Active
+                        && state
+                            .businesses
+                            .get(employment.business_id)
+                            .is_some_and(|business| business.district_id() == district_id)
+                })
+                .map(|employment| u32::from(employment.workers)),
+        );
         let district = state
             .districts
             .get_mut(&district_id)
@@ -5730,15 +5724,44 @@ fn advance_ai_rival_objective(state: &mut AppState, dynasty_id: DynastyId) -> Ob
     let Some(relationship) = state.relationships.get_mut(&pair) else {
         return ObjectiveProgress::Achieved;
     };
+    relationship.trust_basis_points = relationship.trust_basis_points.saturating_sub(75);
     relationship.fear_basis_points = relationship
         .fear_basis_points
         .saturating_add(100)
         .min(10_000);
     relationship.resentment_basis_points = relationship
         .resentment_basis_points
-        .saturating_add(75)
+        .saturating_add(100)
         .min(10_000);
-    ObjectiveProgress::from_achieved(relationship.fear_basis_points >= 5_000)
+    let achieved = relationship.fear_basis_points >= 5_000;
+    if achieved {
+        let rival_name = state.dynasties.get(&dynasty_id).map_or_else(
+            || dynasty_id.to_string(),
+            |dynasty| dynasty.name().to_owned(),
+        );
+        remember_dynasty_interaction(
+            state,
+            dynasty_id,
+            state.player_dynasty_id,
+            &format!(
+                "House {rival_name} completed a containment campaign that hardened bilateral commercial relations."
+            ),
+        );
+        record_counterparty_information(
+            state,
+            dynasty_id,
+            state.player_dynasty_id,
+            "Rival patronage, guild correspondence, and commercial refusals",
+        );
+        push_outbox(
+            state,
+            OutboxKind::Information,
+            format!("House {rival_name} is containing the dynasty"),
+            "A sustained rival campaign has reduced trust and increased resentment. Future contracts with that house may require a premium or discount until relations improve."
+                .to_owned(),
+        );
+    }
+    ObjectiveProgress::from_achieved(achieved)
 }
 
 fn update_information_reports(registry: &Registry, state: &mut AppState) {

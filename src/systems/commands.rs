@@ -111,6 +111,7 @@ pub enum PlayerCommand {
     SetHouseGovernance {
         governance: HouseGovernance,
     },
+    ConveneFamilyCouncil,
     DesignateHeir {
         character_id: CharacterId,
     },
@@ -189,7 +190,11 @@ pub(crate) const PROPERTY_COUNTERPARTY_BUYER_RESERVE: Money = Money::from_copper
 pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
-pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_800;
+pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_080;
+pub(crate) const FAMILY_COUNCIL_MEETING_INTERVAL_DAYS: i64 = 360;
+pub(crate) const FAMILY_COUNCIL_MEETING_COST: Money = Money::from_copper(2_500);
+const FAMILY_COUNCIL_MEETING_UNITY_GAIN: u16 = 1_500;
+const FAMILY_COUNCIL_MEETING_LOYALTY_GAIN: u16 = 600;
 pub(crate) const HEIR_DESIGNATION_INTERVAL_DAYS: i64 = 720;
 pub(crate) const HEIR_DESIGNATION_LEGITIMACY_COST: u16 = 300;
 const HEIR_DESIGNATION_UNITY_COST: u16 = 250;
@@ -410,6 +415,8 @@ pub enum CommandError {
     UnchangedHouseGovernance { governance: HouseGovernance },
     #[error("house governance cannot change again before day {next_change_day}")]
     HouseGovernanceCooldown { next_change_day: i64 },
+    #[error("the family council cannot be convened again before day {next_meeting_day}")]
+    FamilyCouncilMeetingCooldown { next_meeting_day: i64 },
     #[error("character {character_id} is not an eligible heir candidate")]
     InvalidHeirCandidate { character_id: CharacterId },
     #[error("character {character_id} is already the designated heir")]
@@ -685,6 +692,7 @@ fn dispatch_player_command(
             damages,
         ),
         PlayerCommand::SetHouseGovernance { governance } => apply_governance(state, governance),
+        PlayerCommand::ConveneFamilyCouncil => apply_family_council_meeting(state),
         PlayerCommand::DesignateHeir { character_id } => apply_heir(state, character_id),
         PlayerCommand::AdoptWard { focus } => apply_adopt_ward(state, focus),
         PlayerCommand::EducateFamilyMember {
@@ -1114,8 +1122,14 @@ fn ensure_non_player_contract_counterparty_accepts(
             good_id: terms.good_id,
         })?
         .price();
-    let minimum_price = ceil_positive_money_div(market_price, 2);
-    let maximum_price = market_price.saturating_mul_ratio(3, 2);
+    let price_bounds = contract_counterparty_price_bounds(
+        state,
+        terms.buyer_business_id,
+        terms.seller_business_id,
+        market_price,
+    );
+    let minimum_price = price_bounds.minimum_seller_price;
+    let maximum_price = price_bounds.maximum_buyer_price;
     if seller.owner_dynasty_id() != state.player_dynasty_id && terms.unit_price < minimum_price {
         return Err(CommandError::ContractCounterpartyPriceTooLow {
             unit_price: terms.unit_price,
@@ -1168,6 +1182,68 @@ fn ensure_non_player_contract_counterparty_accepts(
         });
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ContractCounterpartyPriceBounds {
+    pub(crate) minimum_seller_price: Money,
+    pub(crate) maximum_buyer_price: Money,
+    pub(crate) relationship_pressure_basis_points: u16,
+}
+
+/// Returns the price band an NPC counterparty will accept against the player.
+///
+/// Neutral houses tolerate a modest bargaining band around the market quote. Distrust and
+/// resentment narrow that band and can eventually require a premium from an NPC seller or a
+/// discount for an NPC buyer. The relationship surcharge is capped so hostility cannot move a
+/// negotiated price more than 15% away from market solely through this rule.
+pub(crate) fn contract_counterparty_price_bounds(
+    state: &AppState,
+    buyer_business_id: BusinessId,
+    seller_business_id: BusinessId,
+    market_price: Money,
+) -> ContractCounterpartyPriceBounds {
+    let player_id = state.player_dynasty_id;
+    let buyer_owner = state
+        .businesses
+        .get(buyer_business_id)
+        .map(crate::core::Business::owner_dynasty_id);
+    let seller_owner = state
+        .businesses
+        .get(seller_business_id)
+        .map(crate::core::Business::owner_dynasty_id);
+    let counterparty_id = match (buyer_owner, seller_owner) {
+        (Some(owner), Some(_)) | (Some(_), Some(owner)) if owner != player_id => Some(owner),
+        _ => None,
+    };
+    let relationship_pressure_basis_points = counterparty_id.map_or(0, |counterparty_id| {
+        contract_relationship_pressure_basis_points(state, counterparty_id)
+    });
+    let seller_factor = 9_000_i64.saturating_add(i64::from(relationship_pressure_basis_points));
+    let buyer_factor = 11_000_i64.saturating_sub(i64::from(relationship_pressure_basis_points));
+    ContractCounterpartyPriceBounds {
+        minimum_seller_price: market_price.saturating_mul_ratio(seller_factor, 10_000),
+        maximum_buyer_price: market_price.saturating_mul_ratio(buyer_factor, 10_000),
+        relationship_pressure_basis_points,
+    }
+}
+
+pub(crate) fn contract_relationship_pressure_basis_points(
+    state: &AppState,
+    counterparty_id: DynastyId,
+) -> u16 {
+    let Some(relationship) = state
+        .relationships
+        .get(&DynastyPair::new(state.player_dynasty_id, counterparty_id))
+    else {
+        return 0;
+    };
+    let distrust = 4_000_u16.saturating_sub(relationship.trust_basis_points);
+    let resentment = relationship.resentment_basis_points.saturating_sub(3_500);
+    distrust
+        .saturating_add(resentment)
+        .saturating_div(2)
+        .min(2_500)
 }
 
 fn ensure_player_loan_party(state: &AppState, terms: &LoanTerms) -> Result<(), CommandError> {
@@ -1835,6 +1911,73 @@ fn apply_governance(
     );
     Ok(CommandOutcome {
         summary: format!("Changed house governance to {governance:?}."),
+    })
+}
+
+fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, CommandError> {
+    let dynasty_id = state.player_dynasty_id;
+    let subject = format!("dynasty:{dynasty_id};council-meeting");
+    let council = state
+        .family_councils
+        .get(&dynasty_id)
+        .ok_or(CommandError::MissingFamilyCouncil { dynasty_id })?;
+    if let Some(last_meeting_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::HouseGovernanceChange && record.subject() == subject
+        })
+        .map(AuditRecord::day)
+    {
+        let next_meeting_day =
+            last_meeting_day.saturating_add(FAMILY_COUNCIL_MEETING_INTERVAL_DAYS);
+        if state.clock.day() < next_meeting_day {
+            return Err(CommandError::FamilyCouncilMeetingCooldown { next_meeting_day });
+        }
+    }
+    let member_ids: Vec<_> = council.members.iter().copied().collect();
+    let unity_before = council.unity_basis_points;
+    spend_player_treasury(state, FAMILY_COUNCIL_MEETING_COST)?;
+    for character_id in member_ids {
+        if let Some(character) = state.characters.get_mut(character_id)
+            && character.status() == CharacterStatus::Active
+        {
+            character.runtime.loyalty_basis_points = character
+                .runtime
+                .loyalty_basis_points
+                .saturating_add(FAMILY_COUNCIL_MEETING_LOYALTY_GAIN)
+                .min(10_000);
+        }
+    }
+    let council = state
+        .family_councils
+        .get_mut(&dynasty_id)
+        .expect("validated family council must exist");
+    council.unity_basis_points = council
+        .unity_basis_points
+        .saturating_add(FAMILY_COUNCIL_MEETING_UNITY_GAIN)
+        .min(10_000);
+    let unity_after = council.unity_basis_points;
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::HouseGovernanceChange,
+        subject: subject.into(),
+        detail: format!(
+            "cost={};unity_before={unity_before};unity_after={unity_after};loyalty_gain={FAMILY_COUNCIL_MEETING_LOYALTY_GAIN}",
+            FAMILY_COUNCIL_MEETING_COST.copper()
+        ),
+    });
+    super::strategic::push_outbox(
+        state,
+        OutboxKind::Family,
+        "Family council convened".to_owned(),
+        format!(
+            "The dynasty spent {FAMILY_COUNCIL_MEETING_COST} on settlements, hospitality, and internal obligations. Family unity rose from {unity_before} to {unity_after} bp and active council members gained loyalty."
+        ),
+    );
+    Ok(CommandOutcome {
+        summary: format!("Convened the family council; unity is now {unity_after} bp."),
     })
 }
 

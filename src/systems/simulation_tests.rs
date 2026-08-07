@@ -1779,6 +1779,105 @@ mod health_and_succession {
     }
 
     #[test]
+    fn formal_heir_preparation_reduces_the_succession_shock() {
+        let mut unprepared = make_test_campaign();
+        let mut prepared = unprepared.clone();
+        let dynasty_id = unprepared.player_dynasty_id;
+        let (head_id, heir_id) = {
+            let dynasty = unprepared
+                .dynasties
+                .get(&dynasty_id)
+                .expect("player dynasty must exist");
+            (
+                dynasty.head_id(),
+                dynasty.heir_id().expect("player dynasty must have an heir"),
+            )
+        };
+        for state in [&mut unprepared, &mut prepared] {
+            state
+                .characters
+                .get_mut(head_id)
+                .expect("dynasty head must exist")
+                .runtime
+                .health_basis_points = 0;
+            state
+                .dynasties
+                .get_mut(&dynasty_id)
+                .expect("player dynasty must exist")
+                .runtime
+                .succession_risk_basis_points = 4_800;
+            state
+                .family_councils
+                .get_mut(&dynasty_id)
+                .expect("player council must exist")
+                .unity_basis_points = 8_000;
+        }
+        prepared.audit_log.push(AuditRecord {
+            day: prepared.clock.day(),
+            kind: AuditKind::HeirDesignation,
+            subject: format!("dynasty:{dynasty_id}").into(),
+            detail: format!(
+                "prior_heir={heir_id};heir={heir_id};confirmation=true;legitimacy_cost=0;unity_cost=0"
+            ),
+        });
+
+        let unprepared_lines =
+            decide_successions(&mut unprepared).expect("forced succession must be planned");
+        let prepared_lines =
+            decide_successions(&mut prepared).expect("forced succession must be planned");
+        let unprepared_line = unprepared_lines
+            .iter()
+            .find(|line| line.dynasty_id == dynasty_id)
+            .expect("unprepared player succession must exist");
+        let prepared_line = prepared_lines
+            .iter()
+            .find(|line| line.dynasty_id == dynasty_id)
+            .expect("prepared player succession must exist");
+
+        assert!(!unprepared_line.formally_prepared);
+        assert!(prepared_line.formally_prepared);
+        assert!(prepared_line.family_unity_loss < unprepared_line.family_unity_loss);
+        assert!(prepared_line.family_loyalty_loss < unprepared_line.family_loyalty_loss);
+        assert!(prepared_line.legitimacy_loss < unprepared_line.legitimacy_loss);
+
+        apply_successions(&mut unprepared, unprepared_lines);
+        apply_successions(&mut prepared, prepared_lines);
+
+        assert!(
+            prepared
+                .family_councils
+                .get(&dynasty_id)
+                .expect("prepared council must exist")
+                .unity_basis_points
+                > unprepared
+                    .family_councils
+                    .get(&dynasty_id)
+                    .expect("unprepared council must exist")
+                    .unity_basis_points,
+            "formal succession planning must preserve more family cohesion"
+        );
+        assert!(
+            prepared
+                .dynasties
+                .get(&dynasty_id)
+                .expect("prepared dynasty must exist")
+                .resources
+                .legitimacy_basis_points
+                > unprepared
+                    .dynasties
+                    .get(&dynasty_id)
+                    .expect("unprepared dynasty must exist")
+                    .resources
+                    .legitimacy_basis_points,
+            "formal succession planning must preserve more legitimacy"
+        );
+        assert!(prepared.outbox.iter().any(|message| {
+            message.kind == OutboxKind::Family
+                && message.subject.contains("new generation inherited")
+        }));
+    }
+
+    #[test]
     fn reserved_generation_rejects_forced_succession() {
         let mut state = make_test_campaign();
         let dynasty_id = state.player_dynasty_id;

@@ -88,12 +88,24 @@ struct SuccessionLine {
     dynasty_id: DynastyId,
     outgoing_head_id: CharacterId,
     incoming_head_id: CharacterId,
+    formally_prepared: bool,
+    family_unity_loss: u16,
+    family_loyalty_loss: u16,
+    legitimacy_loss: u16,
     new_heir_name: String,
     new_heir_birth_day: i64,
     new_heir_link_kind: FamilyLinkKind,
     next_generation: u16,
     next_charter_version: u64,
     new_heir_capabilities: CharacterCapabilities,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SuccessionShock {
+    formally_prepared: bool,
+    family_unity_loss: u16,
+    family_loyalty_loss: u16,
+    legitimacy_loss: u16,
 }
 
 /// Advances the canonical simulation pipeline by a positive number of days.
@@ -509,16 +521,17 @@ fn output_limited_batches(
 }
 
 fn worker_limited_batches(state: &AppState, business_id: BusinessId) -> u16 {
-    let active_workers: u32 = state
-        .employment
-        .values()
-        .filter(|agreement| agreement.business_id == business_id)
-        .map(|agreement| match agreement.status {
-            EmploymentStatus::Active => u32::from(agreement.workers),
-            EmploymentStatus::Disputed => u32::from(agreement.workers).div_ceil(2),
-            EmploymentStatus::Suspended | EmploymentStatus::Ended => 0,
-        })
-        .sum();
+    let active_workers = super::saturating_worker_count(
+        state
+            .employment
+            .values()
+            .filter(|agreement| agreement.business_id == business_id)
+            .map(|agreement| match agreement.status {
+                EmploymentStatus::Active => u32::from(agreement.workers),
+                EmploymentStatus::Disputed => u32::from(agreement.workers).div_ceil(2),
+                EmploymentStatus::Suspended | EmploymentStatus::Ended => 0,
+            }),
+    );
     u16::try_from(active_workers / u32::from(super::WORKERS_PER_BATCH)).unwrap_or(u16::MAX)
 }
 
@@ -1736,54 +1749,116 @@ fn decide_successions(state: &mut AppState) -> Result<Vec<SuccessionLine>, Simul
             .charter_version;
         let next_charter_version =
             next_family_charter_version(dynasty_id, current_charter_version)?;
-        let incoming_age_days = state.clock.day().saturating_sub(
-            state
-                .characters
-                .get(heir_id)
-                .expect("dynasty heir reference must be valid")
-                .birth_day(),
-        );
-        let parent_child_age_requirement =
-            (20 * 360_i64).saturating_add(crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS);
-        let (new_heir_birth_day, new_heir_link_kind) =
-            if incoming_age_days >= parent_child_age_requirement {
-                (
-                    state.clock.day().saturating_sub(20 * 360),
-                    FamilyLinkKind::ParentChild,
-                )
-            } else {
-                (
-                    state.clock.day().saturating_sub(18 * 360),
-                    FamilyLinkKind::Sibling,
-                )
-            };
+        let SuccessionShock {
+            formally_prepared,
+            family_unity_loss,
+            family_loyalty_loss,
+            legitimacy_loss,
+        } = succession_shock(state, dynasty_id, heir_id, succession_risk_basis_points);
+        let (new_heir_birth_day, new_heir_link_kind, new_heir_capabilities) =
+            generate_next_heir(state, heir_id);
         lines.push(SuccessionLine {
             dynasty_id,
             outgoing_head_id: head_id,
             incoming_head_id: heir_id,
+            formally_prepared,
+            family_unity_loss,
+            family_loyalty_loss,
+            legitimacy_loss,
             new_heir_name: format!("{dynasty_name} Heir {next_generation}"),
             new_heir_birth_day,
             new_heir_link_kind,
             next_generation,
             next_charter_version,
-            new_heir_capabilities: CharacterCapabilities {
-                administration: 40_u16.saturating_add(
-                    u16::try_from(state.rng.range_u32(50)).expect("random value fits u16"),
-                ),
-                commerce: 40_u16.saturating_add(
-                    u16::try_from(state.rng.range_u32(50)).expect("random value fits u16"),
-                ),
-                social: 40_u16.saturating_add(
-                    u16::try_from(state.rng.range_u32(50)).expect("random value fits u16"),
-                ),
-                craft: 30_u16.saturating_add(
-                    u16::try_from(state.rng.range_u32(55)).expect("random value fits u16"),
-                ),
-            },
+            new_heir_capabilities,
         });
     }
 
     Ok(lines)
+}
+
+fn heir_was_formally_prepared(
+    state: &AppState,
+    dynasty_id: DynastyId,
+    incoming_head_id: CharacterId,
+) -> bool {
+    let subject = format!("dynasty:{dynasty_id}");
+    let heir_marker = format!("heir={incoming_head_id}");
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::HeirDesignation && record.subject() == subject)
+        .is_some_and(|record| record.detail().split(';').any(|part| part == heir_marker))
+}
+
+fn succession_shock(
+    state: &AppState,
+    dynasty_id: DynastyId,
+    incoming_head_id: CharacterId,
+    succession_risk_basis_points: u16,
+) -> SuccessionShock {
+    let formally_prepared = heir_was_formally_prepared(state, dynasty_id, incoming_head_id);
+    if formally_prepared {
+        SuccessionShock {
+            formally_prepared,
+            family_unity_loss: 1_000_u16
+                .saturating_add(succession_risk_basis_points / 5)
+                .min(2_500),
+            family_loyalty_loss: 350_u16
+                .saturating_add(succession_risk_basis_points / 12)
+                .min(1_200),
+            legitimacy_loss: succession_risk_basis_points / 8,
+        }
+    } else {
+        SuccessionShock {
+            formally_prepared,
+            family_unity_loss: 2_500_u16
+                .saturating_add(succession_risk_basis_points / 3)
+                .min(5_000),
+            family_loyalty_loss: 1_000_u16
+                .saturating_add(succession_risk_basis_points / 8)
+                .min(2_500),
+            legitimacy_loss: succession_risk_basis_points / 3,
+        }
+    }
+}
+
+fn generate_next_heir(
+    state: &mut AppState,
+    incoming_head_id: CharacterId,
+) -> (i64, FamilyLinkKind, CharacterCapabilities) {
+    let incoming_age_days = state.clock.day().saturating_sub(
+        state
+            .characters
+            .get(incoming_head_id)
+            .expect("dynasty heir reference must be valid")
+            .birth_day(),
+    );
+    let parent_child_age_requirement =
+        (20 * 360_i64).saturating_add(crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS);
+    let (birth_day, link_kind) = if incoming_age_days >= parent_child_age_requirement {
+        (
+            state.clock.day().saturating_sub(20 * 360),
+            FamilyLinkKind::ParentChild,
+        )
+    } else {
+        (
+            state.clock.day().saturating_sub(18 * 360),
+            FamilyLinkKind::Sibling,
+        )
+    };
+    let capabilities = CharacterCapabilities {
+        administration: 40_u16
+            .saturating_add(u16::try_from(state.rng.range_u32(50)).expect("random value fits u16")),
+        commerce: 40_u16
+            .saturating_add(u16::try_from(state.rng.range_u32(50)).expect("random value fits u16")),
+        social: 40_u16
+            .saturating_add(u16::try_from(state.rng.range_u32(50)).expect("random value fits u16")),
+        craft: 30_u16
+            .saturating_add(u16::try_from(state.rng.range_u32(55)).expect("random value fits u16")),
+    };
+    (birth_day, link_kind, capabilities)
 }
 
 fn succession_chance_basis_points(
@@ -1835,12 +1910,157 @@ fn update_institutions_for_succession(state: &mut AppState, outgoing_head_id: Ch
     }
 }
 
+fn transfer_succession_business_management(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+    outgoing_head_id: CharacterId,
+    incoming_head_id: CharacterId,
+) {
+    let managed_business_ids: Vec<_> = state
+        .businesses
+        .ids_for_owner(dynasty_id)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|business_id| {
+            state
+                .businesses
+                .get(*business_id)
+                .is_some_and(|business| business.manager_id() == outgoing_head_id)
+        })
+        .collect();
+    for business_id in managed_business_ids {
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owner business index must resolve")
+            .operations
+            .manager_id = incoming_head_id;
+    }
+}
+
+fn create_succession_heir(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+    incoming_head_id: CharacterId,
+    new_heir_name: String,
+    new_heir_birth_day: i64,
+    new_heir_link_kind: FamilyLinkKind,
+    new_heir_capabilities: CharacterCapabilities,
+) -> CharacterId {
+    let new_heir_id = state.next_ids.character();
+    state.characters.insert(Character {
+        identity: CharacterIdentity {
+            id: new_heir_id,
+            dynasty_id,
+            name: new_heir_name,
+            birth_day: new_heir_birth_day,
+        },
+        capabilities: new_heir_capabilities,
+        runtime: CharacterRuntime {
+            status: CharacterStatus::Active,
+            health_basis_points: 9_500,
+            loyalty_basis_points: 8_000,
+            role: CharacterRole::Heir,
+        },
+    });
+    let family_link_id = state.next_ids.family_link();
+    state.family_links.insert(
+        family_link_id,
+        FamilyLink {
+            id: family_link_id,
+            first_character_id: incoming_head_id,
+            second_character_id: new_heir_id,
+            kind: new_heir_link_kind,
+            active: true,
+            property_claim_basis_points: 8_000,
+        },
+    );
+    new_heir_id
+}
+
+fn apply_family_succession_transition(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+    outgoing_head_id: CharacterId,
+    incoming_head_id: CharacterId,
+    new_heir_id: CharacterId,
+    shock: SuccessionShock,
+    next_charter_version: u64,
+) {
+    let affected_family_members = {
+        let council = state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("succession dynasty must have a family council");
+        council.members.remove(&outgoing_head_id);
+        council.members.insert(incoming_head_id);
+        council.members.insert(new_heir_id);
+        council.unity_basis_points = council
+            .unity_basis_points
+            .saturating_sub(shock.family_unity_loss);
+        council.charter_version = next_charter_version;
+        council
+            .members
+            .iter()
+            .copied()
+            .filter(|character_id| {
+                *character_id != incoming_head_id && *character_id != new_heir_id
+            })
+            .collect::<Vec<_>>()
+    };
+    for character_id in affected_family_members {
+        if let Some(character) = state.characters.get_mut(character_id)
+            && character.status() == CharacterStatus::Active
+        {
+            character.runtime.loyalty_basis_points = character
+                .runtime
+                .loyalty_basis_points
+                .saturating_sub(shock.family_loyalty_loss);
+        }
+    }
+}
+
+fn record_succession_transition(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+    outgoing_head_id: CharacterId,
+    incoming_head_id: CharacterId,
+    formally_prepared: bool,
+    family_unity_loss: u16,
+    legitimacy_loss: u16,
+) {
+    let id = state.next_ids.chronicle();
+    state.chronicle.push(ChronicleEntry {
+        id,
+        day: state.clock.day(),
+        kind: ChronicleKind::Succession,
+        summary: format!(
+            "Dynasty {dynasty_id} passed from character {outgoing_head_id} to {incoming_head_id}; formal preparation was {formally_prepared}."
+        ),
+    });
+    if dynasty_id == state.player_dynasty_id {
+        super::strategic::push_outbox(
+            state,
+            OutboxKind::Family,
+            "A new generation inherited the house".to_owned(),
+            format!(
+                "Character {incoming_head_id} succeeded character {outgoing_head_id}. Family unity fell by {family_unity_loss} bp and legitimacy by {legitimacy_loss} bp. Formal heir preparation was {formally_prepared}, so the severity of the transition reflects the dynasty's succession planning."
+            ),
+        );
+    }
+}
+
 fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
     for line in lines {
         let SuccessionLine {
             dynasty_id,
             outgoing_head_id,
             incoming_head_id,
+            formally_prepared,
+            family_unity_loss,
+            family_loyalty_loss,
+            legitimacy_loss,
             new_heir_name,
             new_heir_birth_day,
             new_heir_link_kind,
@@ -1859,66 +2079,35 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
         }
 
         update_institutions_for_succession(state, outgoing_head_id);
-
-        let managed_business_ids: Vec<_> = state
-            .businesses
-            .ids_for_owner(dynasty_id)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|business_id| {
-                state
-                    .businesses
-                    .get(*business_id)
-                    .is_some_and(|business| business.manager_id() == outgoing_head_id)
-            })
-            .collect();
-        for business_id in managed_business_ids {
-            state
-                .businesses
-                .get_mut(business_id)
-                .expect("owner business index must resolve")
-                .operations
-                .manager_id = incoming_head_id;
-        }
-
-        let new_heir_id = state.next_ids.character();
-        state.characters.insert(Character {
-            identity: CharacterIdentity {
-                id: new_heir_id,
-                dynasty_id,
-                name: new_heir_name,
-                birth_day: new_heir_birth_day,
-            },
-            capabilities: new_heir_capabilities,
-            runtime: CharacterRuntime {
-                status: CharacterStatus::Active,
-                health_basis_points: 9_500,
-                loyalty_basis_points: 8_000,
-                role: CharacterRole::Heir,
-            },
-        });
-
-        let family_link_id = state.next_ids.family_link();
-        state.family_links.insert(
-            family_link_id,
-            FamilyLink {
-                id: family_link_id,
-                first_character_id: incoming_head_id,
-                second_character_id: new_heir_id,
-                kind: new_heir_link_kind,
-                active: true,
-                property_claim_basis_points: 8_000,
-            },
+        transfer_succession_business_management(
+            state,
+            dynasty_id,
+            outgoing_head_id,
+            incoming_head_id,
         );
-        let council = state
-            .family_councils
-            .get_mut(&dynasty_id)
-            .expect("succession dynasty must have a family council");
-        council.members.remove(&outgoing_head_id);
-        council.members.insert(incoming_head_id);
-        council.members.insert(new_heir_id);
-        council.charter_version = next_charter_version;
+        let new_heir_id = create_succession_heir(
+            state,
+            dynasty_id,
+            incoming_head_id,
+            new_heir_name,
+            new_heir_birth_day,
+            new_heir_link_kind,
+            new_heir_capabilities,
+        );
+        apply_family_succession_transition(
+            state,
+            dynasty_id,
+            outgoing_head_id,
+            incoming_head_id,
+            new_heir_id,
+            SuccessionShock {
+                formally_prepared,
+                family_unity_loss,
+                family_loyalty_loss,
+                legitimacy_loss,
+            },
+            next_charter_version,
+        );
 
         let dynasty = state
             .dynasties
@@ -1930,16 +2119,16 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
         dynasty.resources.legitimacy_basis_points = dynasty
             .resources
             .legitimacy_basis_points
-            .saturating_sub(dynasty.runtime.succession_risk_basis_points / 4);
-        let id = state.next_ids.chronicle();
-        state.chronicle.push(ChronicleEntry {
-            id,
-            day: state.clock.day(),
-            kind: ChronicleKind::Succession,
-            summary: format!(
-                "Dynasty {dynasty_id} passed from character {outgoing_head_id} to {incoming_head_id}."
-            ),
-        });
+            .saturating_sub(legitimacy_loss);
+        record_succession_transition(
+            state,
+            dynasty_id,
+            outgoing_head_id,
+            incoming_head_id,
+            formally_prepared,
+            family_unity_loss,
+            legitimacy_loss,
+        );
     }
 }
 

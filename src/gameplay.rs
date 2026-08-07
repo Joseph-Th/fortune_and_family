@@ -12,25 +12,26 @@ use crate::registry::{GoodCategory, Registry};
 use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
     COMMISSIONED_INFORMATION_SOURCE, CommandError, CrisisResponse,
-    DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, EducationFocus, FAMILY_EDUCATION_COST,
-    FAMILY_EDUCATION_INTERVAL_DAYS, HEIR_DESIGNATION_INTERVAL_DAYS,
-    HEIR_DESIGNATION_LEGITIMACY_COST, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
-    INFORMATION_COMMISSION_COST, INFORMATION_LEVERAGE_COST, INSTITUTION_SUPPORT_COST,
-    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
-    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, InformationFocus, LABOR_REPLACEMENT_COST,
-    LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST,
-    LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
-    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
-    OFFICE_DUTY_COST_PER_POWER, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
-    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
-    OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, OFFICE_POWER_ESTABLISHMENT_DAYS,
-    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
-    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
-    SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
-    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, EducationFocus, FAMILY_COUNCIL_MEETING_COST,
+    FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
+    HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
+    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST, INFORMATION_LEVERAGE_COST,
+    INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
+    InformationFocus, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
+    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
+    LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
+    MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError, OFFICE_DUTY_COST_PER_POWER,
+    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
+    OFFICE_POWER_ESTABLISHMENT_DAYS, PRIVATE_LOAN_COUNTERPARTY_RESERVE,
+    PROPERTY_COUNTERPARTY_BUYER_RESERVE, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand,
+    STANDARD_CONTRACT_BATCHES_PER_WEEK, SimulationError, StrategicError, SupplyContractTerms,
+    WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT, advance_days,
     apply_player_command, available_household_workers, available_supply_contract_capacity,
-    build_new_game, business_recapitalization_target, crisis_response_contains_crisis,
+    build_new_game, business_recapitalization_target, contract_counterparty_price_bounds,
+    contract_relationship_pressure_basis_points, crisis_response_contains_crisis,
     has_established_player_office_power, institution_capability_score,
     institution_membership_count, institution_support_day, institution_support_next_day,
     office_nomination_next_day, player_contract_deliveries, quote_business_acquisition,
@@ -42,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use thiserror::Error;
 
-const ALL_COMMAND_KINDS: [GameplayCommandKind; 26] = [
+const ALL_COMMAND_KINDS: [GameplayCommandKind; 27] = [
     GameplayCommandKind::TransferBusinessCash,
     GameplayCommandKind::AcquireBusiness,
     GameplayCommandKind::InvestInBusiness,
@@ -57,6 +58,7 @@ const ALL_COMMAND_KINDS: [GameplayCommandKind; 26] = [
     GameplayCommandKind::StartPublicWork,
     GameplayCommandKind::FileLegalCase,
     GameplayCommandKind::SetHouseGovernance,
+    GameplayCommandKind::ConveneFamilyCouncil,
     GameplayCommandKind::DesignateHeir,
     GameplayCommandKind::AdoptWard,
     GameplayCommandKind::EducateFamilyMember,
@@ -92,7 +94,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 36;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 37;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -285,6 +287,7 @@ pub enum GameplayCommandKind {
     StartPublicWork,
     FileLegalCase,
     SetHouseGovernance,
+    ConveneFamilyCouncil,
     DesignateHeir,
     AdoptWard,
     EducateFamilyMember,
@@ -317,6 +320,7 @@ impl GameplayCommandKind {
             Self::StartPublicWork => "public-work",
             Self::FileLegalCase => "legal-case",
             Self::SetHouseGovernance => "house-governance",
+            Self::ConveneFamilyCouncil => "family-council",
             Self::DesignateHeir => "designate-heir",
             Self::AdoptWard => "adopt-ward",
             Self::EducateFamilyMember => "family-education",
@@ -341,6 +345,7 @@ impl GameplayCommandKind {
             | Self::SellOutput
             | Self::FileLegalCase
             | Self::RespondToCrisis
+            | Self::ConveneFamilyCouncil
             | Self::AdoptWard
             | Self::EducateFamilyMember
             | Self::CultivateInstitutionSupport
@@ -376,6 +381,7 @@ impl GameplayCommandKind {
                 | Self::BorrowFunds
                 | Self::ExtendCredit
                 | Self::SetHouseGovernance
+                | Self::ConveneFamilyCouncil
                 | Self::EnactLaw
                 | Self::StartPublicWork
                 | Self::ExerciseOfficePower
@@ -529,6 +535,7 @@ pub struct GameplaySnapshot {
     pub average_relationship_respect: u16,
     pub average_relationship_fear: u16,
     pub average_relationship_resentment: u16,
+    pub maximum_contract_relationship_pressure_basis_points: u16,
     pub relationship_obligation_total: i64,
     pub relationship_memory_count: u16,
     pub relationship_state_checksum: u64,
@@ -692,6 +699,7 @@ struct StrategicSnapshotPart {
     average_relationship_respect: u16,
     average_relationship_fear: u16,
     average_relationship_resentment: u16,
+    maximum_contract_relationship_pressure_basis_points: u16,
     relationship_obligation_total: i64,
     relationship_memory_count: u16,
 }
@@ -778,6 +786,7 @@ struct RelationshipSnapshotPart {
     average_respect: u16,
     average_fear: u16,
     average_resentment: u16,
+    maximum_contract_pressure: u16,
     obligation_total: i64,
     memory_count: u16,
 }
@@ -812,6 +821,15 @@ impl RelationshipSnapshotPart {
                     .iter()
                     .map(|relationship| relationship.resentment_basis_points),
             ),
+            maximum_contract_pressure: relationships
+                .iter()
+                .filter_map(|relationship| {
+                    relationship_counterparty_id(relationship, player_id).map(|dynasty_id| {
+                        contract_relationship_pressure_basis_points(state, dynasty_id)
+                    })
+                })
+                .max()
+                .unwrap_or(0),
             obligation_total: relationships.iter().fold(0_i64, |total, relationship| {
                 total.saturating_add(i64::from(relationship.obligation))
             }),
@@ -915,6 +933,8 @@ impl StrategicSnapshotPart {
             average_relationship_respect: relationships.average_respect,
             average_relationship_fear: relationships.average_fear,
             average_relationship_resentment: relationships.average_resentment,
+            maximum_contract_relationship_pressure_basis_points: relationships
+                .maximum_contract_pressure,
             relationship_obligation_total: relationships.obligation_total,
             relationship_memory_count: relationships.memory_count,
         }
@@ -1250,6 +1270,8 @@ macro_rules! assemble_gameplay_snapshot {
             average_relationship_respect: $strategic.average_relationship_respect,
             average_relationship_fear: $strategic.average_relationship_fear,
             average_relationship_resentment: $strategic.average_relationship_resentment,
+            maximum_contract_relationship_pressure_basis_points: $strategic
+                .maximum_contract_relationship_pressure_basis_points,
             relationship_obligation_total: $strategic.relationship_obligation_total,
             relationship_memory_count: $strategic.relationship_memory_count,
             relationship_state_checksum: stable_serialized_checksum(&$state.relationships),
@@ -1361,6 +1383,7 @@ pub struct GameplayDecisionContext {
     pub family_unity: u16,
     pub generation: u16,
     pub player_disputed_employment: u16,
+    pub maximum_contract_relationship_pressure_basis_points: u16,
     pub active_crises: u16,
     pub unread_notifications: u16,
 }
@@ -1394,6 +1417,8 @@ impl From<&GameplaySnapshot> for GameplayDecisionContext {
             family_unity: snapshot.family_unity,
             generation: snapshot.generation,
             player_disputed_employment: snapshot.player_disputed_employment,
+            maximum_contract_relationship_pressure_basis_points: snapshot
+                .maximum_contract_relationship_pressure_basis_points,
             active_crises: snapshot.active_crises,
             unread_notifications: snapshot.unread_notifications,
         }
@@ -1548,6 +1573,8 @@ pub struct GameplayCampaignReport {
     pub maximum_unfinished_public_works: u16,
     pub maximum_active_crises: u16,
     pub maximum_unread_notifications: u16,
+    pub maximum_contract_relationship_pressure_basis_points: u16,
+    pub minimum_post_succession_family_unity: Option<u16>,
     pub longest_substantive_command_streak: u16,
     pub longest_substantive_streak_command: Option<GameplayCommandKind>,
     pub longest_substantive_action_gap_days: u32,
@@ -1692,6 +1719,7 @@ fn classify_player_command(
         PlayerCommand::StartPublicWork { .. } => Some(GameplayCommandKind::StartPublicWork),
         PlayerCommand::FileLegalCase { .. } => Some(GameplayCommandKind::FileLegalCase),
         PlayerCommand::SetHouseGovernance { .. } => Some(GameplayCommandKind::SetHouseGovernance),
+        PlayerCommand::ConveneFamilyCouncil => Some(GameplayCommandKind::ConveneFamilyCouncil),
         PlayerCommand::DesignateHeir { .. } => Some(GameplayCommandKind::DesignateHeir),
         PlayerCommand::AdoptWard { .. } => Some(GameplayCommandKind::AdoptWard),
         PlayerCommand::EducateFamilyMember { .. } => Some(GameplayCommandKind::EducateFamilyMember),
@@ -1802,6 +1830,8 @@ struct CampaignAccumulator {
     maximum_unfinished_public_works: u16,
     maximum_active_crises: u16,
     maximum_unread_notifications: u16,
+    maximum_contract_relationship_pressure_basis_points: u16,
+    minimum_post_succession_family_unity: Option<u16>,
     last_command: Option<GameplayCommandKind>,
     last_substantive_command: Option<GameplayCommandKind>,
     last_substantive_command_day: Option<i64>,
@@ -1857,6 +1887,8 @@ impl CampaignAccumulator {
             maximum_unfinished_public_works: 0,
             maximum_active_crises: 0,
             maximum_unread_notifications: 0,
+            maximum_contract_relationship_pressure_basis_points: 0,
+            minimum_post_succession_family_unity: None,
             last_command: None,
             last_substantive_command: None,
             last_substantive_command_day: None,
@@ -2122,6 +2154,12 @@ impl CampaignAccumulator {
             self.fantasy_arc
                 .first_succession_day
                 .get_or_insert(snapshot.day);
+            self.minimum_post_succession_family_unity = Some(
+                self.minimum_post_succession_family_unity
+                    .map_or(snapshot.family_unity, |minimum| {
+                        minimum.min(snapshot.family_unity)
+                    }),
+            );
         }
     }
 
@@ -2156,6 +2194,9 @@ impl CampaignAccumulator {
         self.maximum_unread_notifications = self
             .maximum_unread_notifications
             .max(snapshot.unread_notifications);
+        self.maximum_contract_relationship_pressure_basis_points = self
+            .maximum_contract_relationship_pressure_basis_points
+            .max(snapshot.maximum_contract_relationship_pressure_basis_points);
     }
 }
 
@@ -2306,6 +2347,9 @@ fn run_campaign(
         maximum_unfinished_public_works: accumulator.maximum_unfinished_public_works,
         maximum_active_crises: accumulator.maximum_active_crises,
         maximum_unread_notifications: accumulator.maximum_unread_notifications,
+        maximum_contract_relationship_pressure_basis_points: accumulator
+            .maximum_contract_relationship_pressure_basis_points,
+        minimum_post_succession_family_unity: accumulator.minimum_post_succession_family_unity,
         longest_substantive_command_streak: accumulator.longest_substantive_command_streak,
         longest_substantive_streak_command: accumulator.longest_substantive_streak_command,
         longest_substantive_action_gap_days: accumulator.longest_substantive_action_gap_days,
@@ -2610,6 +2654,7 @@ fn consequence_horizon_days(
     let desired = match command {
         Some(
             GameplayCommandKind::SetHouseGovernance
+            | GameplayCommandKind::ConveneFamilyCouncil
             | GameplayCommandKind::DesignateHeir
             | GameplayCommandKind::AdoptWard
             | GameplayCommandKind::EducateFamilyMember
@@ -2731,6 +2776,9 @@ fn record_activation_opportunities(
     let governance_opportunity = family_candidates
         .iter()
         .any(|candidate| candidate.kind == GameplayCommandKind::SetHouseGovernance);
+    let family_council_opportunity = family_candidates
+        .iter()
+        .any(|candidate| candidate.kind == GameplayCommandKind::ConveneFamilyCouncil);
     let mut civic_candidates = Vec::new();
     generate_law_candidates(registry, state, persona, &mut civic_candidates);
     generate_public_work_candidates(registry, state, persona, &mut civic_candidates);
@@ -2760,6 +2808,10 @@ fn record_activation_opportunities(
         (
             GameplayCommandKind::SetHouseGovernance,
             governance_opportunity,
+        ),
+        (
+            GameplayCommandKind::ConveneFamilyCouncil,
+            family_council_opportunity,
         ),
         (GameplayCommandKind::EnactLaw, law_opportunity),
         (
@@ -3197,6 +3249,7 @@ fn candidate_preserves_office_duty_reserve(
         | PlayerCommand::StartPublicWork { .. }
         | PlayerCommand::FileLegalCase { .. }
         | PlayerCommand::SetHouseGovernance { .. }
+        | PlayerCommand::ConveneFamilyCouncil
         | PlayerCommand::DesignateHeir { .. }
         | PlayerCommand::AdoptWard { .. }
         | PlayerCommand::EducateFamilyMember { .. }
@@ -3264,6 +3317,7 @@ fn candidate_is_emergency_spending(state: &AppState, candidate: &Candidate) -> b
         | PlayerCommand::StartPublicWork { .. }
         | PlayerCommand::FileLegalCase { .. }
         | PlayerCommand::SetHouseGovernance { .. }
+        | PlayerCommand::ConveneFamilyCouncil
         | PlayerCommand::DesignateHeir { .. }
         | PlayerCommand::AdoptWard { .. }
         | PlayerCommand::EducateFamilyMember { .. }
@@ -3332,6 +3386,7 @@ fn candidate_player_treasury_cost(
             Money::from_copper((budget.copper() / 10).max(1)).min(*budget)
         }
         PlayerCommand::FileLegalCase { .. } => LEGAL_CASE_FILING_COST,
+        PlayerCommand::ConveneFamilyCouncil => FAMILY_COUNCIL_MEETING_COST,
         PlayerCommand::AdoptWard { .. } => WARD_ADOPTION_COST,
         PlayerCommand::EducateFamilyMember { .. } => FAMILY_EDUCATION_COST,
         PlayerCommand::CultivateInstitutionSupport { .. } => INSTITUTION_SUPPORT_COST,
@@ -4345,6 +4400,24 @@ fn add_contract_candidate(
     }) {
         return;
     }
+    let Some(quote) = state.market.quotes.get(&good_id) else {
+        return;
+    };
+    let price_bounds = contract_counterparty_price_bounds(
+        state,
+        buyer_business_id,
+        seller_business_id,
+        quote.price,
+    );
+    let buyer_is_player = state
+        .businesses
+        .get(buyer_business_id)
+        .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id);
+    let unit_price = if buyer_is_player {
+        quote.price.max(price_bounds.minimum_seller_price)
+    } else {
+        quote.price.min(price_bounds.maximum_buyer_price)
+    };
     if !can_support_contract_terms(
         registry,
         state,
@@ -4352,13 +4425,19 @@ fn add_contract_candidate(
         seller_business_id,
         good_id,
         quantity_per_week,
+        unit_price,
     ) {
         return;
     }
-    let Some(quote) = state.market.quotes.get(&good_id) else {
-        return;
+    let penalty = cost_for(quantity_per_week, unit_price).saturating_mul(2);
+    let relationship_note = if price_bounds.relationship_pressure_basis_points > 0 {
+        format!(
+            " under {} bp of counterparty pressure",
+            price_bounds.relationship_pressure_basis_points
+        )
+    } else {
+        String::new()
     };
-    let penalty = cost_for(quantity_per_week, quote.price).saturating_mul(2);
     push_candidate(
         candidates,
         kind,
@@ -4368,13 +4447,13 @@ fn add_contract_candidate(
                 seller_business_id,
                 good_id,
                 quantity_per_week,
-                unit_price: quote.price,
+                unit_price,
                 penalty,
                 duration_weeks: AGENT_CONTRACT_DURATION_WEEKS,
             },
         },
         format!(
-            "contract good {good_id} from business {seller_business_id} to {buyer_business_id}"
+            "contract good {good_id} from business {seller_business_id} to {buyer_business_id} at {unit_price}{relationship_note}"
         ),
         bonus,
     );
@@ -4387,6 +4466,7 @@ fn can_support_contract_terms(
     seller_business_id: BusinessId,
     good_id: crate::ids::GoodId,
     quantity_per_week: Quantity,
+    unit_price: Money,
 ) -> bool {
     let Some(buyer) = state.businesses.get(buyer_business_id) else {
         return false;
@@ -4409,10 +4489,7 @@ fn can_support_contract_terms(
     if quantity_per_week > capacity.seller || quantity_per_week > capacity.buyer {
         return false;
     }
-    let Some(quote) = state.market.quotes.get(&good_id) else {
-        return false;
-    };
-    let weekly_payment = cost_for(quantity_per_week, quote.price);
+    let weekly_payment = cost_for(quantity_per_week, unit_price);
     let buyer_working_cash = buyer
         .cash()
         .saturating_sub(buyer.policy.minimum_cash_reserve);
@@ -5673,12 +5750,71 @@ fn generate_family_candidates(
             governance_bonus(persona, governance),
         );
     }
+    generate_family_council_candidate(state, persona, candidates);
     generate_heir_designation_candidates(state, persona, candidates);
     generate_ward_adoption_candidates(state, persona, candidates);
     generate_family_education_candidates(state, persona, candidates);
     generate_institution_withdrawal_candidates(state, persona, candidates);
     generate_office_power_directive_candidates(registry, state, persona, candidates);
     generate_institution_ascent_candidates(registry, state, persona, candidates);
+}
+
+fn generate_family_council_candidate(
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) {
+    const COUNCIL_INTERVENTION_UNITY_THRESHOLD: u16 = 7_000;
+    let dynasty_id = state.player_dynasty_id;
+    let Some(council) = state.family_councils.get(&dynasty_id) else {
+        return;
+    };
+    if council.unity_basis_points >= COUNCIL_INTERVENTION_UNITY_THRESHOLD
+        || state
+            .dynasties
+            .get(&dynasty_id)
+            .is_none_or(|dynasty| dynasty.treasury() < FAMILY_COUNCIL_MEETING_COST)
+    {
+        return;
+    }
+    let subject = format!("dynasty:{dynasty_id};council-meeting");
+    let available = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::HouseGovernanceChange && record.subject() == subject
+        })
+        .is_none_or(|record| {
+            record
+                .day()
+                .saturating_add(FAMILY_COUNCIL_MEETING_INTERVAL_DAYS)
+                <= state.clock.day()
+        });
+    if !available {
+        return;
+    }
+    let pressure_bonus = i64::from(
+        COUNCIL_INTERVENTION_UNITY_THRESHOLD.saturating_sub(council.unity_basis_points) / 50,
+    );
+    let persona_bonus = match persona {
+        GameplayPersona::Steward => 30,
+        GameplayPersona::PowerBroker => 20,
+        GameplayPersona::Entrepreneur => 15,
+        GameplayPersona::Opportunist => 10,
+    };
+    push_candidate(
+        candidates,
+        GameplayCommandKind::ConveneFamilyCouncil,
+        PlayerCommand::ConveneFamilyCouncil,
+        format!(
+            "convene the family council at {} bp unity to reconcile claims and obligations",
+            council.unity_basis_points
+        ),
+        55_i64
+            .saturating_add(pressure_bonus)
+            .saturating_add(persona_bonus),
+    );
 }
 
 fn preferred_house_governance(
@@ -6714,6 +6850,7 @@ fn recovery_priority_adjustment(state: &AppState, kind: GameplayCommandKind) -> 
         | GameplayCommandKind::StartPublicWork
         | GameplayCommandKind::FileLegalCase
         | GameplayCommandKind::SetHouseGovernance
+        | GameplayCommandKind::ConveneFamilyCouncil
         | GameplayCommandKind::DesignateHeir
         | GameplayCommandKind::AdoptWard
         | GameplayCommandKind::EducateFamilyMember
@@ -6728,6 +6865,7 @@ fn steward_weight(kind: GameplayCommandKind) -> i64 {
     match kind {
         GameplayCommandKind::RespondToCrisis | GameplayCommandKind::ResolveLaborDispute => 900,
         GameplayCommandKind::InvestInBusiness | GameplayCommandKind::ExerciseOfficePower => 800,
+        GameplayCommandKind::ConveneFamilyCouncil => 850,
         GameplayCommandKind::DesignateHeir | GameplayCommandKind::EducateFamilyMember => 650,
         GameplayCommandKind::SetBusinessPolicy | GameplayCommandKind::StartPublicWork => 600,
         GameplayCommandKind::AdoptWard => 520,
@@ -6766,6 +6904,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::CommissionInformation
             | GameplayCommandKind::DesignateHeir => 700,
             GameplayCommandKind::EducateFamilyMember => 600,
+            GameplayCommandKind::ConveneFamilyCouncil => 320,
             GameplayCommandKind::ExtendCredit => 420,
             GameplayCommandKind::AdoptWard => 360,
             GameplayCommandKind::CultivateInstitutionSupport => 300,
@@ -6792,6 +6931,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             GameplayCommandKind::CommissionInformation => 760,
             GameplayCommandKind::DesignateHeir | GameplayCommandKind::AdoptWard => 780,
             GameplayCommandKind::EducateFamilyMember => 720,
+            GameplayCommandKind::ConveneFamilyCouncil => 800,
             GameplayCommandKind::SetHouseGovernance => 700,
             GameplayCommandKind::TransferBusinessCash
             | GameplayCommandKind::AcquireBusiness
@@ -6823,6 +6963,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::WithdrawFromInstitution => 650,
             GameplayCommandKind::AdoptWard => 500,
             GameplayCommandKind::EducateFamilyMember => 420,
+            GameplayCommandKind::ConveneFamilyCouncil => 350,
             GameplayCommandKind::TransferBusinessCash
             | GameplayCommandKind::InvestInBusiness
             | GameplayCommandKind::SetBusinessPolicy
@@ -6863,6 +7004,7 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         GameplayCommandKind::LeverageInformation => 600,
         GameplayCommandKind::WithdrawFromInstitution => institution_withdrawal_urgency(state),
         GameplayCommandKind::FileLegalCase => legal_case_urgency(state),
+        GameplayCommandKind::ConveneFamilyCouncil => family_council_urgency(state),
         GameplayCommandKind::SecureSupply
         | GameplayCommandKind::SellOutput
         | GameplayCommandKind::ExtendCredit
@@ -6877,6 +7019,19 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         | GameplayCommandKind::CommissionInformation
         | GameplayCommandKind::ExerciseOfficePower
         | GameplayCommandKind::NominateForOffice => 0,
+    }
+}
+
+fn family_council_urgency(state: &AppState) -> i64 {
+    let unity = state
+        .family_councils
+        .get(&state.player_dynasty_id)
+        .map_or(10_000, |council| council.unity_basis_points);
+    match unity {
+        0..=3_499 => 2_400,
+        3_500..=5_499 => 1_600,
+        5_500..=6_999 => 800,
+        _ => 0,
     }
 }
 
@@ -7163,6 +7318,7 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::MissingFamilyCouncil { .. } => "missing family council",
         CommandError::UnchangedHouseGovernance { .. } => "unchanged governance",
         CommandError::HouseGovernanceCooldown { .. } => "governance cooldown",
+        CommandError::FamilyCouncilMeetingCooldown { .. } => "family council cooldown",
         CommandError::InvalidHeirCandidate { .. } => "invalid heir candidate",
         CommandError::UnchangedHeir { .. } => "unchanged heir",
         CommandError::HeirDesignationCooldown { .. } => "heir designation cooldown",
@@ -7783,6 +7939,8 @@ fn derive_findings(
     add_office_directive_trajectory_finding(aggregate, &mut findings);
     add_welfare_dynamism_finding(aggregate, campaigns, &mut findings);
     add_long_horizon_risk_findings(aggregate, campaigns, &mut findings);
+    add_rival_commercial_pressure_finding(aggregate, campaigns, &mut findings);
+    add_succession_cohesion_finding(campaigns, &mut findings);
     add_long_substantive_gap_finding(campaigns, &mut findings);
     add_asset_liquidity_drought_finding(campaigns, &mut findings);
     add_economic_recovery_dead_end_finding(campaigns, &mut findings);
@@ -7803,6 +7961,73 @@ fn derive_findings(
         });
     }
     findings
+}
+
+fn add_rival_commercial_pressure_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if average_campaign_days(aggregate) < 3_600 || campaigns.len() < 4 {
+        return;
+    }
+    let pressured = campaigns
+        .iter()
+        .filter(|campaign| campaign.maximum_contract_relationship_pressure_basis_points >= 1_000)
+        .count();
+    if scaled_ratio_usize(pressured, campaigns.len(), 100) >= 50 {
+        return;
+    }
+    let maximum = campaigns
+        .iter()
+        .map(|campaign| campaign.maximum_contract_relationship_pressure_basis_points)
+        .max()
+        .unwrap_or(0);
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Rivalry rarely changes commercial leverage".to_owned(),
+        evidence: format!(
+            "Only {pressured} of {} mature campaigns ever reached 1,000 bp of relationship-driven contract pressure; the maximum observed pressure was {maximum} bp. Rival houses may dislike the player, but that hostility is not consistently changing the price of doing business with them.",
+            campaigns.len()
+        ),
+    });
+}
+
+fn add_succession_cohesion_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let succession_campaigns: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| campaign.fantasy_arc.first_succession_day.is_some())
+        .collect();
+    if succession_campaigns.len() < 4 {
+        return;
+    }
+    let highly_stable = succession_campaigns
+        .iter()
+        .filter(|campaign| {
+            campaign
+                .minimum_post_succession_family_unity
+                .is_some_and(|unity| unity >= 7_000)
+        })
+        .count();
+    if scaled_ratio_usize(highly_stable, succession_campaigns.len(), 100) < 75 {
+        return;
+    }
+    let minimum = succession_campaigns
+        .iter()
+        .filter_map(|campaign| campaign.minimum_post_succession_family_unity)
+        .min()
+        .unwrap_or(10_000);
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Succession rarely destabilizes family cohesion".to_owned(),
+        evidence: format!(
+            "{highly_stable} of {} succession campaigns never fell below 7,000 bp of family unity after transition; the lowest observed post-succession unity was {minimum} bp. Inheritance changes the officeholder, but the family order is usually too stable to demand a new internal strategy.",
+            succession_campaigns.len()
+        ),
+    });
 }
 
 fn add_strategic_cadence_finding(
@@ -7988,19 +8213,49 @@ fn add_phase_quality_finding(
     let choice_depth_is_sufficient = average_families_tenths
         >= thresholds.minimum_average_families_tenths
         || average_choices_tenths >= thresholds.minimum_average_choices_tenths;
-    if action_share >= thresholds.minimum_action_share
-        && static_quiet_share < thresholds.maximum_static_quiet_share
-        && stats.longest_quiet_streak_cycles <= thresholds.maximum_quiet_streak_cycles
-        && multi_family_share >= thresholds.minimum_multi_family_share
-        && choice_depth_is_sufficient
-    {
+    let mut missed_thresholds = Vec::new();
+    if action_share < thresholds.minimum_action_share {
+        missed_thresholds.push(format!(
+            "action share {action_share}% < {}%",
+            thresholds.minimum_action_share
+        ));
+    }
+    if static_quiet_share >= thresholds.maximum_static_quiet_share {
+        missed_thresholds.push(format!(
+            "static quiet share {static_quiet_share}% >= {}%",
+            thresholds.maximum_static_quiet_share
+        ));
+    }
+    if stats.longest_quiet_streak_cycles > thresholds.maximum_quiet_streak_cycles {
+        missed_thresholds.push(format!(
+            "longest quiet streak {} > {} cycles",
+            stats.longest_quiet_streak_cycles, thresholds.maximum_quiet_streak_cycles
+        ));
+    }
+    if multi_family_share < thresholds.minimum_multi_family_share {
+        missed_thresholds.push(format!(
+            "multi-family share {multi_family_share}% < {}%",
+            thresholds.minimum_multi_family_share
+        ));
+    }
+    if !choice_depth_is_sufficient {
+        missed_thresholds.push(format!(
+            "choice depth {} choices / {} families < {} choices or {} families",
+            format_tenths(average_choices_tenths),
+            format_tenths(average_families_tenths),
+            format_tenths(thresholds.minimum_average_choices_tenths),
+            format_tenths(thresholds.minimum_average_families_tenths)
+        ));
+    }
+    if missed_thresholds.is_empty() {
         return;
     }
+    let threshold_evidence = missed_thresholds.join("; ");
     findings.push(GameplayFinding {
         severity: GameplayFindingSeverity::Warning,
         title: title.to_owned(),
         evidence: format!(
-            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}%, and actionable cycles averaged {} viable choices across {} families.",
+            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}%, and actionable cycles averaged {} viable choices across {} families. Thresholds missed: {threshold_evidence}.",
             stats.decision_cycles,
             scaled_ratio_u64(
                 u64::from(stats.quiet_cycles_with_ambient_change),

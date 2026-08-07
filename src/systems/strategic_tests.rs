@@ -77,6 +77,66 @@ mod arithmetic_boundaries {
     use crate::core::CivicDebt;
 
     #[test]
+    fn capitalization_rejects_reserved_business_finance_version_without_mutation() {
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            .expect("campaign must contain a player business")
+            .id();
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("selected business must exist")
+            .finance
+            .version = u64::MAX - 1;
+        let dynasty_id = state.player_dynasty_id;
+        let before = state.clone();
+
+        let result =
+            capitalize_owned_business(&mut state, dynasty_id, business_id, Money::from_copper(1));
+
+        assert_eq!(
+            result,
+            Err(StrategicError::BusinessFinanceVersionExhausted { business_id })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "reserved business finance version must fail before capitalization mutates state",
+        );
+    }
+
+    #[test]
+    fn ai_recovery_skips_business_with_reserved_finance_version() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain an AI business")
+            .id();
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("selected business must exist");
+        business.operations.status = BusinessStatus::Distressed;
+        business.finance.cash = Money::ZERO;
+        business.finance.version = u64::MAX - 1;
+        let before = state.clone();
+
+        recover_ai_businesses(registry, &mut state);
+
+        assert_state_unchanged(
+            &before,
+            &state,
+            "AI recovery must not attempt capitalization when the finance version is reserved",
+        );
+    }
+
+    #[test]
     fn weekly_interest_uses_the_full_supported_balance_range() {
         let balance = Money::from_copper(i64::MAX);
         let expected = Money::from_copper(i64::MAX / 52 + i64::from(i64::MAX % 52 != 0));
@@ -5200,6 +5260,54 @@ mod ai {
             ObjectiveStatus::Pursuing,
             "borrowed cash must not satisfy a reserve-building objective while matching debt remains outstanding"
         );
+    }
+
+    #[test]
+    fn containment_objective_creates_visible_commercial_pressure_against_the_player() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a nonplayer dynasty");
+        let pair = DynastyPair::new(dynasty_id, state.player_dynasty_id);
+        {
+            let relationship = state
+                .relationships
+                .get_mut(&pair)
+                .expect("rival relationship must exist");
+            relationship.trust_basis_points = 5_000;
+            relationship.fear_basis_points = 1_000;
+            relationship.resentment_basis_points = 2_000;
+        }
+
+        let mut progress = ObjectiveProgress::Pending;
+        for _ in 0..40 {
+            progress = advance_ai_rival_objective(&mut state, dynasty_id);
+        }
+
+        assert_eq!(progress, ObjectiveProgress::Achieved);
+        let relationship = state
+            .relationships
+            .get(&pair)
+            .expect("rival relationship must exist");
+        assert_eq!(relationship.trust_basis_points, 2_000);
+        assert_eq!(relationship.fear_basis_points, 5_000);
+        assert_eq!(relationship.resentment_basis_points, 6_000);
+        assert!(
+            crate::systems::contract_relationship_pressure_basis_points(&state, dynasty_id)
+                >= 2_000,
+            "completed containment must make ordinary commercial negotiation materially worse"
+        );
+        assert!(state.outbox.iter().any(|message| {
+            message.kind == OutboxKind::Information
+                && message.subject.contains("containing the dynasty")
+        }));
+        assert!(state.information_reports.values().any(|report| {
+            report.owner_dynasty_id == state.player_dynasty_id
+                && report.target == Some(InformationTarget::Counterparty { dynasty_id })
+        }));
     }
 
     #[test]

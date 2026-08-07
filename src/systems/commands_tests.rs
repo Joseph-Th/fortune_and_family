@@ -857,7 +857,13 @@ mod validation {
             .get_quote(terms.good_id)
             .expect("contract good must have a market quote")
             .price();
-        let minimum_price = ceil_positive_money_div(market_price, 2);
+        let minimum_price = contract_counterparty_price_bounds(
+            &state,
+            terms.buyer_business_id,
+            terms.seller_business_id,
+            market_price,
+        )
+        .minimum_seller_price;
         terms.unit_price = Money::from_copper(1).min(
             minimum_price
                 .checked_sub(Money::from_copper(1))
@@ -885,6 +891,67 @@ mod validation {
             &state,
             "the player must not force an NPC seller into a confiscatory supply price",
         );
+    }
+
+    #[test]
+    fn hostile_counterparty_requires_worse_contract_terms_until_relations_improve() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let mut terms = player_buyer_contract_terms(&state);
+        let seller_dynasty_id = state
+            .businesses
+            .get(terms.seller_business_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
+        let pair = DynastyPair::new(state.player_dynasty_id, seller_dynasty_id);
+        {
+            let relationship = state
+                .relationships
+                .get_mut(&pair)
+                .expect("counterparty relationship must exist");
+            relationship.trust_basis_points = 1_000;
+            relationship.resentment_basis_points = 7_000;
+        }
+        let market_price = state
+            .market
+            .get_quote(terms.good_id)
+            .expect("contract good must have a market quote")
+            .price();
+        terms.unit_price = market_price;
+        let hostile_bounds = contract_counterparty_price_bounds(
+            &state,
+            terms.buyer_business_id,
+            terms.seller_business_id,
+            market_price,
+        );
+
+        assert_eq!(hostile_bounds.relationship_pressure_basis_points, 2_500);
+        assert!(hostile_bounds.minimum_seller_price > market_price);
+        assert_eq!(
+            ensure_non_player_contract_counterparty_accepts(registry, &state, &terms),
+            Err(CommandError::ContractCounterpartyPriceTooLow {
+                unit_price: market_price,
+                minimum_price: hostile_bounds.minimum_seller_price,
+            })
+        );
+
+        {
+            let relationship = state
+                .relationships
+                .get_mut(&pair)
+                .expect("counterparty relationship must exist");
+            relationship.trust_basis_points = 7_000;
+            relationship.resentment_basis_points = 1_000;
+        }
+        let friendly_bounds = contract_counterparty_price_bounds(
+            &state,
+            terms.buyer_business_id,
+            terms.seller_business_id,
+            market_price,
+        );
+        assert_eq!(friendly_bounds.relationship_pressure_basis_points, 0);
+        ensure_non_player_contract_counterparty_accepts(registry, &state, &terms)
+            .expect("ordinary market terms must become acceptable after relations recover");
     }
 
     #[test]
@@ -3359,7 +3426,7 @@ mod politics {
     }
 
     #[test]
-    fn governance_cannot_be_rewritten_twice_within_five_years() {
+    fn governance_cannot_be_rewritten_twice_within_three_years() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let current = state
@@ -3407,6 +3474,119 @@ mod politics {
             &before,
             &state,
             "a premature charter amendment must not mutate family governance",
+        );
+
+        for _ in 0..HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS {
+            state.clock.advance_one_day();
+        }
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetHouseGovernance {
+                governance: *second_alternative,
+            },
+        )
+        .expect("the family must be able to amend the charter again after three years");
+        assert_eq!(
+            state
+                .family_councils
+                .get(&state.player_dynasty_id)
+                .expect("player family council must exist")
+                .governance,
+            *second_alternative
+        );
+    }
+
+    #[test]
+    fn family_council_meeting_restores_cohesion_and_has_an_annual_cooldown() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let member_ids: Vec<_> = state
+            .family_councils
+            .get(&dynasty_id)
+            .expect("player family council must exist")
+            .members
+            .iter()
+            .copied()
+            .collect();
+        state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("player family council must exist")
+            .unity_basis_points = 4_000;
+        for character_id in &member_ids {
+            state
+                .characters
+                .get_mut(*character_id)
+                .expect("family council member must exist")
+                .runtime
+                .loyalty_basis_points = 5_000;
+        }
+        let treasury_before = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        apply_player_command(registry, &mut state, PlayerCommand::ConveneFamilyCouncil)
+            .expect("funded family council meeting must succeed");
+
+        assert_eq!(
+            state
+                .family_councils
+                .get(&dynasty_id)
+                .expect("player family council must exist")
+                .unity_basis_points,
+            5_500
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            treasury_before.saturating_sub(FAMILY_COUNCIL_MEETING_COST)
+        );
+        assert!(member_ids.iter().all(|character_id| {
+            state
+                .characters
+                .get(*character_id)
+                .is_some_and(|character| character.runtime.loyalty_basis_points == 5_600)
+        }));
+        assert!(state.audit_log.iter().any(|record| {
+            record.kind() == AuditKind::HouseGovernanceChange
+                && record.subject() == format!("dynasty:{dynasty_id};council-meeting")
+        }));
+        let before = state.clone();
+
+        let result =
+            apply_player_command(registry, &mut state, PlayerCommand::ConveneFamilyCouncil);
+
+        assert_eq!(
+            result,
+            Err(CommandError::FamilyCouncilMeetingCooldown {
+                next_meeting_day: FAMILY_COUNCIL_MEETING_INTERVAL_DAYS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "premature family reconciliation must not mutate the dynasty",
+        );
+
+        for _ in 0..FAMILY_COUNCIL_MEETING_INTERVAL_DAYS {
+            state.clock.advance_one_day();
+        }
+        apply_player_command(registry, &mut state, PlayerCommand::ConveneFamilyCouncil)
+            .expect("family council must be available again after one year");
+        assert_eq!(
+            state
+                .family_councils
+                .get(&dynasty_id)
+                .expect("player family council must exist")
+                .unity_basis_points,
+            7_000
         );
     }
 
@@ -5302,12 +5482,13 @@ mod serialization {
     use super::*;
     use std::collections::BTreeSet;
 
-    const COMMAND_KINDS: [&str; 24] = [
+    const COMMAND_KINDS: [&str; 25] = [
         "acquire-business",
         "acknowledge-notification",
         "adopt-ward",
         "buy-property",
         "commission-information",
+        "convene-family-council",
         "cultivate-institution-support",
         "designate-heir",
         "sell-property",
@@ -5343,6 +5524,7 @@ mod serialization {
             PlayerCommand::StartPublicWork { .. } => "start-public-work",
             PlayerCommand::FileLegalCase { .. } => "file-legal-case",
             PlayerCommand::SetHouseGovernance { .. } => "set-house-governance",
+            PlayerCommand::ConveneFamilyCouncil => "convene-family-council",
             PlayerCommand::DesignateHeir { .. } => "designate-heir",
             PlayerCommand::AdoptWard { .. } => "adopt-ward",
             PlayerCommand::EducateFamilyMember { .. } => "educate-family-member",
@@ -5461,6 +5643,7 @@ mod serialization {
             PlayerCommand::SetHouseGovernance {
                 governance: HouseGovernance::BranchFederation,
             },
+            PlayerCommand::ConveneFamilyCouncil,
             representative_heir_designation_command(),
             PlayerCommand::AdoptWard {
                 focus: EducationFocus::Administration,

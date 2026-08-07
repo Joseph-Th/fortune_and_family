@@ -78,7 +78,7 @@ The player manages a portfolio of businesses, property, offices, obligations, fa
 
 ### Succession and legacy
 
-A succession tests whether control depends on one exceptional person or on a durable organization. The player can prepare that test by formally confirming the default adult heir or choosing another adult council member, accepting legitimacy and family-unity costs to bind the succession into the family charter. Legacy evaluates both family outcomes and civic consequences.
+A succession tests whether control depends on one exceptional person or on a durable organization. The player can prepare that test by formally confirming the default adult heir or choosing another adult council member, accepting legitimacy and family-unity costs to bind the succession into the family charter. Formal preparation reduces the cohesion, loyalty, and legitimacy shock when succession actually occurs. Legacy evaluates both family outcomes and civic consequences.
 
 These phases may overlap, but they should remain strategically distinct. Political authority should not arrive before sustained commercial performance, and late play should not remain an enlarged version of the opening business loop.
 
@@ -120,7 +120,7 @@ Major setbacks should be recoverable through restructuring, asset sale, recapita
 
 ### Dynasty and family
 
-Family structure determines succession, parallel capacity, office eligibility, management coverage, and long-term continuity. Education, governance, wards, marriage, loyalty, claims, and deliberate heir designation should create strategic differences rather than static bonuses.
+Family structure determines succession, parallel capacity, office eligibility, management coverage, and long-term continuity. Education, governance, wards, marriage, loyalty, claims, and deliberate heir designation should create strategic differences rather than static bonuses. When cohesion deteriorates, the player can convene a costly family council to settle obligations and rebuild unity and loyalty, with an annual limit so reconciliation remains a response to pressure rather than routine maintenance.
 
 ### Households and labor
 

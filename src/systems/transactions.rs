@@ -193,15 +193,20 @@ pub(crate) fn add_market_supply(
     Ok(())
 }
 
-pub(crate) fn next_business_finance_version(business: &Business) -> Result<u64, SimulationError> {
+pub(crate) fn checked_next_business_finance_version(business: &Business) -> Option<u64> {
     business
         .finance
         .version
         .checked_add(1)
         .filter(|next| *next < u64::MAX)
-        .ok_or(SimulationError::BusinessFinanceVersionExhausted {
+}
+
+pub(crate) fn next_business_finance_version(business: &Business) -> Result<u64, SimulationError> {
+    checked_next_business_finance_version(business).ok_or(
+        SimulationError::BusinessFinanceVersionExhausted {
             business_id: business.id(),
-        })
+        },
+    )
 }
 
 pub(crate) fn next_family_charter_version(

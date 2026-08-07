@@ -443,6 +443,21 @@ mod harness {
         make_institution_withdrawal_available_for_test(&mut withdrawal_state);
         kinds.extend(candidate_kinds_for_test(registry, &withdrawal_state));
 
+        let mut family_state = make_test_candidate_coverage_state(registry);
+        let player_id = family_state.player_dynasty_id;
+        family_state
+            .family_councils
+            .get_mut(&player_id)
+            .expect("player family council must exist")
+            .unity_basis_points = 5_000;
+        family_state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        kinds.extend(candidate_kinds_for_test(registry, &family_state));
+
         kinds.extend(information_candidate_kinds(registry));
         kinds.extend(support_candidate_kinds(registry));
         kinds.extend(succession_candidate_kinds(registry));
@@ -504,6 +519,11 @@ mod harness {
                 seller,
                 input.good_id(),
                 input.quantity().saturating_mul_ratio(4, 1),
+                state
+                    .market
+                    .get_quote(input.good_id())
+                    .expect("input good must have a market quote")
+                    .price(),
             ),
             "agents must not propose supply contracts the buyer cannot finance"
         );
@@ -3505,9 +3525,16 @@ mod findings {
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
-        finding_with_title(
+        let finding = finding_with_title(
             &findings,
             "Dynastic governance remains intermittent and strategically narrow",
+        );
+        assert!(
+            finding
+                .evidence
+                .contains("Thresholds missed: longest quiet streak 11 > 10 cycles"),
+            "phase warning must identify the exact failed quality gate: {}",
+            finding.evidence
         );
 
         report

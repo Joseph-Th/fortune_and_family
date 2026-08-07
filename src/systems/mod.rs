@@ -46,6 +46,10 @@ pub(crate) fn supported_worker_capacity(business: &crate::core::Business) -> u32
         .saturating_mul(u32::from(WORKERS_PER_BATCH))
 }
 
+pub(crate) fn saturating_worker_count(workers: impl Iterator<Item = u32>) -> u32 {
+    workers.fold(0_u32, u32::saturating_add)
+}
+
 pub(crate) fn available_household_workers(
     state: &crate::core::AppState,
     household_id: crate::ids::HouseholdId,
@@ -122,7 +126,8 @@ pub use bootstrap::{NewGameError, build_new_game};
 pub(crate) use commands::INSTITUTION_SUPPORT_INTERVAL_DAYS;
 pub(crate) use commands::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
-    COMMISSIONED_INFORMATION_SOURCE, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
+    COMMISSIONED_INFORMATION_SOURCE, FAMILY_COUNCIL_MEETING_COST,
+    FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
     HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
     HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST, INFORMATION_LEVERAGE_COST,
     INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
@@ -135,7 +140,8 @@ pub(crate) use commands::{
     PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
     PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT,
     WARD_ADOPTION_INTERVAL_DAYS, WARD_ADOPTION_LEGITIMACY_REQUIREMENT,
-    WARD_ADOPTION_REPUTATION_REQUIREMENT, has_established_player_office_power,
+    WARD_ADOPTION_REPUTATION_REQUIREMENT, contract_counterparty_price_bounds,
+    contract_relationship_pressure_basis_points, has_established_player_office_power,
     institution_membership_count, institution_support_day, institution_support_next_day,
     office_nomination_next_day, player_contract_deliveries, quote_information_leverage,
     required_office_power_for_law,
@@ -161,3 +167,14 @@ pub(crate) use strategic::{
 pub use transactions::{
     SimulationError, ValidatedCashTransfer, transfer_business_cash, validate_business_cash_transfer,
 };
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn worker_count_saturates_instead_of_wrapping() {
+        assert_eq!(
+            super::saturating_worker_count([u32::MAX, 1].into_iter()),
+            u32::MAX
+        );
+    }
+}
