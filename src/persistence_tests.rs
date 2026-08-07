@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::core::{
-    AuditKind, CivicDebt, CivicDebtStatus, EnactedLaw, FamilyLinkKind, LawKind,
+    AuditKind, AuditRecord, CivicDebt, CivicDebtStatus, EnactedLaw, FamilyLinkKind, LawKind,
     OfficeDirectiveState, OfficePower,
 };
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
@@ -1260,6 +1260,31 @@ mod validation {
             load_state(&path),
             StateValidationKind::IdentifierAllocation,
             "exhausted the supported identifier space",
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_institution_campaign_audit_subjects() {
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionPatronage,
+            subject: format!("invalid:character:{character_id}").into(),
+            detail: "malformed institutional history".to_owned(),
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("invalid-institution-audit-subject.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "invalid institution/character subject",
         );
     }
 

@@ -148,9 +148,12 @@ mod harness {
         for institution in state.institutions.values_mut() {
             institution.members.remove(&character_id);
         }
-        let suffix = format!(":character:{character_id}");
         state.audit_log.retain(|record| {
-            record.kind() != AuditKind::InstitutionPatronage || !record.subject().ends_with(&suffix)
+            record.kind() != AuditKind::InstitutionPatronage
+                || record
+                    .audit_subject()
+                    .institution_character_ids()
+                    .is_none_or(|(_, recorded_character_id)| recorded_character_id != character_id)
         });
         candidate_kinds_for_test(registry, &state)
     }
@@ -413,6 +416,10 @@ mod harness {
         make_supply_security_and_borrowing_available(&mut directional_state);
         kinds.extend(candidate_kinds_for_test(registry, &directional_state));
 
+        let mut lending_state = state.clone();
+        make_external_credit_need_available_for_test(&mut lending_state);
+        kinds.extend(candidate_kinds_for_test(registry, &lending_state));
+
         make_player_business_distressed(&mut state);
         kinds.extend(candidate_kinds_for_test(registry, &state));
         restore_distressed_business_cash_for_test(&mut state);
@@ -479,9 +486,9 @@ mod harness {
             .inputs()
             .first()
             .expect("baker recipe must consume an input");
-        let seller =
-            find_contract_seller(registry, &state, input.good_id(), state.player_dynasty_id)
-                .expect("a nonplayer seller must exist");
+        let seller = contract_sellers(registry, &state, input.good_id(), state.player_dynasty_id)
+            .next()
+            .expect("a nonplayer seller must exist");
         state
             .businesses
             .get_mut(buyer)
@@ -499,6 +506,27 @@ mod harness {
                 input.quantity().saturating_mul_ratio(4, 1),
             ),
             "agents must not propose supply contracts the buyer cannot finance"
+        );
+    }
+
+    #[test]
+    fn contract_counterparty_discovery_keeps_multiple_viable_houses_visible() {
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign();
+        let grain_id = registry
+            .get_good_id("grain")
+            .expect("registry must define grain");
+
+        let sellers = contract_sellers(registry, &state, grain_id, state.player_dynasty_id)
+            .collect::<Vec<_>>();
+
+        assert!(
+            sellers.len() >= 2,
+            "Rivergate contains multiple external grain suppliers; the harness must not collapse them to the first match"
+        );
+        assert!(
+            sellers.windows(2).all(|pair| pair[0] < pair[1]),
+            "counterparty discovery must preserve deterministic business ordering"
         );
     }
 
@@ -685,6 +713,97 @@ mod candidates {
     }
 
     #[test]
+    fn political_agent_does_not_stack_redundant_family_patronage_in_one_institution() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_office_nomination_record_for_test(&mut state);
+        let character_id = eligible_office_characters(&state)
+            .first()
+            .expect("player dynasty must have an office-eligible character")
+            .id();
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("selected institution must exist")
+            .members
+            .insert(character_id);
+        let mut candidates = Vec::new();
+
+        generate_institution_ascent_candidates(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut candidates,
+        );
+
+        assert!(candidates.iter().all(|candidate| {
+            !matches!(
+                candidate.command,
+                PlayerCommand::CultivateInstitutionSupport {
+                    institution_id: candidate_institution_id,
+                    ..
+                } if candidate_institution_id == institution_id
+            )
+        }));
+    }
+
+    #[test]
+    fn established_dynasty_targets_new_offices_that_fit_its_power_strategy() {
+        let state = make_test_campaign();
+        let controlled_powers = BTreeSet::new();
+        let aligned = state
+            .institutions
+            .values()
+            .find(|institution| {
+                institution
+                    .powers
+                    .iter()
+                    .any(|power| office_power_persona_bonus(GameplayPersona::Steward, *power) > 0)
+            })
+            .expect("campaign must contain a steward-aligned institution");
+        let unaligned = state
+            .institutions
+            .values()
+            .find(|institution| {
+                institution
+                    .powers
+                    .iter()
+                    .all(|power| office_power_persona_bonus(GameplayPersona::Steward, *power) == 0)
+            })
+            .expect("campaign must contain an institution outside the steward power strategy");
+
+        assert!(institution_is_strategic_target(
+            &state,
+            aligned,
+            &controlled_powers,
+            true,
+            GameplayPersona::Steward,
+        ));
+        assert!(!institution_is_strategic_target(
+            &state,
+            unaligned,
+            &controlled_powers,
+            true,
+            GameplayPersona::Steward,
+        ));
+        assert!(
+            institution_is_strategic_target(
+                &state,
+                unaligned,
+                &controlled_powers,
+                false,
+                GameplayPersona::Steward,
+            ),
+            "before winning an office the dynasty may use any viable institution as its first foothold"
+        );
+    }
+
+    #[test]
     fn illiquid_officeholder_is_offered_executable_institutional_withdrawal() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -803,6 +922,59 @@ mod candidates {
                 .owner_dynasty_id,
             Some(player_id),
             "liquidation must transfer ownership"
+        );
+    }
+
+    #[test]
+    fn property_liquidation_opportunity_requires_an_executable_counterparty_reserve() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        make_property_liquidation_available_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        for dynasty in state
+            .dynasties
+            .values_mut()
+            .filter(|dynasty| dynasty.id() != player_id)
+        {
+            dynasty.resources.treasury = PROPERTY_COUNTERPARTY_BUYER_RESERVE;
+        }
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(player_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("player must own a liquidatable property")
+            .id;
+        assert!(
+            state
+                .dynasties
+                .keys()
+                .copied()
+                .filter(|dynasty_id| *dynasty_id != player_id)
+                .any(|buyer_id| quote_property_liquidation(
+                    registry,
+                    &state,
+                    player_id,
+                    buyer_id,
+                    property_id,
+                )
+                .is_ok()),
+            "the fixture must retain a raw liquidation quote so the reserve check is material"
+        );
+
+        assert!(
+            !has_property_liquidation_opportunity(registry, &state),
+            "an opportunity must not be reported when every buyer would violate its reserve"
+        );
+        let mut candidates = Vec::new();
+        generate_finance_candidates(registry, &state, GameplayPersona::Steward, &mut candidates);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.kind != GameplayCommandKind::SellProperty),
+            "candidate generation and opportunity accounting must agree"
         );
     }
 
@@ -1471,9 +1643,7 @@ mod candidates {
             candidate.command,
             PlayerCommand::IssueLoan { ref terms }
                 if terms.weekly_payment
-                    == Money::from_copper(
-                        (terms.principal.copper() / AGENT_LOAN_AMORTIZATION_WEEKS).max(1)
-                    )
+                    == positive_money_ceil_div(terms.principal, AGENT_LOAN_AMORTIZATION_WEEKS)
         ));
     }
 
@@ -1589,6 +1759,45 @@ mod candidates {
         assert!(!candidate_preserves_office_duty_reserve(
             registry, &state, &candidate
         ));
+    }
+
+    #[test]
+    fn office_power_agent_waits_for_material_need_instead_of_using_directives_on_cooldown() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points = 10_000;
+        let institution = state
+            .institutions
+            .values_mut()
+            .find(|institution| institution.office_holder_id.is_some())
+            .expect("fixture must grant the player an office");
+        institution.powers = BTreeSet::from([OfficePower::PublicWorks]);
+        let district_id = registry
+            .get_institution(institution.institution_id)
+            .expect("runtime institution must have a registry definition")
+            .district_id();
+        let district = state
+            .districts
+            .get_mut(&district_id)
+            .expect("institution district must exist");
+        district.employment_basis_points = 10_000;
+        district.sanitation_basis_points = 10_000;
+        let mut candidates = Vec::new();
+
+        generate_office_power_directive_candidates(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut candidates,
+        );
+
+        assert!(candidates.is_empty());
     }
 
     #[test]
@@ -2066,6 +2275,7 @@ mod candidates {
             .expect("player dynasty must exist")
             .resources
             .treasury = Money::from_copper(100_000);
+        make_external_credit_need_available_for_test(&mut state);
         let mut candidates = Vec::new();
 
         add_lend_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
@@ -2083,9 +2293,7 @@ mod candidates {
         );
         assert_eq!(
             terms.weekly_payment,
-            Money::from_copper(
-                (terms.principal.copper() / AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS).max(1)
-            )
+            positive_money_ceil_div(terms.principal, AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS)
         );
         assert!(candidate.description.contains("high-yield short-term loan"));
     }
@@ -2118,7 +2326,7 @@ mod candidates {
                     lender_dynasty_id: player_id,
                     borrower_dynasty_id: borrower_id,
                     principal: Money::from_copper(5_000),
-                    weekly_payment: Money::from_copper(500),
+                    weekly_payment: Money::from_copper(300),
                     interest_basis_points: 1_800,
                     collateral_property_id: None,
                 },
@@ -2141,6 +2349,11 @@ mod candidates {
             legal_grievance_kind(&state, borrower_id),
             Some(LegalCaseKind::Debt)
         );
+        assert_eq!(
+            legal_case_urgency(&state),
+            800,
+            "delinquent player credit should make enforcement strategically relevant"
+        );
         let mut candidates = Vec::new();
         generate_legal_candidates(&state, GameplayPersona::Opportunist, &mut candidates);
         assert!(candidates.iter().any(|candidate| {
@@ -2154,6 +2367,20 @@ mod candidates {
                     } if defendant_dynasty_id == borrower_id
                 )
         }));
+
+        state
+            .loans
+            .values_mut()
+            .find(|loan| {
+                loan.lender_dynasty_id == player_id && loan.borrower_dynasty_id == borrower_id
+            })
+            .expect("test loan must still exist")
+            .status = LoanStatus::Defaulted;
+        assert_eq!(
+            legal_case_urgency(&state),
+            1_200,
+            "defaulted player credit should outrank routine governance work"
+        );
     }
 
     #[test]
@@ -2161,6 +2388,21 @@ mod candidates {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         grant_player_office_for_test(&mut state);
+        let institution_id = state
+            .institutions
+            .values()
+            .find(|institution| institution.office_holder_id.is_some())
+            .expect("fixture must grant the player an office")
+            .institution_id;
+        let district_id = registry
+            .get_institution(institution_id)
+            .expect("runtime institution must have a registry definition")
+            .district_id();
+        state
+            .districts
+            .get_mut(&district_id)
+            .expect("institution district must exist")
+            .employment_basis_points = 0;
         let mut accumulator = CampaignAccumulator::new();
 
         record_activation_opportunities(
@@ -2195,6 +2437,78 @@ mod metrics {
         arc.first_succession_day = Some(4_500);
 
         assert_eq!(gameplay_phase(&arc), GameplayPhase::SuccessionLegacy);
+    }
+
+    #[test]
+    fn early_patronage_remains_part_of_establishment_until_commercial_standing() {
+        let mut arc = GameplayFantasyArc {
+            first_reputation_standing_day: Some(90),
+            first_institution_support_day: Some(420),
+            ..GameplayFantasyArc::default()
+        };
+
+        assert_eq!(gameplay_phase(&arc), GameplayPhase::Establishment);
+
+        arc.first_commercial_standing_day = Some(600);
+        assert_eq!(gameplay_phase(&arc), GameplayPhase::InstitutionalAscent);
+    }
+
+    #[test]
+    fn phase_stats_record_consecutive_quiet_streaks() {
+        let mut accumulator = CampaignAccumulator::new();
+        let quiet = PhaseCycleObservation {
+            action: None,
+            choices: ChoiceCycleMetrics {
+                substantive_candidate_count: 0,
+                substantive_viable_count: 0,
+                viable_command_kind_count: 0,
+                close_choice: false,
+                distinct_immediate_choices: false,
+                distinct_projected_choices: false,
+            },
+            ambient_change: true,
+        };
+
+        accumulator.record_phase_cycle(GameplayPhase::InstitutionalAscent, quiet);
+        accumulator.record_phase_cycle(GameplayPhase::InstitutionalAscent, quiet);
+        accumulator.record_phase_cycle(
+            GameplayPhase::InstitutionalAscent,
+            PhaseCycleObservation {
+                action: Some(GameplayCommandKind::EducateFamilyMember),
+                choices: ChoiceCycleMetrics {
+                    substantive_candidate_count: 1,
+                    substantive_viable_count: 1,
+                    viable_command_kind_count: 1,
+                    close_choice: false,
+                    distinct_immediate_choices: false,
+                    distinct_projected_choices: false,
+                },
+                ambient_change: true,
+            },
+        );
+        accumulator.record_phase_cycle(GameplayPhase::InstitutionalAscent, quiet);
+
+        let stats = accumulator
+            .phase_stats
+            .get(&GameplayPhase::InstitutionalAscent)
+            .expect("institutional-ascent phase statistics must exist");
+        assert_eq!(stats.quiet_cycles, 3);
+        assert_eq!(stats.longest_quiet_streak_cycles, 2);
+    }
+
+    #[test]
+    fn terminal_phase_transition_requests_one_decision_cycle() {
+        let mut accumulator = CampaignAccumulator::new();
+        accumulator.fantasy_arc.first_succession_day = Some(7_200);
+
+        assert!(terminal_phase_needs_decision(&accumulator));
+
+        accumulator
+            .phase_stats
+            .get_mut(&GameplayPhase::SuccessionLegacy)
+            .expect("succession phase statistics must exist")
+            .decision_cycles = 1;
+        assert!(!terminal_phase_needs_decision(&accumulator));
     }
 
     #[test]
@@ -3096,8 +3410,10 @@ mod findings {
             GameplayPhaseStats {
                 decision_cycles: 100,
                 substantive_actions: 55,
+                institutional_campaign_actions: 0,
                 quiet_cycles: 45,
                 quiet_cycles_with_ambient_change: 0,
+                longest_quiet_streak_cycles: 4,
                 blocked_cycles: 0,
                 cycles_with_multiple_viable_command_kinds: 20,
                 cycles_with_close_viable_command_kinds: 0,
@@ -3112,8 +3428,10 @@ mod findings {
             GameplayPhaseStats {
                 decision_cycles: 100,
                 substantive_actions: 65,
+                institutional_campaign_actions: 0,
                 quiet_cycles: 35,
                 quiet_cycles_with_ambient_change: 0,
+                longest_quiet_streak_cycles: 3,
                 blocked_cycles: 0,
                 cycles_with_multiple_viable_command_kinds: 29,
                 cycles_with_close_viable_command_kinds: 0,
@@ -3141,8 +3459,10 @@ mod findings {
             GameplayPhaseStats {
                 decision_cycles: 100,
                 substantive_actions: 72,
+                institutional_campaign_actions: 0,
                 quiet_cycles: 28,
                 quiet_cycles_with_ambient_change: 28,
+                longest_quiet_streak_cycles: 2,
                 blocked_cycles: 0,
                 cycles_with_multiple_viable_command_kinds: 39,
                 cycles_with_close_viable_command_kinds: 20,
@@ -3155,6 +3475,48 @@ mod findings {
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
+        assert_finding_absent(
+            &findings,
+            "Dynastic governance remains intermittent and strategically narrow",
+        );
+    }
+
+    #[test]
+    fn governance_long_quiet_streak_is_visible_even_when_aggregate_breadth_is_healthy() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.phase_stats.insert(
+            GameplayPhase::DynasticGovernance,
+            GameplayPhaseStats {
+                decision_cycles: 100,
+                substantive_actions: 70,
+                institutional_campaign_actions: 0,
+                quiet_cycles: 30,
+                quiet_cycles_with_ambient_change: 30,
+                longest_quiet_streak_cycles: 11,
+                blocked_cycles: 0,
+                cycles_with_multiple_viable_command_kinds: 40,
+                cycles_with_close_viable_command_kinds: 20,
+                cycles_with_distinct_immediate_consequences: 40,
+                cycles_with_distinct_projected_consequences: 40,
+                total_viable_choices: 300,
+                total_viable_command_kinds: 160,
+            },
+        );
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Dynastic governance remains intermittent and strategically narrow",
+        );
+
+        report
+            .aggregate
+            .phase_stats
+            .get_mut(&GameplayPhase::DynasticGovernance)
+            .expect("governance phase statistics must exist")
+            .longest_quiet_streak_cycles = 10;
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
         assert_finding_absent(
             &findings,
             "Dynastic governance remains intermittent and strategically narrow",
@@ -3183,6 +3545,36 @@ mod findings {
         finding_with_title(
             &findings,
             "Institutional campaigning dominates the decision loop",
+        );
+    }
+
+    #[test]
+    fn findings_surface_phase_specific_campaign_administration_dominance() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.phase_stats.insert(
+            GameplayPhase::InstitutionalAscent,
+            GameplayPhaseStats {
+                decision_cycles: 60,
+                substantive_actions: 40,
+                institutional_campaign_actions: 28,
+                quiet_cycles: 20,
+                quiet_cycles_with_ambient_change: 20,
+                longest_quiet_streak_cycles: 2,
+                blocked_cycles: 0,
+                cycles_with_multiple_viable_command_kinds: 20,
+                cycles_with_close_viable_command_kinds: 10,
+                cycles_with_distinct_immediate_consequences: 20,
+                cycles_with_distinct_projected_consequences: 20,
+                total_viable_choices: 120,
+                total_viable_command_kinds: 70,
+            },
+        );
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Institutional ascent becomes campaign administration",
         );
     }
 
@@ -3929,6 +4321,41 @@ mod findings {
     }
 
     #[test]
+    fn one_campaign_without_player_labor_conflict_is_only_informational() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 7_200;
+        *report
+            .aggregate
+            .ambient_domain_changes
+            .get_mut(&GameplayDomain::Labor)
+            .expect("labor domain statistics must exist") = 50;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(&findings, "Labor conflict remains ambient to the player");
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+    }
+
+    #[test]
+    fn repeated_labor_avoidance_across_campaigns_remains_a_warning() {
+        let mut report = cached_focused_report(30);
+        let baseline = report.campaigns[0].clone();
+        report.aggregate.campaigns = 3;
+        report.aggregate.simulated_days = 2_160;
+        *report
+            .aggregate
+            .ambient_domain_changes
+            .get_mut(&GameplayDomain::Labor)
+            .expect("labor domain statistics must exist") = 50;
+        report.campaigns = vec![baseline; 3];
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(&findings, "Labor conflict remains ambient to the player");
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
     fn one_off_viable_alternatives_remain_informational() {
         let mut report = cached_focused_report(30);
         let stats = report
@@ -4241,6 +4668,31 @@ fn make_supply_security_and_borrowing_available(state: &mut AppState) {
         .expect("player dynasty must exist")
         .resources
         .treasury = Money::ZERO;
+}
+
+fn make_external_credit_need_available_for_test(state: &mut AppState) {
+    let player_id = state.player_dynasty_id;
+    state
+        .dynasties
+        .get_mut(&player_id)
+        .expect("player dynasty must exist")
+        .resources
+        .treasury = Money::from_copper(100_000);
+    let borrower_id = state
+        .dynasties
+        .keys()
+        .copied()
+        .find(|dynasty_id| {
+            *dynasty_id != player_id
+                && !same_pair_credit_blocks_new_loan(state, player_id, *dynasty_id)
+        })
+        .expect("campaign must contain an unused external-credit counterparty");
+    state
+        .dynasties
+        .get_mut(&borrower_id)
+        .expect("selected borrower must exist")
+        .resources
+        .treasury = Money::from_copper(20_000);
 }
 
 fn add_second_player_business(state: &mut AppState) {

@@ -50,6 +50,11 @@ pub enum StrategicError {
     MissingBusiness { business_id: BusinessId },
     #[error("business {business_id} is not active")]
     BusinessInactive { business_id: BusinessId },
+    #[error("business {business_id} is not owned by dynasty {dynasty_id}")]
+    BusinessNotOwnedByDynasty {
+        business_id: BusinessId,
+        dynasty_id: DynastyId,
+    },
     #[error("dynasty {dynasty_id} does not exist")]
     MissingDynasty { dynasty_id: DynastyId },
     #[error("property {property_id} does not exist")]
@@ -293,6 +298,7 @@ enum ObjectiveProgress {
 }
 
 const AI_OBJECTIVE_REVIEW_DAYS: i64 = 720;
+const AI_BUSINESS_RECOVERY_TREASURY_RESERVE: Money = Money::from_copper(20_000);
 pub(crate) const STANDARD_CONTRACT_BATCHES_PER_WEEK: i64 = 2;
 
 impl ObjectiveProgress {
@@ -636,6 +642,67 @@ pub fn validate_supply_contract(
 ) -> Result<ValidatedSupplyContract, StrategicError> {
     validate_supply_contract_terms(registry, state, &terms)?;
     Ok(ValidatedSupplyContract { terms })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SupplyContractCapacity {
+    pub(crate) buyer: Quantity,
+    pub(crate) seller: Quantity,
+}
+
+pub(crate) fn available_supply_contract_capacity(
+    registry: &Registry,
+    state: &AppState,
+    buyer_business_id: BusinessId,
+    seller_business_id: BusinessId,
+    good_id: GoodId,
+) -> Option<SupplyContractCapacity> {
+    let buyer = state.businesses.get(buyer_business_id)?;
+    let seller = state.businesses.get(seller_business_id)?;
+    let buyer_recipe = registry.get_recipe(buyer.recipe_id())?;
+    let seller_recipe = registry.get_recipe(seller.recipe_id())?;
+    if seller_recipe.output_good_id() != good_id {
+        return None;
+    }
+    let input_per_batch = buyer_recipe
+        .inputs()
+        .iter()
+        .find(|input| input.good_id() == good_id)?
+        .quantity();
+    let seller_capacity = seller_recipe.output_quantity().saturating_mul_ratio(
+        i64::from(seller.operations.capacity_batches_per_day).saturating_mul(5),
+        1,
+    );
+    let buyer_capacity = input_per_batch.saturating_mul_ratio(
+        i64::from(buyer.operations.capacity_batches_per_day).saturating_mul(5),
+        1,
+    );
+    let committed_outgoing = state
+        .contracts
+        .values()
+        .filter(|contract| {
+            contract.status == ContractStatus::Active
+                && contract.seller_business_id == seller_business_id
+                && contract.good_id == good_id
+        })
+        .fold(Quantity::ZERO, |total, contract| {
+            total.saturating_add(contract.quantity_per_week)
+        });
+    let committed_incoming = state
+        .contracts
+        .values()
+        .filter(|contract| {
+            contract.status == ContractStatus::Active
+                && contract.buyer_business_id == buyer_business_id
+                && contract.good_id == good_id
+        })
+        .fold(Quantity::ZERO, |total, contract| {
+            total.saturating_add(contract.quantity_per_week)
+        });
+    Some(SupplyContractCapacity {
+        buyer: buyer_capacity.saturating_sub(committed_incoming),
+        seller: seller_capacity.saturating_sub(committed_outgoing),
+    })
 }
 
 fn validate_supply_contract_terms(
@@ -1198,6 +1265,139 @@ fn record_completed_loan_repayment(
         borrower_dynasty_id,
         "Completed loan repayment records",
     );
+}
+
+/// Transfers dynasty treasury into one of its businesses and rehabilitates operating condition.
+///
+/// This is the canonical capitalization path used by both player commands and autonomous houses.
+///
+/// # Errors
+///
+/// Returns an error when the dynasty or business is missing, ownership does not match, the amount
+/// is non-positive, the business is closed, funds are insufficient, or the resulting cash/version
+/// would exceed supported ranges. Failed capitalization leaves state unchanged.
+pub(crate) fn capitalize_owned_business(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+    business_id: BusinessId,
+    amount: Money,
+) -> Result<u16, StrategicError> {
+    if amount <= Money::ZERO {
+        return Err(StrategicError::NonPositiveAmount);
+    }
+    let dynasty = state
+        .dynasties
+        .get(&dynasty_id)
+        .ok_or(StrategicError::MissingDynasty { dynasty_id })?;
+    let dynasty_treasury = dynasty.treasury();
+    if dynasty_treasury < amount {
+        return Err(StrategicError::InsufficientDynastyFunds {
+            dynasty_id,
+            available: dynasty_treasury,
+            required: amount,
+        });
+    }
+    let business = state
+        .businesses
+        .get(business_id)
+        .ok_or(StrategicError::MissingBusiness { business_id })?;
+    if business.owner_dynasty_id() != dynasty_id {
+        return Err(StrategicError::BusinessNotOwnedByDynasty {
+            business_id,
+            dynasty_id,
+        });
+    }
+    if business.status() == BusinessStatus::Closed {
+        return Err(StrategicError::BusinessInactive { business_id });
+    }
+    let resulting_cash =
+        business
+            .cash()
+            .checked_add(amount)
+            .ok_or(StrategicError::BusinessCashOverflow {
+                business_id,
+                current: business.cash(),
+                incoming: amount,
+            })?;
+    let finance_version = business
+        .finance
+        .version
+        .checked_add(1)
+        .ok_or(StrategicError::BusinessFinanceVersionExhausted { business_id })?;
+    let rehabilitation = u16::try_from((amount.copper() / 2).clamp(0, 3_000))
+        .expect("bounded rehabilitation must fit u16");
+
+    state
+        .dynasties
+        .get_mut(&dynasty_id)
+        .expect("validated dynasty must exist")
+        .resources
+        .treasury = dynasty_treasury
+        .checked_sub(amount)
+        .expect("validated dynasty funds must cover capitalization");
+    let business = state
+        .businesses
+        .get_mut(business_id)
+        .expect("validated business must exist");
+    business.finance.cash = resulting_cash;
+    business.finance.version = finance_version;
+    business.operations.condition_basis_points = business
+        .operations
+        .condition_basis_points
+        .saturating_add(rehabilitation)
+        .min(10_000);
+    business.operations.quality_basis_points = business
+        .operations
+        .quality_basis_points
+        .saturating_add(rehabilitation / 2)
+        .min(10_000);
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::BusinessCapitalization,
+        subject: format!("business:{business_id}").into(),
+        detail: format!(
+            "dynasty={dynasty_id};amount={};rehabilitation_basis_points={rehabilitation}",
+            amount.copper()
+        ),
+    });
+    Ok(rehabilitation)
+}
+
+pub(crate) fn business_recapitalization_target(
+    registry: &Registry,
+    state: &AppState,
+    business: &crate::core::Business,
+) -> Money {
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("business recipe must resolve");
+    let payroll_buffer = state
+        .employment
+        .values()
+        .filter(|agreement| {
+            agreement.business_id == business.id() && agreement.status != EmploymentStatus::Ended
+        })
+        .fold(Money::ZERO, |total, agreement| {
+            total.saturating_add(agreement.weekly_wage.saturating_mul(2))
+        });
+    let input_buffer = recipe.inputs().iter().fold(Money::ZERO, |total, input| {
+        let price = state
+            .market
+            .get_quote(input.good_id())
+            .expect("recipe input good must have a market quote")
+            .price();
+        let quantity = input.quantity().saturating_mul_ratio(
+            i64::from(business.operations.capacity_batches_per_day).saturating_mul(7),
+            1,
+        );
+        total.saturating_add(cost_for(quantity, price))
+    });
+    business
+        .policy
+        .minimum_cash_reserve
+        .saturating_add(recipe.daily_operating_cost().saturating_mul(14))
+        .saturating_add(payroll_buffer)
+        .saturating_add(input_buffer)
 }
 
 /// Sells an owned property to another dynasty at the canonical liquidation price.
@@ -2303,6 +2503,7 @@ pub(crate) fn run_daily_strategic_systems(
 ) -> Result<(), SimulationError> {
     apply_route_laws(state);
     apply_crisis_daily_effects(registry, state)?;
+    recover_ai_businesses(registry, state);
     apply_external_route_supply(state)?;
     Ok(())
 }
@@ -4348,6 +4549,60 @@ pub(crate) fn run_monthly_strategic_systems(
     Ok(())
 }
 
+fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
+    let mut business_ids: Vec<_> = state
+        .businesses
+        .iter()
+        .filter(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+        .filter(|business| {
+            matches!(
+                business.status(),
+                BusinessStatus::Distressed | BusinessStatus::Insolvent
+            )
+        })
+        .map(crate::core::Business::id)
+        .collect();
+    business_ids.sort_unstable();
+
+    for business_id in business_ids {
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("indexed AI business must exist");
+        if business.finance.version == u64::MAX {
+            continue;
+        }
+        let owner_dynasty_id = business.owner_dynasty_id();
+        let target_cash = business_recapitalization_target(registry, state, business);
+        let shortfall = Money::from_copper(
+            target_cash
+                .copper()
+                .saturating_sub(business.cash().copper())
+                .max(0),
+        );
+        if shortfall == Money::ZERO {
+            continue;
+        }
+        let treasury = state
+            .dynasties
+            .get(&owner_dynasty_id)
+            .expect("AI business owner dynasty must exist")
+            .treasury();
+        let available = Money::from_copper(
+            treasury
+                .copper()
+                .saturating_sub(AI_BUSINESS_RECOVERY_TREASURY_RESERVE.copper())
+                .max(0),
+        );
+        let amount = shortfall.min(available);
+        if amount == Money::ZERO {
+            continue;
+        }
+        capitalize_owned_business(state, owner_dynasty_id, business_id, amount)
+            .expect("prevalidated AI business capitalization must commit");
+    }
+}
+
 fn apply_active_office_directives(
     registry: &Registry,
     state: &mut AppState,
@@ -5209,10 +5464,7 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
             ObjectiveKind::ReduceDebt => advance_ai_debt_objective(state, dynasty_id),
             ObjectiveKind::ImproveLegitimacy => advance_ai_legitimacy_objective(state, dynasty_id),
             ObjectiveKind::AccumulateCash => ObjectiveProgress::from_achieved(
-                state
-                    .dynasties
-                    .get(&dynasty_id)
-                    .is_some_and(|dynasty| dynasty.treasury() > Money::from_copper(120_000)),
+                ai_net_liquid_position(state, dynasty_id) > i128::from(120_000),
             ),
             ObjectiveKind::ContainRival => advance_ai_rival_objective(state, dynasty_id),
         };
@@ -5258,6 +5510,20 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
             );
         }
     }
+}
+
+fn ai_net_liquid_position(state: &AppState, dynasty_id: DynastyId) -> i128 {
+    let treasury = state
+        .dynasties
+        .get(&dynasty_id)
+        .map_or(0_i128, |dynasty| i128::from(dynasty.treasury().copper()));
+    let outstanding_debt = state
+        .loans
+        .values()
+        .filter(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status != LoanStatus::Repaid)
+        .map(|loan| i128::from(loan.balance.copper()))
+        .sum::<i128>();
+    treasury - outstanding_debt
 }
 
 const fn next_objective_kind(kind: ObjectiveKind) -> ObjectiveKind {

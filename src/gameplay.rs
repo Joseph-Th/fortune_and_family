@@ -8,7 +8,7 @@ use crate::core::{
 };
 use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, InstitutionId};
 use crate::money::{Money, Quantity, cost_for};
-use crate::registry::{GoodCategory, RecipeDef, Registry};
+use crate::registry::{GoodCategory, Registry};
 use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
     COMMISSIONED_INFORMATION_SOURCE, CommandError, CrisisResponse,
@@ -24,16 +24,18 @@ use crate::systems::{
     OFFICE_DUTY_COST_PER_POWER, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
     OFFICE_NOMINATION_REPUTATION_REQUIREMENT, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
     OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, OFFICE_POWER_ESTABLISHMENT_DAYS,
+    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
     PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
     SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
     WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT, advance_days,
-    apply_player_command, available_household_workers, build_new_game,
-    crisis_response_contains_crisis, has_established_player_office_power,
-    institution_capability_score, institution_membership_count, institution_support_day,
-    institution_support_next_day, office_nomination_next_day, player_contract_deliveries,
-    quote_business_acquisition, quote_information_leverage, quote_property_liquidation,
-    required_office_power_for_law, validate_invariants,
+    apply_player_command, available_household_workers, available_supply_contract_capacity,
+    build_new_game, business_recapitalization_target, crisis_response_contains_crisis,
+    has_established_player_office_power, institution_capability_score,
+    institution_membership_count, institution_support_day, institution_support_next_day,
+    office_nomination_next_day, player_contract_deliveries, quote_business_acquisition,
+    quote_information_leverage, quote_property_liquidation, required_office_power_for_law,
+    validate_invariants,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -90,7 +92,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 35;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 36;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -132,6 +134,7 @@ const NOTIFICATION_BATCH_THRESHOLD: usize = 8;
 const AGENT_LOAN_AMORTIZATION_WEEKS: i64 = 104;
 const AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS: i64 = 26;
 const AGENT_OPPORTUNIST_LOAN_INTEREST_BASIS_POINTS: u16 = 1_800;
+const AGENT_EXTERNAL_CREDIT_TREASURY_PRESSURE: Money = Money::from_copper(25_000);
 const AGENT_OFFICE_DUTY_RESERVE_MONTHS: i64 = 12;
 const AGENT_OFFICE_LIQUIDITY_BUFFER: Money = Money::from_copper(5_000);
 const AGENT_CONTRACT_DURATION_WEEKS: u16 = 104;
@@ -1491,8 +1494,10 @@ impl GameplayPhase {
 pub struct GameplayPhaseStats {
     pub decision_cycles: u32,
     pub substantive_actions: u32,
+    pub institutional_campaign_actions: u32,
     pub quiet_cycles: u32,
     pub quiet_cycles_with_ambient_change: u32,
+    pub longest_quiet_streak_cycles: u32,
     pub blocked_cycles: u32,
     pub cycles_with_multiple_viable_command_kinds: u32,
     pub cycles_with_close_viable_command_kinds: u32,
@@ -1765,6 +1770,7 @@ struct PhaseCycleObservation {
 struct CampaignAccumulator {
     commands: BTreeMap<GameplayCommandKind, GameplayCommandStats>,
     phase_stats: BTreeMap<GameplayPhase, GameplayPhaseStats>,
+    current_phase_quiet_streaks: BTreeMap<GameplayPhase, u32>,
     rejection_reasons: BTreeMap<String, u32>,
     domain_changes: BTreeMap<GameplayDomain, u32>,
     causal_domain_changes: BTreeMap<GameplayDomain, u32>,
@@ -1819,6 +1825,7 @@ impl CampaignAccumulator {
         Self {
             commands: initialized_command_stats(),
             phase_stats: initialized_phase_stats(),
+            current_phase_quiet_streaks: initialized_phase_counts(),
             rejection_reasons: BTreeMap::new(),
             domain_changes: initialized_domain_counts(),
             causal_domain_changes: initialized_domain_counts(),
@@ -1991,6 +1998,19 @@ impl CampaignAccumulator {
             choices,
             ambient_change,
         } = observation;
+        let quiet_cycle = action
+            .is_none_or(|kind| kind == GameplayCommandKind::AcknowledgeNotification)
+            && choices.substantive_viable_count == 0
+            && choices.substantive_candidate_count == 0;
+        let current_quiet_streak = self
+            .current_phase_quiet_streaks
+            .get_mut(&phase)
+            .expect("every gameplay phase must have quiet-streak state");
+        if quiet_cycle {
+            *current_quiet_streak = current_quiet_streak.saturating_add(1);
+        } else {
+            *current_quiet_streak = 0;
+        }
         let stats = self
             .phase_stats
             .get_mut(&phase)
@@ -2004,9 +2024,21 @@ impl CampaignAccumulator {
             .saturating_add(usize_to_u32(choices.substantive_viable_count));
         if action.is_some_and(|kind| kind != GameplayCommandKind::AcknowledgeNotification) {
             stats.substantive_actions = stats.substantive_actions.saturating_add(1);
+            if action.is_some_and(|kind| {
+                matches!(
+                    kind,
+                    GameplayCommandKind::CultivateInstitutionSupport
+                        | GameplayCommandKind::NominateForOffice
+                )
+            }) {
+                stats.institutional_campaign_actions =
+                    stats.institutional_campaign_actions.saturating_add(1);
+            }
         } else if choices.substantive_viable_count == 0 {
             if choices.substantive_candidate_count == 0 {
                 stats.quiet_cycles = stats.quiet_cycles.saturating_add(1);
+                stats.longest_quiet_streak_cycles =
+                    stats.longest_quiet_streak_cycles.max(*current_quiet_streak);
                 if ambient_change {
                     stats.quiet_cycles_with_ambient_change =
                         stats.quiet_cycles_with_ambient_change.saturating_add(1);
@@ -2220,6 +2252,9 @@ fn run_campaign(
         )?;
         remaining = remaining.saturating_sub(step_days);
     }
+    if terminal_phase_needs_decision(&accumulator) {
+        run_terminal_decision_cycle(registry, config, persona, &mut state, &mut accumulator)?;
+    }
     validate_invariants(registry, &state);
     let end = GameplaySnapshot::capture(&state);
     let scores = score_campaign(&accumulator, &start, &end);
@@ -2283,12 +2318,60 @@ fn run_campaign(
     })
 }
 
+fn terminal_phase_needs_decision(accumulator: &CampaignAccumulator) -> bool {
+    accumulator
+        .phase_stats
+        .get(&gameplay_phase(&accumulator.fantasy_arc))
+        .is_some_and(|stats| stats.decision_cycles == 0)
+}
+
+#[derive(Clone, Copy)]
+enum DecisionCycleMode {
+    AdvanceCampaign { step_days: u32 },
+    Terminal,
+}
+
+fn run_terminal_decision_cycle(
+    registry: &Registry,
+    config: &GameplayHarnessConfig,
+    persona: GameplayPersona,
+    state: &mut AppState,
+    accumulator: &mut CampaignAccumulator,
+) -> Result<(), GameplayHarnessError> {
+    run_decision_cycle_internal(
+        registry,
+        config,
+        persona,
+        state,
+        DecisionCycleMode::Terminal,
+        accumulator,
+    )
+}
+
 fn run_decision_cycle(
     registry: &Registry,
     config: &GameplayHarnessConfig,
     persona: GameplayPersona,
     state: &mut AppState,
     step_days: u32,
+    accumulator: &mut CampaignAccumulator,
+) -> Result<(), GameplayHarnessError> {
+    run_decision_cycle_internal(
+        registry,
+        config,
+        persona,
+        state,
+        DecisionCycleMode::AdvanceCampaign { step_days },
+        accumulator,
+    )
+}
+
+fn run_decision_cycle_internal(
+    registry: &Registry,
+    config: &GameplayHarnessConfig,
+    persona: GameplayPersona,
+    state: &mut AppState,
+    mode: DecisionCycleMode,
     accumulator: &mut CampaignAccumulator,
 ) -> Result<(), GameplayHarnessError> {
     accumulator.decision_cycles = accumulator.decision_cycles.saturating_add(1);
@@ -2309,34 +2392,52 @@ fn run_decision_cycle(
     let candidates_to_probe =
         select_probe_candidates(candidates, usize::from(config.max_candidate_probes));
     let probe_limit = candidates_to_probe.len();
+    let projection_step_days = match mode {
+        DecisionCycleMode::AdvanceCampaign { step_days } => step_days,
+        DecisionCycleMode::Terminal => u32::from(config.decision_interval_days),
+    };
     let probe = probe_candidates(
         registry,
         state,
         candidates_to_probe.into_iter(),
-        step_days,
+        projection_step_days,
         accumulator,
     )?;
     let choice_metrics =
         record_choice_cycle_metrics(accumulator, substantive_candidate_count, &probe);
     let action = apply_selected_candidate(registry, state, probe.selected, accumulator)?;
     let action_kind = action.as_ref().map(|action| action.kind);
-    accumulator.record_action_gap(action_kind, step_days, &before);
+    let action_gap_days = match mode {
+        DecisionCycleMode::AdvanceCampaign { step_days } => step_days,
+        DecisionCycleMode::Terminal => 0,
+    };
+    accumulator.record_action_gap(action_kind, action_gap_days, &before);
     let after_command = GameplaySnapshot::capture(state);
     let consequence_horizon = consequence_horizon_days(
         action.as_ref().map(|action| action.kind),
-        step_days,
+        projection_step_days,
         config.max_consequence_horizon_days,
     );
-    let mut consequence_state = (consequence_horizon > step_days).then(|| state.clone());
-    advance_days(registry, state, step_days)?;
-    let campaign_after_time = GameplaySnapshot::capture(state);
-    accumulator.observe_snapshot(&campaign_after_time);
-    accumulator.record_recovery_pressure(step_days, &campaign_after_time);
-    let after_time = if let Some(consequence_state) = consequence_state.as_mut() {
-        advance_days(registry, consequence_state, consequence_horizon)?;
-        GameplaySnapshot::capture(consequence_state)
-    } else {
-        campaign_after_time
+    let after_time = match mode {
+        DecisionCycleMode::AdvanceCampaign { step_days } => {
+            let mut consequence_state = (consequence_horizon > step_days).then(|| state.clone());
+            advance_days(registry, state, step_days)?;
+            let campaign_after_time = GameplaySnapshot::capture(state);
+            accumulator.observe_snapshot(&campaign_after_time);
+            accumulator.record_recovery_pressure(step_days, &campaign_after_time);
+            if let Some(consequence_state) = consequence_state.as_mut() {
+                advance_days(registry, consequence_state, consequence_horizon)?;
+                GameplaySnapshot::capture(consequence_state)
+            } else {
+                campaign_after_time
+            }
+        }
+        DecisionCycleMode::Terminal => {
+            accumulator.observe_snapshot(&after_command);
+            let mut consequence_state = state.clone();
+            advance_days(registry, &mut consequence_state, consequence_horizon)?;
+            GameplaySnapshot::capture(&consequence_state)
+        }
     };
     advance_days(registry, &mut baseline_state, consequence_horizon)?;
     let baseline_after_time = GameplaySnapshot::capture(&baseline_state);
@@ -2492,7 +2593,7 @@ fn gameplay_phase(arc: &GameplayFantasyArc) -> GameplayPhase {
         GameplayPhase::SuccessionLegacy
     } else if arc.first_city_shaping_action_day.is_some() {
         GameplayPhase::DynasticGovernance
-    } else if arc.first_institution_support_day.is_some() {
+    } else if arc.first_commercial_standing_day.is_some() {
         GameplayPhase::InstitutionalAscent
     } else if arc.first_reputation_standing_day.is_some() {
         GameplayPhase::Establishment
@@ -3708,7 +3809,7 @@ fn generate_business_investment_candidate(
     if spendable <= Money::ZERO {
         return;
     }
-    let target_cash = business_recapitalization_target(state, business, recipe);
+    let target_cash = business_recapitalization_target(registry, state, business);
     let shortfall = Money::from_copper(
         target_cash
             .copper()
@@ -3856,40 +3957,6 @@ const fn recapitalization_dynasty_reserve(
         GameplayPersona::PowerBroker => Money::from_copper(20_000),
         GameplayPersona::Opportunist => Money::from_copper(8_000),
     }
-}
-
-fn business_recapitalization_target(
-    state: &AppState,
-    business: &crate::core::Business,
-    recipe: &RecipeDef,
-) -> Money {
-    let payroll_buffer = state
-        .employment
-        .values()
-        .filter(|agreement| {
-            agreement.business_id == business.id() && agreement.status != EmploymentStatus::Ended
-        })
-        .fold(Money::ZERO, |total, agreement| {
-            total.saturating_add(agreement.weekly_wage.saturating_mul(2))
-        });
-    let input_buffer = recipe.inputs().iter().fold(Money::ZERO, |total, input| {
-        let price = state
-            .market
-            .get_quote(input.good_id())
-            .expect("recipe input good must have a market quote")
-            .price();
-        let quantity = input.quantity().saturating_mul_ratio(
-            i64::from(business.operations.capacity_batches_per_day).saturating_mul(7),
-            1,
-        );
-        total.saturating_add(cost_for(quantity, price))
-    });
-    business
-        .policy
-        .minimum_cash_reserve
-        .saturating_add(recipe.daily_operating_cost().saturating_mul(14))
-        .saturating_add(payroll_buffer)
-        .saturating_add(input_buffer)
 }
 
 fn generate_business_acquisition_candidates(
@@ -4142,8 +4209,7 @@ fn generate_contract_candidates(
             .get_recipe(business.recipe_id())
             .expect("business recipe must exist");
         for input in recipe.inputs() {
-            if let Some(seller) = find_contract_seller(registry, state, input.good_id(), player_id)
-            {
+            for seller in contract_sellers(registry, state, input.good_id(), player_id) {
                 add_contract_candidate(
                     registry,
                     state,
@@ -4161,9 +4227,7 @@ fn generate_contract_candidates(
                 );
             }
         }
-        if let Some(buyer) =
-            find_contract_buyer(registry, state, recipe.output_good_id(), player_id)
-        {
+        for buyer in contract_buyers(registry, state, recipe.output_good_id(), player_id) {
             add_contract_candidate(
                 registry,
                 state,
@@ -4210,13 +4274,13 @@ const fn sell_output_bonus(persona: GameplayPersona) -> i64 {
     }
 }
 
-fn find_contract_seller(
-    registry: &Registry,
-    state: &AppState,
+fn contract_sellers<'a>(
+    registry: &'a Registry,
+    state: &'a AppState,
     good_id: crate::ids::GoodId,
     excluded_owner: DynastyId,
-) -> Option<BusinessId> {
-    state.businesses.iter().find_map(|business| {
+) -> impl Iterator<Item = BusinessId> + 'a {
+    state.businesses.iter().filter_map(move |business| {
         let recipe = registry.get_recipe(business.recipe_id())?;
         (business.owner_dynasty_id() != excluded_owner
             && !matches!(
@@ -4228,13 +4292,13 @@ fn find_contract_seller(
     })
 }
 
-fn find_contract_buyer(
-    registry: &Registry,
-    state: &AppState,
+fn contract_buyers<'a>(
+    registry: &'a Registry,
+    state: &'a AppState,
     good_id: crate::ids::GoodId,
     excluded_owner: DynastyId,
-) -> Option<BusinessId> {
-    state.businesses.iter().find_map(|business| {
+) -> impl Iterator<Item = BusinessId> + 'a {
+    state.businesses.iter().filter_map(move |business| {
         let recipe = registry.get_recipe(business.recipe_id())?;
         (business.owner_dynasty_id() != excluded_owner
             && !matches!(
@@ -4330,53 +4394,19 @@ fn can_support_contract_terms(
     let Some(seller) = state.businesses.get(seller_business_id) else {
         return false;
     };
-    let Some(buyer_recipe) = registry.get_recipe(buyer.recipe_id()) else {
-        return false;
-    };
     let Some(seller_recipe) = registry.get_recipe(seller.recipe_id()) else {
         return false;
     };
-    let Some(input_per_batch) = buyer_recipe
-        .inputs()
-        .iter()
-        .find(|input| input.good_id() == good_id)
-        .map(crate::registry::RecipeInput::quantity)
-    else {
+    let Some(capacity) = available_supply_contract_capacity(
+        registry,
+        state,
+        buyer_business_id,
+        seller_business_id,
+        good_id,
+    ) else {
         return false;
     };
-    let seller_capacity = seller_recipe.output_quantity().saturating_mul_ratio(
-        i64::from(seller.operations.capacity_batches_per_day).saturating_mul(5),
-        1,
-    );
-    let buyer_capacity = input_per_batch.saturating_mul_ratio(
-        i64::from(buyer.operations.capacity_batches_per_day).saturating_mul(5),
-        1,
-    );
-    let existing_outgoing = state
-        .contracts
-        .values()
-        .filter(|contract| {
-            contract.status == ContractStatus::Active
-                && contract.seller_business_id == seller_business_id
-                && contract.good_id == good_id
-        })
-        .fold(Quantity::ZERO, |total, contract| {
-            total.saturating_add(contract.quantity_per_week)
-        });
-    let existing_incoming = state
-        .contracts
-        .values()
-        .filter(|contract| {
-            contract.status == ContractStatus::Active
-                && contract.buyer_business_id == buyer_business_id
-                && contract.good_id == good_id
-        })
-        .fold(Quantity::ZERO, |total, contract| {
-            total.saturating_add(contract.quantity_per_week)
-        });
-    if existing_outgoing.saturating_add(quantity_per_week) > seller_capacity
-        || existing_incoming.saturating_add(quantity_per_week) > buyer_capacity
-    {
+    if quantity_per_week > capacity.seller || quantity_per_week > capacity.buyer {
         return false;
     }
     let Some(quote) = state.market.quotes.get(&good_id) else {
@@ -4472,8 +4502,7 @@ fn add_property_liquidation_candidates(
         let buyer = buyers
             .iter()
             .filter_map(|buyer| {
-                quote_property_liquidation(registry, state, player_id, buyer.id(), property.id)
-                    .ok()
+                accepted_property_liquidation_quote(registry, state, buyer.id(), property.id)
                     .map(|quote| (*buyer, quote))
             })
             .max_by_key(|(buyer, quote)| (quote.buyer_contribution, buyer.treasury(), buyer.id()));
@@ -4527,6 +4556,28 @@ fn player_needs_property_liquidation(state: &AppState) -> bool {
     business_rescue_needed || owned_properties >= 2
 }
 
+fn accepted_property_liquidation_quote(
+    registry: &Registry,
+    state: &AppState,
+    buyer_dynasty_id: DynastyId,
+    property_id: crate::ids::PropertyId,
+) -> Option<crate::systems::PropertyLiquidationQuote> {
+    let quote = quote_property_liquidation(
+        registry,
+        state,
+        state.player_dynasty_id,
+        buyer_dynasty_id,
+        property_id,
+    )
+    .ok()?;
+    let buyer = state.dynasties.get(&buyer_dynasty_id)?;
+    buyer
+        .treasury()
+        .checked_sub(quote.buyer_contribution)
+        .filter(|remaining| *remaining >= PROPERTY_COUNTERPARTY_BUYER_RESERVE)?;
+    Some(quote)
+}
+
 fn has_property_liquidation_opportunity(registry: &Registry, state: &AppState) -> bool {
     if !player_needs_property_liquidation(state) {
         return false;
@@ -4542,9 +4593,14 @@ fn has_property_liquidation_opportunity(registry: &Registry, state: &AppState) -
                 .keys()
                 .copied()
                 .filter(|dynasty_id| *dynasty_id != player_id)
-                .any(|buyer_id| {
-                    quote_property_liquidation(registry, state, player_id, buyer_id, property.id)
-                        .is_ok()
+                .any(|buyer_dynasty_id| {
+                    accepted_property_liquidation_quote(
+                        registry,
+                        state,
+                        buyer_dynasty_id,
+                        property.id,
+                    )
+                    .is_some()
                 })
         })
 }
@@ -4587,16 +4643,27 @@ fn add_borrow_candidate(
         .values()
         .filter(|dynasty| dynasty.id() != player_id)
         .filter(|dynasty| !same_pair_credit_blocks_new_loan(state, dynasty.id(), player_id))
+        .filter(|dynasty| {
+            dynasty
+                .treasury()
+                .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+                .is_some_and(|available| available >= Money::from_copper(1_000))
+        })
         .max_by_key(|dynasty| dynasty.treasury());
     let Some(lender) = lender else {
         return;
     };
     let defaulted_loan = latest_defaulted_loan(state, lender.id(), player_id);
-    let principal = if defaulted_loan.is_some() {
+    let desired_principal = if defaulted_loan.is_some() {
         Money::from_copper((lender.treasury().copper() / 12).clamp(1_000, 6_000))
     } else {
         Money::from_copper((lender.treasury().copper() / 8).clamp(1_000, 12_000))
     };
+    let lender_available = lender
+        .treasury()
+        .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+        .expect("eligible lender must retain the negotiated reserve");
+    let principal = desired_principal.min(lender_available);
     let repayment_balance =
         defaulted_loan.map_or(principal, |loan| loan.balance.saturating_add(principal));
     let amortization_weeks = if defaulted_loan.is_some() {
@@ -4622,9 +4689,7 @@ fn add_borrow_candidate(
                 lender_dynasty_id: lender.id(),
                 borrower_dynasty_id: player_id,
                 principal,
-                weekly_payment: Money::from_copper(
-                    (repayment_balance.copper() / amortization_weeks).max(1),
-                ),
+                weekly_payment: positive_money_ceil_div(repayment_balance, amortization_weeks),
                 interest_basis_points: if defaulted_loan.is_some() { 1_000 } else { 700 },
                 collateral_property_id: collateral.map(|property| property.id),
             },
@@ -4687,6 +4752,13 @@ fn lending_limits(persona: GameplayPersona) -> (Money, usize) {
     }
 }
 
+fn positive_money_ceil_div(value: Money, denominator: i64) -> Money {
+    debug_assert!(value > Money::ZERO);
+    debug_assert!(denominator > 0);
+    let copper = value.copper();
+    Money::from_copper(copper / denominator + i64::from(copper % denominator != 0))
+}
+
 fn active_player_lending(state: &AppState) -> usize {
     state
         .loans
@@ -4709,7 +4781,30 @@ fn eligible_lending_borrower(state: &AppState) -> Option<&crate::core::Dynasty> 
         .filter(|dynasty| {
             !same_pair_credit_blocks_new_loan(state, state.player_dynasty_id, dynasty.id())
         })
-        .min_by_key(|dynasty| dynasty.treasury())
+        .filter(|dynasty| lending_pressure(state, dynasty.id()) > 0)
+        .min_by_key(|dynasty| {
+            (
+                std::cmp::Reverse(lending_pressure(state, dynasty.id())),
+                dynasty.treasury(),
+                dynasty.id(),
+            )
+        })
+}
+
+fn lending_pressure(state: &AppState, dynasty_id: DynastyId) -> u8 {
+    let distressed_credit = state.loans.values().any(|loan| {
+        loan.borrower_dynasty_id == dynasty_id
+            && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
+    });
+    if distressed_credit {
+        return 2;
+    }
+    u8::from(
+        state
+            .dynasties
+            .get(&dynasty_id)
+            .is_some_and(|dynasty| dynasty.treasury() < AGENT_EXTERNAL_CREDIT_TREASURY_PRESSURE),
+    )
 }
 
 fn eligible_lending_restructuring_borrower(state: &AppState) -> Option<&crate::core::Dynasty> {
@@ -4792,7 +4887,9 @@ fn add_lend_candidate(state: &AppState, persona: GameplayPersona, candidates: &m
         900
     };
     let collateral = state.properties.values().find(|property| {
-        property.owner_dynasty_id == Some(borrower.id()) && property.collateral_loan_id.is_none()
+        property.owner_dynasty_id == Some(borrower.id())
+            && property.collateral_loan_id.is_none()
+            && repayment_balance >= property.value.saturating_mul_ratio(1, 5)
     });
     let base_bonus: i64 = match persona {
         GameplayPersona::PowerBroker => 430,
@@ -4809,9 +4906,7 @@ fn add_lend_candidate(state: &AppState, persona: GameplayPersona, candidates: &m
                 lender_dynasty_id: state.player_dynasty_id,
                 borrower_dynasty_id: borrower.id(),
                 principal,
-                weekly_payment: Money::from_copper(
-                    (repayment_balance.copper() / amortization_weeks).max(1),
-                ),
+                weekly_payment: positive_money_ceil_div(repayment_balance, amortization_weeks),
                 interest_basis_points,
                 collateral_property_id: collateral.map(|property| property.id),
             },
@@ -5822,7 +5917,8 @@ fn institution_is_strategic_target(
     state: &AppState,
     institution: &crate::core::InstitutionRuntime,
     controlled_powers: &BTreeSet<OfficePower>,
-    player_has_office: bool,
+    player_has_institutional_foothold: bool,
+    persona: GameplayPersona,
 ) -> bool {
     let held_by_player = institution.office_holder_id.is_some_and(|character_id| {
         state
@@ -5830,12 +5926,19 @@ fn institution_is_strategic_target(
             .get(character_id)
             .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
     });
+    let represented_by_player = institution.members.iter().any(|character_id| {
+        state
+            .characters
+            .get(*character_id)
+            .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+    });
     !held_by_player
-        && (!player_has_office
-            || institution
-                .powers
-                .iter()
-                .any(|power| !controlled_powers.contains(power)))
+        && (represented_by_player
+            || !player_has_institutional_foothold
+            || institution.powers.iter().any(|power| {
+                !controlled_powers.contains(power)
+                    && office_power_persona_bonus(persona, *power) > 0
+            }))
 }
 
 fn office_power_directive_available(state: &AppState, institution_id: InstitutionId) -> bool {
@@ -5980,14 +6083,14 @@ fn generate_office_power_directive_candidates(
             .iter()
             .copied()
             .map(|power| {
-                let priority = office_power_persona_bonus(persona, power).saturating_add(
-                    office_power_need_bonus(state, institution.institution_id, district_id, power),
-                );
-                (priority, power)
+                let need =
+                    office_power_need_bonus(state, institution.institution_id, district_id, power);
+                let priority = office_power_persona_bonus(persona, power).saturating_add(need);
+                (need, priority, power)
             })
-            .filter(|(priority, _)| *priority > 0)
-            .max_by_key(|(priority, power)| (*priority, *power));
-        let Some((priority, power)) = selected else {
+            .filter(|(need, priority, _)| *need > 0 && *priority > 0)
+            .max_by_key(|(_, priority, power)| (*priority, *power));
+        let Some((_, priority, power)) = selected else {
             continue;
         };
         push_candidate(
@@ -6012,27 +6115,17 @@ fn generate_institution_ascent_candidates(
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) {
-    let support_bonus: i64 = match persona {
-        GameplayPersona::PowerBroker => 850,
-        GameplayPersona::Steward => 420,
-        GameplayPersona::Entrepreneur => 260,
-        GameplayPersona::Opportunist => 540,
-    };
-    let nomination_bonus: i64 = match persona {
-        GameplayPersona::PowerBroker => 620,
-        GameplayPersona::Steward => 170,
-        GameplayPersona::Entrepreneur => 130,
-        GameplayPersona::Opportunist => 260,
-    };
+    let (support_bonus, nomination_bonus) = institution_ascent_bonuses(persona);
     let characters = eligible_office_characters(state);
     let controlled_powers = player_controlled_office_powers(state);
-    let player_has_office = has_player_office(state);
+    let player_has_institutional_foothold = has_player_institutional_foothold(state);
     for institution in state.institutions.values() {
         if !institution_is_strategic_target(
             state,
             institution,
             &controlled_powers,
-            player_has_office,
+            player_has_institutional_foothold,
+            persona,
         ) {
             continue;
         }
@@ -6040,22 +6133,33 @@ fn generate_institution_ascent_candidates(
             .get_institution(institution.institution_id)
             .expect("runtime institution must have a registry definition")
             .kind();
-        let strongest_character = characters
+        let has_available_player_member = characters
             .iter()
-            .copied()
-            .filter(|character| {
-                is_institution_support_available(state, character.id())
-                    && institution_membership_count(state, character.id())
-                        < MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER
-                    && institution_support_day(state, institution.institution_id, character.id())
-                        .is_none()
+            .any(|character| institution.members.contains(&character.id()));
+        let strongest_character = (!has_available_player_member)
+            .then(|| {
+                characters
+                    .iter()
+                    .copied()
+                    .filter(|character| {
+                        is_institution_support_available(state, character.id())
+                            && institution_membership_count(state, character.id())
+                                < MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER
+                            && institution_support_day(
+                                state,
+                                institution.institution_id,
+                                character.id(),
+                            )
+                            .is_none()
+                    })
+                    .max_by_key(|character| {
+                        (
+                            institution_capability_score(character, institution_kind),
+                            std::cmp::Reverse(character.id()),
+                        )
+                    })
             })
-            .max_by_key(|character| {
-                (
-                    institution_capability_score(character, institution_kind),
-                    std::cmp::Reverse(character.id()),
-                )
-            });
+            .flatten();
         let power_bonus = institution_power_bonus(persona, &institution.powers);
         if let Some(character) = strongest_character {
             push_candidate(
@@ -6108,6 +6212,26 @@ fn generate_institution_ascent_candidates(
             );
         }
     }
+}
+
+const fn institution_ascent_bonuses(persona: GameplayPersona) -> (i64, i64) {
+    match persona {
+        GameplayPersona::PowerBroker => (850, 620),
+        GameplayPersona::Steward => (420, 170),
+        GameplayPersona::Entrepreneur => (260, 130),
+        GameplayPersona::Opportunist => (540, 260),
+    }
+}
+
+fn has_player_institutional_foothold(state: &AppState) -> bool {
+    state.institutions.values().any(|institution| {
+        institution.members.iter().any(|character_id| {
+            state
+                .characters
+                .get(*character_id)
+                .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+        })
+    })
 }
 
 fn generate_institution_withdrawal_candidates(
@@ -6738,13 +6862,13 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         GameplayCommandKind::TransferBusinessCash => impaired_business_urgency(state, 2_800),
         GameplayCommandKind::LeverageInformation => 600,
         GameplayCommandKind::WithdrawFromInstitution => institution_withdrawal_urgency(state),
+        GameplayCommandKind::FileLegalCase => legal_case_urgency(state),
         GameplayCommandKind::SecureSupply
         | GameplayCommandKind::SellOutput
         | GameplayCommandKind::ExtendCredit
         | GameplayCommandKind::BuyProperty
         | GameplayCommandKind::EnactLaw
         | GameplayCommandKind::StartPublicWork
-        | GameplayCommandKind::FileLegalCase
         | GameplayCommandKind::SetHouseGovernance
         | GameplayCommandKind::DesignateHeir
         | GameplayCommandKind::AdoptWard
@@ -6754,6 +6878,25 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         | GameplayCommandKind::ExerciseOfficePower
         | GameplayCommandKind::NominateForOffice => 0,
     }
+}
+
+fn legal_case_urgency(state: &AppState) -> i64 {
+    let player_id = state.player_dynasty_id;
+    let has_defaulted_debt = state.loans.values().any(|loan| {
+        loan.lender_dynasty_id == player_id
+            && loan.status == LoanStatus::Defaulted
+            && legal_grievance_kind(state, loan.borrower_dynasty_id) == Some(LegalCaseKind::Debt)
+    });
+    if has_defaulted_debt {
+        return 1_200;
+    }
+    let has_unresolved_grievance = state
+        .dynasties
+        .keys()
+        .copied()
+        .filter(|dynasty_id| *dynasty_id != player_id)
+        .any(|dynasty_id| legal_grievance_kind(state, dynasty_id).is_some());
+    if has_unresolved_grievance { 800 } else { 0 }
 }
 
 fn labor_dispute_urgency(state: &AppState) -> i64 {
@@ -6973,6 +7116,21 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::MissingBusiness { .. } => "missing business",
         CommandError::BusinessNotOwned { .. } => "business not owned",
         CommandError::PlayerNotParty => "player not party",
+        CommandError::LoanCounterpartyLenderReserve { .. } => "loan counterparty lender reserve",
+        CommandError::LoanCounterpartyInterestTooLow { .. } => "loan counterparty interest low",
+        CommandError::LoanCounterpartyInterestTooHigh { .. } => "loan counterparty interest high",
+        CommandError::LoanCounterpartyPaymentTooLow { .. } => "loan counterparty payment low",
+        CommandError::LoanCounterpartyPaymentTooHigh { .. } => "loan counterparty payment high",
+        CommandError::LoanCounterpartyCollateralTooLarge { .. } => {
+            "loan counterparty collateral too large"
+        }
+        CommandError::ContractCounterpartyPriceTooLow { .. } => "contract counterparty price low",
+        CommandError::ContractCounterpartyPriceTooHigh { .. } => "contract counterparty price high",
+        CommandError::ContractCounterpartyPenaltyOutOfRange { .. } => {
+            "contract counterparty penalty"
+        }
+        CommandError::ContractCounterpartyCapacity { .. } => "contract counterparty capacity",
+        CommandError::PropertyCounterpartyBuyerReserve { .. } => "property buyer reserve",
         CommandError::InvalidBusinessPolicy => "invalid business policy",
         CommandError::UnchangedBusinessPolicy { .. } => "unchanged business policy",
         CommandError::BusinessPolicyCooldown { .. } => "business policy cooldown",
@@ -7058,6 +7216,9 @@ const fn strategic_error_category(error: &StrategicError) -> &'static str {
         StrategicError::RegistryMismatch { .. } => "strategic: registry mismatch",
         StrategicError::MissingBusiness { .. } => "strategic: missing business",
         StrategicError::BusinessInactive { .. } => "strategic: inactive business",
+        StrategicError::BusinessNotOwnedByDynasty { .. } => {
+            "strategic: business ownership mismatch"
+        }
         StrategicError::MissingDynasty { .. } => "strategic: missing dynasty",
         StrategicError::MissingProperty { .. } => "strategic: missing property",
         StrategicError::SameContractParty => "strategic: same contract party",
@@ -7488,10 +7649,16 @@ fn merge_phase_stats(
         target.substantive_actions = target
             .substantive_actions
             .saturating_add(source.substantive_actions);
+        target.institutional_campaign_actions = target
+            .institutional_campaign_actions
+            .saturating_add(source.institutional_campaign_actions);
         target.quiet_cycles = target.quiet_cycles.saturating_add(source.quiet_cycles);
         target.quiet_cycles_with_ambient_change = target
             .quiet_cycles_with_ambient_change
             .saturating_add(source.quiet_cycles_with_ambient_change);
+        target.longest_quiet_streak_cycles = target
+            .longest_quiet_streak_cycles
+            .max(source.longest_quiet_streak_cycles);
         target.blocked_cycles = target.blocked_cycles.saturating_add(source.blocked_cycles);
         target.cycles_with_multiple_viable_command_kinds = target
             .cycles_with_multiple_viable_command_kinds
@@ -7609,6 +7776,7 @@ fn derive_findings(
     add_domain_findings(aggregate, &mut findings);
     add_action_concentration_finding(aggregate, &mut findings);
     add_institutional_campaign_concentration_finding(aggregate, &mut findings);
+    add_phase_institutional_campaign_concentration_finding(aggregate, &mut findings);
     add_repetitive_command_streak_finding(campaigns, &mut findings);
     add_information_routine_finding(campaigns, &mut findings);
     add_crisis_trajectory_finding(aggregate, &mut findings);
@@ -7698,6 +7866,7 @@ fn add_strategic_cadence_finding(
 struct PhaseQualityThresholds {
     minimum_action_share: u64,
     maximum_static_quiet_share: u64,
+    maximum_quiet_streak_cycles: u32,
     minimum_multi_family_share: u64,
     minimum_average_choices_tenths: u64,
     minimum_average_families_tenths: u64,
@@ -7713,6 +7882,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
         PhaseQualityThresholds {
             minimum_action_share: 60,
             maximum_static_quiet_share: 40,
+            maximum_quiet_streak_cycles: 6,
             minimum_multi_family_share: 25,
             minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 16,
@@ -7727,6 +7897,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
         PhaseQualityThresholds {
             minimum_action_share: 60,
             maximum_static_quiet_share: 35,
+            maximum_quiet_streak_cycles: 6,
             minimum_multi_family_share: 25,
             minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 15,
@@ -7741,7 +7912,8 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
         PhaseQualityThresholds {
             minimum_action_share: 0,
             maximum_static_quiet_share: 30,
-            minimum_multi_family_share: 35,
+            maximum_quiet_streak_cycles: 10,
+            minimum_multi_family_share: 30,
             minimum_average_choices_tenths: 30,
             minimum_average_families_tenths: 20,
         },
@@ -7755,6 +7927,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
         PhaseQualityThresholds {
             minimum_action_share: 55,
             maximum_static_quiet_share: 35,
+            maximum_quiet_streak_cycles: 8,
             minimum_multi_family_share: 30,
             minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 18,
@@ -7817,6 +7990,7 @@ fn add_phase_quality_finding(
         || average_choices_tenths >= thresholds.minimum_average_choices_tenths;
     if action_share >= thresholds.minimum_action_share
         && static_quiet_share < thresholds.maximum_static_quiet_share
+        && stats.longest_quiet_streak_cycles <= thresholds.maximum_quiet_streak_cycles
         && multi_family_share >= thresholds.minimum_multi_family_share
         && choice_depth_is_sufficient
     {
@@ -7826,13 +8000,14 @@ fn add_phase_quality_finding(
         severity: GameplayFindingSeverity::Warning,
         title: title.to_owned(),
         evidence: format!(
-            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, multiple command families were viable in {multi_family_share}%, and actionable cycles averaged {} viable choices across {} families.",
+            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}%, and actionable cycles averaged {} viable choices across {} families.",
             stats.decision_cycles,
             scaled_ratio_u64(
                 u64::from(stats.quiet_cycles_with_ambient_change),
                 u64::from(stats.decision_cycles),
                 100,
             ),
+            stats.longest_quiet_streak_cycles,
             format_tenths(average_choices_tenths),
             format_tenths(average_families_tenths)
         ),
@@ -8595,6 +8770,36 @@ fn add_institutional_campaign_concentration_finding(
         evidence: format!(
             "Patronage and nominations accounted for {campaign_actions} of {} substantive actions ({share}%). Family political capacity should create strategic reach without becoming recurring campaign administration.",
             aggregate.substantive_actions
+        ),
+    });
+}
+
+fn add_phase_institutional_campaign_concentration_finding(
+    aggregate: &GameplayAggregate,
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let stats = aggregate
+        .phase_stats
+        .get(&GameplayPhase::InstitutionalAscent)
+        .copied()
+        .unwrap_or_default();
+    if stats.substantive_actions < 20 || stats.institutional_campaign_actions < 20 {
+        return;
+    }
+    let share = scaled_ratio_u64(
+        u64::from(stats.institutional_campaign_actions),
+        u64::from(stats.substantive_actions),
+        100,
+    );
+    if share < 65 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Institutional ascent becomes campaign administration".to_owned(),
+        evidence: format!(
+            "Patronage and nominations accounted for {} of {} substantive institutional-ascent actions ({share}%). Political ascent should still leave room for commercial, family, information, and civic decisions while support and campaigns mature.",
+            stats.institutional_campaign_actions, stats.substantive_actions
         ),
     });
 }
@@ -9466,10 +9671,14 @@ fn add_player_labor_agency_finding(
         .unwrap_or(0);
     if player_dispute_campaigns == 0 && ambient_labor_changes > 0 {
         findings.push(GameplayFinding {
-            severity: GameplayFindingSeverity::Warning,
+            severity: if campaigns.len() >= 3 {
+                GameplayFindingSeverity::Warning
+            } else {
+                GameplayFindingSeverity::Info
+            },
             title: "Labor conflict remains ambient to the player".to_owned(),
             evidence: format!(
-                "Labor changed in {ambient_labor_changes} baseline observations, but none of {} campaigns produced a dispute in a player-owned business.",
+                "Labor changed in {ambient_labor_changes} baseline observations, but none of {} campaigns produced a dispute in a player-owned business. A single campaign is insufficient to distinguish successful dispute avoidance from a systemic exposure gap.",
                 campaigns.len()
             ),
         });
@@ -9938,6 +10147,11 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             u64::from(stats.decision_cycles),
             100,
         );
+        let campaign_admin_share = scaled_ratio_u64(
+            u64::from(stats.institutional_campaign_actions),
+            u64::from(stats.substantive_actions),
+            100,
+        );
         let multi_family_share = scaled_ratio_u64(
             u64::from(stats.cycles_with_multiple_viable_command_kinds),
             u64::from(stats.decision_cycles),
@@ -9971,10 +10185,11 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
         );
         let _ = writeln!(
             output,
-            "  {:<22} cycles {:>5} | action {:>3}% | multi {:>3}% | close {:>3}% | distinct now {:>3}% / next {:>3}% | choices {}.{} / families {}.{} | quiet {:>5} (ambient {:>5}) | blocked {:>5}",
+            "  {:<22} cycles {:>5} | action {:>3}% | campaign admin {:>3}% | multi {:>3}% | close {:>3}% | distinct now {:>3}% / next {:>3}% | choices {}.{} / families {}.{} | quiet {:>5} (ambient {:>5}, longest {:>2}) | blocked {:>5}",
             phase.label(),
             stats.decision_cycles,
             action_share,
+            campaign_admin_share,
             multi_family_share,
             close_choice_share,
             distinct_choice_share,
@@ -9985,6 +10200,7 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             average_families_tenths % 10,
             stats.quiet_cycles,
             stats.quiet_cycles_with_ambient_change,
+            stats.longest_quiet_streak_cycles,
             stats.blocked_cycles
         );
     }
@@ -10772,6 +10988,13 @@ fn initialized_phase_stats() -> BTreeMap<GameplayPhase, GameplayPhaseStats> {
     .into_iter()
     .map(|phase| (phase, GameplayPhaseStats::default()))
     .collect()
+}
+
+fn initialized_phase_counts() -> BTreeMap<GameplayPhase, u32> {
+    initialized_phase_stats()
+        .into_keys()
+        .map(|phase| (phase, 0))
+        .collect()
 }
 
 fn initialized_domain_counts() -> BTreeMap<GameplayDomain, u32> {

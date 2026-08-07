@@ -626,14 +626,28 @@ impl AuditSubject {
         institution_id: InstitutionId,
         character_id: CharacterId,
     ) -> bool {
+        self.institution_character_ids() == Some((institution_id, character_id))
+    }
+
+    #[must_use]
+    pub fn institution_character_ids(&self) -> Option<(InstitutionId, CharacterId)> {
         let mut segments = self.0.split(':');
-        segments.next() == Some("institution")
-            && segments.next().and_then(|value| value.parse::<u32>().ok())
-                == Some(institution_id.value())
-            && segments.next() == Some("character")
-            && segments.next().and_then(|value| value.parse::<u32>().ok())
-                == Some(character_id.value())
-            && segments.next().is_none()
+        if segments.next() != Some("institution") {
+            return None;
+        }
+        let institution_id = segments
+            .next()?
+            .parse::<u32>()
+            .ok()
+            .map(InstitutionId::new)?;
+        if segments.next() != Some("character") {
+            return None;
+        }
+        let character_id = segments.next()?.parse::<u32>().ok().map(CharacterId::new)?;
+        segments
+            .next()
+            .is_none()
+            .then_some((institution_id, character_id))
     }
 }
 
@@ -724,6 +738,14 @@ mod audit_subject_tests {
         assert!(
             !AuditSubject::from("institution:3:character:10:extra")
                 .references_institution_character(InstitutionId::new(3), CharacterId::new(10))
+        );
+        assert_eq!(
+            subject.institution_character_ids(),
+            Some((InstitutionId::new(3), CharacterId::new(10)))
+        );
+        assert_eq!(
+            AuditSubject::from("other:3:character:10").institution_character_ids(),
+            None
         );
     }
 }

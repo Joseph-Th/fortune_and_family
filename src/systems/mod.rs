@@ -12,7 +12,7 @@ pub(crate) const EMPLOYMENT_RECOVERY_BASIS_POINTS: u16 = 3_000;
 pub(crate) const MIN_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 7_000;
 pub(crate) const MAX_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 14_000;
 pub(crate) const OFFICE_TERM_DAYS: i64 = 360;
-pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 240;
+pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 120;
 
 pub(crate) fn institution_powers_for(
     kind: crate::registry::InstitutionKind,
@@ -132,6 +132,7 @@ pub(crate) use commands::{
     MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
     OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
+    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
     PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT,
     WARD_ADOPTION_INTERVAL_DAYS, WARD_ADOPTION_LEGITIMACY_REQUIREMENT,
     WARD_ADOPTION_REPUTATION_REQUIREMENT, has_established_player_office_power,
@@ -153,7 +154,8 @@ pub use strategic::{
 };
 pub(crate) use strategic::{
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, OFFICE_DUTY_COST_PER_POWER,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, crisis_response_contains_crisis,
+    STANDARD_CONTRACT_BATCHES_PER_WEEK, available_supply_contract_capacity,
+    business_recapitalization_target, capitalize_owned_business, crisis_response_contains_crisis,
     dynasty_office_administrative_load, initialize_strategic_state, institution_capability_score,
 };
 pub use transactions::{

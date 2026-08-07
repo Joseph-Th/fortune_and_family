@@ -238,7 +238,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             validate_invariants(&registry, &state);
             let html = render_campaign_html(&registry, &state)
                 .map_err(|source| CliError::DashboardSerialization { source })?;
-            create_output_parent(&output)?;
+            ensure_output_parent(&output)?;
             std::fs::write(&output, html).map_err(|source| CliError::DashboardWrite {
                 path: output.clone(),
                 source,
@@ -355,7 +355,7 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
         render_gameplay_report(&report)
     };
     if let Some(path) = args.output {
-        create_output_parent(&path)?;
+        ensure_output_parent(&path)?;
         std::fs::write(&path, rendered).map_err(|source| CliError::GameplayReportWrite {
             path: path.clone(),
             source,
@@ -397,7 +397,7 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
     Ok(())
 }
 
-fn create_output_parent(path: &Path) -> Result<(), CliError> {
+fn ensure_output_parent(path: &Path) -> Result<(), CliError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -482,7 +482,7 @@ mod tests {
             .join("nested")
             .join("report.json");
 
-        create_output_parent(&output).expect("nested output parent must be created");
+        ensure_output_parent(&output).expect("nested output parent must be created");
 
         assert!(
             output.parent().expect("output must have a parent").is_dir(),

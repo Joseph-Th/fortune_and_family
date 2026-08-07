@@ -1495,6 +1495,27 @@ fn validate_persisted_history(state: &AppState) -> Result<(), String> {
         if record.subject().trim().is_empty() || record.detail().trim().is_empty() {
             return Err("audit record lacks diagnostic content".to_owned());
         }
+        if matches!(
+            record.kind(),
+            AuditKind::InstitutionPatronage | AuditKind::OfficeNomination
+        ) {
+            let Some((institution_id, character_id)) =
+                record.audit_subject().institution_character_ids()
+            else {
+                return Err(format!(
+                    "{:?} audit record has an invalid institution/character subject",
+                    record.kind()
+                ));
+            };
+            if !state.institutions.contains_key(&institution_id)
+                || state.characters.get(character_id).is_none()
+            {
+                return Err(format!(
+                    "{:?} audit record references a missing institution or character",
+                    record.kind()
+                ));
+            }
+        }
         prior_audit_day = record.day();
     }
     Ok(())

@@ -133,6 +133,61 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
 
 mod validation {
     use super::*;
+    use crate::systems::strategic::PROPERTY_LIQUIDATION_BASIS_POINTS;
+
+    fn non_player_credit_counterparty(state: &AppState, player_is_lender: bool) -> DynastyId {
+        state
+            .dynasties
+            .values()
+            .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
+            .filter(|dynasty| {
+                let (lender_id, borrower_id) = if player_is_lender {
+                    (state.player_dynasty_id, dynasty.id())
+                } else {
+                    (dynasty.id(), state.player_dynasty_id)
+                };
+                !state.loans.values().any(|loan| {
+                    loan.lender_dynasty_id == lender_id
+                        && loan.borrower_dynasty_id == borrower_id
+                        && matches!(
+                            loan.status,
+                            LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
+                        )
+                })
+            })
+            .max_by_key(|dynasty| dynasty.treasury())
+            .map(crate::core::Dynasty::id)
+            .expect("campaign must contain an unused non-player credit counterparty")
+    }
+
+    fn player_buyer_contract_terms(state: &AppState) -> SupplyContractTerms {
+        let contract = state
+            .contracts
+            .values()
+            .find(|contract| {
+                let buyer_owner = state
+                    .businesses
+                    .get(contract.buyer_business_id)
+                    .map(crate::core::Business::owner_dynasty_id);
+                let seller_owner = state
+                    .businesses
+                    .get(contract.seller_business_id)
+                    .map(crate::core::Business::owner_dynasty_id);
+                contract.status == ContractStatus::Active
+                    && buyer_owner == Some(state.player_dynasty_id)
+                    && seller_owner.is_some_and(|owner| owner != state.player_dynasty_id)
+            })
+            .expect("campaign must contain a player-buyer contract");
+        SupplyContractTerms {
+            buyer_business_id: contract.buyer_business_id,
+            seller_business_id: contract.seller_business_id,
+            good_id: contract.good_id,
+            quantity_per_week: contract.quantity_per_week,
+            unit_price: contract.unit_price,
+            penalty: contract.penalty,
+            duration_weeks: 8,
+        }
+    }
 
     #[test]
     fn rejects_registry_mismatch_without_mutation() {
@@ -683,6 +738,251 @@ mod validation {
         let message = state.outbox.last().expect("cash transfer must be reported");
         assert_eq!(message.kind(), OutboxKind::Finance);
         assert!(message.subject().contains("Portfolio cash moved"));
+    }
+
+    #[test]
+    fn non_player_lender_rejects_coerced_zero_interest_credit_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let lender_dynasty_id = non_player_credit_counterparty(&state, false);
+        let terms = LoanTerms {
+            lender_dynasty_id,
+            borrower_dynasty_id: state.player_dynasty_id,
+            principal: Money::from_copper(1_000),
+            weekly_payment: Money::from_copper(50),
+            interest_basis_points: 0,
+            collateral_property_id: None,
+        };
+        let before = state.clone();
+
+        let result = apply_player_command(registry, &mut state, PlayerCommand::IssueLoan { terms });
+
+        assert_eq!(
+            result,
+            Err(CommandError::LoanCounterpartyInterestTooLow {
+                interest_basis_points: 0,
+                minimum_basis_points: PRIVATE_LOAN_COUNTERPARTY_MIN_INTEREST_BASIS_POINTS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "the player must not force a non-player lender into concessionary terms",
+        );
+    }
+
+    #[test]
+    fn non_player_borrower_rejects_predatory_interest_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let borrower_dynasty_id = non_player_credit_counterparty(&state, true);
+        let terms = LoanTerms {
+            lender_dynasty_id: state.player_dynasty_id,
+            borrower_dynasty_id,
+            principal: Money::from_copper(1_000),
+            weekly_payment: Money::from_copper(50),
+            interest_basis_points: 10_000,
+            collateral_property_id: None,
+        };
+        let before = state.clone();
+
+        let result = apply_player_command(registry, &mut state, PlayerCommand::IssueLoan { terms });
+
+        assert_eq!(
+            result,
+            Err(CommandError::LoanCounterpartyInterestTooHigh {
+                interest_basis_points: 10_000,
+                maximum_basis_points: PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "the player must not force a non-player borrower into predatory interest",
+        );
+    }
+
+    #[test]
+    fn non_player_lender_keeps_a_household_credit_reserve() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let lender_dynasty_id = non_player_credit_counterparty(&state, false);
+        let available = state
+            .dynasties
+            .get(&lender_dynasty_id)
+            .expect("selected lender must exist")
+            .treasury();
+        let principal = available
+            .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+            .and_then(|amount| amount.checked_add(Money::from_copper(1)))
+            .expect("fixture lender must have more than the reserved amount");
+        let terms = LoanTerms {
+            lender_dynasty_id,
+            borrower_dynasty_id: state.player_dynasty_id,
+            principal,
+            weekly_payment: ceil_positive_money_div(
+                principal,
+                PRIVATE_LOAN_COUNTERPARTY_MAX_AMORTIZATION_WEEKS,
+            ),
+            interest_basis_points: 700,
+            collateral_property_id: None,
+        };
+        let before = state.clone();
+
+        let result = apply_player_command(registry, &mut state, PlayerCommand::IssueLoan { terms });
+
+        assert_eq!(
+            result,
+            Err(CommandError::LoanCounterpartyLenderReserve {
+                lender_dynasty_id,
+                available,
+                principal,
+                required_reserve: PRIVATE_LOAN_COUNTERPARTY_RESERVE,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "the player must not drain a non-player lender below its negotiated reserve",
+        );
+    }
+
+    #[test]
+    fn non_player_contract_seller_rejects_coerced_below_market_price() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let mut terms = player_buyer_contract_terms(&state);
+        let market_price = state
+            .market
+            .get_quote(terms.good_id)
+            .expect("contract good must have a market quote")
+            .price();
+        let minimum_price = ceil_positive_money_div(market_price, 2);
+        terms.unit_price = Money::from_copper(1).min(
+            minimum_price
+                .checked_sub(Money::from_copper(1))
+                .expect("market floor must exceed zero"),
+        );
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CreateSupplyContract {
+                terms: terms.clone(),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::ContractCounterpartyPriceTooLow {
+                unit_price: terms.unit_price,
+                minimum_price,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "the player must not force an NPC seller into a confiscatory supply price",
+        );
+    }
+
+    #[test]
+    fn non_player_contract_counterparty_requires_meaningful_breach_penalty() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let mut terms = player_buyer_contract_terms(&state);
+        terms.unit_price = state
+            .market
+            .get_quote(terms.good_id)
+            .expect("contract good must have a market quote")
+            .price();
+        terms.penalty = Money::ZERO;
+        let weekly_payment =
+            crate::money::checked_cost_for(terms.quantity_per_week, terms.unit_price)
+                .expect("test contract payment must fit");
+        let minimum_penalty = ceil_positive_money_div(weekly_payment, 4);
+        let maximum_penalty = weekly_payment.saturating_mul(4);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CreateSupplyContract { terms },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::ContractCounterpartyPenaltyOutOfRange {
+                penalty: Money::ZERO,
+                minimum_penalty,
+                maximum_penalty,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "NPC supply counterparties must not accept a contract with no meaningful breach protection",
+        );
+    }
+
+    #[test]
+    fn voluntary_property_sale_cannot_drain_the_named_npc_buyer() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(state.player_dynasty_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("player dynasty must own an unpledged property")
+            .id;
+        let buyer_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a non-player property buyer");
+        let price = state
+            .properties
+            .get(&property_id)
+            .expect("selected property must exist")
+            .value
+            .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000)
+            .max(Money::from_copper(1));
+        state
+            .dynasties
+            .get_mut(&buyer_dynasty_id)
+            .expect("selected buyer must exist")
+            .resources
+            .treasury = price;
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SellProperty {
+                property_id,
+                buyer_dynasty_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::PropertyCounterpartyBuyerReserve {
+                buyer_dynasty_id,
+                available: price,
+                buyer_contribution: price,
+                required_reserve: PROPERTY_COUNTERPARTY_BUYER_RESERVE,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a voluntary property liquidation must not consume the named buyer's entire treasury",
+        );
     }
 }
 
@@ -1799,7 +2099,7 @@ mod politics {
                     || player_businesses.contains(&contract.seller_business_id)
             })
             .expect("campaign must contain a player contract");
-        let deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
+        let deliveries = u16::try_from(INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT)
             .expect("delivery requirement must fit contract counters");
         contract.fulfilled_deliveries = deliveries;
         contract
@@ -1823,6 +2123,29 @@ mod politics {
             treasury_before,
             budget_before,
         )
+    }
+
+    fn grant_nomination_delivery_record(state: &mut AppState, player_id: DynastyId) {
+        let player_businesses: BTreeSet<_> = state
+            .businesses
+            .iter()
+            .filter(|business| business.owner_dynasty_id() == player_id)
+            .map(crate::core::Business::id)
+            .collect();
+        let contract = state
+            .contracts
+            .values_mut()
+            .find(|contract| {
+                player_businesses.contains(&contract.buyer_business_id)
+                    || player_businesses.contains(&contract.seller_business_id)
+            })
+            .expect("campaign must contain a player contract");
+        let deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
+            .expect("nomination delivery requirement must fit contract counters");
+        contract.fulfilled_deliveries = deliveries;
+        contract
+            .fulfilled_deliveries_by_dynasty
+            .insert(player_id, deliveries);
     }
 
     #[test]
@@ -1878,6 +2201,30 @@ mod politics {
                 && record.subject() == institution_support_subject(institution_id, character_id)
         }));
 
+        let before_incomplete_record_nomination = state.clone();
+        let incomplete_record_nomination = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::NominateForOffice {
+                institution_id,
+                character_id,
+            },
+        );
+        assert_eq!(
+            incomplete_record_nomination,
+            Err(CommandError::InsufficientOfficeCommercialRecord {
+                delivered: INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+                required: OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+            })
+        );
+        assert_state_unchanged(
+            &before_incomplete_record_nomination,
+            &state,
+            "patronage must open before the commercial record is strong enough for candidacy",
+        );
+
+        grant_nomination_delivery_record(&mut state, player_id);
+
         let before_early_nomination = state.clone();
         let early_nomination = apply_player_command(
             registry,
@@ -1918,6 +2265,31 @@ mod politics {
         )
         .expect("established support must permit nomination");
         validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn malformed_institution_history_does_not_create_character_cooldowns() {
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionPatronage,
+            subject: format!("invalid:character:{character_id}").into(),
+            detail: "invalid persisted history fixture".to_owned(),
+        });
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeNomination,
+            subject: format!("invalid:character:{character_id}").into(),
+            detail: "invalid persisted history fixture".to_owned(),
+        });
+
+        assert_eq!(institution_support_next_day(&state, character_id), None);
+        assert_eq!(office_nomination_next_day(&state, character_id), None);
     }
 
     #[test]

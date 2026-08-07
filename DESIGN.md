@@ -66,11 +66,11 @@ The player stabilizes the household and first business, builds reliable supply a
 
 ### Establishment
 
-The dynasty acquires property, credit relationships, trained family capacity, stronger counterparties, and social standing.
+The dynasty acquires property, credit relationships, trained family capacity, stronger counterparties, and social standing. Once reputation and a developing commercial record are credible, the player can begin patronage and coalition-building before the dynasty is ready to contest public office.
 
 ### Institutional ascent
 
-Commercial credibility creates access to guilds, offices, courts, laws, public works, and municipal finance. Officeholding introduces duties, scrutiny, administrative load, and enemies.
+Sustained commercial credibility turns maturing patronage into candidacy and creates access to guild offices, courts, laws, public works, and municipal finance. Officeholding introduces duties, scrutiny, administrative load, and enemies.
 
 ### Dynastic governance
 
@@ -140,7 +140,7 @@ Property connects wealth to districts, rent, tenancy, occupancy, collateral, pub
 
 ### Institutions and politics
 
-Institutions have earned membership, offices, budgets, legitimacy, powers, and selection rules. Commercial standing opens patronage, patronage creates membership and coalition support, and established support opens candidacy. Political power must control concrete outcomes such as laws, debt, public works, courts, licensing, trade, or enforcement. Incumbents can spend legitimacy on time-bounded directives that intensify an office power and produce explicit civic benefits or backlash.
+Institutions have earned membership, offices, budgets, legitimacy, powers, and selection rules. Established reputation plus a developing commercial record opens patronage; patronage creates membership and coalition support while the dynasty continues proving itself. Sustained commercial standing and mature support then open candidacy. Political power must control concrete outcomes such as laws, debt, public works, courts, licensing, trade, or enforcement. Incumbents can spend legitimacy on time-bounded directives that intensify an office power and produce explicit civic benefits or backlash.
 
 Officeholding is not a permanent upgrade. It consumes administrative capacity, creates recurring duties, and can be lost through failure.
 

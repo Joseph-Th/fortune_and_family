@@ -5012,6 +5012,197 @@ mod ai {
     use super::*;
 
     #[test]
+    fn solvent_ai_house_recapitalizes_its_distressed_business() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let owner_dynasty_id = state
+            .businesses
+            .get(business_id)
+            .expect("selected business must exist")
+            .owner_dynasty_id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.finance.cash = Money::ZERO;
+        }
+        state
+            .dynasties
+            .get_mut(&owner_dynasty_id)
+            .expect("business owner must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let target_cash = business_recapitalization_target(
+            registry,
+            &state,
+            state
+                .businesses
+                .get(business_id)
+                .expect("selected business must exist"),
+        );
+        let treasury_before = state
+            .dynasties
+            .get(&owner_dynasty_id)
+            .expect("business owner must exist")
+            .treasury();
+
+        recover_ai_businesses(registry, &mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("selected business must exist")
+                .cash(),
+            target_cash,
+            "AI recovery must fund the same operating threshold used by lifecycle recovery"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&owner_dynasty_id)
+                .expect("business owner must exist")
+                .treasury(),
+            treasury_before
+                .checked_sub(target_cash)
+                .expect("test owner must afford capitalization")
+        );
+        assert!(state.audit_log.iter().rev().any(|record| {
+            record.kind() == AuditKind::BusinessCapitalization
+                && record.subject() == format!("business:{business_id}")
+                && record
+                    .detail()
+                    .contains(&format!("dynasty={owner_dynasty_id}"))
+        }));
+    }
+
+    #[test]
+    fn ai_business_recovery_preserves_the_household_reserve() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let owner_dynasty_id = state
+            .businesses
+            .get(business_id)
+            .expect("selected business must exist")
+            .owner_dynasty_id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.finance.cash = Money::ZERO;
+        }
+        state
+            .dynasties
+            .get_mut(&owner_dynasty_id)
+            .expect("business owner must exist")
+            .resources
+            .treasury = AI_BUSINESS_RECOVERY_TREASURY_RESERVE
+            .checked_sub(Money::from_copper(1))
+            .expect("recovery reserve must exceed one copper");
+        let protected_treasury = state
+            .dynasties
+            .get(&owner_dynasty_id)
+            .expect("business owner must exist")
+            .treasury();
+        let before = state.clone();
+
+        recover_ai_businesses(registry, &mut state);
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&owner_dynasty_id)
+                .expect("business owner must exist")
+                .treasury(),
+            protected_treasury
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("selected business must exist")
+                .cash(),
+            Money::ZERO
+        );
+        assert_eq!(
+            state.audit_log.len(),
+            before.audit_log.len(),
+            "AI recovery must not spend the protected household reserve"
+        );
+    }
+
+    #[test]
+    fn accumulate_cash_objective_measures_liquidity_net_of_private_debt() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let loan = state
+            .loans
+            .values()
+            .find(|loan| {
+                loan.status == LoanStatus::Current
+                    && loan.borrower_dynasty_id != state.player_dynasty_id
+            })
+            .expect("campaign must contain non-player private debt");
+        let loan_id = loan.id;
+        let dynasty_id = loan.borrower_dynasty_id;
+        let objective_id = state
+            .ai_objectives
+            .values()
+            .find(|objective| objective.dynasty_id == dynasty_id)
+            .expect("borrower dynasty must have an AI objective")
+            .id;
+        for objective in state.ai_objectives.values_mut() {
+            objective.status = ObjectiveStatus::Planned;
+        }
+        let objective = state
+            .ai_objectives
+            .get_mut(&objective_id)
+            .expect("selected objective must exist");
+        objective.kind = ObjectiveKind::AccumulateCash;
+        objective.status = ObjectiveStatus::Pursuing;
+        objective.created_day = state.clock.day();
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("borrower dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(130_000);
+        state
+            .loans
+            .get_mut(&loan_id)
+            .expect("selected loan must exist")
+            .balance = Money::from_copper(20_000);
+
+        advance_ai_objectives(registry, &mut state);
+
+        assert_eq!(
+            state
+                .ai_objectives
+                .get(&objective_id)
+                .expect("objective must remain traceable")
+                .status,
+            ObjectiveStatus::Pursuing,
+            "borrowed cash must not satisfy a reserve-building objective while matching debt remains outstanding"
+        );
+    }
+
+    #[test]
     fn stalled_objectives_are_abandoned_and_replaced() {
         let registry = test_registry();
         let mut state = make_test_campaign();

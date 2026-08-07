@@ -3,8 +3,9 @@
 use super::transactions::{next_business_finance_version, next_family_charter_version};
 use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
-    acquire_business, buy_unowned_property, issue_loan, sell_owned_property, sign_supply_contract,
-    transfer_business_cash,
+    acquire_business, available_supply_contract_capacity, buy_unowned_property,
+    capitalize_owned_business, quote_property_liquidation, sell_owned_property,
+    transfer_business_cash, validate_loan, validate_supply_contract,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
@@ -12,8 +13,8 @@ use crate::core::{
     ChronicleKind, CivicDebt, CivicDebtStatus, ContractStatus, CrisisStatus, DynastyPair,
     EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind, HouseGovernance,
     InformationConfidence, InformationReport, InformationTarget, LawKind, LegalCase, LegalCaseKind,
-    LegalCaseStatus, OfficeDirectiveState, OfficePower, OutboxKind, PublicWork, PublicWorkKind,
-    PublicWorkStatus,
+    LegalCaseStatus, LoanStatus, OfficeDirectiveState, OfficePower, OutboxKind, PublicWork,
+    PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId,
@@ -178,6 +179,13 @@ pub(crate) const LAW_LEGITIMACY_COST: u16 = 250;
 pub(crate) const CIVIC_DEBT_INTEREST_BASIS_POINTS: u16 = 600;
 pub(crate) const CIVIC_DEBT_TERM_WEEKS: i64 = 104;
 pub(crate) const CIVIC_DEBT_CREDITOR_RESERVE: Money = Money::from_copper(10_000);
+pub(crate) const PRIVATE_LOAN_COUNTERPARTY_RESERVE: Money = Money::from_copper(10_000);
+const PRIVATE_LOAN_COUNTERPARTY_MIN_INTEREST_BASIS_POINTS: u16 = 400;
+const PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS: u16 = 2_500;
+const PRIVATE_LOAN_COUNTERPARTY_MAX_AMORTIZATION_WEEKS: i64 = 260;
+const PRIVATE_LOAN_COUNTERPARTY_MIN_AMORTIZATION_WEEKS: i64 = 13;
+const PRIVATE_LOAN_COUNTERPARTY_MIN_COLLATERAL_LTV_BASIS_POINTS: i64 = 2_000;
+pub(crate) const PROPERTY_COUNTERPARTY_BUYER_RESERVE: Money = Money::from_copper(10_000);
 pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
@@ -192,7 +200,7 @@ pub(crate) const INSTITUTION_SUPPORT_INTERVAL_DAYS: i64 = 360;
 pub(crate) const INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS: i64 = 180;
 pub(crate) const INSTITUTION_SUPPORT_COST: Money = Money::from_copper(1_200);
 pub(crate) const INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT: u16 = 5_500;
-pub(crate) const INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT: u32 = 78;
+pub(crate) const INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT: u32 = 52;
 pub(crate) const MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER: usize = 2;
 pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_RECOVERY_DAYS: i64 = 720;
@@ -225,6 +233,91 @@ pub enum CommandError {
     BusinessNotOwned { business_id: BusinessId },
     #[error("command does not involve the player dynasty")]
     PlayerNotParty,
+    #[error(
+        "non-player lender {lender_dynasty_id} must retain at least {required_reserve} after advancing {principal}; available treasury is {available}"
+    )]
+    LoanCounterpartyLenderReserve {
+        lender_dynasty_id: DynastyId,
+        available: Money,
+        principal: Money,
+        required_reserve: Money,
+    },
+    #[error(
+        "non-player lender requires at least {minimum_basis_points} basis points of interest; proposed rate is {interest_basis_points}"
+    )]
+    LoanCounterpartyInterestTooLow {
+        interest_basis_points: u16,
+        minimum_basis_points: u16,
+    },
+    #[error(
+        "non-player borrower accepts at most {maximum_basis_points} basis points of interest; proposed rate is {interest_basis_points}"
+    )]
+    LoanCounterpartyInterestTooHigh {
+        interest_basis_points: u16,
+        maximum_basis_points: u16,
+    },
+    #[error(
+        "non-player lender requires a weekly payment of at least {minimum_payment}; proposed payment is {weekly_payment}"
+    )]
+    LoanCounterpartyPaymentTooLow {
+        weekly_payment: Money,
+        minimum_payment: Money,
+    },
+    #[error(
+        "non-player borrower accepts a weekly payment of at most {maximum_payment}; proposed payment is {weekly_payment}"
+    )]
+    LoanCounterpartyPaymentTooHigh {
+        weekly_payment: Money,
+        maximum_payment: Money,
+    },
+    #[error(
+        "non-player borrower will not pledge property {property_id} valued at {property_value} for exposure below {minimum_exposure}; proposed exposure is {exposure}"
+    )]
+    LoanCounterpartyCollateralTooLarge {
+        property_id: PropertyId,
+        property_value: Money,
+        exposure: Money,
+        minimum_exposure: Money,
+    },
+    #[error(
+        "non-player contract seller requires at least {minimum_price} per unit; proposed price is {unit_price}"
+    )]
+    ContractCounterpartyPriceTooLow {
+        unit_price: Money,
+        minimum_price: Money,
+    },
+    #[error(
+        "non-player contract buyer accepts at most {maximum_price} per unit; proposed price is {unit_price}"
+    )]
+    ContractCounterpartyPriceTooHigh {
+        unit_price: Money,
+        maximum_price: Money,
+    },
+    #[error(
+        "contract counterparty accepts a penalty from {minimum_penalty} through {maximum_penalty}; proposed penalty is {penalty}"
+    )]
+    ContractCounterpartyPenaltyOutOfRange {
+        penalty: Money,
+        minimum_penalty: Money,
+        maximum_penalty: Money,
+    },
+    #[error(
+        "non-player business {business_id} has weekly contract capacity {available}, below requested quantity {requested}"
+    )]
+    ContractCounterpartyCapacity {
+        business_id: BusinessId,
+        requested: crate::money::Quantity,
+        available: crate::money::Quantity,
+    },
+    #[error(
+        "property buyer {buyer_dynasty_id} must retain at least {required_reserve} after contributing {buyer_contribution}; available treasury is {available}"
+    )]
+    PropertyCounterpartyBuyerReserve {
+        buyer_dynasty_id: DynastyId,
+        available: Money,
+        buyer_contribution: Money,
+        required_reserve: Money,
+    },
     #[error("business policy values are outside supported ranges")]
     InvalidBusinessPolicy,
     #[error("business {business_id} already uses the requested operating policy")]
@@ -566,8 +659,8 @@ fn dispatch_player_command(
                 quality_target_basis_points,
             },
         ),
-        PlayerCommand::CreateSupplyContract { terms } => apply_contract(registry, state, terms),
-        PlayerCommand::IssueLoan { terms } => apply_loan(state, terms),
+        PlayerCommand::CreateSupplyContract { terms } => apply_contract(registry, state, &terms),
+        PlayerCommand::IssueLoan { terms } => apply_loan(state, &terms),
         PlayerCommand::BuyProperty { property_id } => apply_property_purchase(state, property_id),
         PlayerCommand::SellProperty {
             property_id,
@@ -635,18 +728,22 @@ fn dispatch_player_command(
 fn apply_contract(
     registry: &Registry,
     state: &mut AppState,
-    terms: SupplyContractTerms,
+    terms: &SupplyContractTerms,
 ) -> Result<CommandOutcome, CommandError> {
-    ensure_player_contract_party(state, &terms)?;
-    let id = sign_supply_contract(registry, state, terms)?;
+    ensure_player_contract_party(state, terms)?;
+    let validated = validate_supply_contract(registry, state, terms.clone())?;
+    ensure_non_player_contract_counterparty_accepts(registry, state, terms)?;
+    let id = validated.commit(registry, state)?;
     Ok(CommandOutcome {
         summary: format!("Created supply contract {id}."),
     })
 }
 
-fn apply_loan(state: &mut AppState, terms: LoanTerms) -> Result<CommandOutcome, CommandError> {
-    ensure_player_loan_party(state, &terms)?;
-    let id = issue_loan(state, terms)?;
+fn apply_loan(state: &mut AppState, terms: &LoanTerms) -> Result<CommandOutcome, CommandError> {
+    ensure_player_loan_party(state, terms)?;
+    let validated = validate_loan(state, terms.clone())?;
+    ensure_non_player_loan_counterparty_accepts(state, terms)?;
+    let id = validated.commit(state)?;
     Ok(CommandOutcome {
         summary: format!("Issued loan {id}."),
     })
@@ -668,6 +765,29 @@ fn apply_property_sale(
     property_id: PropertyId,
     buyer_dynasty_id: DynastyId,
 ) -> Result<CommandOutcome, CommandError> {
+    let quote = quote_property_liquidation(
+        registry,
+        state,
+        state.player_dynasty_id,
+        buyer_dynasty_id,
+        property_id,
+    )?;
+    let buyer = state
+        .dynasties
+        .get(&buyer_dynasty_id)
+        .expect("validated property buyer must exist");
+    let buyer_after = buyer
+        .treasury()
+        .checked_sub(quote.buyer_contribution)
+        .expect("validated property buyer contribution must fit treasury");
+    if buyer_after < PROPERTY_COUNTERPARTY_BUYER_RESERVE {
+        return Err(CommandError::PropertyCounterpartyBuyerReserve {
+            buyer_dynasty_id,
+            available: buyer.treasury(),
+            buyer_contribution: quote.buyer_contribution,
+            required_reserve: PROPERTY_COUNTERPARTY_BUYER_RESERVE,
+        });
+    }
     let quote = sell_owned_property(
         registry,
         state,
@@ -806,42 +926,28 @@ fn apply_business_investment(
             business_id,
         }));
     }
-    let resulting_cash = business.cash().checked_add(amount).ok_or_else(|| {
+    business.cash().checked_add(amount).ok_or_else(|| {
         CommandError::Simulation(super::SimulationError::BusinessCashOverflow {
             business_id,
             current: business.cash(),
             incoming: amount,
         })
     })?;
-    let next_finance_version = next_business_finance_version(business)?;
-    spend_player_treasury(state, amount)?;
-    let business = state
-        .businesses
-        .get_mut(business_id)
-        .expect("validated business must exist");
-    business.finance.cash = resulting_cash;
-    business.finance.version = next_finance_version;
-    let rehabilitation = u16::try_from((amount.copper() / 2).clamp(0, 3_000))
-        .expect("bounded rehabilitation must fit u16");
-    business.operations.condition_basis_points = business
-        .operations
-        .condition_basis_points
-        .saturating_add(rehabilitation)
-        .min(10_000);
-    business.operations.quality_basis_points = business
-        .operations
-        .quality_basis_points
-        .saturating_add(rehabilitation / 2)
-        .min(10_000);
-    state.audit_log.push(AuditRecord {
-        day: state.clock.day(),
-        kind: AuditKind::BusinessCapitalization,
-        subject: format!("business:{business_id}").into(),
-        detail: format!(
-            "amount={};rehabilitation_basis_points={rehabilitation}",
-            amount.copper()
-        ),
-    });
+    next_business_finance_version(business)?;
+    let treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    if treasury < amount {
+        return Err(CommandError::InsufficientPlayerFunds {
+            available: treasury,
+            required: amount,
+        });
+    }
+    let rehabilitation =
+        capitalize_owned_business(state, state.player_dynasty_id, business_id, amount)
+            .expect("prevalidated player business capitalization must commit");
     super::strategic::push_outbox(
         state,
         OutboxKind::Finance,
@@ -988,6 +1094,82 @@ fn ensure_player_contract_party(
     Ok(())
 }
 
+fn ensure_non_player_contract_counterparty_accepts(
+    registry: &Registry,
+    state: &AppState,
+    terms: &SupplyContractTerms,
+) -> Result<(), CommandError> {
+    let buyer = state
+        .businesses
+        .get(terms.buyer_business_id)
+        .expect("validated contract buyer must exist");
+    let seller = state
+        .businesses
+        .get(terms.seller_business_id)
+        .expect("validated contract seller must exist");
+    let market_price = state
+        .market
+        .get_quote(terms.good_id)
+        .ok_or(CommandError::MissingMarketQuote {
+            good_id: terms.good_id,
+        })?
+        .price();
+    let minimum_price = ceil_positive_money_div(market_price, 2);
+    let maximum_price = market_price.saturating_mul_ratio(3, 2);
+    if seller.owner_dynasty_id() != state.player_dynasty_id && terms.unit_price < minimum_price {
+        return Err(CommandError::ContractCounterpartyPriceTooLow {
+            unit_price: terms.unit_price,
+            minimum_price,
+        });
+    }
+    if buyer.owner_dynasty_id() != state.player_dynasty_id && terms.unit_price > maximum_price {
+        return Err(CommandError::ContractCounterpartyPriceTooHigh {
+            unit_price: terms.unit_price,
+            maximum_price,
+        });
+    }
+
+    let weekly_payment = crate::money::checked_cost_for(terms.quantity_per_week, terms.unit_price)
+        .expect("validated contract payment must fit the supported money range");
+    let minimum_penalty = ceil_positive_money_div(weekly_payment, 4);
+    let maximum_penalty = weekly_payment.saturating_mul(4);
+    if terms.penalty < minimum_penalty || terms.penalty > maximum_penalty {
+        return Err(CommandError::ContractCounterpartyPenaltyOutOfRange {
+            penalty: terms.penalty,
+            minimum_penalty,
+            maximum_penalty,
+        });
+    }
+
+    let capacity = available_supply_contract_capacity(
+        registry,
+        state,
+        terms.buyer_business_id,
+        terms.seller_business_id,
+        terms.good_id,
+    )
+    .expect("validated contract parties must have compatible capacity");
+    if seller.owner_dynasty_id() != state.player_dynasty_id
+        && terms.quantity_per_week > capacity.seller
+    {
+        return Err(CommandError::ContractCounterpartyCapacity {
+            business_id: terms.seller_business_id,
+            requested: terms.quantity_per_week,
+            available: capacity.seller,
+        });
+    }
+    if buyer.owner_dynasty_id() != state.player_dynasty_id
+        && terms.quantity_per_week > capacity.buyer
+    {
+        return Err(CommandError::ContractCounterpartyCapacity {
+            business_id: terms.buyer_business_id,
+            requested: terms.quantity_per_week,
+            available: capacity.buyer,
+        });
+    }
+    Ok(())
+}
+
 fn ensure_player_loan_party(state: &AppState, terms: &LoanTerms) -> Result<(), CommandError> {
     if terms.lender_dynasty_id != state.player_dynasty_id
         && terms.borrower_dynasty_id != state.player_dynasty_id
@@ -995,6 +1177,116 @@ fn ensure_player_loan_party(state: &AppState, terms: &LoanTerms) -> Result<(), C
         return Err(CommandError::PlayerNotParty);
     }
     Ok(())
+}
+
+fn ensure_non_player_loan_counterparty_accepts(
+    state: &AppState,
+    terms: &LoanTerms,
+) -> Result<(), CommandError> {
+    let player_id = state.player_dynasty_id;
+    let exposure = negotiated_loan_exposure(state, terms);
+
+    if terms.lender_dynasty_id != player_id {
+        let lender = state
+            .dynasties
+            .get(&terms.lender_dynasty_id)
+            .expect("validated loan lender must exist");
+        let lender_after = lender
+            .treasury()
+            .checked_sub(terms.principal)
+            .expect("validated loan lender must cover principal");
+        if lender_after < PRIVATE_LOAN_COUNTERPARTY_RESERVE {
+            return Err(CommandError::LoanCounterpartyLenderReserve {
+                lender_dynasty_id: terms.lender_dynasty_id,
+                available: lender.treasury(),
+                principal: terms.principal,
+                required_reserve: PRIVATE_LOAN_COUNTERPARTY_RESERVE,
+            });
+        }
+        if terms.interest_basis_points < PRIVATE_LOAN_COUNTERPARTY_MIN_INTEREST_BASIS_POINTS {
+            return Err(CommandError::LoanCounterpartyInterestTooLow {
+                interest_basis_points: terms.interest_basis_points,
+                minimum_basis_points: PRIVATE_LOAN_COUNTERPARTY_MIN_INTEREST_BASIS_POINTS,
+            });
+        }
+        let minimum_payment =
+            ceil_positive_money_div(exposure, PRIVATE_LOAN_COUNTERPARTY_MAX_AMORTIZATION_WEEKS);
+        if terms.weekly_payment < minimum_payment {
+            return Err(CommandError::LoanCounterpartyPaymentTooLow {
+                weekly_payment: terms.weekly_payment,
+                minimum_payment,
+            });
+        }
+    }
+
+    if terms.borrower_dynasty_id != player_id {
+        if terms.interest_basis_points > PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS {
+            return Err(CommandError::LoanCounterpartyInterestTooHigh {
+                interest_basis_points: terms.interest_basis_points,
+                maximum_basis_points: PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS,
+            });
+        }
+        let maximum_payment =
+            ceil_positive_money_div(exposure, PRIVATE_LOAN_COUNTERPARTY_MIN_AMORTIZATION_WEEKS);
+        if terms.weekly_payment > maximum_payment {
+            return Err(CommandError::LoanCounterpartyPaymentTooHigh {
+                weekly_payment: terms.weekly_payment,
+                maximum_payment,
+            });
+        }
+        if let Some(property_id) = terms.collateral_property_id {
+            let property = state
+                .properties
+                .get(&property_id)
+                .expect("validated loan collateral must exist");
+            let minimum_exposure = ceil_basis_point_share(
+                property.value,
+                PRIVATE_LOAN_COUNTERPARTY_MIN_COLLATERAL_LTV_BASIS_POINTS,
+            );
+            if exposure < minimum_exposure {
+                return Err(CommandError::LoanCounterpartyCollateralTooLarge {
+                    property_id,
+                    property_value: property.value,
+                    exposure,
+                    minimum_exposure,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn negotiated_loan_exposure(state: &AppState, terms: &LoanTerms) -> Money {
+    let prior_default = state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.lender_dynasty_id == terms.lender_dynasty_id
+                && loan.borrower_dynasty_id == terms.borrower_dynasty_id
+                && loan.status == LoanStatus::Defaulted
+        })
+        .max_by_key(|loan| (loan.next_due_day, loan.id))
+        .map_or(Money::ZERO, |loan| loan.balance);
+    prior_default
+        .checked_add(terms.principal)
+        .expect("validated loan exposure must fit the supported money range")
+}
+
+fn ceil_positive_money_div(value: Money, denominator: i64) -> Money {
+    debug_assert!(value > Money::ZERO);
+    debug_assert!(denominator > 0);
+    let copper = value.copper();
+    Money::from_copper(copper / denominator + i64::from(copper % denominator != 0))
+}
+
+fn ceil_basis_point_share(value: Money, basis_points: i64) -> Money {
+    debug_assert!(value >= Money::ZERO);
+    debug_assert!((0..=10_000).contains(&basis_points));
+    let numerator = i128::from(value.copper()) * i128::from(basis_points);
+    let copper = (numerator + 9_999) / 10_000;
+    Money::from_copper(
+        i64::try_from(copper).expect("basis-point share of supported money must fit money"),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1041,10 +1333,6 @@ fn validate_civic_debt_issuance(
         .ok_or(CommandError::NoCivicDebtCreditor {
             required: principal,
         })?;
-    let weekly_payment_copper = principal
-        .copper()
-        .saturating_add(CIVIC_DEBT_TERM_WEEKS.saturating_sub(1))
-        / CIVIC_DEBT_TERM_WEEKS;
     Ok(ValidatedCivicDebtIssuance {
         treasury_id,
         creditor_dynasty_id: creditor.id(),
@@ -1054,7 +1342,7 @@ fn validate_civic_debt_issuance(
             .checked_sub(principal)
             .expect("validated civic debt creditor must cover the principal"),
         treasury_budget_after,
-        weekly_payment: Money::from_copper(weekly_payment_copper.max(1)),
+        weekly_payment: ceil_positive_money_div(principal, CIVIC_DEBT_TERM_WEEKS),
     })
 }
 
@@ -2641,12 +2929,17 @@ fn latest_character_campaign_day(
     kind: AuditKind,
     character_id: CharacterId,
 ) -> Option<i64> {
-    let suffix = format!(":character:{character_id}");
     state
         .audit_log
         .iter()
         .rev()
-        .find(|record| record.kind() == kind && record.subject().ends_with(&suffix))
+        .find(|record| {
+            record.kind() == kind
+                && record
+                    .audit_subject()
+                    .institution_character_ids()
+                    .is_some_and(|(_, recorded_character_id)| recorded_character_id == character_id)
+        })
         .map(AuditRecord::day)
 }
 
