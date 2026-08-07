@@ -1782,6 +1782,59 @@ mod candidates {
     }
 
     #[test]
+    fn family_council_can_draw_into_long_term_office_reserve_without_risking_near_term_duties() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        state
+            .family_councils
+            .get_mut(&state.player_dynasty_id)
+            .expect("player family council must exist")
+            .unity_basis_points = FAMILY_COUNCIL_INTERVENTION_UNITY_THRESHOLD.saturating_sub(1);
+        let full_reserve = player_office_duty_reserve(&state, 0);
+        let recovery_reserve = player_family_recovery_office_duty_reserve(&state);
+        assert!(recovery_reserve < full_reserve);
+        let candidate = Candidate {
+            kind: GameplayCommandKind::ConveneFamilyCouncil,
+            command: PlayerCommand::ConveneFamilyCouncil,
+            description: "reconcile a divided officeholding family".to_owned(),
+            score: 0,
+        };
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = FAMILY_COUNCIL_MEETING_COST.saturating_add(recovery_reserve);
+
+        assert!(candidate_preserves_office_duty_reserve(
+            registry, &state, &candidate
+        ));
+        assert!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury()
+                .saturating_sub(FAMILY_COUNCIL_MEETING_COST)
+                < full_reserve,
+            "the family intervention should be allowed to use part of the long-term reserve"
+        );
+
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = FAMILY_COUNCIL_MEETING_COST
+            .saturating_add(recovery_reserve)
+            .saturating_sub(Money::from_copper(1));
+        assert!(!candidate_preserves_office_duty_reserve(
+            registry, &state, &candidate
+        ));
+    }
+
+    #[test]
     fn office_power_agent_waits_for_material_need_instead_of_using_directives_on_cooldown() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -2263,6 +2316,69 @@ mod candidates {
             candidates.is_empty(),
             "the annual commission interval must prevent repetitive intelligence housekeeping after leverage"
         );
+    }
+
+    #[test]
+    fn severe_counterparty_pressure_accelerates_political_intelligence_without_becoming_routine() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let relationship = state
+            .relationships
+            .values_mut()
+            .find(|relationship| {
+                relationship.pair.first == player_id || relationship.pair.second == player_id
+            })
+            .expect("campaign must contain a player counterparty relationship");
+        relationship.trust_basis_points = 1_002;
+        relationship.resentment_basis_points = 3_500;
+        state.audit_log.push(AuditRecord {
+            day: 0,
+            kind: AuditKind::InformationCommission,
+            subject: format!("dynasty:{player_id}").into(),
+            detail: "prior commissioned intelligence".to_owned(),
+        });
+        for _ in 0..INFORMATION_COMMISSION_INTERVAL_DAYS {
+            state.clock.advance_one_day();
+        }
+        let mut candidates = Vec::new();
+
+        generate_information_candidates(
+            registry,
+            &state,
+            GameplayPersona::Opportunist,
+            &mut candidates,
+        );
+        assert!(
+            candidates.is_empty(),
+            "material but sub-threshold relationship strain should still use the two-year agent cadence"
+        );
+
+        let relationship = state
+            .relationships
+            .values_mut()
+            .find(|relationship| {
+                relationship.pair.first == player_id || relationship.pair.second == player_id
+            })
+            .expect("campaign must contain the pressured counterparty relationship");
+        relationship.trust_basis_points = 1_000;
+        candidates.clear();
+        generate_information_candidates(
+            registry,
+            &state,
+            GameplayPersona::Opportunist,
+            &mut candidates,
+        );
+
+        assert!(candidates.iter().any(|candidate| {
+            candidate.kind == GameplayCommandKind::CommissionInformation
+                && matches!(
+                    candidate.command,
+                    PlayerCommand::CommissionInformation {
+                        focus: InformationFocus::Counterparty { .. }
+                    }
+                )
+        }));
     }
 
     #[test]
@@ -3953,6 +4069,30 @@ mod findings {
     }
 
     #[test]
+    fn findings_do_not_treat_severe_pressure_intelligence_as_scheduled_maintenance() {
+        let mut report = cached_focused_report(30);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::CommissionInformation)
+            .expect("commission statistics must exist")
+            .executed = 20;
+        campaign.commission_leverage_pairs = 20;
+        campaign.maximum_contract_relationship_pressure_basis_points =
+            AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(
+            &findings,
+            "Commissioned intelligence becomes a routine two-step ritual",
+        );
+    }
+
+    #[test]
     fn passive_information_changes_without_a_material_trigger_do_not_imply_missing_player_agency() {
         let mut report = cached_focused_report(30);
         *report
@@ -4237,12 +4377,12 @@ mod findings {
 
         finding_with_title(
             &findings,
-            "Established dynasties often avoid measured internal exposure",
+            "Established dynasties often avoid measured power exposure",
         );
     }
 
     #[test]
-    fn material_civic_duties_count_as_power_exposure() {
+    fn routine_civic_duties_do_not_mask_sheltered_power() {
         let mut report = cached_focused_report(30);
         let baseline = report.campaigns[0].clone();
         report.aggregate.campaigns = 4;
@@ -4267,9 +4407,38 @@ mod findings {
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
+        finding_with_title(
+            &findings,
+            "Established dynasties often avoid measured power exposure",
+        );
+    }
+
+    #[test]
+    fn material_relationship_pressure_counts_as_power_exposure() {
+        let mut report = cached_focused_report(30);
+        let baseline = report.campaigns[0].clone();
+        report.aggregate.campaigns = 4;
+        report.aggregate.simulated_days = 14_400;
+        report.campaigns = (0..4)
+            .map(|_| {
+                let mut campaign = baseline.clone();
+                campaign.simulated_days = 3_600;
+                campaign.maximum_offices_held = 1;
+                campaign.maximum_player_disputed_employment = 0;
+                campaign.end.player_contract_failures = 0;
+                campaign.end.distressed_businesses = 0;
+                campaign.end.insolvent_businesses = 0;
+                campaign.end.player_treasury = campaign.start.player_treasury;
+                campaign.maximum_contract_relationship_pressure_basis_points = 1_500;
+                campaign
+            })
+            .collect();
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
         assert_finding_absent(
             &findings,
-            "Established dynasties often avoid measured internal exposure",
+            "Established dynasties often avoid measured power exposure",
         );
     }
 

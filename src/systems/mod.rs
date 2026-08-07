@@ -129,12 +129,12 @@ pub(crate) use commands::{
     COMMISSIONED_INFORMATION_SOURCE, FAMILY_COUNCIL_MEETING_COST,
     FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
     HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
-    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST, INFORMATION_LEVERAGE_COST,
-    INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
-    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
-    LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS,
-    LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
-    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
+    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST,
+    INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST, INSTITUTION_SUPPORT_COST,
+    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
+    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
+    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
+    MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
     OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
     PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
@@ -152,6 +152,7 @@ pub use commands::{
 };
 pub use invariants::validate_invariants;
 pub use simulation::advance_days;
+pub(crate) use strategic::MAX_RELATIONSHIP_MEMORIES;
 pub use strategic::{
     BusinessAcquisitionQuote, LoanTerms, PropertyLiquidationQuote, StrategicError,
     SupplyContractTerms, ValidatedLoan, ValidatedSupplyContract, acquire_business,
@@ -159,10 +160,11 @@ pub use strategic::{
     sell_owned_property, sign_supply_contract, validate_loan, validate_supply_contract,
 };
 pub(crate) use strategic::{
-    DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, OFFICE_DUTY_COST_PER_POWER,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, available_supply_contract_capacity,
-    business_recapitalization_target, capitalize_owned_business, crisis_response_contains_crisis,
-    dynasty_office_administrative_load, initialize_strategic_state, institution_capability_score,
+    DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, STANDARD_CONTRACT_BATCHES_PER_WEEK,
+    available_supply_contract_capacity, business_recapitalization_target,
+    capitalize_owned_business, crisis_response_contains_crisis, dynasty_office_administrative_load,
+    initialize_strategic_state, institution_capability_score,
+    projected_dynasty_monthly_office_duty,
 };
 pub use transactions::{
     SimulationError, ValidatedCashTransfer, transfer_business_cash, validate_business_cash_transfer,

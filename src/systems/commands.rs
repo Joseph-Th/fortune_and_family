@@ -2336,13 +2336,19 @@ fn active_player_ward_count(state: &AppState) -> usize {
         .values()
         .filter(|link| link.active && link.kind == FamilyLinkKind::Ward)
         .filter(|link| {
-            state
+            let guardian_active = state
                 .characters
-                .get(link.second_character_id)
-                .is_some_and(|character| {
-                    character.dynasty_id() == state.player_dynasty_id
-                        && character.status() == CharacterStatus::Active
-                })
+                .get(link.first_character_id)
+                .is_some_and(|character| character.status() == CharacterStatus::Active);
+            let ward_active =
+                state
+                    .characters
+                    .get(link.second_character_id)
+                    .is_some_and(|character| {
+                        character.dynasty_id() == state.player_dynasty_id
+                            && character.status() == CharacterStatus::Active
+                    });
+            guardian_active && ward_active
         })
         .count()
 }
@@ -4049,7 +4055,7 @@ fn adjust_information_relationship(
     relationship.resentment_basis_points =
         adjust_basis_points(relationship.resentment_basis_points, resentment_change);
     relationship.last_interaction_day = day;
-    if relationship.memories.len() >= 12 {
+    if relationship.memories.len() >= super::MAX_RELATIONSHIP_MEMORIES {
         relationship.memories.remove(0);
     }
     relationship.memories.push(format!("Day {day}: {memory}"));

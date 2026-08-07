@@ -263,6 +263,54 @@ mod round_trip {
     }
 
     #[test]
+    fn load_repairs_active_ward_with_inactive_guardian() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let ward_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        let guardian_id = state.next_ids.character();
+        let mut guardian = state
+            .characters
+            .get(ward_id)
+            .expect("player heir must exist")
+            .clone();
+        guardian.identity.id = guardian_id;
+        guardian.identity.name = "Inactive Guardian".to_owned();
+        guardian.runtime.status = crate::core::CharacterStatus::Incapacitated;
+        guardian.runtime.health_basis_points = 0;
+        guardian.runtime.role = crate::core::CharacterRole::Clerk;
+        state.characters.insert(guardian);
+        let link_id = state.next_ids.family_link();
+        state.family_links.insert(
+            link_id,
+            crate::core::FamilyLink {
+                id: link_id,
+                first_character_id: guardian_id,
+                second_character_id: ward_id,
+                kind: FamilyLinkKind::Ward,
+                active: true,
+                property_claim_basis_points: 1_500,
+            },
+        );
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("stale-active-ward.json", &value);
+
+        let loaded = load_state(&path).expect("stale ward lifecycle must be normalized on load");
+
+        assert!(
+            !loaded
+                .family_links
+                .get(&link_id)
+                .expect("ward link must remain recorded")
+                .active,
+            "load normalization must deactivate guardianship with an inactive guardian"
+        );
+    }
+
+    #[test]
     fn atomic_save_replaces_the_previous_campaign() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -2020,6 +2068,368 @@ mod validation {
             load_state(&path),
             StateValidationKind::StrategicRecords,
             "invalid identity or authorization reference",
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_civic_debts_backed_by_one_consumed_authorization() {
+        let mut state = make_test_campaign();
+        let creditor_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a non-player dynasty");
+        let law_id = state.next_ids.law();
+        state.laws.insert(
+            law_id,
+            EnactedLaw {
+                id: law_id,
+                kind: LawKind::PublicDebtAuthorization,
+                enacted_day: state.clock.day(),
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                value: 10_000,
+                active: false,
+            },
+        );
+        for _ in 0..2 {
+            let debt_id = state.next_ids.civic_debt();
+            state.civic_debts.insert(
+                debt_id,
+                CivicDebt {
+                    id: debt_id,
+                    creditor_dynasty_id,
+                    authorizing_law_id: law_id,
+                    sponsor_dynasty_id: Some(state.player_dynasty_id),
+                    principal: Money::from_copper(10_000),
+                    balance: Money::from_copper(10_000),
+                    weekly_payment: Money::from_copper(100),
+                    interest_basis_points: 600,
+                    issued_day: state.clock.day(),
+                    next_due_day: state.clock.day().saturating_add(7),
+                    missed_payments: 0,
+                    status: CivicDebtStatus::Current,
+                },
+            );
+        }
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("reused-civic-debt-authorization.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "reuses consumed public-debt authorization",
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_repayment_active_loans_for_one_pair() {
+        let mut state = make_test_campaign();
+        let mut duplicate = state
+            .loans
+            .values()
+            .find(|loan| {
+                matches!(
+                    loan.status,
+                    crate::core::LoanStatus::Current
+                        | crate::core::LoanStatus::Delinquent
+                        | crate::core::LoanStatus::Restructured
+                )
+            })
+            .expect("campaign must contain a repayment-active loan")
+            .clone();
+        let duplicate_id = state.next_ids.loan();
+        duplicate.id = duplicate_id;
+        duplicate.collateral_property_id = None;
+        state.loans.insert(duplicate_id, duplicate);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("duplicate-active-loan.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "duplicates an existing repayment-active lender/borrower pair",
+        );
+    }
+
+    #[test]
+    fn rejects_player_character_above_institution_membership_capacity() {
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let institution_ids: Vec<_> = state
+            .institutions
+            .keys()
+            .copied()
+            .take(crate::systems::MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER + 1)
+            .collect();
+        assert_eq!(
+            institution_ids.len(),
+            crate::systems::MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER + 1,
+            "campaign must contain enough institutions to exceed membership capacity"
+        );
+        for institution_id in institution_ids {
+            state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("selected institution must exist")
+                .members
+                .insert(character_id);
+            state.audit_log.push(AuditRecord {
+                day: state.clock.day(),
+                kind: AuditKind::InstitutionPatronage,
+                subject: format!("institution:{institution_id}:character:{character_id}").into(),
+                detail: "test patronage record".to_owned(),
+            });
+        }
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("excess-institution-memberships.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "exceeding the supported maximum",
+        );
+    }
+
+    #[test]
+    fn rejects_relationship_history_above_retention_bound() {
+        let mut state = make_test_campaign();
+        let relationship = state
+            .relationships
+            .values_mut()
+            .next()
+            .expect("campaign must contain a relationship");
+        relationship.memories = (0..=crate::systems::MAX_RELATIONSHIP_MEMORIES)
+            .map(|index| format!("memory {index}"))
+            .collect();
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("excess-relationship-memory.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "relationship map contains an invalid dynasty pair",
+        );
+    }
+
+    #[test]
+    fn rejects_missing_relationship_pair() {
+        let mut state = make_test_campaign();
+        let pair = *state
+            .relationships
+            .keys()
+            .next()
+            .expect("campaign must contain a relationship");
+        state.relationships.remove(&pair);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("missing-relationship-pair.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "relationship map is missing dynasty pair",
+        );
+    }
+
+    #[test]
+    fn rejects_character_with_multiple_active_marriages() {
+        let mut state = make_test_campaign();
+        let character_ids: Vec<_> = state
+            .characters
+            .iter()
+            .map(crate::core::Character::id)
+            .take(3)
+            .collect();
+        assert_eq!(
+            character_ids.len(),
+            3,
+            "campaign must contain three characters for the marriage fixture"
+        );
+        for spouse_id in character_ids.iter().copied().skip(1) {
+            let link_id = state.next_ids.family_link();
+            state.family_links.insert(
+                link_id,
+                crate::core::FamilyLink {
+                    id: link_id,
+                    first_character_id: character_ids[0],
+                    second_character_id: spouse_id,
+                    kind: FamilyLinkKind::Marriage,
+                    active: true,
+                    property_claim_basis_points: 5_000,
+                },
+            );
+        }
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("duplicate-active-marriage.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "multiple active marriages",
+        );
+    }
+
+    #[test]
+    fn rejects_active_marriage_with_inactive_participant() {
+        let mut state = make_test_campaign();
+        let active_character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let foreign_template = state
+            .characters
+            .iter()
+            .find(|character| character.dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a foreign character")
+            .clone();
+        let inactive_character_id = state.next_ids.character();
+        let mut inactive_character = foreign_template;
+        inactive_character.identity.id = inactive_character_id;
+        inactive_character.identity.name = "Inactive Spouse".to_owned();
+        inactive_character.runtime.status = crate::core::CharacterStatus::Incapacitated;
+        inactive_character.runtime.health_basis_points = 0;
+        inactive_character.runtime.role = crate::core::CharacterRole::Clerk;
+        state.characters.insert(inactive_character);
+        let link_id = state.next_ids.family_link();
+        state.family_links.insert(
+            link_id,
+            crate::core::FamilyLink {
+                id: link_id,
+                first_character_id: active_character_id,
+                second_character_id: inactive_character_id,
+                kind: FamilyLinkKind::Marriage,
+                active: true,
+                property_claim_basis_points: 5_000,
+            },
+        );
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("inactive-active-marriage.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "invalid active marriage lifecycle",
+        );
+    }
+
+    #[test]
+    fn rejects_player_above_active_ward_capacity() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let head_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let template_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        let template = state
+            .characters
+            .get(template_id)
+            .expect("player heir must exist")
+            .clone();
+        for index in 0..=crate::systems::MAX_ACTIVE_WARDS {
+            let ward_id = state.next_ids.character();
+            let mut ward = template.clone();
+            ward.identity.id = ward_id;
+            ward.identity.name = format!("Capacity Ward {index}");
+            ward.runtime.role = crate::core::CharacterRole::Clerk;
+            state.characters.insert(ward);
+            state
+                .family_councils
+                .get_mut(&dynasty_id)
+                .expect("player family council must exist")
+                .members
+                .insert(ward_id);
+            let link_id = state.next_ids.family_link();
+            state.family_links.insert(
+                link_id,
+                crate::core::FamilyLink {
+                    id: link_id,
+                    first_character_id: head_id,
+                    second_character_id: ward_id,
+                    kind: FamilyLinkKind::Ward,
+                    active: true,
+                    property_claim_basis_points: 1_500,
+                },
+            );
+        }
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("excess-active-wards.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "exceeding the supported maximum",
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_unfinished_public_work_for_district_and_kind() {
+        let mut state = make_test_campaign();
+        let mut duplicate = state
+            .public_works
+            .values()
+            .next()
+            .expect("campaign must contain a public work")
+            .clone();
+        let duplicate_id = state.next_ids.public_work();
+        duplicate.id = duplicate_id;
+        state.public_works.insert(duplicate_id, duplicate);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("duplicate-unfinished-public-work.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "duplicates an unfinished project",
+        );
+    }
+
+    #[test]
+    fn rejects_player_above_unfinished_public_work_sponsorship_capacity() {
+        let mut state = make_test_campaign();
+        let districts: Vec<_> = state.districts.keys().copied().take(3).collect();
+        assert_eq!(districts.len(), 3, "campaign must contain three districts");
+        let kinds = [
+            crate::core::PublicWorkKind::Road,
+            crate::core::PublicWorkKind::Bridge,
+            crate::core::PublicWorkKind::Market,
+        ];
+        for (district_id, kind) in districts.into_iter().zip(kinds) {
+            let id = state.next_ids.public_work();
+            state.public_works.insert(
+                id,
+                crate::core::PublicWork {
+                    id,
+                    district_id,
+                    kind,
+                    sponsor_dynasty_id: Some(state.player_dynasty_id),
+                    budget: Money::from_copper(10_000),
+                    spent: Money::ZERO,
+                    progress_basis_points: 0,
+                    status: crate::core::PublicWorkStatus::Building,
+                },
+            );
+        }
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("excess-player-public-works.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "exceeding the supported maximum",
         );
     }
 

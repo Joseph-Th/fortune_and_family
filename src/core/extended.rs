@@ -526,7 +526,7 @@ pub struct DistrictRuntime {
     pub(crate) dynasty_support: Vec<(DynastyId, u16)>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PublicWorkKind {
     Road,
     Bridge,

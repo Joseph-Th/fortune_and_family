@@ -144,6 +144,8 @@ Institutions have earned membership, offices, budgets, legitimacy, powers, and s
 
 Officeholding is not a permanent upgrade. It consumes administrative capacity, creates recurring duties, and can be lost through failure.
 
+Concentrating several offices in one dynasty should also create political exposure even when that dynasty is wealthy. Member houses become more fearful and resentful as one family consolidates authority, which should weaken future coalition support and feed back into commercial relationships rather than allowing cash alone to neutralize the cost of political expansion.
+
 ### Law, courts, and enforcement
 
 Law shapes contracts, property, debt, trade, labor, inheritance, and public authority. Cases require parties, claims, evidence, procedure, judgment, and consequences.

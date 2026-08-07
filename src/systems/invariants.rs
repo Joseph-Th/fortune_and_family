@@ -2,7 +2,7 @@
 
 use crate::core::{
     AppState, AuditKind, Business, CharacterStatus, CivicDebtStatus, ContractStatus, CrisisStatus,
-    EmploymentStatus, FamilyLinkKind, LegalCaseStatus, LoanStatus, ObjectiveStatus,
+    DynastyPair, EmploymentStatus, FamilyLinkKind, LegalCaseStatus, LoanStatus, ObjectiveStatus,
     PublicWorkStatus,
 };
 use crate::ids::{
@@ -758,6 +758,7 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
 }
 
 fn validate_loans(state: &AppState) {
+    let mut active_loan_pairs = BTreeSet::new();
     for (loan_id, loan) in &state.loans {
         debug_assert_eq!(
             *loan_id, loan.id,
@@ -785,6 +786,15 @@ fn validate_loans(state: &AppState) {
             loan.interest_basis_points <= 10_000,
             "Lifecycle Validity: loan interest is outside basis-point range"
         );
+        if matches!(
+            loan.status,
+            LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
+        ) {
+            debug_assert!(
+                active_loan_pairs.insert((loan.lender_dynasty_id, loan.borrower_dynasty_id)),
+                "Ownership Exclusivity: a lender/borrower pair cannot have multiple repayment-active loans"
+            );
+        }
         match loan.status {
             LoanStatus::Current
             | LoanStatus::Delinquent
@@ -840,6 +850,7 @@ fn validate_loans(state: &AppState) {
 }
 
 fn validate_civic_debts(state: &AppState) {
+    let mut authorizing_law_ids = BTreeSet::new();
     for (debt_id, debt) in &state.civic_debts {
         debug_assert_eq!(
             *debt_id, debt.id,
@@ -862,6 +873,10 @@ fn validate_civic_debts(state: &AppState) {
                     && law.value == debt.principal.copper()
             }),
             "Record Reference Validity: civic debt authorization is missing or inconsistent"
+        );
+        debug_assert!(
+            authorizing_law_ids.insert(debt.authorizing_law_id),
+            "Ownership Exclusivity: a consumed public-debt authorization cannot back multiple civic debts"
         );
         debug_assert!(
             debt.sponsor_dynasty_id
@@ -975,6 +990,14 @@ fn validate_employment(state: &AppState) {
 }
 
 fn validate_family_state(state: &AppState) {
+    validate_family_links(state);
+    validate_family_councils(state);
+}
+
+fn validate_family_links(state: &AppState) {
+    let mut actively_married_characters = BTreeSet::new();
+    let mut active_wards = BTreeSet::new();
+    let mut active_player_wards = 0_usize;
     for (link_id, link) in &state.family_links {
         debug_assert_eq!(
             *link_id, link.id,
@@ -993,6 +1016,24 @@ fn validate_family_state(state: &AppState) {
             link.property_claim_basis_points <= 10_000,
             "Lifecycle Validity: family property claim is outside basis-point range"
         );
+        if link.active && link.kind == FamilyLinkKind::Marriage {
+            debug_assert!(
+                actively_married_characters.insert(link.first_character_id)
+                    && actively_married_characters.insert(link.second_character_id),
+                "Ownership Exclusivity: a character cannot have multiple active marriages"
+            );
+            debug_assert!(
+                state
+                    .characters
+                    .get(link.first_character_id)
+                    .is_some_and(|character| character.status() == CharacterStatus::Active)
+                    && state
+                        .characters
+                        .get(link.second_character_id)
+                        .is_some_and(|character| character.status() == CharacterStatus::Active),
+                "Lifecycle Validity: active marriages require active participants"
+            );
+        }
         validate_parent_child_chronology(state, link);
         if matches!(link.kind, FamilyLinkKind::Adoptive | FamilyLinkKind::Ward) {
             let first = state
@@ -1010,15 +1051,34 @@ fn validate_family_state(state: &AppState) {
             );
             if link.active && link.kind == FamilyLinkKind::Ward {
                 debug_assert!(
+                    first.status() == CharacterStatus::Active
+                        && second.status() == CharacterStatus::Active,
+                    "Lifecycle Validity: active ward relationships require active participants"
+                );
+                debug_assert!(
                     state
                         .family_councils
                         .get(&second.dynasty_id())
                         .is_some_and(|council| council.members.contains(&second.id())),
                     "Index Completeness: an active ward must belong to its dynasty council"
                 );
+                debug_assert!(
+                    active_wards.insert(link.second_character_id),
+                    "Ownership Exclusivity: a character cannot have multiple active ward relationships"
+                );
+                if second.dynasty_id() == state.player_dynasty_id {
+                    active_player_wards += 1;
+                }
             }
         }
     }
+    debug_assert!(
+        active_player_wards <= super::MAX_ACTIVE_WARDS,
+        "Lifecycle Validity: player dynasty exceeds the active ward limit"
+    );
+}
+
+fn validate_family_councils(state: &AppState) {
     debug_assert_eq!(
         state.family_councils.len(),
         state.dynasties.len(),
@@ -1142,6 +1202,21 @@ fn validate_laws_and_relationships(state: &AppState) {
             relationship.last_interaction_day <= state.clock.day(),
             "No Lost Runtime State: relationship interaction is dated in the future"
         );
+        debug_assert!(
+            relationship.memories.len() <= super::MAX_RELATIONSHIP_MEMORIES,
+            "Lifecycle Validity: relationship history exceeds its retention bound"
+        );
+    }
+    let dynasty_ids: Vec<_> = state.dynasties.keys().copied().collect();
+    for (index, left_dynasty_id) in dynasty_ids.iter().enumerate() {
+        for right_dynasty_id in dynasty_ids.iter().skip(index + 1) {
+            debug_assert!(
+                state
+                    .relationships
+                    .contains_key(&DynastyPair::new(*left_dynasty_id, *right_dynasty_id)),
+                "Index Completeness: every distinct dynasty pair requires a relationship record"
+            );
+        }
     }
 }
 
@@ -1236,6 +1311,8 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
             );
         }
     }
+    let mut active_public_works = BTreeSet::new();
+    let mut active_player_sponsored_works = 0_usize;
     for (work_id, work) in &state.public_works {
         debug_assert_eq!(
             *work_id, work.id,
@@ -1278,7 +1355,23 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
                 "Record Reference Validity: public work sponsor does not exist"
             );
         }
+        if matches!(
+            work.status,
+            PublicWorkStatus::Building | PublicWorkStatus::Suspended
+        ) {
+            debug_assert!(
+                active_public_works.insert((work.district_id, work.kind)),
+                "Ownership Exclusivity: duplicate unfinished public work exists for one district and kind"
+            );
+            if work.sponsor_dynasty_id == Some(state.player_dynasty_id) {
+                active_player_sponsored_works += 1;
+            }
+        }
     }
+    debug_assert!(
+        active_player_sponsored_works <= super::MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+        "Lifecycle Validity: player dynasty exceeds the unfinished public-work sponsorship limit"
+    );
 }
 
 fn validate_legal_cases(state: &AppState) {

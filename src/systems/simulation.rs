@@ -1890,7 +1890,7 @@ fn retire_outgoing_head(state: &mut AppState, outgoing_head_id: CharacterId) {
         .status = CharacterStatus::Deceased;
     for link in state.family_links.values_mut().filter(|link| {
         link.active
-            && link.kind == FamilyLinkKind::Marriage
+            && matches!(link.kind, FamilyLinkKind::Marriage | FamilyLinkKind::Ward)
             && (link.first_character_id == outgoing_head_id
                 || link.second_character_id == outgoing_head_id)
     }) {

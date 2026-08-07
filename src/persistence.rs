@@ -192,6 +192,7 @@ pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> 
     if let Some(officeholders) = legacy_officeholders {
         restore_legacy_officeholders(&mut state, officeholders);
     }
+    normalize_family_link_lifecycle(&mut state);
     validate_state(&state).map_err(|error| PersistenceError::InvalidState {
         path: path.to_path_buf(),
         kind: error.kind,
@@ -986,6 +987,7 @@ fn validate_finance_and_organization_records(state: &AppState) -> Result<(), Str
 }
 
 fn validate_civic_debt_records(state: &AppState) -> Result<(), String> {
+    let mut authorizing_law_ids = BTreeSet::new();
     for (debt_id, debt) in &state.civic_debts {
         let authorizing_law = state.laws.get(&debt.authorizing_law_id);
         if debt.id != *debt_id
@@ -1004,6 +1006,12 @@ fn validate_civic_debt_records(state: &AppState) -> Result<(), String> {
         {
             return Err(format!(
                 "civic debt {debt_id} has an invalid identity or authorization reference"
+            ));
+        }
+        if !authorizing_law_ids.insert(debt.authorizing_law_id) {
+            return Err(format!(
+                "civic debt {debt_id} reuses consumed public-debt authorization {}",
+                debt.authorizing_law_id
             ));
         }
         match debt.status {
@@ -1041,6 +1049,7 @@ fn validate_civic_debt_records(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_loan_records(state: &AppState) -> Result<(), String> {
+    let mut active_loan_pairs = BTreeSet::new();
     for (loan_id, loan) in &state.loans {
         if loan.id != *loan_id
             || loan.lender_dynasty_id == loan.borrower_dynasty_id
@@ -1048,6 +1057,17 @@ fn validate_loan_records(state: &AppState) -> Result<(), String> {
             || !state.dynasties.contains_key(&loan.borrower_dynasty_id)
         {
             return Err(format!("loan {loan_id} has an invalid dynasty reference"));
+        }
+        if matches!(
+            loan.status,
+            crate::core::LoanStatus::Current
+                | crate::core::LoanStatus::Delinquent
+                | crate::core::LoanStatus::Restructured
+        ) && !active_loan_pairs.insert((loan.lender_dynasty_id, loan.borrower_dynasty_id))
+        {
+            return Err(format!(
+                "loan {loan_id} duplicates an existing repayment-active lender/borrower pair"
+            ));
         }
         match loan.status {
             crate::core::LoanStatus::Current
@@ -1161,60 +1181,161 @@ fn validate_employment_records(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_family_records(state: &AppState) -> Result<(), String> {
+    validate_family_links(state)?;
+    validate_family_councils(state)
+}
+
+fn validate_family_links(state: &AppState) -> Result<(), String> {
+    let mut actively_married_characters = BTreeSet::new();
+    let mut active_wards = BTreeSet::new();
+    let mut active_player_wards = 0_usize;
     for (link_id, link) in &state.family_links {
-        if link.id != *link_id
-            || link.first_character_id == link.second_character_id
-            || state.characters.get(link.first_character_id).is_none()
-            || state.characters.get(link.second_character_id).is_none()
-        {
-            return Err(format!(
-                "family link {link_id} has an invalid character reference"
-            ));
-        }
-        if matches!(link.kind, FamilyLinkKind::Adoptive | FamilyLinkKind::Ward) {
-            let first = state
-                .characters
-                .get(link.first_character_id)
-                .expect("validated family link character must exist");
-            let second = state
-                .characters
-                .get(link.second_character_id)
-                .expect("validated family link character must exist");
-            if first.dynasty_id() != second.dynasty_id() {
-                return Err(format!(
-                    "family link {link_id} crosses dynasties for an adoptive or ward relationship"
-                ));
-            }
-            if link.active
-                && link.kind == FamilyLinkKind::Ward
-                && !state
-                    .family_councils
-                    .get(&second.dynasty_id())
-                    .is_some_and(|council| council.members.contains(&second.id()))
-            {
-                return Err(format!(
-                    "family link {link_id} has an active ward outside its dynasty council"
-                ));
-            }
-        }
-        if link.kind == FamilyLinkKind::ParentChild {
-            let parent = state
-                .characters
-                .get(link.first_character_id)
-                .expect("validated family link character must exist");
-            let child = state
-                .characters
-                .get(link.second_character_id)
-                .expect("validated family link character must exist");
-            if child.birth_day().saturating_sub(parent.birth_day())
-                < crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS
-            {
-                return Err(format!(
-                    "family link {link_id} has impossible parent-child chronology"
-                ));
-            }
-        }
+        validate_family_link_reference(state, *link_id, link)?;
+        validate_marriage_link(state, *link_id, link, &mut actively_married_characters)?;
+        validate_adoptive_or_ward_link(
+            state,
+            *link_id,
+            link,
+            &mut active_wards,
+            &mut active_player_wards,
+        )?;
+        validate_parent_child_link(state, *link_id, link)?;
     }
+    if active_player_wards > crate::systems::MAX_ACTIVE_WARDS {
+        return Err(format!(
+            "player dynasty has {active_player_wards} active wards, exceeding the supported maximum of {}",
+            crate::systems::MAX_ACTIVE_WARDS
+        ));
+    }
+    Ok(())
+}
+
+fn validate_family_link_reference(
+    state: &AppState,
+    link_id: crate::ids::FamilyLinkId,
+    link: &crate::core::FamilyLink,
+) -> Result<(), String> {
+    if link.id != link_id
+        || link.first_character_id == link.second_character_id
+        || state.characters.get(link.first_character_id).is_none()
+        || state.characters.get(link.second_character_id).is_none()
+    {
+        return Err(format!(
+            "family link {link_id} has an invalid character reference"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_marriage_link(
+    state: &AppState,
+    link_id: crate::ids::FamilyLinkId,
+    link: &crate::core::FamilyLink,
+    actively_married_characters: &mut BTreeSet<crate::ids::CharacterId>,
+) -> Result<(), String> {
+    if !link.active || link.kind != FamilyLinkKind::Marriage {
+        return Ok(());
+    }
+    if !actively_married_characters.insert(link.first_character_id)
+        || !actively_married_characters.insert(link.second_character_id)
+    {
+        return Err(format!(
+            "family link {link_id} gives a character multiple active marriages"
+        ));
+    }
+    let first = state
+        .characters
+        .get(link.first_character_id)
+        .expect("validated family link character must exist");
+    let second = state
+        .characters
+        .get(link.second_character_id)
+        .expect("validated family link character must exist");
+    if first.status() != crate::core::CharacterStatus::Active
+        || second.status() != crate::core::CharacterStatus::Active
+    {
+        return Err(format!(
+            "family link {link_id} has an invalid active marriage lifecycle"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_adoptive_or_ward_link(
+    state: &AppState,
+    link_id: crate::ids::FamilyLinkId,
+    link: &crate::core::FamilyLink,
+    active_wards: &mut BTreeSet<crate::ids::CharacterId>,
+    active_player_wards: &mut usize,
+) -> Result<(), String> {
+    if !matches!(link.kind, FamilyLinkKind::Adoptive | FamilyLinkKind::Ward) {
+        return Ok(());
+    }
+    let first = state
+        .characters
+        .get(link.first_character_id)
+        .expect("validated family link character must exist");
+    let second = state
+        .characters
+        .get(link.second_character_id)
+        .expect("validated family link character must exist");
+    if first.dynasty_id() != second.dynasty_id() {
+        return Err(format!(
+            "family link {link_id} crosses dynasties for an adoptive or ward relationship"
+        ));
+    }
+    if !link.active || link.kind != FamilyLinkKind::Ward {
+        return Ok(());
+    }
+    if first.status() != crate::core::CharacterStatus::Active
+        || second.status() != crate::core::CharacterStatus::Active
+        || !state
+            .family_councils
+            .get(&second.dynasty_id())
+            .is_some_and(|council| council.members.contains(&second.id()))
+    {
+        return Err(format!(
+            "family link {link_id} has an invalid active ward lifecycle"
+        ));
+    }
+    if !active_wards.insert(link.second_character_id) {
+        return Err(format!(
+            "family link {link_id} gives one character multiple active ward relationships"
+        ));
+    }
+    if second.dynasty_id() == state.player_dynasty_id {
+        *active_player_wards += 1;
+    }
+    Ok(())
+}
+
+fn validate_parent_child_link(
+    state: &AppState,
+    link_id: crate::ids::FamilyLinkId,
+    link: &crate::core::FamilyLink,
+) -> Result<(), String> {
+    if link.kind != FamilyLinkKind::ParentChild {
+        return Ok(());
+    }
+    let parent = state
+        .characters
+        .get(link.first_character_id)
+        .expect("validated family link character must exist");
+    let child = state
+        .characters
+        .get(link.second_character_id)
+        .expect("validated family link character must exist");
+    if child.birth_day().saturating_sub(parent.birth_day())
+        < crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS
+    {
+        return Err(format!(
+            "family link {link_id} has impossible parent-child chronology"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_family_councils(state: &AppState) -> Result<(), String> {
     if state.family_councils.len() != state.dynasties.len() {
         return Err("every dynasty must have exactly one family council".to_owned());
     }
@@ -1252,6 +1373,7 @@ fn validate_family_records(state: &AppState) -> Result<(), String> {
 
 fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String> {
     let mut officeholders = BTreeSet::new();
+    let mut player_memberships = BTreeMap::new();
     for (institution_id, institution) in &state.institutions {
         let unsupported_player_member = institution.members.iter().any(|character_id| {
             state
@@ -1294,6 +1416,23 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
                 "institution {institution_id} duplicates an existing officeholder"
             ));
         }
+        for character_id in &institution.members {
+            if state
+                .characters
+                .get(*character_id)
+                .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+            {
+                *player_memberships.entry(*character_id).or_insert(0_usize) += 1;
+            }
+        }
+    }
+    if let Some((character_id, memberships)) = player_memberships.iter().find(|(_, memberships)| {
+        **memberships > crate::systems::MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER
+    }) {
+        return Err(format!(
+            "player character {character_id} belongs to {memberships} institutions, exceeding the supported maximum of {}",
+            crate::systems::MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER
+        ));
     }
     for (pair, relationship) in &state.relationships {
         if relationship.pair != *pair
@@ -1301,8 +1440,20 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
             || !state.dynasties.contains_key(&pair.first)
             || !state.dynasties.contains_key(&pair.second)
             || relationship.last_interaction_day > state.clock.day()
+            || relationship.memories.len() > crate::systems::MAX_RELATIONSHIP_MEMORIES
         {
             return Err("relationship map contains an invalid dynasty pair".to_owned());
+        }
+    }
+    let dynasty_ids: Vec<_> = state.dynasties.keys().copied().collect();
+    for (index, left_dynasty_id) in dynasty_ids.iter().enumerate() {
+        for right_dynasty_id in dynasty_ids.iter().skip(index + 1) {
+            let pair = crate::core::DynastyPair::new(*left_dynasty_id, *right_dynasty_id);
+            if !state.relationships.contains_key(&pair) {
+                return Err(format!(
+                    "relationship map is missing dynasty pair {left_dynasty_id}/{right_dynasty_id}"
+                ));
+            }
         }
     }
     validate_misc_record_ids_and_refs(state)
@@ -1392,6 +1543,8 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
 }
 
 fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
+    let mut active_public_works = BTreeSet::new();
+    let mut active_player_sponsored_works = 0_usize;
     for (work_id, work) in &state.public_works {
         if work.id != *work_id
             || !state.districts.contains_key(&work.district_id)
@@ -1401,6 +1554,26 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
         {
             return Err(format!("public work {work_id} has an invalid reference"));
         }
+        if matches!(
+            work.status,
+            crate::core::PublicWorkStatus::Building | crate::core::PublicWorkStatus::Suspended
+        ) {
+            if !active_public_works.insert((work.district_id, work.kind)) {
+                return Err(format!(
+                    "public work {work_id} duplicates an unfinished project of the same kind in district {}",
+                    work.district_id
+                ));
+            }
+            if work.sponsor_dynasty_id == Some(state.player_dynasty_id) {
+                active_player_sponsored_works += 1;
+            }
+        }
+    }
+    if active_player_sponsored_works > crate::systems::MAX_ACTIVE_SPONSORED_PUBLIC_WORKS {
+        return Err(format!(
+            "player dynasty sponsors {active_player_sponsored_works} unfinished public works, exceeding the supported maximum of {}",
+            crate::systems::MAX_ACTIVE_SPONSORED_PUBLIC_WORKS
+        ));
     }
     let mut active_cases = BTreeSet::new();
     for (case_id, legal_case) in &state.legal_cases {
@@ -1532,6 +1705,25 @@ fn hydrate_strategic_state(state: &mut AppState, migrated_from_legacy: bool) {
     }
     let registry = crate::registry::build_rivergate_registry();
     crate::systems::initialize_strategic_state(&registry, state);
+}
+
+fn normalize_family_link_lifecycle(state: &mut AppState) {
+    for link in state.family_links.values_mut() {
+        if !link.active || link.kind != FamilyLinkKind::Ward {
+            continue;
+        }
+        let guardian_active = state
+            .characters
+            .get(link.first_character_id)
+            .is_some_and(|character| character.status() == crate::core::CharacterStatus::Active);
+        let ward_active = state
+            .characters
+            .get(link.second_character_id)
+            .is_some_and(|character| character.status() == crate::core::CharacterStatus::Active);
+        if !guardian_active || !ward_active {
+            link.active = false;
+        }
+    }
 }
 
 fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, PersistenceError> {

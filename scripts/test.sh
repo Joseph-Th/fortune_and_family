@@ -17,6 +17,7 @@ usage:
   $0 docs                run documentation consistency and doctests
   $0 cli                 run CLI smoke tests
   $0 gameplay            run release gameplay and generation-length quality gates
+  $0 gameplay-audit      run mature multi-seed and multi-persona generation design audits
   $0 all                 run syntax, library, doc, soak, CLI, and gameplay tests
 EOF
   exit 2
@@ -201,6 +202,58 @@ if phase.get("decision_cycles", 0) == 0:
 '
 }
 
+run_gameplay_audit() {
+  local python_command
+  if python3 --version >/dev/null 2>&1; then
+    python_command=python3
+  elif python --version >/dev/null 2>&1; then
+    python_command=python
+  else
+    printf 'Python is required for deep gameplay validation\n' >&2
+    return 1
+  fi
+  run_step 'Mature multi-seed gameplay audit' \
+    cargo run --release --quiet --locked -- playtest \
+      --days 3600 \
+      --start-seed 1 \
+      --seeds 2 \
+      --trace-limit 30 \
+      --minimum-overall 75 \
+      --fail-on-critical \
+      --json \
+      --output target/gameplay-deep-audit.json
+  run_step 'Generation-length persona audit' \
+    cargo run --release --quiet --locked -- playtest \
+      --days 7200 \
+      --persona steward \
+      --persona entrepreneur \
+      --persona power-broker \
+      --persona opportunist \
+      --background baker \
+      --trace-limit 30 \
+      --minimum-overall 75 \
+      --fail-on-critical \
+      --json \
+      --output target/gameplay-generation-matrix.json
+  run_step 'Deep gameplay fantasy validation' "$python_command" -c '
+import json
+from pathlib import Path
+
+report = json.loads(Path("target/gameplay-generation-matrix.json").read_text(encoding="utf-8"))
+campaigns = report["campaigns"]
+expected_personas = {"Steward", "Entrepreneur", "PowerBroker", "Opportunist"}
+observed_personas = {campaign["persona"] for campaign in campaigns}
+if observed_personas != expected_personas:
+    raise SystemExit(f"generation audit personas differ: {sorted(observed_personas)}")
+missing = [campaign["persona"] for campaign in campaigns if campaign["fantasy_arc"]["first_succession_day"] is None]
+if missing:
+    raise SystemExit(f"generation audit did not reach succession for: {missing}")
+phase = report["aggregate"]["phase_stats"].get("SuccessionLegacy", {})
+if phase.get("decision_cycles", 0) == 0 or phase.get("substantive_actions", 0) == 0:
+    raise SystemExit("generation audit did not observe substantive succession-and-legacy play")
+'
+}
+
 case "$mode" in
   fast)
     [[ $# -le 2 ]] || usage
@@ -234,6 +287,10 @@ case "$mode" in
     [[ $# -eq 1 ]] || usage
     run_gameplay
     run_legacy_gameplay
+    ;;
+  gameplay-audit)
+    [[ $# -eq 1 ]] || usage
+    run_gameplay_audit
     ;;
   all)
     [[ $# -eq 1 ]] || usage

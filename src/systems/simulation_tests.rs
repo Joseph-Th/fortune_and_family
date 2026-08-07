@@ -1731,6 +1731,94 @@ mod health_and_succession {
     }
 
     #[test]
+    fn succession_deactivates_ward_links_to_the_outgoing_head() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let outgoing_head_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let ward_id = state.next_ids.character();
+        state.characters.insert(Character {
+            identity: CharacterIdentity {
+                id: ward_id,
+                dynasty_id,
+                name: "Succession Ward".to_owned(),
+                birth_day: state.clock.day().saturating_sub(18 * 360),
+            },
+            capabilities: CharacterCapabilities {
+                administration: 45,
+                commerce: 45,
+                social: 45,
+                craft: 45,
+            },
+            runtime: CharacterRuntime {
+                status: CharacterStatus::Active,
+                health_basis_points: 9_000,
+                loyalty_basis_points: 8_000,
+                role: CharacterRole::Clerk,
+            },
+        });
+        state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("player family council must exist")
+            .members
+            .insert(ward_id);
+        let ward_link_id = state.next_ids.family_link();
+        state.family_links.insert(
+            ward_link_id,
+            FamilyLink {
+                id: ward_link_id,
+                first_character_id: outgoing_head_id,
+                second_character_id: ward_id,
+                kind: FamilyLinkKind::Ward,
+                active: true,
+                property_claim_basis_points: 1_500,
+            },
+        );
+        state
+            .characters
+            .get_mut(outgoing_head_id)
+            .expect("outgoing head must exist")
+            .runtime
+            .health_basis_points = 0;
+
+        let successions =
+            decide_successions(&mut state).expect("forced succession must remain representable");
+        apply_successions(&mut state, successions);
+
+        assert!(
+            !state
+                .family_links
+                .get(&ward_link_id)
+                .expect("ward link must remain recorded")
+                .active,
+            "a deceased guardian cannot retain an active ward relationship"
+        );
+        assert_eq!(
+            state
+                .characters
+                .get(ward_id)
+                .expect("ward must remain recorded")
+                .status(),
+            CharacterStatus::Active
+        );
+        assert!(
+            state
+                .family_councils
+                .get(&dynasty_id)
+                .expect("player family council must exist")
+                .members
+                .contains(&ward_id),
+            "succession should end guardianship without expelling the adopted family member"
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn zero_health_forces_succession_before_normal_retirement_age() {
         let mut state = make_test_campaign();
         let dynasty_id = state.player_dynasty_id;

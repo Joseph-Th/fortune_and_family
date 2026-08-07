@@ -1341,6 +1341,147 @@ mod gameplay_stability {
     }
 
     #[test]
+    fn multiple_offices_add_portfolio_overhead_to_recurring_duties() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let player = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist");
+        let head_id = player.head_id();
+        let heir_id = player.heir_id().expect("player dynasty must have an heir");
+        let institution_ids: Vec<_> = state.institutions.keys().copied().take(2).collect();
+        assert_eq!(
+            institution_ids.len(),
+            2,
+            "campaign must contain two institutions"
+        );
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        state
+            .institutions
+            .get_mut(&institution_ids[0])
+            .expect("first institution must exist")
+            .office_holder_id = Some(head_id);
+        state
+            .institutions
+            .get_mut(&institution_ids[1])
+            .expect("second institution must exist")
+            .office_holder_id = Some(heir_id);
+        let base_duty = institution_ids
+            .iter()
+            .fold(Money::ZERO, |total, institution_id| {
+                let power_count = i64::try_from(
+                    state
+                        .institutions
+                        .get(institution_id)
+                        .expect("selected institution must exist")
+                        .powers
+                        .len(),
+                )
+                .expect("power count must fit i64");
+                total.saturating_add(OFFICE_DUTY_COST_PER_POWER.saturating_mul(power_count))
+            });
+        let expected = base_duty.saturating_add(
+            OFFICE_DUTY_PORTFOLIO_SURCHARGE_PER_ADDITIONAL_OFFICE.saturating_mul(2),
+        );
+        let treasury_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        assert_eq!(
+            projected_dynasty_monthly_office_duty(&state, player_id, 0),
+            expected,
+            "the projected reserve cost must match the canonical portfolio-scaled duty"
+        );
+        apply_office_duties(&mut state).expect("office duties must remain representable");
+
+        let player = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist");
+        assert_eq!(player.treasury(), treasury_before.saturating_sub(expected));
+        assert_eq!(player.civic_contributions(), expected);
+        assert_eq!(player.unmet_office_duties(), 0);
+    }
+
+    #[test]
+    fn concentrated_office_control_creates_member_house_backlash() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let player = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist");
+        let head_id = player.head_id();
+        let heir_id = player.heir_id().expect("player dynasty must have an heir");
+        let institution_ids: Vec<_> = state.institutions.keys().copied().take(2).collect();
+        assert_eq!(
+            institution_ids.len(),
+            2,
+            "campaign must contain two institutions"
+        );
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        for (institution_id, holder_id) in institution_ids.iter().zip([head_id, heir_id]) {
+            let institution = state
+                .institutions
+                .get_mut(institution_id)
+                .expect("selected institution must exist");
+            institution.members.insert(holder_id);
+            institution.office_holder_id = Some(holder_id);
+        }
+        let rival_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival dynasty");
+        let pair = DynastyPair::new(player_id, rival_id);
+        let before = state
+            .relationships
+            .get(&pair)
+            .expect("player and rival must have a relationship")
+            .clone();
+
+        apply_office_concentration_backlash(&mut state, institution_ids[1], heir_id);
+
+        let after = state
+            .relationships
+            .get(&pair)
+            .expect("player and rival must have a relationship");
+        assert_eq!(
+            after.trust_basis_points,
+            before.trust_basis_points.saturating_sub(60)
+        );
+        assert_eq!(
+            after.respect_basis_points,
+            before.respect_basis_points.saturating_add(30).min(10_000)
+        );
+        assert_eq!(
+            after.fear_basis_points,
+            before.fear_basis_points.saturating_add(40).min(10_000)
+        );
+        assert_eq!(
+            after.resentment_basis_points,
+            before
+                .resentment_basis_points
+                .saturating_add(120)
+                .min(10_000)
+        );
+        assert!(
+            after
+                .memories
+                .last()
+                .is_some_and(|memory| memory.contains("consolidated 2 offices"))
+        );
+    }
+
+    #[test]
     fn office_duty_contribution_overflow_is_atomic() {
         let registry = test_registry();
         let mut state = make_test_campaign();
@@ -1394,6 +1535,67 @@ mod gameplay_stability {
             &before,
             &state,
             "civic contribution overflow must be rejected before any ledger moves",
+        );
+    }
+
+    #[test]
+    fn multi_office_duty_overflow_is_preflighted_before_any_payment() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let player = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist");
+        let head_id = player.head_id();
+        let heir_id = player.heir_id().expect("player dynasty must have an heir");
+        let institution_ids: Vec<_> = state.institutions.keys().copied().take(2).collect();
+        assert_eq!(
+            institution_ids.len(),
+            2,
+            "campaign must contain two institutions"
+        );
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        state
+            .institutions
+            .get_mut(&institution_ids[0])
+            .expect("first institution must exist")
+            .office_holder_id = Some(head_id);
+        state
+            .institutions
+            .get_mut(&institution_ids[1])
+            .expect("second institution must exist")
+            .office_holder_id = Some(heir_id);
+        let first_power_count = state
+            .institutions
+            .get(&institution_ids[0])
+            .expect("first institution must exist")
+            .powers
+            .len();
+        let first_payment = office_duty_required(first_power_count, 2);
+        let player = state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist");
+        player.resources.treasury = Money::from_copper(100_000);
+        player.resources.civic_contributions =
+            Money::from_copper(i64::MAX).saturating_sub(first_payment);
+        let before = state.clone();
+
+        let result = apply_office_duties(&mut state);
+
+        assert!(matches!(
+            result,
+            Err(SimulationError::DynastyCivicContributionsOverflow {
+                dynasty_id,
+                ..
+            }) if dynasty_id == player_id
+        ));
+        assert_state_unchanged(
+            &before,
+            &state,
+            "multi-office civic contribution overflow must be rejected before any ledger moves",
         );
     }
 

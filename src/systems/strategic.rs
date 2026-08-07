@@ -27,10 +27,14 @@ use thiserror::Error;
 
 pub(crate) const OFFICE_ADMINISTRATIVE_LOAD_PER_POWER: u16 = 10;
 pub(crate) const OFFICE_DUTY_COST_PER_POWER: Money = Money::from_copper(100);
+pub(crate) const OFFICE_DUTY_PORTFOLIO_SURCHARGE_PER_ADDITIONAL_OFFICE: Money =
+    Money::from_copper(50);
 const OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS: i64 = 90;
 const OFFICE_DUTY_FORFEITURE_WINDOW_DAYS: i64 = 90;
 const OFFICE_DUTY_REELECTION_BAN_DAYS: i64 = 180;
 const OFFICE_DUTY_FORFEITURE_THRESHOLD: usize = 3;
+const OFFICE_CONCENTRATION_BACKLASH_PER_ADDITIONAL_OFFICE: i16 = 120;
+const MAX_OFFICE_CONCENTRATION_BACKLASH: i16 = 600;
 pub(crate) const DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS: i64 = 180;
 pub(crate) const PROPERTY_LIQUIDATION_BASIS_POINTS: i64 = 5_000;
 const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000);
@@ -4419,7 +4423,7 @@ pub(crate) fn adjust_dynasty_relationship(
     relationship.last_interaction_day = day;
 }
 
-const MAX_RELATIONSHIP_MEMORIES: usize = 12;
+pub(crate) const MAX_RELATIONSHIP_MEMORIES: usize = 12;
 
 pub(crate) fn remember_dynasty_interaction(
     state: &mut AppState,
@@ -4738,19 +4742,150 @@ pub(crate) fn dynasty_office_administrative_load(state: &AppState, dynasty_id: D
         })
 }
 
+fn office_duty_required(power_count: usize, office_count: usize) -> Money {
+    if power_count == 0 || office_count == 0 {
+        return Money::ZERO;
+    }
+    let power_count = i64::try_from(power_count).unwrap_or(i64::MAX);
+    let additional_offices = i64::try_from(office_count.saturating_sub(1)).unwrap_or(i64::MAX);
+    OFFICE_DUTY_COST_PER_POWER
+        .saturating_mul(power_count)
+        .saturating_add(
+            OFFICE_DUTY_PORTFOLIO_SURCHARGE_PER_ADDITIONAL_OFFICE
+                .saturating_mul(additional_offices),
+        )
+}
+
+pub(crate) fn projected_dynasty_monthly_office_duty(
+    state: &AppState,
+    dynasty_id: DynastyId,
+    additional_office_power_count: usize,
+) -> Money {
+    let held_power_counts: Vec<_> = state
+        .institutions
+        .values()
+        .filter(|institution| {
+            institution.office_holder_id.is_some_and(|character_id| {
+                state
+                    .characters
+                    .get(character_id)
+                    .is_some_and(|character| character.dynasty_id() == dynasty_id)
+            })
+        })
+        .map(|institution| institution.powers.len())
+        .collect();
+    let office_count = held_power_counts
+        .len()
+        .saturating_add(usize::from(additional_office_power_count > 0));
+    held_power_counts
+        .into_iter()
+        .chain((additional_office_power_count > 0).then_some(additional_office_power_count))
+        .fold(Money::ZERO, |total, power_count| {
+            total.saturating_add(office_duty_required(power_count, office_count))
+        })
+}
+
+#[derive(Clone, Copy)]
+struct OfficeDutyPlan {
+    institution_id: InstitutionId,
+    dynasty_id: DynastyId,
+    power_count: usize,
+    office_count: usize,
+}
+
 fn apply_office_duties(state: &mut AppState) -> Result<(), SimulationError> {
+    let office_counts = state
+        .institutions
+        .values()
+        .filter_map(|institution| {
+            let holder_id = institution.office_holder_id?;
+            state
+                .characters
+                .get(holder_id)
+                .map(crate::core::Character::dynasty_id)
+        })
+        .fold(
+            BTreeMap::<DynastyId, usize>::new(),
+            |mut counts, dynasty_id| {
+                *counts.entry(dynasty_id).or_default() += 1;
+                counts
+            },
+        );
     let duties: Vec<_> = state
         .institutions
         .values()
         .filter_map(|institution| {
             let holder_id = institution.office_holder_id?;
             let dynasty_id = state.characters.get(holder_id)?.dynasty_id();
-            let power_count = u16::try_from(institution.powers.len()).unwrap_or(u16::MAX);
-            Some((institution.institution_id, dynasty_id, power_count))
+            let office_count = office_counts.get(&dynasty_id).copied().unwrap_or(1);
+            Some(OfficeDutyPlan {
+                institution_id: institution.institution_id,
+                dynasty_id,
+                power_count: institution.powers.len(),
+                office_count,
+            })
         })
         .collect();
-    for (institution_id, dynasty_id, power_count) in duties {
-        apply_office_duty(state, institution_id, dynasty_id, power_count)?;
+    preflight_office_duty_contributions(state, &duties)?;
+    for duty in duties {
+        apply_office_duty(
+            state,
+            duty.institution_id,
+            duty.dynasty_id,
+            duty.power_count,
+            duty.office_count,
+        )?;
+    }
+    Ok(())
+}
+
+fn preflight_office_duty_contributions(
+    state: &AppState,
+    duties: &[OfficeDutyPlan],
+) -> Result<(), SimulationError> {
+    let mut projected_treasuries = BTreeMap::new();
+    let mut projected_contributions = BTreeMap::new();
+    for duty in duties {
+        let required = office_duty_required(duty.power_count, duty.office_count);
+        let institution_budget = state
+            .institutions
+            .get(&duty.institution_id)
+            .expect("office institution must exist")
+            .budget;
+        let collectible = required.min(institution_budget.max_nonnegative_addend());
+        let treasury = projected_treasuries
+            .entry(duty.dynasty_id)
+            .or_insert_with(|| {
+                state
+                    .dynasties
+                    .get(&duty.dynasty_id)
+                    .expect("officeholder dynasty must exist")
+                    .treasury()
+            });
+        let paid = collectible.min(*treasury);
+        *treasury = treasury
+            .checked_sub(paid)
+            .expect("projected office-duty payment must not exceed treasury");
+        if paid == Money::ZERO {
+            continue;
+        }
+        let contributions = projected_contributions
+            .entry(duty.dynasty_id)
+            .or_insert_with(|| {
+                state
+                    .dynasties
+                    .get(&duty.dynasty_id)
+                    .expect("officeholder dynasty must exist")
+                    .resources
+                    .civic_contributions
+            });
+        *contributions = contributions.checked_add(paid).ok_or(
+            SimulationError::DynastyCivicContributionsOverflow {
+                dynasty_id: duty.dynasty_id,
+                current: *contributions,
+                incoming: paid,
+            },
+        )?;
     }
     Ok(())
 }
@@ -4759,9 +4894,10 @@ fn apply_office_duty(
     state: &mut AppState,
     institution_id: crate::ids::InstitutionId,
     dynasty_id: DynastyId,
-    power_count: u16,
+    power_count: usize,
+    office_count: usize,
 ) -> Result<(), SimulationError> {
-    let required = OFFICE_DUTY_COST_PER_POWER.saturating_mul(i64::from(power_count));
+    let required = office_duty_required(power_count, office_count);
     let institution_budget = state
         .institutions
         .get(&institution_id)
@@ -5327,16 +5463,19 @@ fn resolve_institution_selections(
         selections.push((institution_id, winner, term_number));
     }
 
-    for (institution_id, winner, term_number) in selections {
+    for (institution_id, winner, term_number) in &selections {
         let institution = state
             .institutions
-            .get_mut(&institution_id)
+            .get_mut(institution_id)
             .expect("institution runtime must exist");
-        institution.office_holder_id = winner;
+        institution.office_holder_id = *winner;
         institution.term_started_day = day;
         institution.next_selection_day = day.saturating_add(super::OFFICE_TERM_DAYS);
-        institution.term_number = term_number;
+        institution.term_number = *term_number;
+    }
+    for (institution_id, winner, term_number) in selections {
         if let Some(winner) = winner {
+            apply_office_concentration_backlash(state, institution_id, winner);
             push_outbox(
                 state,
                 OutboxKind::Politics,
@@ -5346,6 +5485,64 @@ fn resolve_institution_selections(
         }
     }
     Ok(())
+}
+
+fn apply_office_concentration_backlash(
+    state: &mut AppState,
+    institution_id: InstitutionId,
+    winner_id: CharacterId,
+) {
+    let winner_dynasty_id = state
+        .characters
+        .get(winner_id)
+        .expect("selected officeholder must exist")
+        .dynasty_id();
+    let office_count = state
+        .institutions
+        .values()
+        .filter(|institution| {
+            institution.office_holder_id.is_some_and(|character_id| {
+                state
+                    .characters
+                    .get(character_id)
+                    .is_some_and(|character| character.dynasty_id() == winner_dynasty_id)
+            })
+        })
+        .count();
+    let additional_offices = office_count.saturating_sub(1);
+    if additional_offices == 0 {
+        return;
+    }
+    let backlash = i16::try_from(additional_offices)
+        .unwrap_or(i16::MAX)
+        .saturating_mul(OFFICE_CONCENTRATION_BACKLASH_PER_ADDITIONAL_OFFICE)
+        .min(MAX_OFFICE_CONCENTRATION_BACKLASH);
+    let member_dynasties: BTreeSet<_> = state
+        .institutions
+        .get(&institution_id)
+        .expect("selected institution must exist")
+        .members
+        .iter()
+        .filter_map(|character_id| state.characters.get(*character_id))
+        .map(crate::core::Character::dynasty_id)
+        .filter(|dynasty_id| *dynasty_id != winner_dynasty_id)
+        .collect();
+    for member_dynasty_id in member_dynasties {
+        adjust_dynasty_relationship(
+            state,
+            winner_dynasty_id,
+            member_dynasty_id,
+            RelationshipDelta::new(-(backlash / 2), 30, backlash / 3, backlash, 0),
+        );
+        remember_dynasty_interaction(
+            state,
+            winner_dynasty_id,
+            member_dynasty_id,
+            &format!(
+                "house {winner_dynasty_id} consolidated {office_count} offices after winning institution {institution_id}, increasing coalition resistance"
+            ),
+        );
+    }
 }
 
 pub(crate) fn institution_capability_score(

@@ -15,13 +15,13 @@ use crate::systems::{
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, EducationFocus, FAMILY_COUNCIL_MEETING_COST,
     FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
     HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
-    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST, INFORMATION_LEVERAGE_COST,
-    INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
-    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
-    InformationFocus, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
-    LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
-    MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError, OFFICE_DUTY_COST_PER_POWER,
+    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST,
+    INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST, INSTITUTION_SUPPORT_COST,
+    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
+    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, InformationFocus, LABOR_REPLACEMENT_COST,
+    LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST,
+    LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
     OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
     OFFICE_POWER_ESTABLISHMENT_DAYS, PRIVATE_LOAN_COUNTERPARTY_RESERVE,
@@ -34,9 +34,9 @@ use crate::systems::{
     contract_relationship_pressure_basis_points, crisis_response_contains_crisis,
     has_established_player_office_power, institution_capability_score,
     institution_membership_count, institution_support_day, institution_support_next_day,
-    office_nomination_next_day, player_contract_deliveries, quote_business_acquisition,
-    quote_information_leverage, quote_property_liquidation, required_office_power_for_law,
-    validate_invariants,
+    office_nomination_next_day, player_contract_deliveries, projected_dynasty_monthly_office_duty,
+    quote_business_acquisition, quote_information_leverage, quote_property_liquidation,
+    required_office_power_for_law, validate_invariants,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -139,6 +139,9 @@ const AGENT_OPPORTUNIST_LOAN_INTEREST_BASIS_POINTS: u16 = 1_800;
 const AGENT_EXTERNAL_CREDIT_TREASURY_PRESSURE: Money = Money::from_copper(25_000);
 const AGENT_OFFICE_DUTY_RESERVE_MONTHS: i64 = 12;
 const AGENT_OFFICE_LIQUIDITY_BUFFER: Money = Money::from_copper(5_000);
+const AGENT_FAMILY_COUNCIL_DUTY_RESERVE_MONTHS: i64 = 6;
+const AGENT_FAMILY_COUNCIL_LIQUIDITY_BUFFER: Money = Money::from_copper(2_500);
+const FAMILY_COUNCIL_INTERVENTION_UNITY_THRESHOLD: u16 = 7_000;
 const AGENT_CONTRACT_DURATION_WEEKS: u16 = 104;
 const AGENT_CASH_REBALANCE_TRIGGER: Money = Money::from_copper(1_000);
 const AGENT_CASH_REBALANCE_BUFFER: Money = Money::from_copper(2_000);
@@ -146,6 +149,7 @@ const AGENT_CASH_REBALANCE_INTERVAL_DAYS: i64 = 28;
 const AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS: i64 = 360;
 const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_000);
 const AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 720;
+const AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS: u16 = 1_500;
 const AGENT_INFORMATION_LEVERAGE_DELAY_DAYS: i64 = 90;
 const INFORMATION_ROUTINE_PAIR_WINDOW_DAYS: i64 = 180;
 const AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS: u64 = 1_000;
@@ -824,15 +828,9 @@ impl RelationshipSnapshotPart {
                     .iter()
                     .map(|relationship| relationship.resentment_basis_points),
             ),
-            maximum_contract_pressure: relationships
-                .iter()
-                .filter_map(|relationship| {
-                    relationship_counterparty_id(relationship, player_id).map(|dynasty_id| {
-                        contract_relationship_pressure_basis_points(state, dynasty_id)
-                    })
-                })
-                .max()
-                .unwrap_or(0),
+            maximum_contract_pressure: maximum_player_contract_relationship_pressure_basis_points(
+                state, player_id,
+            ),
             obligation_total: relationships.iter().fold(0_i64, |total, relationship| {
                 total.saturating_add(i64::from(relationship.obligation))
             }),
@@ -3281,7 +3279,17 @@ fn candidate_preserves_office_duty_reserve(
         | PlayerCommand::LeverageInformation { .. }
         | PlayerCommand::AcknowledgeNotification { .. } => 0,
     };
-    let reserve = player_office_duty_reserve(state, additional_powers);
+    let reserve = if matches!(candidate.command, PlayerCommand::ConveneFamilyCouncil)
+        && state
+            .family_councils
+            .get(&state.player_dynasty_id)
+            .is_some_and(|council| {
+                council.unity_basis_points < FAMILY_COUNCIL_INTERVENTION_UNITY_THRESHOLD
+            }) {
+        player_family_recovery_office_duty_reserve(state)
+    } else {
+        player_office_duty_reserve(state, additional_powers)
+    };
     let reserve = if additional_powers > 0 && player_has_office_duty_forfeiture(state) {
         reserve.saturating_mul(3)
     } else {
@@ -3352,28 +3360,24 @@ fn candidate_is_emergency_spending(state: &AppState, candidate: &Candidate) -> b
 }
 
 fn player_office_duty_reserve(state: &AppState, additional_powers: usize) -> Money {
-    let existing_powers = state
-        .institutions
-        .values()
-        .filter(|institution| {
-            institution.office_holder_id.is_some_and(|character_id| {
-                state
-                    .characters
-                    .get(character_id)
-                    .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
-            })
-        })
-        .map(|institution| institution.powers.len())
-        .sum::<usize>();
-    let total_powers = existing_powers.saturating_add(additional_powers);
-    if total_powers == 0 {
+    let monthly_duty =
+        projected_dynasty_monthly_office_duty(state, state.player_dynasty_id, additional_powers);
+    if monthly_duty == Money::ZERO {
         return Money::ZERO;
     }
-    let power_count = i64::try_from(total_powers).unwrap_or(i64::MAX);
-    OFFICE_DUTY_COST_PER_POWER
-        .saturating_mul(power_count)
+    monthly_duty
         .saturating_mul(AGENT_OFFICE_DUTY_RESERVE_MONTHS)
         .saturating_add(AGENT_OFFICE_LIQUIDITY_BUFFER)
+}
+
+fn player_family_recovery_office_duty_reserve(state: &AppState) -> Money {
+    let monthly_duty = projected_dynasty_monthly_office_duty(state, state.player_dynasty_id, 0);
+    if monthly_duty == Money::ZERO {
+        return Money::ZERO;
+    }
+    monthly_duty
+        .saturating_mul(AGENT_FAMILY_COUNCIL_DUTY_RESERVE_MONTHS)
+        .saturating_add(AGENT_FAMILY_COUNCIL_LIQUIDITY_BUFFER)
 }
 
 fn candidate_player_treasury_cost(
@@ -5093,11 +5097,22 @@ fn generate_information_candidates(
         })
         .map(AuditRecord::day)
         .max();
+    let commission_interval = if matches!(
+        persona,
+        GameplayPersona::PowerBroker | GameplayPersona::Opportunist
+    ) && maximum_player_contract_relationship_pressure_basis_points(
+        state,
+        state.player_dynasty_id,
+    )
+        >= AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS
+    {
+        INFORMATION_COMMISSION_INTERVAL_DAYS
+    } else {
+        AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS
+    };
     let available = report_commission_day
         .max(audit_commission_day)
-        .is_none_or(|day| {
-            state.clock.day() >= day.saturating_add(AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS)
-        });
+        .is_none_or(|day| state.clock.day() >= day.saturating_add(commission_interval));
     if !available {
         return;
     }
@@ -5386,6 +5401,21 @@ fn relationship_counterparty_id(
     } else {
         None
     }
+}
+
+fn maximum_player_contract_relationship_pressure_basis_points(
+    state: &AppState,
+    player_id: DynastyId,
+) -> u16 {
+    state
+        .relationships
+        .values()
+        .filter_map(|relationship| {
+            relationship_counterparty_id(relationship, player_id)
+                .map(|dynasty_id| contract_relationship_pressure_basis_points(state, dynasty_id))
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn generate_civic_candidates(
@@ -5810,12 +5840,11 @@ fn generate_family_council_candidate(
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) {
-    const COUNCIL_INTERVENTION_UNITY_THRESHOLD: u16 = 7_000;
     let dynasty_id = state.player_dynasty_id;
     let Some(council) = state.family_councils.get(&dynasty_id) else {
         return;
     };
-    if council.unity_basis_points >= COUNCIL_INTERVENTION_UNITY_THRESHOLD
+    if council.unity_basis_points >= FAMILY_COUNCIL_INTERVENTION_UNITY_THRESHOLD
         || state
             .dynasties
             .get(&dynasty_id)
@@ -5841,7 +5870,7 @@ fn generate_family_council_candidate(
         return;
     }
     let pressure_bonus = i64::from(
-        COUNCIL_INTERVENTION_UNITY_THRESHOLD.saturating_sub(council.unity_basis_points) / 50,
+        FAMILY_COUNCIL_INTERVENTION_UNITY_THRESHOLD.saturating_sub(council.unity_basis_points) / 50,
     );
     let persona_bonus = match persona {
         GameplayPersona::Steward => 30,
@@ -6476,21 +6505,7 @@ fn generate_institution_withdrawal_candidates(
 }
 
 fn player_current_office_duty_cost(state: &AppState) -> Money {
-    state
-        .institutions
-        .values()
-        .filter(|institution| {
-            institution.office_holder_id.is_some_and(|character_id| {
-                state
-                    .characters
-                    .get(character_id)
-                    .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
-            })
-        })
-        .fold(Money::ZERO, |total, institution| {
-            let powers = i64::try_from(institution.powers.len()).unwrap_or(i64::MAX);
-            total.saturating_add(OFFICE_DUTY_COST_PER_POWER.saturating_mul(powers))
-        })
+    projected_dynasty_monthly_office_duty(state, state.player_dynasty_id, 0)
 }
 
 fn player_has_severe_business_distress(state: &AppState) -> bool {
@@ -8348,7 +8363,17 @@ fn add_information_routine_finding(
     campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
 ) {
-    let commissions: u32 = campaigns
+    let routine_campaigns: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| {
+            campaign.maximum_contract_relationship_pressure_basis_points
+                < AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS
+        })
+        .collect();
+    if routine_campaigns.is_empty() {
+        return;
+    }
+    let commissions: u32 = routine_campaigns
         .iter()
         .map(|campaign| {
             campaign
@@ -8357,11 +8382,11 @@ fn add_information_routine_finding(
                 .map_or(0, |stats| stats.executed)
         })
         .sum();
-    let pairs: u32 = campaigns
+    let pairs: u32 = routine_campaigns
         .iter()
         .map(|campaign| u32::from(campaign.commission_leverage_pairs))
         .sum();
-    let simulated_days = campaigns.iter().fold(0_u64, |total, campaign| {
+    let simulated_days = routine_campaigns.iter().fold(0_u64, |total, campaign| {
         total.saturating_add(u64::from(campaign.simulated_days))
     });
     let commissions_per_hundred_campaign_years = scaled_ratio_u64(
@@ -8379,7 +8404,7 @@ fn add_information_routine_finding(
         severity: GameplayFindingSeverity::Warning,
         title: "Commissioned intelligence becomes a routine two-step ritual".to_owned(),
         evidence: format!(
-            "{pairs} of {commissions} commissioned reports were leveraged within {INFORMATION_ROUTINE_PAIR_WINDOW_DAYS} days, at a rate of {commissions_per_hundred_campaign_years} commissions per 100 campaign-years. Intelligence is functioning, but the repeated commission-then-spend sequence risks becoming scheduled maintenance rather than a response to uncertainty."
+            "{pairs} of {commissions} commissioned reports in non-severe-pressure campaigns were leveraged within {INFORMATION_ROUTINE_PAIR_WINDOW_DAYS} days, at a rate of {commissions_per_hundred_campaign_years} commissions per 100 campaign-years. Intelligence is functioning, but the repeated commission-then-spend sequence risks becoming scheduled maintenance rather than a response to uncertainty. Campaigns that reached at least {AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS} bp of relationship-driven contract pressure are excluded because their faster political intelligence cadence is an explicit response to material exposure."
         ),
     });
 }
@@ -10272,11 +10297,6 @@ fn add_power_exposure_finding(
     let sheltered = established
         .iter()
         .filter(|campaign| {
-            let civic_contribution = campaign
-                .end
-                .player_civic_contributions
-                .copper()
-                .saturating_sub(campaign.start.player_civic_contributions.copper());
             let unmet_duties = campaign
                 .end
                 .player_unmet_office_duties
@@ -10287,7 +10307,7 @@ fn add_power_exposure_finding(
                 && campaign.end.insolvent_businesses == 0
                 && campaign.end.player_treasury.copper()
                     >= campaign.start.player_treasury.copper().saturating_div(2)
-                && civic_contribution < 5_000
+                && campaign.maximum_contract_relationship_pressure_basis_points < 1_500
                 && unmet_duties == 0
         })
         .count();
@@ -10296,9 +10316,9 @@ fn add_power_exposure_finding(
     }
     findings.push(GameplayFinding {
         severity: GameplayFindingSeverity::Warning,
-        title: "Established dynasties often avoid measured internal exposure".to_owned(),
+        title: "Established dynasties often avoid measured power exposure".to_owned(),
         evidence: format!(
-            "{sheltered} of {} officeholding campaigns reached the endpoint without a player labor dispute, contract failure, distressed business, insolvent business, major treasury drawdown, material civic contribution, or unmet office duty. The design calls for greater power to create obligations and vulnerability, not only additional tools.",
+            "{sheltered} of {} officeholding campaigns reached the endpoint without a player labor dispute, contract failure, distressed business, insolvent business, major treasury drawdown, at least 1,500 basis points of relationship-driven contract pressure, or unmet office duty. Routine civic payments no longer count as meaningful exposure by themselves; political backlash does count once it materially worsens commercial bargaining. The design calls for greater power to create consequential obligations and vulnerability, not only additional tools.",
             established.len()
         ),
     });
