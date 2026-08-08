@@ -2130,7 +2130,7 @@ fn initialize_properties(registry: &Registry, state: &mut AppState) {
                 owner_dynasty_id: None,
                 occupant_business_id: None,
                 tenant_dynasty_id: None,
-                value: Money::from_copper(34_000),
+                value: Money::from_copper(55_000),
                 weekly_rent: Money::from_copper(420),
                 condition_basis_points: 6_500,
                 collateral_loan_id: None,
@@ -3681,8 +3681,6 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
 }
 
 fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
-    let annual_rent_limit =
-        active_law_value(state, LawKind::RentRestriction).map(|value| value.clamp(0, 10_000));
     let rents: Vec<_> = state
         .properties
         .values()
@@ -3691,16 +3689,11 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
                 property.owner_dynasty_id?,
                 property.tenant_dynasty_id,
                 property.occupant_business_id,
-                property.weekly_rent,
-                property.value,
+                effective_property_weekly_rent(state, property),
             ))
         })
         .collect();
-    for (owner_id, tenant_id, occupant_business_id, contractual_rent, property_value) in rents {
-        let rent = annual_rent_limit.map_or(contractual_rent, |limit| {
-            let annual_cap = property_value.saturating_mul_ratio(limit, 10_000);
-            contractual_rent.min(Money::from_copper(annual_cap.copper() / 52))
-        });
+    for (owner_id, tenant_id, occupant_business_id, rent) in rents {
         let paid = if let Some(tenant_id) = tenant_id {
             if owner_id == tenant_id {
                 continue;
@@ -3769,6 +3762,28 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
     Ok(())
 }
 
+pub(crate) fn effective_property_weekly_rent(state: &AppState, property: &Property) -> Money {
+    let indexed_rent =
+        if property.tenant_dynasty_id.is_none() && property.occupant_business_id.is_none() {
+            let rent_index = state
+                .districts
+                .get(&property.district_id)
+                .expect("property district runtime must exist")
+                .rent_index_basis_points;
+            property
+                .weekly_rent
+                .saturating_mul_ratio(i64::from(rent_index), 10_000)
+        } else {
+            property.weekly_rent
+        };
+    active_law_value(state, LawKind::RentRestriction).map_or(indexed_rent, |limit| {
+        let annual_cap = property
+            .value
+            .saturating_mul_ratio(limit.clamp(0, 10_000), 10_000);
+        indexed_rent.min(Money::from_copper(annual_cap.copper() / 52))
+    })
+}
+
 fn distribute_business_dividends(
     registry: &Registry,
     state: &mut AppState,
@@ -3825,7 +3840,7 @@ fn distribute_business_dividends(
             next_finance_version,
         ));
     }
-    let mut total = Money::ZERO;
+    let mut total_copper = 0_i128;
     for (business_id, owner_id, dividend, resulting_cash, next_finance_version) in dividends {
         let business = state
             .businesses
@@ -3842,14 +3857,14 @@ fn distribute_business_dividends(
             .treasury
             .checked_add(dividend)
             .expect("bounded dividend must fit owner treasury");
-        total = total.saturating_add(dividend);
+        total_copper += i128::from(dividend.copper());
     }
-    if total > Money::ZERO {
+    if total_copper > 0 {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::BusinessDividend,
             subject: "business-portfolio".into(),
-            detail: format!("dividends={}", total.copper()),
+            detail: format!("dividends={total_copper}"),
         });
     }
     Ok(())
@@ -4352,8 +4367,8 @@ fn update_quality_reputations(state: &mut AppState) {
     for dynasty_id in dynasty_ids {
         let mut total_quality = 0_u64;
         let mut business_count = 0_u64;
-        let mut lifetime_revenue = Money::ZERO;
-        let mut lifetime_costs = Money::ZERO;
+        let mut lifetime_revenue_copper = 0_i128;
+        let mut lifetime_costs_copper = 0_i128;
         for business in state.businesses.iter().filter(|business| {
             business.owner_dynasty_id() == dynasty_id
                 && business.status() != crate::core::BusinessStatus::Closed
@@ -4361,8 +4376,8 @@ fn update_quality_reputations(state: &mut AppState) {
             total_quality =
                 total_quality.saturating_add(u64::from(business.operations.quality_basis_points));
             business_count = business_count.saturating_add(1);
-            lifetime_revenue = lifetime_revenue.saturating_add(business.finance.lifetime_revenue);
-            lifetime_costs = lifetime_costs.saturating_add(business.finance.lifetime_costs);
+            lifetime_revenue_copper += i128::from(business.finance.lifetime_revenue.copper());
+            lifetime_costs_copper += i128::from(business.finance.lifetime_costs.copper());
         }
         if business_count == 0 {
             continue;
@@ -4375,8 +4390,8 @@ fn update_quality_reputations(state: &mut AppState) {
         let maximum_step = quality_reputation_step(
             dynasty.resources.reputation_quality_basis_points,
             target,
-            lifetime_revenue,
-            lifetime_costs,
+            lifetime_revenue_copper,
+            lifetime_costs_copper,
         );
         dynasty.resources.reputation_quality_basis_points = move_basis_points_toward(
             dynasty.resources.reputation_quality_basis_points,
@@ -4389,14 +4404,14 @@ fn update_quality_reputations(state: &mut AppState) {
 fn quality_reputation_step(
     current: u16,
     target: u16,
-    lifetime_revenue: Money,
-    lifetime_costs: Money,
+    lifetime_revenue_copper: i128,
+    lifetime_costs_copper: i128,
 ) -> u16 {
     if current >= target {
         return 50;
     }
-    let has_trade_history = lifetime_revenue > Money::ZERO || lifetime_costs > Money::ZERO;
-    if has_trade_history && lifetime_revenue >= lifetime_costs {
+    let has_trade_history = lifetime_revenue_copper > 0 || lifetime_costs_copper > 0;
+    if has_trade_history && lifetime_revenue_copper >= lifetime_costs_copper {
         50
     } else {
         25

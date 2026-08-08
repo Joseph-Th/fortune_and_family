@@ -163,7 +163,7 @@ pub(crate) use strategic::{
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, STANDARD_CONTRACT_BATCHES_PER_WEEK,
     available_supply_contract_capacity, business_recapitalization_target,
     capitalize_owned_business, crisis_response_contains_crisis, dynasty_office_administrative_load,
-    initialize_strategic_state, institution_capability_score,
+    effective_property_weekly_rent, initialize_strategic_state, institution_capability_score,
     projected_dynasty_monthly_office_duty,
 };
 pub use transactions::{

@@ -211,6 +211,48 @@ mod coverage {
     }
 
     #[test]
+    fn property_projection_exposes_district_adjusted_rent_yield() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.tenant_dynasty_id.is_none()
+                    && property.occupant_business_id.is_none()
+                    && property.weekly_rent > Money::ZERO
+            })
+            .expect("campaign must contain a vacant rentable property")
+            .id;
+        let (district_id, weekly_rent) = {
+            let property = state
+                .properties
+                .get(&property_id)
+                .expect("property must exist");
+            (property.district_id, property.weekly_rent)
+        };
+        state
+            .districts
+            .get_mut(&district_id)
+            .expect("property district must exist")
+            .rent_index_basis_points = 12_000;
+
+        let projection = build_campaign_projection(registry, &state);
+        let property = projection
+            .properties
+            .iter()
+            .find(|property| property.id == property_id)
+            .expect("property must be projected");
+
+        assert_eq!(property.weekly_rent, weekly_rent);
+        assert_eq!(property.district_rent_index_basis_points, 12_000);
+        assert_eq!(
+            property.effective_weekly_rent,
+            weekly_rent.saturating_mul_ratio(12_000, 10_000)
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "state and registry scenarios must match before projection")]
     fn summary_rejects_registry_mismatch() {
         let registry = rivergate_registry_for_test();

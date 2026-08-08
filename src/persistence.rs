@@ -419,7 +419,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         }
     }
     for property in state.properties.values() {
-        if property.value < Money::ZERO
+        if property.value <= Money::ZERO
             || property.weekly_rent < Money::ZERO
             || property.condition_basis_points > 10_000
         {
@@ -848,6 +848,9 @@ fn validate_strategic_records(
             return Err(format!(
                 "property {property_id} has an invalid identity reference"
             ));
+        }
+        if property.name.trim().is_empty() {
+            return Err(format!("property {property_id} has a blank name"));
         }
         for dynasty_id in [property.owner_dynasty_id, property.tenant_dynasty_id]
             .into_iter()
@@ -1441,6 +1444,10 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
             || !state.dynasties.contains_key(&pair.second)
             || relationship.last_interaction_day > state.clock.day()
             || relationship.memories.len() > crate::systems::MAX_RELATIONSHIP_MEMORIES
+            || relationship
+                .memories
+                .iter()
+                .any(|memory| memory.trim().is_empty())
         {
             return Err("relationship map contains an invalid dynasty pair".to_owned());
         }
@@ -1499,6 +1506,9 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
             || !state.dynasties.contains_key(&report.owner_dynasty_id)
             || report.created_day > state.clock.day()
             || report.expires_day < report.created_day
+            || report.subject.trim().is_empty()
+            || report.source.trim().is_empty()
+            || report.summary.trim().is_empty()
         {
             return Err(format!(
                 "information report {report_id} has an invalid reference"
@@ -1531,12 +1541,8 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
                 "AI objective {objective_id} has an invalid reference"
             ));
         }
-        if objective.status == crate::core::ObjectiveStatus::Achieved
-            && objective.rationale.is_empty()
-        {
-            return Err(format!(
-                "achieved AI objective {objective_id} has no rationale"
-            ));
+        if objective.rationale.trim().is_empty() {
+            return Err(format!("AI objective {objective_id} has no rationale"));
         }
     }
     Ok(())
@@ -1609,7 +1615,10 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
         }
     }
     for (route_id, route) in &state.external_routes {
-        if route.id != *route_id || !state.market.quotes.contains_key(&route.good_id) {
+        if route.id != *route_id
+            || route.name.trim().is_empty()
+            || !state.market.quotes.contains_key(&route.good_id)
+        {
             return Err(format!(
                 "external route {route_id} has an invalid reference"
             ));
@@ -1618,6 +1627,7 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
     for (crisis_id, crisis) in &state.crises {
         if crisis.id != *crisis_id
             || crisis.started_day > state.clock.day()
+            || crisis.cause.trim().is_empty()
             || crisis
                 .district_id
                 .is_some_and(|district_id| !state.districts.contains_key(&district_id))

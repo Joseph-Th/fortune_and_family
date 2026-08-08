@@ -11,7 +11,9 @@ use crate::ids::{
 };
 use crate::money::{Money, Quantity};
 use crate::registry::Registry;
-use crate::systems::{dynasty_office_administrative_load, quote_business_acquisition};
+use crate::systems::{
+    dynasty_office_administrative_load, effective_property_weekly_rent, quote_business_acquisition,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
@@ -335,6 +337,8 @@ pub struct PropertyProjection {
     pub owner: Option<String>,
     pub value: Money,
     pub weekly_rent: Money,
+    pub effective_weekly_rent: Money,
+    pub district_rent_index_basis_points: u16,
     pub condition_basis_points: u16,
     pub occupied_business_id: Option<BusinessId>,
 }
@@ -910,6 +914,12 @@ fn build_property_projections(registry: &Registry, state: &AppState) -> Vec<Prop
             }),
             value: property.value,
             weekly_rent: property.weekly_rent,
+            effective_weekly_rent: effective_property_weekly_rent(state, property),
+            district_rent_index_basis_points: state
+                .districts
+                .get(&property.district_id)
+                .expect("property district runtime must exist")
+                .rent_index_basis_points,
             condition_basis_points: property.condition_basis_points,
             occupied_business_id: property.occupant_business_id,
         })

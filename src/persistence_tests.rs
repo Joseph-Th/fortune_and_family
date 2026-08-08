@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::core::{
-    AuditKind, AuditRecord, CivicDebt, CivicDebtStatus, EnactedLaw, FamilyLinkKind, LawKind,
-    OfficeDirectiveState, OfficePower,
+    AuditKind, AuditRecord, CivicDebt, CivicDebtStatus, Crisis, CrisisKind, CrisisStatus,
+    EnactedLaw, FamilyLinkKind, LawKind, OfficeDirectiveState, OfficePower,
 };
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
 use crate::money::{Money, Quantity};
@@ -1211,6 +1211,147 @@ mod validation {
             load_state(&path),
             StateValidationKind::PrimaryRecords,
             "has a blank name",
+        );
+    }
+
+    #[test]
+    fn rejects_blank_property_name() {
+        let mut state = make_test_campaign();
+        state
+            .properties
+            .values_mut()
+            .next()
+            .expect("campaign must contain a property")
+            .name = " \t ".to_owned();
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("blank-property-name.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "has a blank name",
+        );
+    }
+
+    #[test]
+    fn rejects_zero_value_property() {
+        let mut state = make_test_campaign();
+        state
+            .properties
+            .values_mut()
+            .next()
+            .expect("campaign must contain a property")
+            .value = Money::ZERO;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("zero-value-property.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid financial value",
+        );
+    }
+
+    #[test]
+    fn rejects_blank_information_report_content() {
+        let mut state = make_test_campaign();
+        state
+            .information_reports
+            .values_mut()
+            .next()
+            .expect("campaign must contain an information report")
+            .summary = "   ".to_owned();
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("blank-information-summary.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "information report",
+        );
+    }
+
+    #[test]
+    fn rejects_blank_relationship_memory() {
+        let mut state = make_test_campaign();
+        state
+            .relationships
+            .values_mut()
+            .next()
+            .expect("campaign must contain a relationship")
+            .memories
+            .push(" \n ".to_owned());
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("blank-relationship-memory.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "relationship map",
+        );
+    }
+
+    #[test]
+    fn rejects_blank_ai_objective_rationale() {
+        let mut state = make_test_campaign();
+        state
+            .ai_objectives
+            .values_mut()
+            .next()
+            .expect("campaign must contain an AI objective")
+            .rationale = "\t".to_owned();
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("blank-objective-rationale.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "has no rationale",
+        );
+    }
+
+    #[test]
+    fn rejects_blank_external_route_name() {
+        let mut state = make_test_campaign();
+        state
+            .external_routes
+            .values_mut()
+            .next()
+            .expect("campaign must contain an external route")
+            .name = " ".to_owned();
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("blank-route-name.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "external route",
+        );
+    }
+
+    #[test]
+    fn rejects_blank_crisis_cause() {
+        let mut state = make_test_campaign();
+        let crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            crisis_id,
+            Crisis {
+                id: crisis_id,
+                kind: CrisisKind::BankingPanic,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 1_000,
+                status: CrisisStatus::Active,
+                cause: " \t ".to_owned(),
+            },
+        );
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("blank-crisis-cause.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "crisis",
         );
     }
 

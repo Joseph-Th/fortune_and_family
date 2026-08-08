@@ -685,6 +685,35 @@ mod integration {
         }
         validate_invariants(registry, &state);
     }
+
+    #[test]
+    fn vacant_warehouses_begin_as_competitive_capital_assets() {
+        let state = make_test_campaign();
+        let player_treasury = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
+        let warehouse_value = state
+            .properties
+            .values()
+            .find(|property| {
+                property.kind == PropertyKind::Warehouse && property.owner_dynasty_id.is_none()
+            })
+            .expect("campaign must contain a vacant warehouse")
+            .value;
+
+        assert!(
+            warehouse_value > player_treasury,
+            "the player should need commercial success before buying a scarce warehouse instead of converting starting cash immediately"
+        );
+        assert!(
+            state.dynasties.values().any(|dynasty| {
+                dynasty.id() != state.player_dynasty_id && dynasty.treasury() >= warehouse_value
+            }),
+            "at least one rival house must be able to compete for a warehouse before the player can simply sweep the market"
+        );
+    }
 }
 
 mod public_works {
@@ -1067,6 +1096,56 @@ mod gameplay_stability {
                 .treasury()
                 > treasury_before,
             "property acquisition must create a durable economic consequence"
+        );
+    }
+
+    #[test]
+    fn vacant_property_yield_tracks_its_district_rent_index() {
+        let mut state = make_test_campaign();
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id.is_none()
+                    && property.tenant_dynasty_id.is_none()
+                    && property.occupant_business_id.is_none()
+                    && property.weekly_rent > Money::ZERO
+            })
+            .expect("campaign must contain rentable unowned property")
+            .id;
+        let owner_id = state.player_dynasty_id;
+        let (district_id, base_rent) = {
+            let property = state
+                .properties
+                .get_mut(&property_id)
+                .expect("property must exist");
+            property.owner_dynasty_id = Some(owner_id);
+            (property.district_id, property.weekly_rent)
+        };
+        state
+            .districts
+            .get_mut(&district_id)
+            .expect("property district must exist")
+            .rent_index_basis_points = 12_000;
+        let owner_before = state
+            .dynasties
+            .get(&owner_id)
+            .expect("owner must exist")
+            .treasury();
+        let expected_rent = base_rent.saturating_mul_ratio(12_000, 10_000);
+
+        settle_property_rents(&mut state).expect("property rent settlement must succeed");
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&owner_id)
+                .expect("owner must exist")
+                .treasury(),
+            owner_before
+                .checked_add(expected_rent)
+                .expect("test rent must fit owner treasury"),
+            "a vacant property's external yield must reflect the district rent market"
         );
     }
 
@@ -2737,6 +2816,60 @@ mod reputation {
                 .reputation_quality_basis_points,
             5_025,
             "visible quality must build standing more slowly until trade proves commercially sustainable"
+        );
+    }
+
+    #[test]
+    fn portfolio_profitability_does_not_saturate_at_money_range() {
+        let mut state = make_test_campaign();
+        let business_ids: Vec<_> = state
+            .businesses
+            .iter()
+            .take(2)
+            .map(crate::core::Business::id)
+            .collect();
+        let [first_id, second_id] = business_ids.as_slice() else {
+            panic!("campaign must contain at least two businesses");
+        };
+        let dynasty_id = state
+            .businesses
+            .get(*first_id)
+            .expect("first business must exist")
+            .owner_dynasty_id();
+        let revenue = Money::from_copper((i64::MAX / 3) * 2);
+        let costs = Money::from_copper((i64::MAX / 4) * 3);
+        assert!(
+            i128::from(revenue.copper()) * 2 > i128::from(i64::MAX)
+                && i128::from(costs.copper()) * 2 > i128::from(i64::MAX)
+        );
+        for business_id in [*first_id, *second_id] {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.identity.owner_dynasty_id = dynasty_id;
+            business.operations.quality_basis_points = 9_000;
+            business.finance.lifetime_revenue = revenue;
+            business.finance.lifetime_costs = costs;
+        }
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("business owner must exist")
+            .resources
+            .reputation_quality_basis_points = 5_000;
+
+        update_quality_reputations(&mut state);
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("business owner must exist")
+                .resources
+                .reputation_quality_basis_points,
+            5_025,
+            "aggregate lifetime losses must remain visible even when both portfolio totals exceed the Money range"
         );
     }
 }

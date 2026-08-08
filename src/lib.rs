@@ -24,11 +24,12 @@ pub mod systems;
 pub use core::{AppState, NewGameConfig};
 pub use gameplay::{
     GAMEPLAY_REPORT_SCHEMA_VERSION, GameplayAggregate, GameplayCampaignReport,
-    GameplayCandidateRanking, GameplayCommandKind, GameplayCommandStats, GameplayDomain,
-    GameplayFantasyArc, GameplayFinding, GameplayFindingSeverity, GameplayHarnessConfig,
-    GameplayHarnessError, GameplayHarnessReport, GameplayInteractionEdge, GameplayPersona,
-    GameplayPhase, GameplayPhaseStats, GameplayScores, GameplaySnapshot, GameplayTraceStep,
-    GameplayViableOption, render_gameplay_report, run_gameplay_harness,
+    GameplayCandidateRanking, GameplayCommandKind, GameplayCommandStats,
+    GameplayConsequenceProfile, GameplayDomain, GameplayFantasyArc, GameplayFinding,
+    GameplayFindingSeverity, GameplayHarnessConfig, GameplayHarnessError, GameplayHarnessReport,
+    GameplayInteractionEdge, GameplayMeasure, GameplayPersona, GameplayPhase, GameplayPhaseStats,
+    GameplayScores, GameplaySnapshot, GameplayTraceStep, GameplayViableOption,
+    render_gameplay_report, run_gameplay_harness,
 };
 pub use persistence::{PersistenceError, StateValidationKind, load_state, save_state};
 pub use projection::{

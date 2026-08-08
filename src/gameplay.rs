@@ -94,7 +94,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 40;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 41;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -1436,6 +1436,157 @@ pub struct GameplayViableOption {
     pub projected_domains: BTreeSet<GameplayDomain>,
     pub immediate_history_change: bool,
     pub projected_history_change: bool,
+    pub immediate_profile: GameplayConsequenceProfile,
+    pub projected_profile: GameplayConsequenceProfile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum GameplayMeasure {
+    PlayerTreasury,
+    PlayerBusinessCash,
+    ActiveBusinesses,
+    DistressedBusinesses,
+    PlayerProperties,
+    Legitimacy,
+    FamilyUnity,
+    OfficesHeld,
+    InstitutionRepresentation,
+    ActiveLaws,
+    CompletedPublicWorks,
+    AverageFoodSatisfaction,
+    AverageDistrictUnrest,
+    ActiveCrises,
+    ContractRelationshipPressure,
+    PlayerDisputedEmployment,
+    DefaultedLoans,
+    UnmetOfficeDuties,
+    InformationReports,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GameplayConsequenceProfile {
+    pub increases: BTreeSet<GameplayMeasure>,
+    pub decreases: BTreeSet<GameplayMeasure>,
+    pub impact_fingerprint: u64,
+    pub strategic_fingerprint: u64,
+}
+
+impl GameplayConsequenceProfile {
+    fn between(baseline: &GameplaySnapshot, outcome: &GameplaySnapshot) -> Self {
+        let mut profile = Self::default();
+        macro_rules! record {
+            ($measure:ident, $field:ident) => {
+                record_measure_direction(
+                    &mut profile,
+                    GameplayMeasure::$measure,
+                    &baseline.$field,
+                    &outcome.$field,
+                );
+            };
+        }
+        record!(PlayerTreasury, player_treasury);
+        record!(PlayerBusinessCash, player_business_cash);
+        record!(ActiveBusinesses, active_businesses);
+        record!(DistressedBusinesses, distressed_businesses);
+        record!(PlayerProperties, player_properties);
+        record!(Legitimacy, legitimacy);
+        record!(FamilyUnity, family_unity);
+        record!(OfficesHeld, offices_held);
+        record!(InstitutionRepresentation, player_institutions_represented);
+        record!(ActiveLaws, active_laws);
+        record!(CompletedPublicWorks, completed_public_works);
+        record!(AverageFoodSatisfaction, average_food_satisfaction);
+        record!(AverageDistrictUnrest, average_district_unrest);
+        record!(ActiveCrises, active_crises);
+        record!(
+            ContractRelationshipPressure,
+            maximum_contract_relationship_pressure_basis_points
+        );
+        record!(PlayerDisputedEmployment, player_disputed_employment);
+        record!(DefaultedLoans, defaulted_loans);
+        record!(UnmetOfficeDuties, player_unmet_office_duties);
+        record!(InformationReports, information_reports);
+        profile.impact_fingerprint = impact_outcome_fingerprint(outcome);
+        profile.strategic_fingerprint = strategic_outcome_fingerprint(outcome);
+        profile
+    }
+}
+
+fn impact_outcome_fingerprint(snapshot: &GameplaySnapshot) -> u64 {
+    let money_bits = |money: Money| u64::from_ne_bytes(money.copper().to_ne_bytes());
+    let signed_bits = |value: i64| u64::from_ne_bytes(value.to_ne_bytes());
+    [
+        money_bits(snapshot.player_treasury),
+        money_bits(snapshot.player_business_cash),
+        u64::from(snapshot.active_businesses),
+        u64::from(snapshot.distressed_businesses),
+        u64::from(snapshot.player_properties),
+        u64::from(snapshot.legitimacy),
+        u64::from(snapshot.family_unity),
+        u64::from(snapshot.offices_held),
+        u64::from(snapshot.player_institutions_represented),
+        u64::from(snapshot.active_laws),
+        u64::from(snapshot.completed_public_works),
+        u64::from(snapshot.average_food_satisfaction),
+        u64::from(snapshot.average_district_unrest),
+        u64::from(snapshot.active_crises),
+        u64::from(snapshot.maximum_contract_relationship_pressure_basis_points),
+        u64::from(snapshot.player_disputed_employment),
+        u64::from(snapshot.defaulted_loans),
+        u64::from(snapshot.player_unmet_office_duties),
+        u64::from(snapshot.information_reports),
+        u64::from(snapshot.player_family_capability_checksum),
+        signed_bits(snapshot.player_office_checksum),
+        signed_bits(snapshot.active_law_checksum),
+        signed_bits(snapshot.player_completed_public_work_checksum),
+    ]
+    .into_iter()
+    .fold(14_695_981_039_346_656_037_u64, |fingerprint, value| {
+        fingerprint.wrapping_mul(1_099_511_628_211) ^ value
+    })
+}
+
+fn strategic_outcome_fingerprint(snapshot: &GameplaySnapshot) -> u64 {
+    [
+        snapshot.business_state_checksum,
+        snapshot.market_state_checksum,
+        snapshot.contract_state_checksum,
+        snapshot.loan_state_checksum,
+        snapshot.civic_debt_state_checksum,
+        snapshot.property_state_checksum,
+        snapshot.employment_state_checksum,
+        snapshot.relationship_state_checksum,
+        snapshot.character_state_checksum,
+        snapshot.family_state_checksum,
+        snapshot.institution_state_checksum,
+        snapshot.law_state_checksum,
+        snapshot.public_work_state_checksum,
+        snapshot.district_state_checksum,
+        snapshot.legal_case_state_checksum,
+        snapshot.crisis_state_checksum,
+        snapshot.information_state_checksum,
+    ]
+    .into_iter()
+    .fold(14_695_981_039_346_656_037_u64, |fingerprint, value| {
+        fingerprint.wrapping_mul(1_099_511_628_211) ^ value
+    })
+}
+
+fn record_measure_direction<T: Ord>(
+    profile: &mut GameplayConsequenceProfile,
+    measure: GameplayMeasure,
+    baseline: &T,
+    outcome: &T,
+) {
+    match outcome.cmp(baseline) {
+        std::cmp::Ordering::Greater => {
+            profile.increases.insert(measure);
+        }
+        std::cmp::Ordering::Less => {
+            profile.decreases.insert(measure);
+        }
+        std::cmp::Ordering::Equal => {}
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1533,6 +1684,10 @@ pub struct GameplayPhaseStats {
     pub cycles_with_close_viable_command_kinds: u32,
     pub cycles_with_distinct_immediate_consequences: u32,
     pub cycles_with_distinct_projected_consequences: u32,
+    pub cycles_with_multiple_viable_options: u32,
+    pub cycles_with_close_viable_options: u32,
+    pub cycles_with_distinct_immediate_option_consequences: u32,
+    pub cycles_with_distinct_projected_option_consequences: u32,
     pub total_viable_choices: u32,
     pub total_viable_command_kinds: u32,
 }
@@ -1549,6 +1704,10 @@ pub struct GameplayCampaignReport {
     pub cycles_with_close_viable_command_kinds: u32,
     pub cycles_with_distinct_immediate_consequences: u32,
     pub cycles_with_distinct_projected_consequences: u32,
+    pub cycles_with_multiple_viable_options: u32,
+    pub cycles_with_close_viable_options: u32,
+    pub cycles_with_distinct_immediate_option_consequences: u32,
+    pub cycles_with_distinct_projected_option_consequences: u32,
     pub no_action_cycles: u32,
     pub quiet_cycles: u32,
     pub quiet_cycles_with_ambient_change: u32,
@@ -1625,6 +1784,10 @@ pub struct GameplayAggregate {
     pub cycles_with_close_viable_command_kinds: u64,
     pub cycles_with_distinct_immediate_consequences: u64,
     pub cycles_with_distinct_projected_consequences: u64,
+    pub cycles_with_multiple_viable_options: u64,
+    pub cycles_with_close_viable_options: u64,
+    pub cycles_with_distinct_immediate_option_consequences: u64,
+    pub cycles_with_distinct_projected_option_consequences: u64,
     pub command_coverage: u16,
     pub domain_coverage: u16,
     pub commands: BTreeMap<GameplayCommandKind, GameplayCommandStats>,
@@ -1780,6 +1943,9 @@ struct ProbeResult {
     close_choice_score_gap: Option<i64>,
     distinct_immediate_choice_profiles: usize,
     distinct_projected_choice_profiles: usize,
+    family_close_choice_score_gap: Option<i64>,
+    distinct_immediate_family_profiles: usize,
+    distinct_projected_family_profiles: usize,
     rejections: Vec<String>,
 }
 
@@ -1788,9 +1954,44 @@ struct ChoiceCycleMetrics {
     substantive_candidate_count: usize,
     substantive_viable_count: usize,
     viable_command_kind_count: usize,
-    close_choice: bool,
-    distinct_immediate_choices: bool,
-    distinct_projected_choices: bool,
+    family_quality: AlternativeQuality,
+    option_quality: AlternativeQuality,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AlternativeQuality(u8);
+
+impl AlternativeQuality {
+    const MULTIPLE: u8 = 1;
+    const CLOSE: u8 = 1 << 1;
+    const DISTINCT_IMMEDIATE: u8 = 1 << 2;
+    const DISTINCT_PROJECTED: u8 = 1 << 3;
+
+    fn from_observations(
+        alternative_count: usize,
+        score_gap: Option<i64>,
+        immediate_profile_count: usize,
+        projected_profile_count: usize,
+    ) -> Self {
+        let mut flags = 0_u8;
+        if alternative_count >= 2 {
+            flags |= Self::MULTIPLE;
+        }
+        if score_gap.is_some_and(|gap| gap <= CLOSE_CHOICE_SCORE_GAP) {
+            flags |= Self::CLOSE;
+        }
+        if immediate_profile_count >= 2 {
+            flags |= Self::DISTINCT_IMMEDIATE;
+        }
+        if projected_profile_count >= 2 {
+            flags |= Self::DISTINCT_PROJECTED;
+        }
+        Self(flags)
+    }
+
+    const fn contains(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1817,6 +2018,10 @@ struct CampaignAccumulator {
     cycles_with_close_viable_command_kinds: u32,
     cycles_with_distinct_immediate_consequences: u32,
     cycles_with_distinct_projected_consequences: u32,
+    cycles_with_multiple_viable_options: u32,
+    cycles_with_close_viable_options: u32,
+    cycles_with_distinct_immediate_option_consequences: u32,
+    cycles_with_distinct_projected_option_consequences: u32,
     no_action_cycles: u32,
     quiet_cycles: u32,
     quiet_cycles_with_ambient_change: u32,
@@ -1874,6 +2079,10 @@ impl CampaignAccumulator {
             cycles_with_close_viable_command_kinds: 0,
             cycles_with_distinct_immediate_consequences: 0,
             cycles_with_distinct_projected_consequences: 0,
+            cycles_with_multiple_viable_options: 0,
+            cycles_with_close_viable_options: 0,
+            cycles_with_distinct_immediate_option_consequences: 0,
+            cycles_with_distinct_projected_option_consequences: 0,
             no_action_cycles: 0,
             quiet_cycles: 0,
             quiet_cycles_with_ambient_change: 0,
@@ -2134,26 +2343,7 @@ impl CampaignAccumulator {
                 stats.blocked_cycles = stats.blocked_cycles.saturating_add(1);
             }
         }
-        if choices.viable_command_kind_count >= 2 {
-            stats.cycles_with_multiple_viable_command_kinds = stats
-                .cycles_with_multiple_viable_command_kinds
-                .saturating_add(1);
-        }
-        if choices.close_choice {
-            stats.cycles_with_close_viable_command_kinds = stats
-                .cycles_with_close_viable_command_kinds
-                .saturating_add(1);
-        }
-        if choices.distinct_immediate_choices {
-            stats.cycles_with_distinct_immediate_consequences = stats
-                .cycles_with_distinct_immediate_consequences
-                .saturating_add(1);
-        }
-        if choices.distinct_projected_choices {
-            stats.cycles_with_distinct_projected_consequences = stats
-                .cycles_with_distinct_projected_consequences
-                .saturating_add(1);
-        }
+        record_phase_alternative_quality(stats, choices);
     }
 
     fn observe_initial_snapshot(&mut self, snapshot: &GameplaySnapshot) {
@@ -2305,13 +2495,73 @@ fn gameplay_harness_limitations() -> Vec<String> {
         "Automated agents measure reachability and systemic outcomes, not whether a human understands the interface or enjoys the decisions.".to_owned(),
         "The report cannot measure emotional investment, narrative quality, or the cognitive burden of comparing choices.".to_owned(),
         "Agents inspect authoritative simulation state when choosing what to investigate; commissioned reports can unlock traceable follow-up actions, but the harness does not measure whether a human can interpret the report or identify the best use.".to_owned(),
-        "Alternative-choice profiles compare immediate effects and one decision interval of projected divergence; the harness does not advance every unchosen branch through its full delayed consequence horizon.".to_owned(),
+        "Alternative-choice profiles retain every successfully probed concrete target and distinguish measured impact from persistent target identity, but they compare only immediate effects and one decision interval of projected divergence; the harness does not advance every unchosen branch through its full delayed consequence horizon.".to_owned(),
+        "A distinct target fingerprint proves that two branches preserve different strategic state, not that a human will value the difference or that the difference becomes important within the campaign.".to_owned(),
         "Deterministic personas follow fixed priorities and do not model experimentation, misunderstanding, changing preferences, or interface friction.".to_owned(),
         "Stress personas can prove that risky legal, labor, and financial routes exist, but they cannot prove that those risks are legible or attractive to a human player.".to_owned(),
         "AI-objective progress measures rival activity, but the harness cannot prove that a human recognizes which house caused a setback or understands that rival's intent.".to_owned(),
         "Counterfactual attribution can only detect consequences represented by the report snapshot and configured consequence horizon.".to_owned(),
         "Persistent state and chronicle changes approximate historical imprint; the harness cannot judge whether the game presents that legacy as a coherent remembered story.".to_owned(),
     ]
+}
+
+fn record_phase_alternative_quality(stats: &mut GameplayPhaseStats, choices: ChoiceCycleMetrics) {
+    if choices
+        .family_quality
+        .contains(AlternativeQuality::MULTIPLE)
+    {
+        stats.cycles_with_multiple_viable_command_kinds = stats
+            .cycles_with_multiple_viable_command_kinds
+            .saturating_add(1);
+    }
+    if choices.family_quality.contains(AlternativeQuality::CLOSE) {
+        stats.cycles_with_close_viable_command_kinds = stats
+            .cycles_with_close_viable_command_kinds
+            .saturating_add(1);
+    }
+    if choices
+        .family_quality
+        .contains(AlternativeQuality::DISTINCT_IMMEDIATE)
+    {
+        stats.cycles_with_distinct_immediate_consequences = stats
+            .cycles_with_distinct_immediate_consequences
+            .saturating_add(1);
+    }
+    if choices
+        .family_quality
+        .contains(AlternativeQuality::DISTINCT_PROJECTED)
+    {
+        stats.cycles_with_distinct_projected_consequences = stats
+            .cycles_with_distinct_projected_consequences
+            .saturating_add(1);
+    }
+    if choices
+        .option_quality
+        .contains(AlternativeQuality::MULTIPLE)
+    {
+        stats.cycles_with_multiple_viable_options =
+            stats.cycles_with_multiple_viable_options.saturating_add(1);
+    }
+    if choices.option_quality.contains(AlternativeQuality::CLOSE) {
+        stats.cycles_with_close_viable_options =
+            stats.cycles_with_close_viable_options.saturating_add(1);
+    }
+    if choices
+        .option_quality
+        .contains(AlternativeQuality::DISTINCT_IMMEDIATE)
+    {
+        stats.cycles_with_distinct_immediate_option_consequences = stats
+            .cycles_with_distinct_immediate_option_consequences
+            .saturating_add(1);
+    }
+    if choices
+        .option_quality
+        .contains(AlternativeQuality::DISTINCT_PROJECTED)
+    {
+        stats.cycles_with_distinct_projected_option_consequences = stats
+            .cycles_with_distinct_projected_option_consequences
+            .saturating_add(1);
+    }
 }
 
 fn run_campaign(
@@ -2371,6 +2621,12 @@ fn run_campaign(
             .cycles_with_distinct_immediate_consequences,
         cycles_with_distinct_projected_consequences: accumulator
             .cycles_with_distinct_projected_consequences,
+        cycles_with_multiple_viable_options: accumulator.cycles_with_multiple_viable_options,
+        cycles_with_close_viable_options: accumulator.cycles_with_close_viable_options,
+        cycles_with_distinct_immediate_option_consequences: accumulator
+            .cycles_with_distinct_immediate_option_consequences,
+        cycles_with_distinct_projected_option_consequences: accumulator
+            .cycles_with_distinct_projected_option_consequences,
         no_action_cycles: accumulator.no_action_cycles,
         quiet_cycles: accumulator.quiet_cycles,
         quiet_cycles_with_ambient_change: accumulator.quiet_cycles_with_ambient_change,
@@ -2578,11 +2834,18 @@ fn record_choice_cycle_metrics(
     substantive_candidate_count: usize,
     probe: &ProbeResult,
 ) -> ChoiceCycleMetrics {
-    let close_choice = probe
-        .close_choice_score_gap
-        .is_some_and(|gap| gap <= CLOSE_CHOICE_SCORE_GAP);
-    let distinct_immediate_choices = probe.distinct_immediate_choice_profiles >= 2;
-    let distinct_projected_choices = probe.distinct_projected_choice_profiles >= 2;
+    let family_quality = AlternativeQuality::from_observations(
+        probe.viable_command_kinds.len(),
+        probe.family_close_choice_score_gap,
+        probe.distinct_immediate_family_profiles,
+        probe.distinct_projected_family_profiles,
+    );
+    let option_quality = AlternativeQuality::from_observations(
+        probe.substantive_viable_count,
+        probe.close_choice_score_gap,
+        probe.distinct_immediate_choice_profiles,
+        probe.distinct_projected_choice_profiles,
+    );
     accumulator.total_viable_choices = accumulator
         .total_viable_choices
         .saturating_add(usize_to_u32(probe.substantive_viable_count));
@@ -2605,28 +2868,47 @@ fn record_choice_cycle_metrics(
             .cycles_with_multiple_viable_command_kinds
             .saturating_add(1);
     }
-    if close_choice {
+    if family_quality.contains(AlternativeQuality::CLOSE) {
         accumulator.cycles_with_close_viable_command_kinds = accumulator
             .cycles_with_close_viable_command_kinds
             .saturating_add(1);
     }
-    if distinct_immediate_choices {
+    if family_quality.contains(AlternativeQuality::DISTINCT_IMMEDIATE) {
         accumulator.cycles_with_distinct_immediate_consequences = accumulator
             .cycles_with_distinct_immediate_consequences
             .saturating_add(1);
     }
-    if distinct_projected_choices {
+    if family_quality.contains(AlternativeQuality::DISTINCT_PROJECTED) {
         accumulator.cycles_with_distinct_projected_consequences = accumulator
             .cycles_with_distinct_projected_consequences
+            .saturating_add(1);
+    }
+    if option_quality.contains(AlternativeQuality::MULTIPLE) {
+        accumulator.cycles_with_multiple_viable_options = accumulator
+            .cycles_with_multiple_viable_options
+            .saturating_add(1);
+    }
+    if option_quality.contains(AlternativeQuality::CLOSE) {
+        accumulator.cycles_with_close_viable_options = accumulator
+            .cycles_with_close_viable_options
+            .saturating_add(1);
+    }
+    if option_quality.contains(AlternativeQuality::DISTINCT_IMMEDIATE) {
+        accumulator.cycles_with_distinct_immediate_option_consequences = accumulator
+            .cycles_with_distinct_immediate_option_consequences
+            .saturating_add(1);
+    }
+    if option_quality.contains(AlternativeQuality::DISTINCT_PROJECTED) {
+        accumulator.cycles_with_distinct_projected_option_consequences = accumulator
+            .cycles_with_distinct_projected_option_consequences
             .saturating_add(1);
     }
     ChoiceCycleMetrics {
         substantive_candidate_count,
         substantive_viable_count: probe.substantive_viable_count,
         viable_command_kind_count: probe.viable_command_kinds.len(),
-        close_choice,
-        distinct_immediate_choices,
-        distinct_projected_choices,
+        family_quality,
+        option_quality,
     }
 }
 
@@ -2968,6 +3250,10 @@ fn probe_candidates(
     let mut viable_options = Vec::new();
     let mut immediate_profiles = BTreeSet::new();
     let mut projected_profiles = BTreeSet::new();
+    let mut immediate_family_profiles = BTreeSet::new();
+    let mut projected_family_profiles = BTreeSet::new();
+    let mut option_scores = Vec::new();
+    let mut family_scores = Vec::new();
     let mut rejections = Vec::new();
     for candidate in candidates {
         let command_stats = accumulator
@@ -2982,32 +3268,25 @@ fn probe_candidates(
                 viable_count = viable_count.saturating_add(1);
                 if candidate.kind != GameplayCommandKind::AcknowledgeNotification {
                     substantive_viable_count = substantive_viable_count.saturating_add(1);
+                    let evaluated = evaluate_viable_option(
+                        registry,
+                        &baseline,
+                        &projected_baseline,
+                        &probe,
+                        &candidate,
+                        projection_days,
+                    )?;
+                    let immediate_choice_profile = evaluated.immediate_profile_key.clone();
+                    let projected_choice_profile = evaluated.projected_profile_key.clone();
+                    immediate_profiles.insert(immediate_choice_profile.clone());
+                    projected_profiles.insert(projected_choice_profile.clone());
+                    option_scores.push(candidate.score);
                     if viable_command_kinds.insert(candidate.kind) {
-                        let immediate_snapshot = GameplaySnapshot::capture(&probe);
-                        let immediate_domains = baseline.changed_domains(&immediate_snapshot);
-                        let immediate_history_change = baseline.audit_state_checksum
-                            != immediate_snapshot.audit_state_checksum;
-                        let mut projected_state = probe.clone();
-                        advance_days(registry, &mut projected_state, projection_days)?;
-                        let projected_snapshot = GameplaySnapshot::capture(&projected_state);
-                        let projected_domains =
-                            projected_baseline.changed_domains(&projected_snapshot);
-                        let projected_history_change = projected_baseline.audit_state_checksum
-                            != projected_snapshot.audit_state_checksum;
-                        immediate_profiles
-                            .insert((immediate_domains.clone(), immediate_history_change));
-                        projected_profiles
-                            .insert((projected_domains.clone(), projected_history_change));
-                        viable_options.push(GameplayViableOption {
-                            command: candidate.kind,
-                            score: candidate.score,
-                            description: candidate.description.clone(),
-                            immediate_domains,
-                            projected_domains,
-                            immediate_history_change,
-                            projected_history_change,
-                        });
+                        immediate_family_profiles.insert(immediate_choice_profile);
+                        projected_family_profiles.insert(projected_choice_profile);
+                        family_scores.push(candidate.score);
                     }
+                    viable_options.push(evaluated.option);
                     if selected.is_none() {
                         selected = Some(candidate);
                     }
@@ -3028,10 +3307,10 @@ fn probe_candidates(
             }
         }
     }
-    let close_choice_score_gap = viable_options
-        .first()
-        .zip(viable_options.get(1))
-        .map(|(first, second)| first.score.saturating_sub(second.score));
+    option_scores.sort_unstable_by(|left, right| right.cmp(left));
+    family_scores.sort_unstable_by(|left, right| right.cmp(left));
+    let close_choice_score_gap = score_gap(&option_scores);
+    let family_close_choice_score_gap = score_gap(&family_scores);
     Ok(ProbeResult {
         selected: selected.or(housekeeping_fallback),
         viable_count,
@@ -3041,8 +3320,92 @@ fn probe_candidates(
         close_choice_score_gap,
         distinct_immediate_choice_profiles: immediate_profiles.len(),
         distinct_projected_choice_profiles: projected_profiles.len(),
+        family_close_choice_score_gap,
+        distinct_immediate_family_profiles: immediate_family_profiles.len(),
+        distinct_projected_family_profiles: projected_family_profiles.len(),
         rejections,
     })
+}
+
+type ConsequenceProfileKey = (
+    BTreeSet<GameplayDomain>,
+    bool,
+    BTreeSet<GameplayMeasure>,
+    BTreeSet<GameplayMeasure>,
+    u64,
+);
+
+struct EvaluatedViableOption {
+    option: GameplayViableOption,
+    immediate_profile_key: ConsequenceProfileKey,
+    projected_profile_key: ConsequenceProfileKey,
+}
+
+fn evaluate_viable_option(
+    registry: &Registry,
+    baseline: &GameplaySnapshot,
+    projected_baseline: &GameplaySnapshot,
+    immediate_state: &AppState,
+    candidate: &Candidate,
+    projection_days: u32,
+) -> Result<EvaluatedViableOption, GameplayHarnessError> {
+    let immediate_snapshot = GameplaySnapshot::capture(immediate_state);
+    let immediate_domains = baseline.changed_domains(&immediate_snapshot);
+    let immediate_history_change =
+        baseline.audit_state_checksum != immediate_snapshot.audit_state_checksum;
+    let immediate_profile = GameplayConsequenceProfile::between(baseline, &immediate_snapshot);
+    let mut projected_state = immediate_state.clone();
+    advance_days(registry, &mut projected_state, projection_days)?;
+    let projected_snapshot = GameplaySnapshot::capture(&projected_state);
+    let projected_domains = projected_baseline.changed_domains(&projected_snapshot);
+    let projected_history_change =
+        projected_baseline.audit_state_checksum != projected_snapshot.audit_state_checksum;
+    let projected_profile =
+        GameplayConsequenceProfile::between(projected_baseline, &projected_snapshot);
+    Ok(EvaluatedViableOption {
+        immediate_profile_key: consequence_profile_key(
+            &immediate_domains,
+            immediate_history_change,
+            &immediate_profile,
+        ),
+        projected_profile_key: consequence_profile_key(
+            &projected_domains,
+            projected_history_change,
+            &projected_profile,
+        ),
+        option: GameplayViableOption {
+            command: candidate.kind,
+            score: candidate.score,
+            description: candidate.description.clone(),
+            immediate_domains,
+            projected_domains,
+            immediate_history_change,
+            projected_history_change,
+            immediate_profile,
+            projected_profile,
+        },
+    })
+}
+
+fn consequence_profile_key(
+    domains: &BTreeSet<GameplayDomain>,
+    history_change: bool,
+    profile: &GameplayConsequenceProfile,
+) -> ConsequenceProfileKey {
+    (
+        domains.clone(),
+        history_change,
+        profile.increases.clone(),
+        profile.decreases.clone(),
+        profile.impact_fingerprint,
+    )
+}
+
+fn score_gap(scores_descending: &[i64]) -> Option<i64> {
+    scores_descending
+        .first()
+        .zip(scores_descending.get(1))
+        .map(|(first, second)| first.saturating_sub(*second))
 }
 
 struct CycleObservation<'a> {
@@ -4604,6 +4967,15 @@ fn generate_finance_candidates(
         .collect();
     properties.sort_by_key(|property| (property.value, property.id));
     for property in properties.into_iter().take(4) {
+        let district = registry
+            .get_district(property.district_id)
+            .expect("property district must exist");
+        let rent_index = state
+            .districts
+            .get(&property.district_id)
+            .expect("property district runtime must exist")
+            .rent_index_basis_points;
+        let effective_rent = crate::systems::effective_property_weekly_rent(state, property);
         push_candidate(
             candidates,
             GameplayCommandKind::BuyProperty,
@@ -4611,8 +4983,11 @@ fn generate_finance_candidates(
                 property_id: property.id,
             },
             format!(
-                "buy {:?} property {} for {}",
-                property.kind, property.id, property.value
+                "buy {:?} property {} in {} for {}; effective rent {effective_rent}/week at rent index {rent_index}",
+                property.kind,
+                property.id,
+                district.name(),
+                property.value,
             ),
             property_bonus,
         );
@@ -4691,7 +5066,29 @@ fn player_needs_property_liquidation(state: &AppState) -> bool {
         .dynasties
         .get(&player_id)
         .expect("player dynasty must exist");
-    if player.treasury() >= Money::from_copper(2_000) {
+    let emergency_reserve = Money::from_copper(2_000);
+    let two_month_office_duty =
+        projected_dynasty_monthly_office_duty(state, player_id, 0).saturating_mul(2);
+    let two_month_loan_service = state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.borrower_dynasty_id == player_id
+                && matches!(
+                    loan.status,
+                    LoanStatus::Current
+                        | LoanStatus::Delinquent
+                        | LoanStatus::Restructured
+                        | LoanStatus::Defaulted
+                )
+        })
+        .fold(Money::ZERO, |total, loan| {
+            total.saturating_add(loan.weekly_payment.saturating_mul(8))
+        });
+    let liquidity_floor = emergency_reserve
+        .saturating_add(two_month_office_duty)
+        .saturating_add(two_month_loan_service);
+    if player.treasury() >= liquidity_floor {
         return false;
     }
     let business_rescue_needed = state.businesses.iter().any(|business| {
@@ -4707,7 +5104,11 @@ fn player_needs_property_liquidation(state: &AppState) -> bool {
         .values()
         .filter(|property| property.owner_dynasty_id == Some(player_id))
         .count();
-    business_rescue_needed || owned_properties >= 2
+    let committed_financial_pressure =
+        two_month_office_duty > Money::ZERO || two_month_loan_service > Money::ZERO;
+    business_rescue_needed
+        || owned_properties >= 2
+        || (owned_properties > 0 && committed_financial_pressure)
 }
 
 fn accepted_property_liquidation_quote(
@@ -4772,8 +5173,7 @@ fn add_borrow_candidate(
     let base_borrowing_trigger = match persona {
         GameplayPersona::Steward => Money::from_copper(4_000),
         GameplayPersona::Entrepreneur => Money::from_copper(12_000),
-        GameplayPersona::PowerBroker => Money::from_copper(3_000),
-        GameplayPersona::Opportunist => Money::from_copper(8_000),
+        GameplayPersona::PowerBroker | GameplayPersona::Opportunist => Money::from_copper(8_000),
     };
     let office_reserve = player_office_duty_reserve(state, 0);
     let borrowing_trigger = if office_reserve > base_borrowing_trigger {
@@ -6002,7 +6402,16 @@ fn preferred_house_governance(
         return Some(HouseGovernance::BranchFederation);
     }
     if head_age >= 50 || dynasty.runtime.succession_risk_basis_points >= 2_500 {
-        return Some(HouseGovernance::Primogeniture);
+        return Some(match persona {
+            GameplayPersona::Steward | GameplayPersona::PowerBroker => {
+                HouseGovernance::Primogeniture
+            }
+            GameplayPersona::Entrepreneur if active_members >= 4 => {
+                HouseGovernance::BranchFederation
+            }
+            GameplayPersona::Entrepreneur => HouseGovernance::FamilyPartnership,
+            GameplayPersona::Opportunist => HouseGovernance::HeadCommand,
+        });
     }
     Some(match persona {
         GameplayPersona::Entrepreneur if active_members >= 4 => HouseGovernance::BranchFederation,
@@ -6580,7 +6989,7 @@ fn generate_institution_withdrawal_candidates(
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist")
         .treasury();
-    let monthly_cost = player_current_office_duty_cost(state);
+    let monthly_cost = player_monthly_committed_duty_cost(state);
     let severe_liquidity = treasury < monthly_cost.saturating_mul(3);
     let business_distress = player_has_severe_business_distress(state);
     let political_paralysis = player_is_politically_overextended(state);
@@ -6632,6 +7041,25 @@ fn player_current_office_duty_cost(state: &AppState) -> Money {
     projected_dynasty_monthly_office_duty(state, state.player_dynasty_id, 0)
 }
 
+fn player_monthly_committed_duty_cost(state: &AppState) -> Money {
+    state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.borrower_dynasty_id == state.player_dynasty_id
+                && matches!(
+                    loan.status,
+                    LoanStatus::Current
+                        | LoanStatus::Delinquent
+                        | LoanStatus::Restructured
+                        | LoanStatus::Defaulted
+                )
+        })
+        .fold(player_current_office_duty_cost(state), |total, loan| {
+            total.saturating_add(loan.weekly_payment.saturating_mul(4))
+        })
+}
+
 fn player_has_severe_business_distress(state: &AppState) -> bool {
     state.businesses.iter().any(|business| {
         business.owner_dynasty_id() == state.player_dynasty_id
@@ -6651,10 +7079,11 @@ fn has_recent_player_office_duty_shortfall(state: &AppState) -> bool {
 }
 
 fn has_institution_withdrawal_opportunity(state: &AppState) -> bool {
-    let monthly_cost = player_current_office_duty_cost(state);
-    if monthly_cost == Money::ZERO {
+    let office_cost = player_current_office_duty_cost(state);
+    if office_cost == Money::ZERO {
         return false;
     }
+    let monthly_cost = player_monthly_committed_duty_cost(state);
     let treasury = state
         .dynasties
         .get(&state.player_dynasty_id)
@@ -7916,7 +8345,20 @@ fn score_campaign(
         accumulator.total_viable_command_kinds,
         opportunity_cycles.saturating_mul(3),
     );
-    let variety = average_scores(&[coverage_score, distribution_score, choice_richness]);
+    let concrete_consequence_diversity = if accumulator.cycles_with_multiple_viable_options == 0 {
+        choice_richness
+    } else {
+        ratio_score(
+            accumulator.cycles_with_distinct_projected_option_consequences,
+            accumulator.cycles_with_multiple_viable_options,
+        )
+    };
+    let variety = average_scores(&[
+        coverage_score,
+        distribution_score,
+        choice_richness,
+        concrete_consequence_diversity,
+    ]);
     let edge_count = usize_to_u32(accumulator.interactions.len());
     let interaction_observations: u32 = accumulator.interactions.values().copied().sum();
     let interconnection = interconnection_score(
@@ -8041,6 +8483,10 @@ struct AggregateCycleTotals {
     close_viable_command_kinds: u64,
     distinct_immediate_consequences: u64,
     distinct_projected_consequences: u64,
+    multiple_viable_options: u64,
+    close_viable_options: u64,
+    distinct_immediate_option_consequences: u64,
+    distinct_projected_option_consequences: u64,
 }
 
 impl AggregateCycleTotals {
@@ -8085,6 +8531,22 @@ impl AggregateCycleTotals {
                 .saturating_add(u64::from(
                     campaign.cycles_with_distinct_projected_consequences,
                 ));
+        self.multiple_viable_options = self
+            .multiple_viable_options
+            .saturating_add(u64::from(campaign.cycles_with_multiple_viable_options));
+        self.close_viable_options = self
+            .close_viable_options
+            .saturating_add(u64::from(campaign.cycles_with_close_viable_options));
+        self.distinct_immediate_option_consequences = self
+            .distinct_immediate_option_consequences
+            .saturating_add(u64::from(
+                campaign.cycles_with_distinct_immediate_option_consequences,
+            ));
+        self.distinct_projected_option_consequences = self
+            .distinct_projected_option_consequences
+            .saturating_add(u64::from(
+                campaign.cycles_with_distinct_projected_option_consequences,
+            ));
     }
 }
 
@@ -8157,6 +8619,12 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
         cycles_with_close_viable_command_kinds: totals.close_viable_command_kinds,
         cycles_with_distinct_immediate_consequences: totals.distinct_immediate_consequences,
         cycles_with_distinct_projected_consequences: totals.distinct_projected_consequences,
+        cycles_with_multiple_viable_options: totals.multiple_viable_options,
+        cycles_with_close_viable_options: totals.close_viable_options,
+        cycles_with_distinct_immediate_option_consequences: totals
+            .distinct_immediate_option_consequences,
+        cycles_with_distinct_projected_option_consequences: totals
+            .distinct_projected_option_consequences,
         command_coverage,
         domain_coverage,
         commands,
@@ -8208,6 +8676,18 @@ fn merge_phase_stats(
         target.cycles_with_distinct_projected_consequences = target
             .cycles_with_distinct_projected_consequences
             .saturating_add(source.cycles_with_distinct_projected_consequences);
+        target.cycles_with_multiple_viable_options = target
+            .cycles_with_multiple_viable_options
+            .saturating_add(source.cycles_with_multiple_viable_options);
+        target.cycles_with_close_viable_options = target
+            .cycles_with_close_viable_options
+            .saturating_add(source.cycles_with_close_viable_options);
+        target.cycles_with_distinct_immediate_option_consequences = target
+            .cycles_with_distinct_immediate_option_consequences
+            .saturating_add(source.cycles_with_distinct_immediate_option_consequences);
+        target.cycles_with_distinct_projected_option_consequences = target
+            .cycles_with_distinct_projected_option_consequences
+            .saturating_add(source.cycles_with_distinct_projected_option_consequences);
         target.total_viable_choices = target
             .total_viable_choices
             .saturating_add(source.total_viable_choices);
@@ -8329,6 +8809,7 @@ fn derive_findings(
     add_system_health_findings(aggregate, campaigns, &mut findings);
     add_choice_quality_finding(aggregate, &mut findings);
     add_institutional_reach_finding(campaigns, &mut findings);
+    add_property_concentration_finding(aggregate, campaigns, &mut findings);
     add_strategic_cadence_finding(aggregate, campaigns, &mut findings);
     add_phase_quality_findings(aggregate, &mut findings);
     add_core_fantasy_findings(aggregate, campaigns, &mut findings);
@@ -8341,6 +8822,36 @@ fn derive_findings(
         });
     }
     findings
+}
+
+fn add_property_concentration_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if campaigns.len() < 8 || average_campaign_days(aggregate) < 720 {
+        return;
+    }
+    let repeated_acquirers = campaigns
+        .iter()
+        .filter(|campaign| {
+            campaign
+                .commands
+                .get(&GameplayCommandKind::BuyProperty)
+                .is_some_and(|stats| stats.executed >= 3)
+        })
+        .count();
+    if scaled_ratio_usize(repeated_acquirers, campaigns.len(), 100) < 50 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Property acquisition becomes a universal progression path".to_owned(),
+        evidence: format!(
+            "{repeated_acquirers} of {} campaigns acquired at least three additional properties. Repeated land acquisition across distinct personas is a concentration signal because property is intended to compete with business investment, credit, family capacity, and political commitments rather than become an automatic wealth step.",
+            campaigns.len()
+        ),
+    });
 }
 
 fn add_rival_commercial_pressure_finding(
@@ -9532,6 +10043,7 @@ fn add_choice_quality_finding(aggregate: &GameplayAggregate, findings: &mut Vec<
         findings,
     );
     add_choice_tradeoff_findings(aggregate, findings);
+    add_option_tradeoff_findings(aggregate, findings);
     add_blocked_choice_finding(aggregate, opportunity_cycles, findings);
 }
 
@@ -9628,6 +10140,56 @@ fn add_choice_tradeoff_findings(
                 "Only {} of {} multi-family cycles produced at least two distinct projected domain-change profiles after one decision interval ({projected_share}%). Immediate feedback may differ while the simulated trajectories still converge.",
                 aggregate.cycles_with_distinct_projected_consequences,
                 denominator
+            ),
+        });
+    }
+}
+
+fn add_option_tradeoff_findings(
+    aggregate: &GameplayAggregate,
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let denominator = aggregate.cycles_with_multiple_viable_options;
+    if denominator < 20 {
+        return;
+    }
+    let close_share =
+        scaled_ratio_u64(aggregate.cycles_with_close_viable_options, denominator, 100);
+    let immediate_share = scaled_ratio_u64(
+        aggregate.cycles_with_distinct_immediate_option_consequences,
+        denominator,
+        100,
+    );
+    let projected_share = scaled_ratio_u64(
+        aggregate.cycles_with_distinct_projected_option_consequences,
+        denominator,
+        100,
+    );
+    if projected_share < 50 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Concrete alternatives converge despite different targets".to_owned(),
+            evidence: format!(
+                "Only {} of {denominator} cycles with at least two viable concrete options produced distinct projected consequence profiles after one decision interval ({projected_share}%). The harness compares targets and templates inside the same command family as well as different families, including whether observed strategic measures rise or fall. A low share means apparent target choice often changes labels more than trajectory.",
+                aggregate.cycles_with_distinct_projected_option_consequences,
+            ),
+        });
+    } else if immediate_share < 50 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Info,
+            title: "Concrete alternatives differentiate mainly through delayed effects".to_owned(),
+            evidence: format!(
+                "{immediate_share}% of multi-option cycles had distinct immediate consequence profiles, while {projected_share}% diverged after one decision interval. Target-level choices are systemic, but much of their identity emerges through simulation rather than at commit time."
+            ),
+        });
+    }
+    if close_share < 15 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Info,
+            title: "Concrete choices are usually strongly ranked by the diagnostic persona".to_owned(),
+            evidence: format!(
+                "Only {} of {denominator} cycles with multiple concrete viable options placed the top two within {CLOSE_CHOICE_SCORE_GAP} score points ({close_share}%). This is not inherently a balance defect because persona scores encode deliberate priorities, but it identifies where human playtesting should verify that lower-ranked targets remain credible tradeoffs rather than dominated options.",
+                aggregate.cycles_with_close_viable_options,
             ),
         });
     }
@@ -10022,6 +10584,7 @@ fn add_core_fantasy_findings(
     add_player_labor_agency_finding(aggregate, campaigns, findings);
     add_persona_convergence_finding(campaigns, findings);
     add_civic_convergence_finding(aggregate, campaigns, findings);
+    add_house_governance_convergence_finding(aggregate, campaigns, findings);
     add_power_exposure_finding(aggregate, campaigns, findings);
     add_office_duty_failure_finding(aggregate, campaigns, findings);
     add_dynastic_continuity_finding(aggregate, campaigns, findings);
@@ -10660,6 +11223,52 @@ fn add_civic_convergence_finding(
     }
 }
 
+fn add_house_governance_convergence_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if campaigns.len() < 8 || average_campaign_days(aggregate) < 1_800 {
+        return;
+    }
+    let mut counts = BTreeMap::<u8, (HouseGovernance, usize)>::new();
+    for campaign in campaigns {
+        let governance = campaign.end.house_governance;
+        counts
+            .entry(governance as u8)
+            .and_modify(|(_, count)| *count = count.saturating_add(1))
+            .or_insert((governance, 1));
+    }
+    let Some((_, (governance, dominant_count))) =
+        counts.into_iter().max_by_key(|(_, (_, count))| *count)
+    else {
+        return;
+    };
+    if scaled_ratio_usize(dominant_count, campaigns.len(), 100) < 75 {
+        return;
+    }
+    let governance_changes = campaigns
+        .iter()
+        .filter(|campaign| {
+            campaign
+                .commands
+                .get(&GameplayCommandKind::SetHouseGovernance)
+                .is_some_and(|stats| stats.executed > 0)
+        })
+        .count();
+    if governance_changes < campaigns.len() / 3 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "House governance converges on one succession model".to_owned(),
+        evidence: format!(
+            "{dominant_count} of {} mature campaigns ended under {governance:?}, even though {governance_changes} campaigns actively rewrote their family charter. Governance is intended to trade succession stability, unity, and administrative capacity rather than collapse to one universal late-game answer.",
+            campaigns.len()
+        ),
+    });
+}
+
 fn add_power_exposure_finding(
     aggregate: &GameplayAggregate,
     campaigns: &[GameplayCampaignReport],
@@ -11202,11 +11811,15 @@ fn render_report_header(report: &GameplayHarnessReport, output: &mut String) {
     let average_choices = format_tenths(average_choices_tenths);
     let _ = writeln!(
         output,
-        "choice quality: {average_choices} viable choices / {average_families} command families per actionable cycle | {} multi-family | {} close-ranked | {} distinct immediate profiles | {} distinct projected profiles\n",
+        "choice quality: {average_choices} viable choices / {average_families} command families per actionable cycle | family: {} multi / {} close / {} distinct immediate / {} distinct projected | concrete: {} multi / {} close / {} distinct immediate / {} distinct projected\n",
         aggregate.cycles_with_multiple_viable_command_kinds,
         aggregate.cycles_with_close_viable_command_kinds,
         aggregate.cycles_with_distinct_immediate_consequences,
-        aggregate.cycles_with_distinct_projected_consequences
+        aggregate.cycles_with_distinct_projected_consequences,
+        aggregate.cycles_with_multiple_viable_options,
+        aggregate.cycles_with_close_viable_options,
+        aggregate.cycles_with_distinct_immediate_option_consequences,
+        aggregate.cycles_with_distinct_projected_option_consequences,
     );
 }
 
@@ -11376,9 +11989,10 @@ fn render_trace_samples(report: &GameplayHarnessReport, output: &mut String) {
                 .iter()
                 .take(3)
                 .map(|candidate| format!(
-                    "{}:{}:now={}{}:next={}{}",
+                    "{}:{}:{}:now={}{}:next={}{}",
                     candidate.command.label(),
                     candidate.score,
+                    candidate.description,
                     domain_labels(&candidate.immediate_domains),
                     history_suffix(candidate.immediate_history_change),
                     domain_labels(&candidate.projected_domains),

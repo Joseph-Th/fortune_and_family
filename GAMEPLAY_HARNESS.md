@@ -118,7 +118,7 @@ Each decision cycle:
 2. Generates concrete `PlayerCommand` candidates from state.
 3. Ranks candidates by urgency, persona priorities, coverage, resources, and repetition.
 4. Preserves probe capacity across command families.
-5. Validates candidates through `apply_player_command` on cloned state.
+5. Validates candidates through `apply_player_command` on cloned state and retains every successfully probed concrete target or template, not only the first target from each command family.
 6. Selects the highest-ranked viable substantive command; notification acknowledgement is fallback housekeeping.
 7. Commits through the canonical command API.
 8. Advances the action branch through `advance_days`.
@@ -166,7 +166,7 @@ The harness classifies each decision cycle by the furthest reached fantasy miles
 | Dynastic governance | The first city-shaping law or public work is sponsored. |
 | Succession and legacy | The first succession completes and the inherited organization begins operating under the next generation. |
 
-Each phase records action share, quiet and blocked cycles, how many quiet cycles still contain autonomous world change, the longest consecutive quiet streak, viable option depth, viable command-family breadth, multi-family choice frequency, closely ranked alternatives, whether alternatives produce distinct immediate and projected consequence profiles, and the share of substantive actions spent on patronage or nomination administration. Campaign reports also track maximum relationship-driven contract pressure and the minimum family unity observed after succession. Findings distinguish consequential time passage from genuinely static downtime and apply phase-specific limits to consecutive quiet streaks: establishment and institutional ascent are expected to remain comparatively tight, while mature governance may tolerate longer world-moving intervals without manufacturing busywork. Phase findings name the exact thresholds that failed so a warning caused by one excessive drought can be distinguished from broad actionability or choice-depth failure. They warn when establishment or institutional ascent becomes mostly waiting, when political ascent collapses into repetitive campaign administration, when apparently broad choices have one obvious winner, equivalent immediate effects, or convergent short-term trajectories, when rival hostility rarely changes commercial leverage, when mature governance is strategically narrow or develops an excessive uninterrupted drought, when succession rarely disrupts family cohesion, or when succession produces no meaningful post-transition strategy. Quiet observation while the world continues to change is reported but is not treated as dead time. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
+Each phase records action share, quiet and blocked cycles, how many quiet cycles still contain autonomous world change, the longest consecutive quiet streak, viable option depth, viable command-family breadth, multi-family choice frequency, and closely ranked alternatives. It records consequence differentiation twice: once across command families and again across every concrete viable target or template inside those families. Concrete profiles expose the direction of important economic, civic, family, and risk measures plus an impact fingerprint derived from measured outcomes. A separate strategic fingerprint preserves identity-sensitive state so two different properties, institutions, wards, laws, or districts remain inspectable even when their short-horizon measured effects are equivalent. Campaign reports also track maximum relationship-driven contract pressure and the minimum family unity observed after succession. Findings distinguish consequential time passage from genuinely static downtime and apply phase-specific limits to consecutive quiet streaks: establishment and institutional ascent are expected to remain comparatively tight, while mature governance may tolerate longer world-moving intervals without manufacturing busywork. Phase findings name the exact thresholds that failed so a warning caused by one excessive drought can be distinguished from broad actionability or choice-depth failure. They warn when establishment or institutional ascent becomes mostly waiting, when political ascent collapses into repetitive campaign administration, when apparently broad choices have one obvious winner, equivalent immediate effects, or convergent short-term trajectories, when repeated property acquisition becomes a universal progression path across otherwise distinct personas, when rival hostility rarely changes commercial leverage, when mature governance is strategically narrow or develops an excessive uninterrupted drought, when succession rarely disrupts family cohesion, or when succession produces no meaningful post-transition strategy. Quiet observation while the world continues to change is reported but is not treated as dead time. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
 
 ## Recovery routes
 
@@ -209,7 +209,7 @@ Scores range from 0 to 100.
 | Score | Measures |
 |---|---|
 | Actionability | Whether substantive candidates pass canonical validation. |
-| Variety | Command-direction coverage, distribution, and viable alternatives. |
+| Variety | Command-direction coverage, action distribution, command-family breadth, and projected consequence diversity among concrete viable alternatives. |
 | Interconnection | Distinct command-to-domain edges and consequence breadth. |
 | Feedback | Observable immediate and durable delayed results. |
 | Resilience | Business continuity, citywide and worst-district food access, liquidity, labor pressure, and crisis load. |
@@ -235,6 +235,8 @@ Findings use `Info`, `Warning`, or `Critical` severity. They cover conditions su
 - Public-work or office-duty overload
 - Misordered, compressed, synchronized, or unreachable campaign milestones
 - Weak strategic variety or persona convergence
+- Near-universal property acquisition that turns a scarce portfolio choice into automatic progression
+- Mature house-governance convergence after campaigns have actively rewritten their family charters
 - Multi-family cycles dominated by one obviously superior option
 - Viable alternatives with indistinguishable immediate consequence profiles
 - Viable alternatives whose simulated trajectories converge after the command-specific attribution horizon
@@ -256,10 +258,11 @@ Each retained step includes:
 - Considered, viable, and substantive candidate counts
 - Distinct viable command families
 - Ranked candidates and scores
-- Successfully probed viable alternatives, their scores, descriptions, immediate consequence domains, and projected domains after one decision interval
+- Every successfully probed viable concrete alternative, its score and target description, immediate and projected domains, directional measured impacts, an impact fingerprint, and an identity-sensitive strategic fingerprint
 - Score distance between the strongest two command families
 - Number of distinct immediate consequence profiles among viable command families
 - Number of distinct projected consequence profiles among viable command families
+- Number of cycles with multiple concrete viable options, close-ranked concrete alternatives, and distinct immediate or projected concrete consequence profiles
 - Selected command and outcome
 - Rejection summary
 - Immediate, persistent, delayed, and ambient domains
@@ -276,7 +279,7 @@ The JSON report contains:
 - `schema_version`
 - Harness configuration
 - Aggregate counters, scores, command statistics, and interaction edges
-- Per-phase actionability, longest quiet streak, viable option depth, command-family breadth among actionable cycles, patronage-and-nomination administration share, close-choice frequency, and immediate plus one-interval projected consequence differentiation
+- Per-phase actionability, longest quiet streak, viable option depth, command-family breadth among actionable cycles, patronage-and-nomination administration share, family-level and concrete-option close-choice frequency, and immediate plus one-interval projected consequence differentiation
 - Per-phase and aggregate separation of quiet cycles with ambient world change from genuinely static quiet cycles
 - Per-campaign start and end snapshots
 - Fantasy-arc milestone timing plus the first institutional support target, office-campaign target, and city-shaping command, so synchronized timing can be distinguished from synchronized strategy
@@ -325,6 +328,7 @@ The harness can evaluate deterministic state and command behavior. It cannot est
 - Whether incomplete information is presented clearly
 - Whether real-time pacing feels appropriate
 - Whether mechanically distinct options feel emotionally or narratively meaningful
+- Whether a persistent target-identity difference is strategically valuable to a human when its measured short-horizon impact profile is otherwise equivalent
 - Whether intentionally risky stress strategies are legible or attractive to a human player
 - Whether a player recognizes which rival caused a setback or understands that rival's intent
 - Whether a relationship-driven premium or succession shock feels fair, attributable, and emotionally salient rather than merely measurable

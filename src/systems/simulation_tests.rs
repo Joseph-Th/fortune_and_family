@@ -457,6 +457,49 @@ mod transfer_boundaries {
             "aggregate income overflow must fail before crediting any household",
         );
     }
+
+    #[test]
+    fn production_audit_total_remains_exact_above_quantity_range() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let output_quantity = Quantity::from_milliunits(i64::MAX / 2 + 1_000_000);
+        let lines: Vec<_> = state
+            .businesses
+            .iter()
+            .take(2)
+            .map(|business| {
+                let recipe = registry
+                    .get_recipe(business.recipe_id())
+                    .expect("business recipe must exist");
+                ProductionLine {
+                    business_id: business.id(),
+                    inputs: Vec::new(),
+                    output_good_id: recipe.output_good_id(),
+                    output_quantity,
+                    operating_cost: Money::ZERO,
+                }
+            })
+            .collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "campaign must contain at least two businesses"
+        );
+        let expected_output = i128::from(output_quantity.milliunits()) * 2;
+        assert!(expected_output > i128::from(i64::MAX));
+
+        apply_production(&mut state, ProductionPlan { lines }).expect("production must succeed");
+
+        let audit = state
+            .audit_log
+            .last()
+            .expect("production must emit an audit record");
+        assert_eq!(audit.kind(), AuditKind::Production);
+        assert_eq!(
+            audit.detail(),
+            format!("output={expected_output}; operating_cost=0")
+        );
+    }
 }
 
 mod starting_economies {
@@ -2550,6 +2593,77 @@ mod market_prices {
                 .price()
                 >= floor,
             "oversupply must not push a produced good below sustainable cost"
+        );
+    }
+
+    #[test]
+    fn production_floor_keeps_exact_payroll_before_daily_conversion() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let target_business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let target_recipe_id = state
+            .businesses
+            .get(target_business_id)
+            .expect("target business must exist")
+            .recipe_id();
+        let target_good_id = registry
+            .get_recipe(target_recipe_id)
+            .expect("target recipe must exist")
+            .output_good_id();
+        for business in state.businesses.iter_mut() {
+            if business.id() != target_business_id
+                && registry
+                    .get_recipe(business.recipe_id())
+                    .expect("business recipe must exist")
+                    .output_good_id()
+                    == target_good_id
+            {
+                business.operations.status = BusinessStatus::Closed;
+            }
+        }
+        let employment_ids: Vec<_> = state.employment.keys().copied().take(2).collect();
+        let [first_id, second_id] = employment_ids.as_slice() else {
+            panic!("campaign must contain at least two employment agreements");
+        };
+        let wage = Money::from_copper((i64::MAX / 4) * 3);
+        for employment_id in [*first_id, *second_id] {
+            let agreement = state
+                .employment
+                .get_mut(&employment_id)
+                .expect("employment agreement must exist");
+            agreement.business_id = target_business_id;
+            agreement.weekly_wage = wage;
+            agreement.status = EmploymentStatus::Active;
+        }
+
+        let recipe = registry
+            .get_recipe(target_recipe_id)
+            .expect("target recipe must exist");
+        let exact_daily_labor = ceil_div_nonnegative_wide(i128::from(wage.copper()) * 2, 7);
+        assert!(
+            exact_daily_labor > ceil_div_nonnegative_wide(i128::from(i64::MAX), 7),
+            "test setup must exceed a saturate-then-divide payroll calculation"
+        );
+        let minimum_labor_only_floor = Money::from_copper(
+            i64::try_from(exact_daily_labor)
+                .expect("test daily labor remains within the Money range"),
+        )
+        .saturating_mul_ratio_ceil_nonnegative(1_000, recipe.output_quantity().milliunits())
+        .saturating_mul_ratio_ceil_nonnegative(11, 10);
+
+        let floor = production_price_floors(registry, &state)
+            .get(&target_good_id)
+            .copied()
+            .expect("target business must define a production floor");
+
+        assert!(
+            floor >= minimum_labor_only_floor,
+            "the sustainable price floor must reflect exact aggregate payroll before weekly-to-daily conversion"
         );
     }
 }

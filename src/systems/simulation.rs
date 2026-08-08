@@ -298,8 +298,8 @@ fn apply_business_purchases(
     state: &mut AppState,
     plan: BusinessPurchasePlan,
 ) -> Result<(), SimulationError> {
-    let mut total_cost = Money::ZERO;
-    let mut total_quantity = Quantity::ZERO;
+    let mut total_cost_copper = 0_i128;
+    let mut total_quantity_milliunits = 0_i128;
     for line in plan.lines {
         let BusinessPurchaseLine {
             business_id,
@@ -377,19 +377,15 @@ fn apply_business_purchases(
             quote.demand_today = resulting_market_demand;
         }
         state.market.clearing_account = resulting_clearing;
-        total_cost = total_cost.saturating_add(cost);
-        total_quantity = total_quantity.saturating_add(quantity);
+        total_cost_copper += i128::from(cost.copper());
+        total_quantity_milliunits += i128::from(quantity.milliunits());
     }
-    if !total_quantity.is_zero() {
+    if total_quantity_milliunits != 0 {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::MarketPurchase,
             subject: "businesses".into(),
-            detail: format!(
-                "quantity={}; cost={}",
-                total_quantity.milliunits(),
-                total_cost.copper()
-            ),
+            detail: format!("quantity={total_quantity_milliunits}; cost={total_cost_copper}"),
         });
     }
     Ok(())
@@ -602,8 +598,8 @@ const fn governance_administrative_multiplier(governance: HouseGovernance) -> u3
 }
 
 fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), SimulationError> {
-    let mut total_output = Quantity::ZERO;
-    let mut total_operating_cost = Money::ZERO;
+    let mut total_output_milliunits = 0_i128;
+    let mut total_operating_cost_copper = 0_i128;
 
     for line in plan.lines {
         let ProductionLine {
@@ -658,19 +654,17 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), Si
         business.finance.cash = resulting_cash;
         business.finance.lifetime_costs = resulting_lifetime_costs;
         business.finance.version = next_finance_version;
-        total_output = total_output.saturating_add(output_quantity);
-        total_operating_cost = total_operating_cost.saturating_add(operating_cost);
+        total_output_milliunits += i128::from(output_quantity.milliunits());
+        total_operating_cost_copper += i128::from(operating_cost.copper());
     }
 
-    if !total_output.is_zero() {
+    if total_output_milliunits != 0 {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::Production,
             subject: "businesses".into(),
             detail: format!(
-                "output={}; operating_cost={}",
-                total_output.milliunits(),
-                total_operating_cost.copper()
+                "output={total_output_milliunits}; operating_cost={total_operating_cost_copper}"
             ),
         });
     }
@@ -807,8 +801,8 @@ fn apply_business_sales(
     state: &mut AppState,
     plan: BusinessSalePlan,
 ) -> Result<(), SimulationError> {
-    let mut total_revenue = Money::ZERO;
-    let mut total_quantity = Quantity::ZERO;
+    let mut total_revenue_copper = 0_i128;
+    let mut total_quantity_milliunits = 0_i128;
     for line in plan.lines {
         let BusinessSaleLine {
             business_id,
@@ -883,19 +877,15 @@ fn apply_business_sales(
             quote.supply_today = resulting_market_supply;
         }
         state.market.clearing_account = resulting_clearing;
-        total_revenue = total_revenue.saturating_add(revenue);
-        total_quantity = total_quantity.saturating_add(quantity);
+        total_revenue_copper += i128::from(revenue.copper());
+        total_quantity_milliunits += i128::from(quantity.milliunits());
     }
-    if !total_quantity.is_zero() {
+    if total_quantity_milliunits != 0 {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::MarketSale,
             subject: "businesses".into(),
-            detail: format!(
-                "quantity={}; revenue={}",
-                total_quantity.milliunits(),
-                total_revenue.copper()
-            ),
+            detail: format!("quantity={total_quantity_milliunits}; revenue={total_revenue_copper}"),
         });
     }
     Ok(())
@@ -1061,8 +1051,8 @@ fn apply_household_consumption(
         lines,
         food_satisfaction,
     } = plan;
-    let mut total_cost = Money::ZERO;
-    let mut total_quantity = Quantity::ZERO;
+    let mut total_cost_copper = 0_i128;
+    let mut total_quantity_milliunits = 0_i128;
     for line in lines {
         let HouseholdPurchaseLine {
             household_id,
@@ -1121,8 +1111,8 @@ fn apply_household_consumption(
             quote.demand_today = resulting_market_demand;
         }
         state.market.clearing_account = resulting_clearing;
-        total_cost = total_cost.saturating_add(cost);
-        total_quantity = total_quantity.saturating_add(quantity);
+        total_cost_copper += i128::from(cost.copper());
+        total_quantity_milliunits += i128::from(quantity.milliunits());
     }
     for (household_id, satisfaction) in food_satisfaction {
         state
@@ -1135,11 +1125,7 @@ fn apply_household_consumption(
         day: state.clock.day(),
         kind: AuditKind::HouseholdConsumption,
         subject: "households".into(),
-        detail: format!(
-            "quantity={}; spending={}",
-            total_quantity.milliunits(),
-            total_cost.copper()
-        ),
+        detail: format!("quantity={total_quantity_milliunits}; spending={total_cost_copper}"),
     });
     Ok(())
 }
@@ -1244,7 +1230,7 @@ fn maintenance_effect(maintenance_basis_points: u16, condition_basis_points: u16
 }
 
 fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), SimulationError> {
-    let mut total_cost = Money::ZERO;
+    let mut total_cost_copper = 0_i128;
     for line in plan.lines {
         let MaintenanceLine {
             business_id,
@@ -1285,14 +1271,14 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
             .clamp(0, 10_000);
         business.operations.quality_basis_points =
             u16::try_from(quality).expect("clamped quality must fit u16");
-        total_cost = total_cost.saturating_add(cost);
+        total_cost_copper += i128::from(cost.copper());
     }
-    if total_cost != Money::ZERO {
+    if total_cost_copper != 0 {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::Maintenance,
             subject: "businesses".into(),
-            detail: format!("cost={}", total_cost.copper()),
+            detail: format!("cost={total_cost_copper}"),
         });
     }
     Ok(())
@@ -1403,17 +1389,21 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
         if output_milliunits <= 0 {
             continue;
         }
-        let weekly_labor = state
+        let weekly_labor_copper = state
             .employment
             .values()
             .filter(|agreement| {
                 agreement.business_id == business.id()
                     && agreement.status != EmploymentStatus::Ended
             })
-            .fold(Money::ZERO, |total, agreement| {
-                total.saturating_add(agreement.weekly_wage)
+            .fold(0_i128, |total, agreement| {
+                total + i128::from(agreement.weekly_wage.copper())
             });
-        let daily_labor = Money::from_copper(ceil_div_nonnegative(weekly_labor.copper(), 7));
+        let daily_labor_copper =
+            ceil_div_nonnegative_wide(weekly_labor_copper, 7).min(i128::from(i64::MAX));
+        let daily_labor = Money::from_copper(
+            i64::try_from(daily_labor_copper).expect("clamped daily labor cost must fit i64"),
+        );
         let daily_maintenance = maintenance_cost(
             recipe.daily_operating_cost(),
             business.policy.maintenance_basis_points,
@@ -1443,10 +1433,10 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
     floors
 }
 
-fn ceil_div_nonnegative(numerator: i64, denominator: i64) -> i64 {
+fn ceil_div_nonnegative_wide(numerator: i128, denominator: i128) -> i128 {
     debug_assert!(numerator >= 0 && denominator > 0);
     let quotient = numerator / denominator;
-    quotient.saturating_add(i64::from(numerator % denominator != 0))
+    quotient + i128::from(numerator % denominator != 0)
 }
 
 fn seasonal_pressure_basis_points(category: GoodCategory, day_of_year: u16) -> i64 {

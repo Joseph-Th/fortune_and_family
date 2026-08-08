@@ -927,6 +927,61 @@ mod candidates {
     }
 
     #[test]
+    fn debt_service_makes_office_retreat_available_before_office_cost_alone_would() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival lender");
+        issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(8_000),
+                weekly_payment: Money::from_copper(500),
+                interest_basis_points: 500,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture loan must be issuable");
+        let office_cost = player_current_office_duty_cost(&state);
+        let treasury = office_cost
+            .saturating_mul(6)
+            .saturating_add(Money::from_copper(1_000));
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = treasury;
+        assert!(
+            treasury >= office_cost.saturating_mul(6),
+            "fixture must stay above the former office-only withdrawal threshold"
+        );
+        assert_eq!(count_player_offices(&state, player_id), 1);
+        assert!(!player_is_politically_overextended(&state));
+
+        assert!(
+            has_institution_withdrawal_opportunity(&state),
+            "loan service should make surrendering an office a viable retreat before office costs alone exhaust liquidity"
+        );
+        let mut candidates = Vec::new();
+        generate_family_candidates(registry, &state, GameplayPersona::Steward, &mut candidates);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::WithdrawFromInstitution),
+            "financial overextension must surface an executable resignation candidate"
+        );
+    }
+
+    #[test]
     fn legitimacy_exhausted_multi_office_dynasty_can_reduce_political_overextension() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -1098,6 +1153,89 @@ mod candidates {
                 .iter()
                 .all(|candidate| candidate.kind != GameplayCommandKind::SellProperty),
             "candidate generation and opportunity accounting must agree"
+        );
+    }
+
+    #[test]
+    fn committed_office_and_debt_costs_surface_property_liquidation_before_emergency_cash() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival lender");
+        issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(8_000),
+                weekly_payment: Money::from_copper(500),
+                interest_basis_points: 500,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture loan must be issuable");
+        let two_month_obligations = projected_dynasty_monthly_office_duty(&state, player_id, 0)
+            .saturating_mul(2)
+            .saturating_add(Money::from_copper(500).saturating_mul(8));
+        let treasury = Money::from_copper(2_000)
+            .saturating_add(two_month_obligations)
+            .saturating_sub(Money::from_copper(1));
+        assert!(
+            treasury > Money::from_copper(2_000),
+            "fixture must remain above the previous emergency-only liquidation threshold"
+        );
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = treasury;
+
+        assert!(
+            has_property_liquidation_opportunity(registry, &state),
+            "near-term committed obligations should make an owned asset liquidatable before emergency cash levels"
+        );
+        let mut candidates = Vec::new();
+        generate_finance_candidates(registry, &state, GameplayPersona::Steward, &mut candidates);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::SellProperty),
+            "the early recovery opportunity must produce an executable property-sale candidate"
+        );
+    }
+
+    #[test]
+    fn succession_pressure_preserves_persona_specific_governance_tradeoffs() {
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .runtime
+            .succession_risk_basis_points = 3_000;
+
+        assert_eq!(
+            preferred_house_governance(&state, GameplayPersona::Steward),
+            Some(HouseGovernance::Primogeniture)
+        );
+        assert_eq!(
+            preferred_house_governance(&state, GameplayPersona::PowerBroker),
+            Some(HouseGovernance::Primogeniture)
+        );
+        assert_eq!(
+            preferred_house_governance(&state, GameplayPersona::Entrepreneur),
+            Some(HouseGovernance::FamilyPartnership)
+        );
+        assert_eq!(
+            preferred_house_governance(&state, GameplayPersona::Opportunist),
+            Some(HouseGovernance::HeadCommand)
         );
     }
 
@@ -2903,9 +3041,8 @@ mod metrics {
                 substantive_candidate_count: 0,
                 substantive_viable_count: 0,
                 viable_command_kind_count: 0,
-                close_choice: false,
-                distinct_immediate_choices: false,
-                distinct_projected_choices: false,
+                family_quality: AlternativeQuality::default(),
+                option_quality: AlternativeQuality::default(),
             },
             ambient_change: true,
         };
@@ -2920,9 +3057,8 @@ mod metrics {
                     substantive_candidate_count: 1,
                     substantive_viable_count: 1,
                     viable_command_kind_count: 1,
-                    close_choice: false,
-                    distinct_immediate_choices: false,
-                    distinct_projected_choices: false,
+                    family_quality: AlternativeQuality::default(),
+                    option_quality: AlternativeQuality::default(),
                 },
                 ambient_change: true,
             },
@@ -2935,6 +3071,71 @@ mod metrics {
             .expect("institutional-ascent phase statistics must exist");
         assert_eq!(stats.quiet_cycles, 3);
         assert_eq!(stats.longest_quiet_streak_cycles, 2);
+    }
+
+    #[test]
+    fn probe_keeps_target_identity_separate_from_consequence_divergence() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(1_000_000);
+        let mut candidates = Vec::new();
+        generate_finance_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+        let property_candidates: Vec<_> = candidates
+            .into_iter()
+            .filter(|candidate| candidate.kind == GameplayCommandKind::BuyProperty)
+            .take(2)
+            .collect();
+        assert_eq!(
+            property_candidates.len(),
+            2,
+            "test campaign must expose two affordable property targets"
+        );
+        let mut accumulator = CampaignAccumulator::new();
+
+        let probe = probe_candidates(
+            registry,
+            &state,
+            property_candidates.into_iter(),
+            30,
+            &mut accumulator,
+        )
+        .expect("property alternatives must be probeable");
+
+        assert_eq!(probe.viable_command_kinds.len(), 1);
+        assert_eq!(probe.viable_options.len(), 2);
+        assert_eq!(
+            probe.distinct_immediate_choice_profiles, 1,
+            "equivalent warehouse purchases must not be counted as different consequence profiles solely because the property IDs differ"
+        );
+        assert!(probe.viable_options.iter().all(|option| {
+            option
+                .immediate_profile
+                .increases
+                .contains(&GameplayMeasure::PlayerProperties)
+                && option
+                    .immediate_profile
+                    .decreases
+                    .contains(&GameplayMeasure::PlayerTreasury)
+        }));
+        assert_ne!(
+            probe.viable_options[0]
+                .immediate_profile
+                .strategic_fingerprint,
+            probe.viable_options[1]
+                .immediate_profile
+                .strategic_fingerprint,
+            "different property targets must retain distinct strategic identities"
+        );
     }
 
     #[test]
@@ -4002,6 +4203,10 @@ mod findings {
                 cycles_with_close_viable_command_kinds: 0,
                 cycles_with_distinct_immediate_consequences: 0,
                 cycles_with_distinct_projected_consequences: 0,
+                cycles_with_multiple_viable_options: 0,
+                cycles_with_close_viable_options: 0,
+                cycles_with_distinct_immediate_option_consequences: 0,
+                cycles_with_distinct_projected_option_consequences: 0,
                 total_viable_choices: 80,
                 total_viable_command_kinds: 80,
             },
@@ -4020,6 +4225,10 @@ mod findings {
                 cycles_with_close_viable_command_kinds: 0,
                 cycles_with_distinct_immediate_consequences: 0,
                 cycles_with_distinct_projected_consequences: 0,
+                cycles_with_multiple_viable_options: 0,
+                cycles_with_close_viable_options: 0,
+                cycles_with_distinct_immediate_option_consequences: 0,
+                cycles_with_distinct_projected_option_consequences: 0,
                 total_viable_choices: 110,
                 total_viable_command_kinds: 110,
             },
@@ -4051,6 +4260,10 @@ mod findings {
                 cycles_with_close_viable_command_kinds: 20,
                 cycles_with_distinct_immediate_consequences: 22,
                 cycles_with_distinct_projected_consequences: 22,
+                cycles_with_multiple_viable_options: 72,
+                cycles_with_close_viable_options: 20,
+                cycles_with_distinct_immediate_option_consequences: 72,
+                cycles_with_distinct_projected_option_consequences: 72,
                 total_viable_choices: 324,
                 total_viable_command_kinds: 137,
             },
@@ -4081,6 +4294,10 @@ mod findings {
                 cycles_with_close_viable_command_kinds: 20,
                 cycles_with_distinct_immediate_consequences: 40,
                 cycles_with_distinct_projected_consequences: 40,
+                cycles_with_multiple_viable_options: 70,
+                cycles_with_close_viable_options: 20,
+                cycles_with_distinct_immediate_option_consequences: 70,
+                cycles_with_distinct_projected_option_consequences: 70,
                 total_viable_choices: 300,
                 total_viable_command_kinds: 160,
             },
@@ -4155,6 +4372,10 @@ mod findings {
                 cycles_with_close_viable_command_kinds: 10,
                 cycles_with_distinct_immediate_consequences: 20,
                 cycles_with_distinct_projected_consequences: 20,
+                cycles_with_multiple_viable_options: 40,
+                cycles_with_close_viable_options: 10,
+                cycles_with_distinct_immediate_option_consequences: 40,
+                cycles_with_distinct_projected_option_consequences: 40,
                 total_viable_choices: 120,
                 total_viable_command_kinds: 70,
             },
@@ -4401,6 +4622,134 @@ mod findings {
             &findings,
             "Strategic alternatives converge after one decision interval",
         );
+    }
+
+    #[test]
+    fn findings_surface_concrete_targets_that_converge_after_projection() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.cycles_with_multiple_viable_options = 100;
+        report.aggregate.cycles_with_close_viable_options = 70;
+        report
+            .aggregate
+            .cycles_with_distinct_immediate_option_consequences = 70;
+        report
+            .aggregate
+            .cycles_with_distinct_projected_option_consequences = 40;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "Concrete alternatives converge despite different targets",
+        );
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn concrete_target_divergence_avoids_false_convergence_warning() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.cycles_with_multiple_viable_options = 100;
+        report.aggregate.cycles_with_close_viable_options = 70;
+        report
+            .aggregate
+            .cycles_with_distinct_immediate_option_consequences = 85;
+        report
+            .aggregate
+            .cycles_with_distinct_projected_option_consequences = 90;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(
+            &findings,
+            "Concrete alternatives converge despite different targets",
+        );
+    }
+
+    #[test]
+    fn findings_surface_property_acquisition_as_universal_progression() {
+        let mut report = cached_focused_report(360);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused report must contain a campaign")
+            .clone();
+        report.campaigns = (0..8).map(|_| template.clone()).collect();
+        report.aggregate.campaigns = 8;
+        report.aggregate.simulated_days = 7_200;
+        for campaign in &mut report.campaigns {
+            campaign.simulated_days = 900;
+            campaign
+                .commands
+                .get_mut(&GameplayCommandKind::BuyProperty)
+                .expect("property command statistics must exist")
+                .executed = 3;
+        }
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "Property acquisition becomes a universal progression path",
+        );
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn diversified_property_growth_avoids_universal_progression_warning() {
+        let mut report = cached_focused_report(360);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused report must contain a campaign")
+            .clone();
+        report.campaigns = (0..8).map(|_| template.clone()).collect();
+        report.aggregate.campaigns = 8;
+        report.aggregate.simulated_days = 7_200;
+        for (index, campaign) in report.campaigns.iter_mut().enumerate() {
+            campaign.simulated_days = 900;
+            campaign
+                .commands
+                .get_mut(&GameplayCommandKind::BuyProperty)
+                .expect("property command statistics must exist")
+                .executed = if index < 3 { 3 } else { 1 };
+        }
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(
+            &findings,
+            "Property acquisition becomes a universal progression path",
+        );
+    }
+
+    #[test]
+    fn findings_surface_mature_house_governance_convergence() {
+        let mut report = cached_focused_report(360);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused report must contain a campaign")
+            .clone();
+        report.campaigns = (0..8).map(|_| template.clone()).collect();
+        report.aggregate.campaigns = 8;
+        report.aggregate.simulated_days = 14_400;
+        for campaign in &mut report.campaigns {
+            campaign.simulated_days = 1_800;
+            campaign.end.house_governance = HouseGovernance::Primogeniture;
+            campaign
+                .commands
+                .get_mut(&GameplayCommandKind::SetHouseGovernance)
+                .expect("house-governance command statistics must exist")
+                .executed = 1;
+        }
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "House governance converges on one succession model",
+        );
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
     }
 
     #[test]

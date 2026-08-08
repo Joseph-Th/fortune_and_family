@@ -2,8 +2,7 @@
 
 use crate::core::{
     AppState, AuditKind, Business, CharacterStatus, CivicDebtStatus, ContractStatus, CrisisStatus,
-    DynastyPair, EmploymentStatus, FamilyLinkKind, LegalCaseStatus, LoanStatus, ObjectiveStatus,
-    PublicWorkStatus,
+    DynastyPair, EmploymentStatus, FamilyLinkKind, LegalCaseStatus, LoanStatus, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, DistrictId, DynastyId, GoodId, HouseholdId, InstitutionId, RecipeId,
@@ -678,12 +677,16 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
             "Derived Data Consistency: property key and record ID differ"
         );
         debug_assert!(
+            !property.name.trim().is_empty(),
+            "No Lost Runtime State: property has a blank name"
+        );
+        debug_assert!(
             ids.districts.contains(&property.district_id),
             "Registry Reference Validity: property district does not exist"
         );
         debug_assert!(
-            !property.value.is_negative() && !property.weekly_rent.is_negative(),
-            "Lifecycle Validity: property value and rent must be nonnegative"
+            property.value > crate::money::Money::ZERO && !property.weekly_rent.is_negative(),
+            "Lifecycle Validity: property value must be positive and rent nonnegative"
         );
         debug_assert!(
             property.condition_basis_points <= 10_000,
@@ -1206,6 +1209,13 @@ fn validate_laws_and_relationships(state: &AppState) {
             relationship.memories.len() <= super::MAX_RELATIONSHIP_MEMORIES,
             "Lifecycle Validity: relationship history exceeds its retention bound"
         );
+        debug_assert!(
+            relationship
+                .memories
+                .iter()
+                .all(|memory| !memory.trim().is_empty()),
+            "No Lost Runtime State: relationship history contains a blank memory"
+        );
     }
     let dynasty_ids: Vec<_> = state.dynasties.keys().copied().collect();
     for (index, left_dynasty_id) in dynasty_ids.iter().enumerate() {
@@ -1233,6 +1243,12 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
         debug_assert!(
             report.created_day <= state.clock.day() && report.expires_day >= report.created_day,
             "Lifecycle Validity: information report dates are invalid"
+        );
+        debug_assert!(
+            !report.subject.trim().is_empty()
+                && !report.source.trim().is_empty()
+                && !report.summary.trim().is_empty(),
+            "No Lost Runtime State: information report lacks user-facing content"
         );
         debug_assert!(
             report.target.is_none_or(|target| match target {
@@ -1266,12 +1282,10 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
             objective.created_day <= state.clock.day(),
             "No Lost Runtime State: AI objective is created in the future"
         );
-        if objective.status == ObjectiveStatus::Achieved {
-            debug_assert!(
-                !objective.rationale.is_empty(),
-                "No Lost Runtime State: achieved AI objective has no rationale"
-            );
-        }
+        debug_assert!(
+            !objective.rationale.trim().is_empty(),
+            "No Lost Runtime State: AI objective has no rationale"
+        );
     }
 }
 
@@ -1434,6 +1448,10 @@ fn validate_routes_and_crises(state: &AppState, ids: &RegistryIds) {
             "Derived Data Consistency: external route key and ID differ"
         );
         debug_assert!(
+            !route.name.trim().is_empty(),
+            "No Lost Runtime State: external route has a blank name"
+        );
+        debug_assert!(
             ids.goods.contains(&route.good_id),
             "Registry Reference Validity: external route good does not exist"
         );
@@ -1449,6 +1467,10 @@ fn validate_routes_and_crises(state: &AppState, ids: &RegistryIds) {
         debug_assert_eq!(
             *crisis_id, crisis.id,
             "Derived Data Consistency: crisis key and ID differ"
+        );
+        debug_assert!(
+            !crisis.cause.trim().is_empty(),
+            "No Lost Runtime State: crisis has no recorded cause"
         );
         debug_assert!(
             crisis.started_day <= state.clock.day(),
