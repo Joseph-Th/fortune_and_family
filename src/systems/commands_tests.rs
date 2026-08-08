@@ -70,7 +70,7 @@ fn grant_player_office_with_power_for_test(state: &mut AppState, power: OfficePo
     institution.next_selection_day = mature_next_selection_day;
 }
 
-fn grant_commercial_standing_for_test(state: &mut AppState) {
+fn grant_commercial_deliveries_for_test(state: &mut AppState, required_deliveries: u32) {
     let player_business_ids: BTreeSet<_> = state
         .businesses
         .iter()
@@ -85,12 +85,16 @@ fn grant_commercial_standing_for_test(state: &mut AppState) {
                 || player_business_ids.contains(&contract.seller_business_id)
         })
         .expect("campaign must contain a player contract");
-    let deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
+    let deliveries = u16::try_from(required_deliveries)
         .expect("office delivery requirement must fit contract counters");
     contract.fulfilled_deliveries = deliveries;
     contract
         .fulfilled_deliveries_by_dynasty
         .insert(state.player_dynasty_id, deliveries);
+}
+
+fn grant_commercial_standing_for_test(state: &mut AppState) {
+    grant_commercial_deliveries_for_test(state, OFFICE_NOMINATION_DELIVERY_REQUIREMENT);
     state
         .dynasties
         .get_mut(&state.player_dynasty_id)
@@ -101,6 +105,11 @@ fn grant_commercial_standing_for_test(state: &mut AppState) {
 
 fn grant_office_nomination_record_for_test(state: &mut AppState) {
     grant_commercial_standing_for_test(state);
+    grant_commercial_deliveries_for_test(
+        state,
+        OFFICE_NOMINATION_DELIVERY_REQUIREMENT
+            .saturating_add(OFFICE_NOMINATION_MAX_PREPARATION_DELIVERIES),
+    );
     let support_day = state
         .clock
         .day()
@@ -2192,7 +2201,11 @@ mod politics {
         )
     }
 
-    fn grant_nomination_delivery_record(state: &mut AppState, player_id: DynastyId) {
+    fn grant_nomination_delivery_record(
+        state: &mut AppState,
+        player_id: DynastyId,
+        required_deliveries: u32,
+    ) {
         let player_businesses: BTreeSet<_> = state
             .businesses
             .iter()
@@ -2207,7 +2220,7 @@ mod politics {
                     || player_businesses.contains(&contract.seller_business_id)
             })
             .expect("campaign must contain a player contract");
-        let deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
+        let deliveries = u16::try_from(required_deliveries)
             .expect("nomination delivery requirement must fit contract counters");
         contract.fulfilled_deliveries = deliveries;
         contract
@@ -2228,6 +2241,55 @@ mod politics {
                     .is_some_and(|character| character.dynasty_id() != player_id)
             })
         }));
+    }
+
+    #[test]
+    fn candidate_capability_reduces_extra_commercial_preparation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        {
+            let capabilities = &mut state
+                .characters
+                .get_mut(character_id)
+                .expect("player character must exist")
+                .capabilities;
+            capabilities.administration = 0;
+            capabilities.commerce = 0;
+            capabilities.social = 0;
+            capabilities.craft = 0;
+        }
+        let unprepared =
+            office_nomination_delivery_requirement(registry, &state, institution_id, character_id);
+        {
+            let capabilities = &mut state
+                .characters
+                .get_mut(character_id)
+                .expect("player character must exist")
+                .capabilities;
+            capabilities.administration = 100;
+            capabilities.commerce = 100;
+            capabilities.social = 100;
+            capabilities.craft = 100;
+        }
+        let prepared =
+            office_nomination_delivery_requirement(registry, &state, institution_id, character_id);
+
+        assert_eq!(prepared, OFFICE_NOMINATION_DELIVERY_REQUIREMENT);
+        assert_eq!(
+            unprepared,
+            OFFICE_NOMINATION_DELIVERY_REQUIREMENT + OFFICE_NOMINATION_MAX_PREPARATION_DELIVERIES
+        );
+        assert!(prepared < unprepared);
     }
 
     #[test]
@@ -2268,6 +2330,8 @@ mod politics {
                 && record.subject() == institution_support_subject(institution_id, character_id)
         }));
 
+        let nomination_delivery_requirement =
+            office_nomination_delivery_requirement(registry, &state, institution_id, character_id);
         let before_incomplete_record_nomination = state.clone();
         let incomplete_record_nomination = apply_player_command(
             registry,
@@ -2281,7 +2345,7 @@ mod politics {
             incomplete_record_nomination,
             Err(CommandError::InsufficientOfficeCommercialRecord {
                 delivered: INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
-                required: OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+                required: nomination_delivery_requirement,
             })
         );
         assert_state_unchanged(
@@ -2290,7 +2354,7 @@ mod politics {
             "patronage must open before the commercial record is strong enough for candidacy",
         );
 
-        grant_nomination_delivery_record(&mut state, player_id);
+        grant_nomination_delivery_record(&mut state, player_id, nomination_delivery_requirement);
 
         let before_early_nomination = state.clone();
         let early_nomination = apply_player_command(
@@ -2938,6 +3002,8 @@ mod politics {
             OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
         let delivered = player_contract_deliveries(&state);
         assert!(delivered < OFFICE_NOMINATION_DELIVERY_REQUIREMENT);
+        let required =
+            office_nomination_delivery_requirement(registry, &state, institution_id, character_id);
         let before = state.clone();
 
         let result = apply_player_command(
@@ -2953,7 +3019,7 @@ mod politics {
             result,
             Err(CommandError::InsufficientOfficeCommercialRecord {
                 delivered,
-                required: OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+                required,
             })
         );
         assert_state_unchanged(

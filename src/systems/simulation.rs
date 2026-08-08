@@ -2,8 +2,7 @@
 
 use super::SimulationError;
 use super::transactions::{
-    add_market_supply, credit_market_clearing_account, debit_market_clearing_account,
-    next_business_finance_version, next_family_charter_version,
+    debit_market_clearing_account, next_business_finance_version, next_family_charter_version,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
@@ -12,7 +11,7 @@ use crate::core::{
     HouseGovernance, MarketCause, OutboxKind, SocialClass,
 };
 use crate::ids::{BusinessId, CharacterId, DynastyId, GoodId};
-use crate::money::{Money, Quantity, affordable_quantity, cost_for};
+use crate::money::{Money, Quantity, affordable_quantity, checked_cost_for, cost_for};
 use crate::registry::{GoodCategory, RecipeDef, Registry};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -308,11 +307,47 @@ fn apply_business_purchases(
             quantity,
             cost,
         } = line;
+        let (resulting_market_stock, resulting_market_demand) = {
+            let quote = state
+                .market
+                .quotes
+                .get(&good_id)
+                .expect("planned market purchase quote must exist");
+            (
+                quote
+                    .stock
+                    .checked_sub(quantity)
+                    .expect("planned business purchase must not exceed market stock"),
+                quote.demand_today.checked_add(quantity).ok_or(
+                    SimulationError::MarketDemandOverflow {
+                        good_id,
+                        current: quote.demand_today,
+                        incoming: quantity,
+                    },
+                )?,
+            )
+        };
+        let clearing_before = state.market.clearing_account;
+        let resulting_clearing = clearing_before.checked_add(cost).ok_or(
+            SimulationError::MarketClearingAccountOverflow {
+                current: clearing_before,
+                change: cost,
+            },
+        )?;
         {
             let business = state
                 .businesses
                 .get_mut(business_id)
                 .expect("planned business purchase target must exist");
+            let current_inventory = business.inventory_quantity(good_id);
+            current_inventory.checked_add(quantity).ok_or(
+                SimulationError::BusinessInventoryOverflow {
+                    business_id,
+                    good_id,
+                    current: current_inventory,
+                    incoming: quantity,
+                },
+            )?;
             let resulting_cash = business
                 .finance
                 .cash
@@ -338,16 +373,10 @@ fn apply_business_purchases(
                 .quotes
                 .get_mut(&good_id)
                 .expect("planned market purchase quote must exist");
-            quote.stock = quote
-                .stock
-                .checked_sub(quantity)
-                .expect("planned business purchase must not exceed market stock");
-            quote.demand_today = quote
-                .demand_today
-                .checked_add(quantity)
-                .expect("bounded business demand must fit market flow totals");
+            quote.stock = resulting_market_stock;
+            quote.demand_today = resulting_market_demand;
         }
-        credit_market_clearing_account(state, cost)?;
+        state.market.clearing_account = resulting_clearing;
         total_cost = total_cost.saturating_add(cost);
         total_quantity = total_quantity.saturating_add(quantity);
     }
@@ -588,6 +617,25 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), Si
             .businesses
             .get_mut(business_id)
             .expect("planned production business must exist");
+        let output_inventory_after_inputs = inputs
+            .iter()
+            .filter(|(good_id, _)| *good_id == output_good_id)
+            .fold(
+                business.inventory_quantity(output_good_id),
+                |current, (_, quantity)| {
+                    current
+                        .checked_sub(*quantity)
+                        .expect("planned production inputs must fit business inventory")
+                },
+            );
+        output_inventory_after_inputs
+            .checked_add(output_quantity)
+            .ok_or(SimulationError::BusinessInventoryOverflow {
+                business_id,
+                good_id: output_good_id,
+                current: output_inventory_after_inputs,
+                incoming: output_quantity,
+            })?;
         let resulting_cash = business
             .finance
             .cash
@@ -708,15 +756,17 @@ fn decide_business_sales(
             .min(10_000);
         let quantity = surplus
             .min(capacity)
-            .saturating_mul_ratio(commerce_efficiency, 10_000)
-            .min(affordable_quantity(
-                business.cash().max_nonnegative_addend(),
-                quote.price,
-            ));
+            .saturating_mul_ratio(commerce_efficiency, 10_000);
         if quantity.is_zero() {
             continue;
         }
-        let revenue = cost_for(quantity, quote.price);
+        let revenue = validate_business_sale_revenue(
+            business.id(),
+            business.cash(),
+            good_id,
+            quantity,
+            quote.price,
+        )?;
         market_capacity.insert(good_id, capacity.saturating_sub(quantity));
         lines.push(BusinessSaleLine {
             business_id: business.id(),
@@ -727,6 +777,30 @@ fn decide_business_sales(
     }
 
     Ok(BusinessSalePlan { lines })
+}
+
+fn validate_business_sale_revenue(
+    business_id: BusinessId,
+    current_cash: Money,
+    good_id: GoodId,
+    quantity: Quantity,
+    unit_price: Money,
+) -> Result<Money, SimulationError> {
+    let revenue = checked_cost_for(quantity, unit_price).ok_or(
+        SimulationError::MarketTradeValueOverflow {
+            good_id,
+            quantity,
+            unit_price,
+        },
+    )?;
+    current_cash
+        .checked_add(revenue)
+        .ok_or(SimulationError::BusinessCashOverflow {
+            business_id,
+            current: current_cash,
+            incoming: revenue,
+        })?;
+    Ok(revenue)
 }
 
 fn apply_business_sales(
@@ -742,6 +816,38 @@ fn apply_business_sales(
             quantity,
             revenue,
         } = line;
+        let (resulting_market_stock, resulting_market_supply) = {
+            let quote = state
+                .market
+                .quotes
+                .get(&good_id)
+                .ok_or(SimulationError::MarketQuoteMissing { good_id })?;
+            (
+                quote
+                    .stock
+                    .checked_add(quantity)
+                    .ok_or(SimulationError::MarketStockOverflow {
+                        good_id,
+                        current: quote.stock,
+                        incoming: quantity,
+                    })?,
+                quote.supply_today.checked_add(quantity).ok_or(
+                    SimulationError::MarketSupplyOverflow {
+                        good_id,
+                        current: quote.supply_today,
+                        incoming: quantity,
+                    },
+                )?,
+            )
+        };
+        let clearing_before = state.market.clearing_account;
+        let clearing_change = Money::from_copper(-revenue.copper());
+        let resulting_clearing = clearing_before.checked_sub(revenue).ok_or(
+            SimulationError::MarketClearingAccountOverflow {
+                current: clearing_before,
+                change: clearing_change,
+            },
+        )?;
         {
             let business = state
                 .businesses
@@ -767,8 +873,16 @@ fn apply_business_sales(
             business.finance.lifetime_revenue = resulting_lifetime_revenue;
             business.finance.version = next_finance_version;
         }
-        add_market_supply(state, good_id, quantity)?;
-        debit_market_clearing_account(state, revenue)?;
+        {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&good_id)
+                .expect("prevalidated business sale quote must exist");
+            quote.stock = resulting_market_stock;
+            quote.supply_today = resulting_market_supply;
+        }
+        state.market.clearing_account = resulting_clearing;
         total_revenue = total_revenue.saturating_add(revenue);
         total_quantity = total_quantity.saturating_add(quantity);
     }
@@ -956,15 +1070,46 @@ fn apply_household_consumption(
             quantity,
             cost,
         } = line;
+        let (resulting_market_stock, resulting_market_demand) = {
+            let quote = state
+                .market
+                .quotes
+                .get(&good_id)
+                .expect("planned household purchase quote must exist");
+            (
+                quote
+                    .stock
+                    .checked_sub(quantity)
+                    .expect("planned household purchase must not exceed market stock"),
+                quote.demand_today.checked_add(quantity).ok_or(
+                    SimulationError::MarketDemandOverflow {
+                        good_id,
+                        current: quote.demand_today,
+                        incoming: quantity,
+                    },
+                )?,
+            )
+        };
+        let clearing_before = state.market.clearing_account;
+        let resulting_clearing = clearing_before.checked_add(cost).ok_or(
+            SimulationError::MarketClearingAccountOverflow {
+                current: clearing_before,
+                change: cost,
+            },
+        )?;
+        let resulting_household_cash = state
+            .households
+            .get(household_id)
+            .expect("planned household purchase target must exist")
+            .cash
+            .checked_sub(cost)
+            .expect("planned household purchase must not exceed household cash");
         {
             let household = state
                 .households
                 .get_mut(household_id)
                 .expect("planned household purchase target must exist");
-            household.cash = household
-                .cash
-                .checked_sub(cost)
-                .expect("planned household purchase must not exceed household cash");
+            household.cash = resulting_household_cash;
         }
         {
             let quote = state
@@ -972,16 +1117,10 @@ fn apply_household_consumption(
                 .quotes
                 .get_mut(&good_id)
                 .expect("planned household purchase quote must exist");
-            quote.stock = quote
-                .stock
-                .checked_sub(quantity)
-                .expect("planned household purchase must not exceed market stock");
-            quote.demand_today = quote
-                .demand_today
-                .checked_add(quantity)
-                .expect("bounded household demand must fit market flow totals");
+            quote.stock = resulting_market_stock;
+            quote.demand_today = resulting_market_demand;
         }
-        credit_market_clearing_account(state, cost)?;
+        state.market.clearing_account = resulting_clearing;
         total_cost = total_cost.saturating_add(cost);
         total_quantity = total_quantity.saturating_add(quantity);
     }
@@ -1451,14 +1590,16 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
         .households
         .iter()
         .map(|household| {
-            (
-                household.id(),
-                household
-                    .weekly_income
-                    .min(household.cash.max_nonnegative_addend()),
-            )
+            household.cash.checked_add(household.weekly_income).ok_or(
+                SimulationError::HouseholdCashOverflow {
+                    household_id: household.id(),
+                    current: household.cash,
+                    incoming: household.weekly_income,
+                },
+            )?;
+            Ok((household.id(), household.weekly_income))
         })
-        .collect();
+        .collect::<Result<_, SimulationError>>()?;
     let mut total = Money::ZERO;
     for (_, paid) in &payments {
         total = total

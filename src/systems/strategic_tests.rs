@@ -921,7 +921,7 @@ mod gameplay_stability {
     }
 
     #[test]
-    fn dividends_share_the_owners_remaining_treasury_headroom() {
+    fn dividends_reject_owner_treasury_overflow_before_any_payout() {
         let registry = test_registry();
         let mut state = make_test_campaign();
         for business in state.businesses.iter_mut() {
@@ -958,43 +958,22 @@ mod gameplay_stability {
             .expect("owner dynasty must exist")
             .resources
             .treasury = Money::from_copper(i64::MAX - 1_500);
-        let cash_before: Vec<_> = business_ids
-            .iter()
-            .map(|business_id| {
-                state
-                    .businesses
-                    .get(*business_id)
-                    .expect("selected business must exist")
-                    .cash()
+        let before = state.clone();
+
+        let result = distribute_business_dividends(registry, &mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::DynastyTreasuryOverflow {
+                dynasty_id: owner_id,
+                current: Money::from_copper(i64::MAX - 500),
+                incoming: Money::from_copper(1_000),
             })
-            .collect();
-
-        distribute_business_dividends(registry, &mut state)
-            .expect("shared owner headroom must bound dividends");
-
-        assert_eq!(
-            state
-                .dynasties
-                .get(&owner_id)
-                .expect("owner dynasty must exist")
-                .treasury(),
-            Money::from_copper(i64::MAX)
         );
-        assert_eq!(
-            state
-                .businesses
-                .get(business_ids[0])
-                .expect("first business must exist")
-                .cash(),
-            cash_before[0].saturating_sub(Money::from_copper(1_000))
-        );
-        assert_eq!(
-            state
-                .businesses
-                .get(business_ids[1])
-                .expect("second business must exist")
-                .cash(),
-            cash_before[1].saturating_sub(Money::from_copper(500))
+        assert_state_unchanged(
+            &before,
+            &state,
+            "dividend overflow must be preflighted across the whole portfolio before any payout",
         );
     }
 
@@ -1088,6 +1067,56 @@ mod gameplay_stability {
                 .treasury()
                 > treasury_before,
             "property acquisition must create a durable economic consequence"
+        );
+    }
+
+    #[test]
+    fn property_rent_rejects_owner_treasury_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id.is_none()
+                    && property.tenant_dynasty_id.is_none()
+                    && property.occupant_business_id.is_none()
+                    && property.weekly_rent > Money::ZERO
+            })
+            .expect("campaign must contain rentable unowned property")
+            .id;
+        let owner_id = state.player_dynasty_id;
+        let rent = state
+            .properties
+            .get(&property_id)
+            .expect("property must exist")
+            .weekly_rent;
+        state
+            .properties
+            .get_mut(&property_id)
+            .expect("property must exist")
+            .owner_dynasty_id = Some(owner_id);
+        state
+            .dynasties
+            .get_mut(&owner_id)
+            .expect("owner dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = settle_property_rents(&mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::DynastyTreasuryOverflow {
+                dynasty_id: owner_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: rent,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "rent overflow must be rejected before the clearing account or owner treasury changes",
         );
     }
 
@@ -1237,45 +1266,48 @@ mod gameplay_stability {
     }
 
     #[test]
-    fn office_revenue_is_limited_by_institution_budget_headroom() {
+    fn office_revenue_rejects_institution_budget_overflow_without_mutation() {
         let registry = test_registry();
         let mut state = make_test_campaign();
         let institution_id = registry
             .get_institution_id("market_office")
             .expect("registry must define the market office");
-        let holder_id = state
-            .dynasties
-            .get(&state.player_dynasty_id)
-            .expect("player dynasty must exist")
-            .head_id();
+        let district_id = registry
+            .get_institution(institution_id)
+            .expect("market office definition must exist")
+            .district_id();
+        let player_dynasty_id = state.player_dynasty_id;
         let available_headroom = Money::from_copper(40);
-        for institution in state.institutions.values_mut() {
-            institution.office_holder_id = None;
-        }
         {
             let institution = state
                 .institutions
                 .get_mut(&institution_id)
                 .expect("market-tolls institution must exist");
-            institution.office_holder_id = Some(holder_id);
             institution.budget = Money::from_copper(i64::MAX).saturating_sub(available_headroom);
         }
-        let clearing_before = state.market.clearing_account;
+        let before = state.clone();
 
-        apply_office_power_effects(registry, &mut state).expect("office power effects must apply");
-
-        assert_eq!(
-            state
-                .institutions
-                .get(&institution_id)
-                .expect("market-tolls institution must exist")
-                .budget,
-            Money::from_copper(i64::MAX)
+        let result = apply_office_power(
+            registry,
+            &mut state,
+            institution_id,
+            player_dynasty_id,
+            district_id,
+            OfficePower::MarketTolls,
         );
+
         assert_eq!(
-            state.market.clearing_account,
-            clearing_before.saturating_sub(available_headroom),
-            "the external clearing account must fund only revenue the institution can retain"
+            result,
+            Err(SimulationError::InstitutionBudgetOverflow {
+                institution_id,
+                current: Money::from_copper(i64::MAX - 40),
+                incoming: Money::from_copper(100),
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "office revenue overflow must be rejected before the institution or clearing account changes",
         );
     }
 
@@ -2192,7 +2224,7 @@ mod contracts {
     }
 
     #[test]
-    fn dual_nonperformance_does_not_arbitrarily_penalize_one_party() {
+    fn dual_nonperformance_ignores_receiver_capacity_when_no_transfer_is_due() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
         let (buyer_id, seller_id, good_id) = {
@@ -2216,10 +2248,22 @@ mod contracts {
             .insert(good_id, Quantity::ZERO);
         state
             .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .finance
+            .cash = Money::from_copper(i64::MAX);
+        state
+            .businesses
             .get_mut(buyer_id)
             .expect("buyer must exist")
             .finance
             .cash = Money::ZERO;
+        state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist")
+            .inventory
+            .insert(good_id, Quantity::from_milliunits(i64::MAX));
         let buyer_before = state
             .businesses
             .get(buyer_id)
@@ -2261,10 +2305,10 @@ mod contracts {
     }
 
     #[test]
-    fn settlement_moves_only_penalty_when_seller_cannot_receive_payment() {
+    fn settlement_rejects_seller_cash_overflow_without_reclassifying_breach() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
-        let (buyer_id, seller_id, good_id, quantity, payment, penalty) = {
+        let (buyer_id, seller_id, good_id, quantity, payment) = {
             let contract = state
                 .contracts
                 .get_mut(&contract_id)
@@ -2277,7 +2321,6 @@ mod contracts {
                 contract.good_id,
                 contract.quantity_per_week,
                 payment,
-                contract.penalty,
             )
         };
         {
@@ -2294,39 +2337,30 @@ mod contracts {
             .expect("buyer must exist")
             .finance
             .cash = payment;
-        let buyer_inventory_before = state
-            .businesses
-            .get(buyer_id)
-            .expect("buyer must exist")
-            .inventory_quantity(good_id);
+        let before = state.clone();
 
-        settle_contracts(&mut state).expect("contract settlement must succeed");
+        let result = settle_contracts(&mut state);
 
-        let buyer = state.businesses.get(buyer_id).expect("buyer must exist");
-        let seller = state.businesses.get(seller_id).expect("seller must exist");
-        assert_eq!(buyer.cash(), payment.saturating_add(penalty));
-        assert_eq!(buyer.inventory_quantity(good_id), buyer_inventory_before);
         assert_eq!(
-            seller.cash(),
-            Money::from_copper(i64::MAX).saturating_sub(penalty)
+            result,
+            Err(SimulationError::BusinessCashOverflow {
+                business_id: seller_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: payment,
+            })
         );
-        assert_eq!(seller.inventory_quantity(good_id), quantity);
-        assert_eq!(
-            state
-                .contracts
-                .get(&contract_id)
-                .expect("contract must exist")
-                .missed_deliveries,
-            1,
-            "an unrepresentable settlement must remain an unfulfilled obligation"
+        assert_state_unchanged(
+            &before,
+            &state,
+            "recipient cash overflow is a representation failure, not contractual nonperformance",
         );
     }
 
     #[test]
-    fn final_delivery_attributes_seller_when_payment_cannot_be_received() {
+    fn final_delivery_rejects_seller_cash_overflow_without_false_breach() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
-        let (buyer_id, seller_id, good_id, quantity, payment, penalty) = {
+        let (buyer_id, seller_id, good_id, quantity, payment) = {
             let contract = state
                 .contracts
                 .get_mut(&contract_id)
@@ -2339,26 +2373,8 @@ mod contracts {
                 contract.good_id,
                 contract.quantity_per_week,
                 cost_for(contract.quantity_per_week, contract.unit_price),
-                contract.penalty,
             )
         };
-        let seller_dynasty_id = state
-            .businesses
-            .get(seller_id)
-            .expect("seller must exist")
-            .owner_dynasty_id();
-        let buyer_dynasty_id = state
-            .businesses
-            .get(buyer_id)
-            .expect("buyer must exist")
-            .owner_dynasty_id();
-        assert_ne!(seller_dynasty_id, buyer_dynasty_id);
-        let seller_reliability_before = state
-            .dynasties
-            .get(&seller_dynasty_id)
-            .expect("seller dynasty must exist")
-            .resources
-            .reputation_reliability_basis_points;
         {
             let seller = state
                 .businesses
@@ -2373,40 +2389,30 @@ mod contracts {
             .expect("buyer must exist")
             .finance
             .cash = payment;
+        let before = state.clone();
 
-        settle_contracts(&mut state).expect("contract settlement must succeed");
+        let result = settle_contracts(&mut state);
 
-        let contract = state
-            .contracts
-            .get(&contract_id)
-            .expect("contract must exist");
-        assert_eq!(contract.status, ContractStatus::Breached);
-        assert_eq!(contract.breaching_dynasty_id, Some(seller_dynasty_id));
         assert_eq!(
-            state
-                .dynasties
-                .get(&seller_dynasty_id)
-                .expect("seller dynasty must exist")
-                .resources
-                .reputation_reliability_basis_points,
-            seller_reliability_before.saturating_sub(120)
+            result,
+            Err(SimulationError::BusinessCashOverflow {
+                business_id: seller_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: payment,
+            })
         );
-        assert_eq!(
-            state
-                .businesses
-                .get(buyer_id)
-                .expect("buyer must exist")
-                .cash(),
-            payment.saturating_add(penalty),
-            "the party unable to receive payment must owe the contractual penalty"
+        assert_state_unchanged(
+            &before,
+            &state,
+            "final delivery overflow must not create a false seller breach or penalty transfer",
         );
     }
 
     #[test]
-    fn final_delivery_attributes_buyer_when_goods_cannot_be_received() {
+    fn final_delivery_rejects_buyer_inventory_overflow_without_false_breach() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
-        let (buyer_id, seller_id, good_id, quantity, payment, penalty) = {
+        let (buyer_id, seller_id, good_id, quantity, payment) = {
             let contract = state
                 .contracts
                 .get_mut(&contract_id)
@@ -2419,31 +2425,8 @@ mod contracts {
                 contract.good_id,
                 contract.quantity_per_week,
                 cost_for(contract.quantity_per_week, contract.unit_price),
-                contract.penalty,
             )
         };
-        let buyer_dynasty_id = state
-            .businesses
-            .get(buyer_id)
-            .expect("buyer must exist")
-            .owner_dynasty_id();
-        let seller_dynasty_id = state
-            .businesses
-            .get(seller_id)
-            .expect("seller must exist")
-            .owner_dynasty_id();
-        assert_ne!(buyer_dynasty_id, seller_dynasty_id);
-        let buyer_reliability_before = state
-            .dynasties
-            .get(&buyer_dynasty_id)
-            .expect("buyer dynasty must exist")
-            .resources
-            .reputation_reliability_basis_points;
-        let seller_cash_before = state
-            .businesses
-            .get(seller_id)
-            .expect("seller must exist")
-            .cash();
         state
             .businesses
             .get_mut(seller_id)
@@ -2458,34 +2441,25 @@ mod contracts {
             buyer
                 .inventory
                 .insert(good_id, Quantity::from_milliunits(i64::MAX));
-            buyer.finance.cash = payment.saturating_add(penalty);
+            buyer.finance.cash = payment;
         }
+        let before = state.clone();
 
-        settle_contracts(&mut state).expect("contract settlement must succeed");
+        let result = settle_contracts(&mut state);
 
-        let contract = state
-            .contracts
-            .get(&contract_id)
-            .expect("contract must exist");
-        assert_eq!(contract.status, ContractStatus::Breached);
-        assert_eq!(contract.breaching_dynasty_id, Some(buyer_dynasty_id));
         assert_eq!(
-            state
-                .dynasties
-                .get(&buyer_dynasty_id)
-                .expect("buyer dynasty must exist")
-                .resources
-                .reputation_reliability_basis_points,
-            buyer_reliability_before.saturating_sub(120)
+            result,
+            Err(SimulationError::BusinessInventoryOverflow {
+                business_id: buyer_id,
+                good_id,
+                current: Quantity::from_milliunits(i64::MAX),
+                incoming: quantity,
+            })
         );
-        assert_eq!(
-            state
-                .businesses
-                .get(seller_id)
-                .expect("seller must exist")
-                .cash(),
-            seller_cash_before.saturating_add(penalty),
-            "the party unable to receive goods must owe the contractual penalty"
+        assert_state_unchanged(
+            &before,
+            &state,
+            "final delivery inventory overflow must not create a false buyer breach or penalty transfer",
         );
     }
 
@@ -3068,7 +3042,7 @@ mod employment {
     }
 
     #[test]
-    fn payroll_does_not_debit_business_when_household_cash_has_no_headroom() {
+    fn payroll_rejects_household_cash_overflow_without_debiting_business() {
         let registry = test_registry();
         let mut state = make_test_campaign();
         let agreement = state
@@ -3091,12 +3065,7 @@ mod employment {
             .get_mut(household_id)
             .expect("employment household must exist")
             .cash = Money::from_copper(i64::MAX);
-        let finance_before = state
-            .businesses
-            .get(business_id)
-            .expect("employment business must exist")
-            .finance
-            .clone();
+        let before = state.clone();
 
         let paid = pay_employment_wage(
             registry,
@@ -3106,22 +3075,18 @@ mod employment {
             Money::from_copper(100),
         );
 
-        assert_eq!(paid, Ok(Money::ZERO));
         assert_eq!(
-            &state
-                .businesses
-                .get(business_id)
-                .expect("employment business must exist")
-                .finance,
-            &finance_before
+            paid,
+            Err(SimulationError::HouseholdCashOverflow {
+                household_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: Money::from_copper(100),
+            })
         );
-        assert_eq!(
-            state
-                .households
-                .get(household_id)
-                .expect("employment household must exist")
-                .cash,
-            Money::from_copper(i64::MAX)
+        assert_state_unchanged(
+            &before,
+            &state,
+            "payroll overflow must be rejected before either ledger changes",
         );
     }
 }
@@ -4039,18 +4004,16 @@ mod loans {
     }
 
     #[test]
-    fn due_loan_does_not_debit_borrower_when_lender_treasury_has_no_headroom() {
+    fn due_loan_rejects_lender_treasury_overflow_without_mutation() {
         let mut state = make_test_campaign();
         let loan_id = current_loan_id(&state);
-        let (lender_id, borrower_id, payment, missed_before, balance_before) = {
+        let (lender_id, borrower_id, payment) = {
             let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
             loan.next_due_day = state.clock.day();
             (
                 loan.lender_dynasty_id,
                 loan.borrower_dynasty_id,
                 loan.weekly_payment,
-                loan.missed_payments,
-                loan.balance,
             )
         };
         state
@@ -4065,39 +4028,22 @@ mod loans {
             .expect("borrower must exist")
             .resources
             .treasury = payment;
+        let before = state.clone();
 
-        settle_loans(&mut state).expect("loan settlement must succeed");
+        let result = settle_loans(&mut state);
 
         assert_eq!(
-            state
-                .dynasties
-                .get(&lender_id)
-                .expect("lender must exist")
-                .treasury(),
-            Money::from_copper(i64::MAX)
+            result,
+            Err(SimulationError::DynastyTreasuryOverflow {
+                dynasty_id: lender_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: payment,
+            })
         );
-        assert_eq!(
-            state
-                .dynasties
-                .get(&borrower_id)
-                .expect("borrower must exist")
-                .treasury(),
-            payment,
-            "a payment that cannot be credited must not be removed from the borrower"
-        );
-        assert_eq!(
-            state
-                .loans
-                .get(&loan_id)
-                .expect("loan must exist")
-                .missed_payments,
-            missed_before,
-            "a lender-side capacity limit must not count as borrower nonpayment"
-        );
-        assert_eq!(
-            state.loans.get(&loan_id).expect("loan must exist").balance,
-            balance_before,
-            "a deferred settlement must not accrue interest while the lender cannot receive it"
+        assert_state_unchanged(
+            &before,
+            &state,
+            "loan recipient overflow must be rejected before interest, payment, or schedule mutation",
         );
     }
 
@@ -4105,11 +4051,16 @@ mod loans {
     fn accrue_interest_when_payment_is_missed() {
         let mut state = make_test_campaign();
         let loan_id = current_loan_id(&state);
-        let borrower_id = state
-            .loans
-            .get(&loan_id)
-            .expect("loan must exist")
-            .borrower_dynasty_id;
+        let (lender_id, borrower_id) = {
+            let loan = state.loans.get(&loan_id).expect("loan must exist");
+            (loan.lender_dynasty_id, loan.borrower_dynasty_id)
+        };
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
         state
             .dynasties
             .get_mut(&borrower_id)
@@ -4370,10 +4321,16 @@ mod loans {
     fn three_missed_civic_debt_payments_default_and_create_civic_pressure() {
         let registry = test_registry();
         let mut state = make_test_campaign();
-        let (debt_id, _) = insert_test_civic_debt(&mut state);
+        let (debt_id, creditor_dynasty_id) = insert_test_civic_debt(&mut state);
         let treasury_id = registry
             .get_institution_id("treasury")
             .expect("registry must define a treasury");
+        state
+            .dynasties
+            .get_mut(&creditor_dynasty_id)
+            .expect("creditor must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
         state
             .institutions
             .get_mut(&treasury_id)
@@ -4706,6 +4663,46 @@ mod legal_cases {
                 .contains("entered hearing")
         );
     }
+
+    #[test]
+    fn legal_damages_reject_plaintiff_treasury_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        let mut dynasty_ids = state.dynasties.keys().copied();
+        let plaintiff_id = dynasty_ids.next().expect("campaign must contain a dynasty");
+        let defendant_id = dynasty_ids
+            .next()
+            .expect("campaign must contain a second dynasty");
+        let damages = Money::from_copper(100);
+        state
+            .dynasties
+            .get_mut(&plaintiff_id)
+            .expect("plaintiff dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        state
+            .dynasties
+            .get_mut(&defendant_id)
+            .expect("defendant dynasty must exist")
+            .resources
+            .treasury = damages;
+        let before = state.clone();
+
+        let result = settle_legal_damages(&mut state, plaintiff_id, defendant_id, damages);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::DynastyTreasuryOverflow {
+                dynasty_id: plaintiff_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: damages,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "damages overflow must be rejected before either dynasty treasury changes",
+        );
+    }
 }
 
 mod crises {
@@ -4806,6 +4803,49 @@ mod crises {
         assert!(
             quote.demand_today > Quantity::ZERO,
             "an active grain shortage must add bread demand"
+        );
+    }
+
+    #[test]
+    fn grain_shortage_rejects_market_demand_overflow_without_mutation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let bread_id = registry
+            .get_good_id("bread")
+            .expect("registry must define bread");
+        insert_crisis(
+            &mut state,
+            CrisisKind::GrainShortage,
+            None,
+            5_000,
+            "test shortage overflow",
+        );
+        let crisis_demand = {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&bread_id)
+                .expect("bread quote must exist");
+            quote.demand_today = Quantity::from_milliunits(i64::MAX);
+            quote.target_stock.saturating_mul_ratio(5_000, 100_000)
+        };
+        assert!(crisis_demand > Quantity::ZERO);
+        let before = state.clone();
+
+        let result = apply_crisis_daily_effects(registry, &mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::MarketDemandOverflow {
+                good_id: bread_id,
+                current: Quantity::from_milliunits(i64::MAX),
+                incoming: crisis_demand,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "crisis demand overflow must be rejected instead of silently saturating the market flow",
         );
     }
 

@@ -55,6 +55,36 @@ mod aggregates {
     }
 }
 
+mod id_allocation {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn allocator_stops_at_the_terminal_valid_counter_without_corrupting_it() {
+        let mut next_ids = NextIds::new();
+        next_ids.business = u32::MAX - 2;
+
+        let final_usable_id = next_ids.business();
+
+        assert_eq!(final_usable_id.value(), u32::MAX - 2);
+        assert_eq!(next_ids.business, u32::MAX - 1);
+
+        let before = next_ids.clone();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = next_ids.business();
+        }));
+
+        assert!(
+            result.is_err(),
+            "allocation must stop before advancing into the exhausted sentinel"
+        );
+        assert_eq!(
+            next_ids, before,
+            "allocation exhaustion must not advance the counter into an invalid save state"
+        );
+    }
+}
+
 mod synchronized_stores {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};

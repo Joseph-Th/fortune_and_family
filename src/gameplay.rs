@@ -8,7 +8,7 @@ use crate::core::{
 };
 use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, InstitutionId};
 use crate::money::{Money, Quantity, cost_for};
-use crate::registry::{GoodCategory, Registry};
+use crate::registry::{GoodCategory, InstitutionKind, Registry};
 use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
     COMMISSIONED_INFORMATION_SOURCE, CommandError, CrisisResponse,
@@ -34,9 +34,9 @@ use crate::systems::{
     contract_relationship_pressure_basis_points, crisis_response_contains_crisis,
     has_established_player_office_power, institution_capability_score,
     institution_membership_count, institution_support_day, institution_support_next_day,
-    office_nomination_next_day, player_contract_deliveries, projected_dynasty_monthly_office_duty,
-    quote_business_acquisition, quote_information_leverage, quote_property_liquidation,
-    required_office_power_for_law, validate_invariants,
+    office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
+    projected_dynasty_monthly_office_duty, quote_business_acquisition, quote_information_leverage,
+    quote_property_liquidation, required_office_power_for_law, validate_invariants,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,7 +94,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 38;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 40;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -150,6 +150,7 @@ const AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS: i64 = 360;
 const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_000);
 const AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 720;
 const AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS: u16 = 1_500;
+const AGENT_INFORMATION_POLITICAL_VULNERABILITY_LEGITIMACY: u16 = 2_500;
 const AGENT_INFORMATION_LEVERAGE_DELAY_DAYS: i64 = 90;
 const INFORMATION_ROUTINE_PAIR_WINDOW_DAYS: i64 = 180;
 const AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS: u64 = 1_000;
@@ -1486,9 +1487,12 @@ pub struct GameplayFantasyArc {
     pub first_reputation_standing_day: Option<i64>,
     pub first_commercial_standing_day: Option<i64>,
     pub first_institution_support_day: Option<i64>,
+    pub first_institution_support_target: Option<InstitutionId>,
     pub first_office_campaign_day: Option<i64>,
+    pub first_office_campaign_target: Option<InstitutionId>,
     pub first_office_day: Option<i64>,
     pub first_city_shaping_action_day: Option<i64>,
+    pub first_city_shaping_command: Option<GameplayCommandKind>,
     pub first_player_labor_dispute_day: Option<i64>,
     pub first_heir_designation_day: Option<i64>,
     pub first_succession_day: Option<i64>,
@@ -1573,6 +1577,7 @@ pub struct GameplayCampaignReport {
     pub maximum_offices_held: u16,
     pub maximum_unfinished_public_works: u16,
     pub maximum_active_crises: u16,
+    pub observed_crisis_kinds: BTreeSet<CrisisKind>,
     pub maximum_unread_notifications: u16,
     pub maximum_contract_relationship_pressure_basis_points: u16,
     pub minimum_post_succession_family_unity: Option<u16>,
@@ -1938,6 +1943,9 @@ impl CampaignAccumulator {
             self.fantasy_arc
                 .first_city_shaping_action_day
                 .get_or_insert(day);
+            self.fantasy_arc
+                .first_city_shaping_command
+                .get_or_insert(kind);
         }
         if kind == GameplayCommandKind::CommissionInformation {
             self.last_information_commission_day = Some(day);
@@ -1968,6 +1976,50 @@ impl CampaignAccumulator {
         if self.current_substantive_command_streak > self.longest_substantive_command_streak {
             self.longest_substantive_command_streak = self.current_substantive_command_streak;
             self.longest_substantive_streak_command = Some(kind);
+        }
+    }
+
+    fn record_executed_candidate(
+        &mut self,
+        kind: GameplayCommandKind,
+        command: &PlayerCommand,
+        day: i64,
+    ) {
+        self.record_executed_command(kind, day);
+        match command {
+            PlayerCommand::CultivateInstitutionSupport { institution_id, .. } => {
+                self.fantasy_arc
+                    .first_institution_support_target
+                    .get_or_insert(*institution_id);
+            }
+            PlayerCommand::NominateForOffice { institution_id, .. } => {
+                self.fantasy_arc
+                    .first_office_campaign_target
+                    .get_or_insert(*institution_id);
+            }
+            PlayerCommand::TransferBusinessCash { .. }
+            | PlayerCommand::AcquireBusiness { .. }
+            | PlayerCommand::InvestInBusiness { .. }
+            | PlayerCommand::SetBusinessPolicy { .. }
+            | PlayerCommand::CreateSupplyContract { .. }
+            | PlayerCommand::IssueLoan { .. }
+            | PlayerCommand::BuyProperty { .. }
+            | PlayerCommand::SellProperty { .. }
+            | PlayerCommand::EnactLaw { .. }
+            | PlayerCommand::StartPublicWork { .. }
+            | PlayerCommand::FileLegalCase { .. }
+            | PlayerCommand::SetHouseGovernance { .. }
+            | PlayerCommand::ConveneFamilyCouncil
+            | PlayerCommand::DesignateHeir { .. }
+            | PlayerCommand::AdoptWard { .. }
+            | PlayerCommand::EducateFamilyMember { .. }
+            | PlayerCommand::ExerciseOfficePower { .. }
+            | PlayerCommand::WithdrawFromInstitution { .. }
+            | PlayerCommand::RespondToCrisis { .. }
+            | PlayerCommand::ResolveLaborDispute { .. }
+            | PlayerCommand::CommissionInformation { .. }
+            | PlayerCommand::LeverageInformation { .. }
+            | PlayerCommand::AcknowledgeNotification { .. } => {}
         }
     }
 
@@ -2347,6 +2399,7 @@ fn run_campaign(
         maximum_offices_held: accumulator.maximum_offices_held,
         maximum_unfinished_public_works: accumulator.maximum_unfinished_public_works,
         maximum_active_crises: accumulator.maximum_active_crises,
+        observed_crisis_kinds: state.crises.values().map(|crisis| crisis.kind).collect(),
         maximum_unread_notifications: accumulator.maximum_unread_notifications,
         maximum_contract_relationship_pressure_basis_points: accumulator
             .maximum_contract_relationship_pressure_basis_points,
@@ -2871,12 +2924,13 @@ fn apply_selected_candidate(
     let Some(candidate) = selected else {
         return Ok(None);
     };
-    let outcome = apply_player_command(registry, state, candidate.command).map_err(|source| {
-        GameplayHarnessError::SelectedCommandRejected {
-            description: candidate.description.clone(),
-            source,
-        }
-    })?;
+    let outcome =
+        apply_player_command(registry, state, candidate.command.clone()).map_err(|source| {
+            GameplayHarnessError::SelectedCommandRejected {
+                description: candidate.description.clone(),
+                source,
+            }
+        })?;
     accumulator
         .commands
         .get_mut(&candidate.kind)
@@ -2887,7 +2941,7 @@ fn apply_selected_candidate(
         .expect("every command kind must have statistics")
         .executed
         .saturating_add(1);
-    accumulator.record_executed_command(candidate.kind, state.clock.day());
+    accumulator.record_executed_candidate(candidate.kind, &candidate.command, state.clock.day());
     Ok(Some(ExecutedAction {
         kind: candidate.kind,
         description: candidate.description,
@@ -5347,21 +5401,45 @@ fn counterparty_information_is_material(
         <= AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD
         || relationship.resentment_basis_points
             >= AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD;
-    if strained || persona != GameplayPersona::Opportunist {
-        return strained;
+    if strained {
+        return true;
     }
     let Some(counterparty_id) = relationship_counterparty_id(relationship, state.player_dynasty_id)
     else {
         return false;
     };
-    let player_treasury = state
+    match persona {
+        GameplayPersona::Opportunist => {
+            let player_treasury = state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .map_or(Money::ZERO, crate::core::Dynasty::treasury);
+            state
+                .dynasties
+                .get(&counterparty_id)
+                .is_some_and(|dynasty| dynasty.treasury() >= player_treasury.saturating_mul(2))
+        }
+        GameplayPersona::PowerBroker => {
+            power_broker_political_intelligence_is_material(state, counterparty_id)
+        }
+        GameplayPersona::Steward | GameplayPersona::Entrepreneur => false,
+    }
+}
+
+fn power_broker_political_intelligence_is_material(
+    state: &AppState,
+    counterparty_id: DynastyId,
+) -> bool {
+    let player = state
         .dynasties
         .get(&state.player_dynasty_id)
-        .map_or(Money::ZERO, crate::core::Dynasty::treasury);
-    state
-        .dynasties
-        .get(&counterparty_id)
-        .is_some_and(|dynasty| dynasty.treasury() >= player_treasury.saturating_mul(2))
+        .expect("player dynasty must exist");
+    let player_offices = count_player_offices(state, state.player_dynasty_id);
+    let counterparty_offices = count_player_offices(state, counterparty_id);
+    player_offices > 0
+        && counterparty_offices >= player_offices
+        && player.resources.legitimacy_basis_points
+            < AGENT_INFORMATION_POLITICAL_VULNERABILITY_LEGITIMACY
 }
 
 fn counterparty_information_priority(
@@ -5372,11 +5450,13 @@ fn counterparty_information_priority(
     let counterparty_id = relationship_counterparty_id(relationship, state.player_dynasty_id)
         .expect("filtered relationship must contain the player dynasty");
     let score = match persona {
-        GameplayPersona::PowerBroker => u32::from(
-            relationship
-                .resentment_basis_points
-                .saturating_add(10_000_u16.saturating_sub(relationship.trust_basis_points)),
-        ),
+        GameplayPersona::PowerBroker => u32::from(count_player_offices(state, counterparty_id))
+            .saturating_mul(20_000)
+            .saturating_add(u32::from(
+                relationship
+                    .resentment_basis_points
+                    .saturating_add(10_000_u16.saturating_sub(relationship.trust_basis_points)),
+            )),
         GameplayPersona::Opportunist => u32::try_from(
             state
                 .dynasties
@@ -5829,7 +5909,7 @@ fn generate_family_candidates(
     generate_family_council_candidate(state, persona, candidates);
     generate_heir_designation_candidates(state, persona, candidates);
     generate_ward_adoption_candidates(state, persona, candidates);
-    generate_family_education_candidates(state, persona, candidates);
+    generate_family_education_candidates(registry, state, persona, candidates);
     generate_institution_withdrawal_candidates(state, persona, candidates);
     generate_office_power_directive_candidates(registry, state, persona, candidates);
     generate_institution_ascent_candidates(registry, state, persona, candidates);
@@ -6255,6 +6335,19 @@ fn office_power_need_bonus(
     }
 }
 
+fn office_power_candidate_need_score(raw_need: i64) -> i64 {
+    const MATERIAL_NEED_THRESHOLD: i64 = 900;
+    const NEED_SCORE_FLOOR: i64 = 300;
+    const NEED_SCORE_CAP: i64 = 1_200;
+
+    if raw_need < MATERIAL_NEED_THRESHOLD {
+        return 0;
+    }
+    NEED_SCORE_FLOOR
+        .saturating_add(raw_need.saturating_sub(MATERIAL_NEED_THRESHOLD) / 2)
+        .min(NEED_SCORE_CAP)
+}
+
 fn generate_office_power_directive_candidates(
     registry: &Registry,
     state: &AppState,
@@ -6294,8 +6387,9 @@ fn generate_office_power_directive_candidates(
             .iter()
             .copied()
             .map(|power| {
-                let need =
+                let raw_need =
                     office_power_need_bonus(state, institution.institution_id, district_id, power);
+                let need = office_power_candidate_need_score(raw_need);
                 let priority = office_power_persona_bonus(persona, power).saturating_add(need);
                 (need, priority, power)
             })
@@ -6344,34 +6438,13 @@ fn generate_institution_ascent_candidates(
             .get_institution(institution.institution_id)
             .expect("runtime institution must have a registry definition")
             .kind();
-        let has_available_player_member = characters
-            .iter()
-            .any(|character| institution.members.contains(&character.id()));
-        let strongest_character = (!has_available_player_member)
-            .then(|| {
-                characters
-                    .iter()
-                    .copied()
-                    .filter(|character| {
-                        is_institution_support_available(state, character.id())
-                            && institution_membership_count(state, character.id())
-                                < MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER
-                            && institution_support_day(
-                                state,
-                                institution.institution_id,
-                                character.id(),
-                            )
-                            .is_none()
-                    })
-                    .max_by_key(|character| {
-                        (
-                            institution_capability_score(character, institution_kind),
-                            std::cmp::Reverse(character.id()),
-                        )
-                    })
-            })
-            .flatten();
-        let power_bonus = institution_power_bonus(persona, &institution.powers);
+        let strongest_character = strongest_institution_support_candidate(
+            state,
+            institution,
+            &characters,
+            institution_kind,
+        );
+        let power_bonus = institution_ascent_power_bonus(registry, state, institution, persona);
         if let Some(character) = strongest_character {
             push_candidate(
                 candidates,
@@ -6388,24 +6461,8 @@ fn generate_institution_ascent_candidates(
                 support_bonus.saturating_add(power_bonus),
             );
         }
-        let nominee = characters
-            .iter()
-            .copied()
-            .filter(|character| is_office_nomination_available(state, character.id()))
-            .filter(|character| institution.members.contains(&character.id()))
-            .filter(|character| {
-                institution_support_day(state, institution.institution_id, character.id())
-                    .is_some_and(|day| {
-                        state.clock.day()
-                            >= day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)
-                    })
-            })
-            .max_by_key(|character| {
-                (
-                    institution_capability_score(character, institution_kind),
-                    std::cmp::Reverse(character.id()),
-                )
-            });
+        let nominee =
+            strongest_office_nominee(registry, state, institution, &characters, institution_kind);
         if let Some(character) = nominee {
             push_candidate(
                 candidates,
@@ -6423,6 +6480,70 @@ fn generate_institution_ascent_candidates(
             );
         }
     }
+}
+
+fn strongest_institution_support_candidate<'a>(
+    state: &AppState,
+    institution: &crate::core::InstitutionRuntime,
+    characters: &[&'a crate::core::Character],
+    institution_kind: InstitutionKind,
+) -> Option<&'a crate::core::Character> {
+    if characters
+        .iter()
+        .any(|character| institution.members.contains(&character.id()))
+    {
+        return None;
+    }
+    characters
+        .iter()
+        .copied()
+        .filter(|character| {
+            is_institution_support_available(state, character.id())
+                && institution_membership_count(state, character.id())
+                    < MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER
+                && institution_support_day(state, institution.institution_id, character.id())
+                    .is_none()
+        })
+        .max_by_key(|character| {
+            (
+                institution_capability_score(character, institution_kind),
+                std::cmp::Reverse(character.id()),
+            )
+        })
+}
+
+fn strongest_office_nominee<'a>(
+    registry: &Registry,
+    state: &AppState,
+    institution: &crate::core::InstitutionRuntime,
+    characters: &[&'a crate::core::Character],
+    institution_kind: InstitutionKind,
+) -> Option<&'a crate::core::Character> {
+    characters
+        .iter()
+        .copied()
+        .filter(|character| institution.members.contains(&character.id()))
+        .filter(|character| {
+            is_office_nomination_available(
+                registry,
+                state,
+                institution.institution_id,
+                character.id(),
+            )
+        })
+        .filter(|character| {
+            institution_support_day(state, institution.institution_id, character.id()).is_some_and(
+                |day| {
+                    state.clock.day() >= day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)
+                },
+            )
+        })
+        .max_by_key(|character| {
+            (
+                institution_capability_score(character, institution_kind),
+                std::cmp::Reverse(character.id()),
+            )
+        })
 }
 
 const fn institution_ascent_bonuses(persona: GameplayPersona) -> (i64, i64) {
@@ -6462,6 +6583,7 @@ fn generate_institution_withdrawal_candidates(
     let monthly_cost = player_current_office_duty_cost(state);
     let severe_liquidity = treasury < monthly_cost.saturating_mul(3);
     let business_distress = player_has_severe_business_distress(state);
+    let political_paralysis = player_is_politically_overextended(state);
     let persona_bonus: i64 = match persona {
         GameplayPersona::Steward => -100,
         GameplayPersona::Entrepreneur => 200,
@@ -6472,6 +6594,8 @@ fn generate_institution_withdrawal_candidates(
         2_400
     } else if severe_liquidity {
         1_800
+    } else if political_paralysis {
+        1_600
     } else if business_distress {
         1_200
     } else {
@@ -6537,12 +6661,22 @@ fn has_institution_withdrawal_opportunity(state: &AppState) -> bool {
         .expect("player dynasty must exist")
         .treasury();
     has_recent_player_office_duty_shortfall(state)
+        || player_is_politically_overextended(state)
         || treasury < monthly_cost.saturating_mul(6)
         || (player_has_severe_business_distress(state)
             && treasury
                 < monthly_cost
                     .saturating_mul(AGENT_OFFICE_DUTY_RESERVE_MONTHS)
                     .saturating_add(AGENT_OFFICE_LIQUIDITY_BUFFER))
+}
+
+fn player_is_politically_overextended(state: &AppState) -> bool {
+    let player = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    count_player_offices(state, state.player_dynasty_id) >= 2
+        && player.resources.legitimacy_basis_points < OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST
 }
 
 fn generate_ward_adoption_candidates(
@@ -6593,10 +6727,13 @@ fn generate_ward_adoption_candidates(
 }
 
 fn generate_family_education_candidates(
+    registry: &Registry,
     state: &AppState,
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) {
+    const TARGETED_PREPARATION_BONUS: i64 = 700;
+    const MIN_TARGETED_PREPARATION_DELIVERIES: u32 = 4;
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
@@ -6606,8 +6743,8 @@ fn generate_family_education_candidates(
             .resources
             .reputation_quality_basis_points
             .max(player.resources.reputation_reliability_basis_points)
-            >= COMMERCIAL_STANDING_REPUTATION_REQUIREMENT
-        && player_contract_deliveries(state) >= OFFICE_NOMINATION_DELIVERY_REQUIREMENT
+            >= INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT
+        && player_contract_deliveries(state) >= INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT
         && state
             .audit_log
             .iter()
@@ -6633,14 +6770,33 @@ fn generate_family_education_candidates(
                 && character.status() == CharacterStatus::Active
         })
         .collect();
+    let controlled_powers = player_controlled_office_powers(state);
+    let player_has_institutional_foothold = has_player_institutional_foothold(state);
     for focus in education_focus_order(persona) {
-        let student = active_characters
-            .iter()
-            .filter(|character| character_focus_value(character, focus) < 100)
-            .min_by_key(|character| (character_focus_value(character, focus), character.id()));
+        let targeted_student = targeted_family_education_student(
+            registry,
+            state,
+            persona,
+            focus,
+            &controlled_powers,
+            player_has_institutional_foothold,
+            MIN_TARGETED_PREPARATION_DELIVERIES,
+        );
+        let student = targeted_student
+            .map(|(character, _, _)| character)
+            .or_else(|| {
+                active_characters
+                    .iter()
+                    .copied()
+                    .filter(|character| character_focus_value(character, focus) < 100)
+                    .min_by_key(|character| {
+                        (character_focus_value(character, focus), character.id())
+                    })
+            });
         let Some(student) = student else {
             continue;
         };
+        let preparation_bonus = targeted_student.map_or(0, |_| TARGETED_PREPARATION_BONUS);
         push_candidate(
             candidates,
             GameplayCommandKind::EducateFamilyMember,
@@ -6648,9 +6804,124 @@ fn generate_family_education_candidates(
                 character_id: student.id(),
                 focus,
             },
-            format!("educate character {} in {focus:?}", student.id()),
-            base_bonus.saturating_add(education_focus_persona_bonus(persona, focus)),
+            if let Some((_, extra, institution_id)) = targeted_student {
+                format!(
+                    "educate character {} in {focus:?} to reduce {extra} extra delivery requirements for institution {institution_id}",
+                    student.id()
+                )
+            } else {
+                format!("educate character {} in {focus:?}", student.id())
+            },
+            base_bonus
+                .saturating_add(education_focus_persona_bonus(persona, focus))
+                .saturating_add(preparation_bonus),
         );
+    }
+}
+
+fn targeted_family_education_student<'a>(
+    registry: &Registry,
+    state: &'a AppState,
+    persona: GameplayPersona,
+    focus: EducationFocus,
+    controlled_powers: &BTreeSet<OfficePower>,
+    player_has_institutional_foothold: bool,
+    minimum_extra_deliveries: u32,
+) -> Option<(&'a crate::core::Character, u32, InstitutionId)> {
+    state
+        .institutions
+        .values()
+        .filter(|institution| {
+            institution_is_strategic_target(
+                state,
+                institution,
+                controlled_powers,
+                player_has_institutional_foothold,
+                persona,
+            )
+        })
+        .filter_map(|institution| {
+            let institution_kind = registry
+                .get_institution(institution.institution_id)
+                .expect("runtime institution must have a registry definition")
+                .kind();
+            if !institution_education_focus_is_relevant(institution_kind, focus) {
+                return None;
+            }
+            institution
+                .members
+                .iter()
+                .filter_map(|character_id| state.characters.get(*character_id))
+                .filter(|character| {
+                    character.dynasty_id() == state.player_dynasty_id
+                        && character.status() == CharacterStatus::Active
+                        && character_focus_value(character, focus) < 100
+                })
+                .filter_map(|character| {
+                    let required = office_nomination_delivery_requirement(
+                        registry,
+                        state,
+                        institution.institution_id,
+                        character.id(),
+                    );
+                    let extra = required.saturating_sub(OFFICE_NOMINATION_DELIVERY_REQUIREMENT);
+                    (extra >= minimum_extra_deliveries).then_some((
+                        character,
+                        extra,
+                        institution.institution_id,
+                    ))
+                })
+                .max_by_key(targeted_education_priority)
+        })
+        .max_by_key(targeted_education_priority)
+}
+
+fn targeted_education_priority(
+    (character, extra, institution_id): &(&crate::core::Character, u32, InstitutionId),
+) -> (
+    u32,
+    std::cmp::Reverse<InstitutionId>,
+    std::cmp::Reverse<CharacterId>,
+) {
+    (
+        *extra,
+        std::cmp::Reverse(*institution_id),
+        std::cmp::Reverse(character.id()),
+    )
+}
+
+const fn institution_education_focus_is_relevant(
+    institution_kind: InstitutionKind,
+    focus: EducationFocus,
+) -> bool {
+    match institution_kind {
+        InstitutionKind::CraftGuild => {
+            matches!(focus, EducationFocus::Craft | EducationFocus::Commerce)
+        }
+        InstitutionKind::MerchantGuild | InstitutionKind::MarketOffice => {
+            matches!(
+                focus,
+                EducationFocus::Commerce | EducationFocus::Administration
+            )
+        }
+        InstitutionKind::Council | InstitutionKind::Charity => {
+            matches!(
+                focus,
+                EducationFocus::Social | EducationFocus::Administration
+            )
+        }
+        InstitutionKind::Court | InstitutionKind::Watch => {
+            matches!(
+                focus,
+                EducationFocus::Administration | EducationFocus::Social
+            )
+        }
+        InstitutionKind::Treasury => {
+            matches!(
+                focus,
+                EducationFocus::Administration | EducationFocus::Commerce
+            )
+        }
     }
 }
 
@@ -6774,17 +7045,51 @@ fn institution_power_bonus(persona: GameplayPersona, powers: &BTreeSet<OfficePow
         .unwrap_or(0)
 }
 
-fn is_office_nomination_available(state: &AppState, character_id: CharacterId) -> bool {
+fn institution_ascent_power_bonus(
+    registry: &Registry,
+    state: &AppState,
+    institution: &crate::core::InstitutionRuntime,
+    persona: GameplayPersona,
+) -> i64 {
+    let base = institution_power_bonus(persona, &institution.powers);
+    let kind = registry
+        .get_institution(institution.institution_id)
+        .expect("runtime institution must have a registry definition")
+        .kind();
+    let capability_fit = eligible_office_characters(state)
+        .into_iter()
+        .map(|character| institution_capability_score(character, kind))
+        .max()
+        .unwrap_or(0);
+    base.saturating_add(institution_capability_fit_bonus(capability_fit))
+}
+
+fn institution_capability_fit_bonus(capability_score: u32) -> i64 {
+    const FULL_FIT_SCORE: u32 = 10_000;
+    const FULL_FIT_BONUS: i64 = 500;
+
+    i64::from(capability_score.min(FULL_FIT_SCORE)).saturating_mul(FULL_FIT_BONUS)
+        / i64::from(FULL_FIT_SCORE)
+}
+
+fn is_office_nomination_available(
+    registry: &Registry,
+    state: &AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> bool {
     let Some(player) = state.dynasties.get(&state.player_dynasty_id) else {
         return false;
     };
+    let required_deliveries =
+        office_nomination_delivery_requirement(registry, state, institution_id, character_id);
     if player.treasury() < Money::from_copper(300)
         || player
             .resources
             .reputation_quality_basis_points
             .max(player.resources.reputation_reliability_basis_points)
             < OFFICE_NOMINATION_REPUTATION_REQUIREMENT
-        || player_contract_deliveries(state) < OFFICE_NOMINATION_DELIVERY_REQUIREMENT
+        || player_contract_deliveries(state) < required_deliveries
     {
         return false;
     }
@@ -7511,6 +7816,9 @@ const fn simulation_error_category(error: &SimulationError) -> &'static str {
             "simulation: insufficient business cash"
         }
         SimulationError::BusinessCashOverflow { .. } => "simulation: business cash overflow",
+        SimulationError::BusinessInventoryOverflow { .. } => {
+            "simulation: business inventory overflow"
+        }
         SimulationError::BusinessLifetimeCostsOverflow { .. } => {
             "simulation: business lifetime costs overflow"
         }
@@ -7530,12 +7838,23 @@ const fn simulation_error_category(error: &SimulationError) -> &'static str {
         SimulationError::DynastyCivicContributionsOverflow { .. } => {
             "simulation: civic contributions overflow"
         }
+        SimulationError::DynastyTreasuryOverflow { .. } => "simulation: dynasty treasury overflow",
+        SimulationError::HouseholdCashOverflow { .. } => "simulation: household cash overflow",
+        SimulationError::InstitutionBudgetOverflow { .. } => {
+            "simulation: institution budget overflow"
+        }
         SimulationError::InstitutionTermNumberExhausted { .. } => {
             "simulation: institution term number exhausted"
         }
         SimulationError::MarketQuoteMissing { .. } => "simulation: missing market quote",
+        SimulationError::NegativeMarketDebit { .. } => "simulation: negative market debit",
+        SimulationError::NegativeMarketSupply { .. } => "simulation: negative market supply",
+        SimulationError::MarketDemandOverflow { .. } => "simulation: market demand overflow",
         SimulationError::MarketStockOverflow { .. } => "simulation: market stock overflow",
         SimulationError::MarketSupplyOverflow { .. } => "simulation: market supply overflow",
+        SimulationError::MarketTradeValueOverflow { .. } => {
+            "simulation: market trade value overflow"
+        }
         SimulationError::WeeklyExternalIncomeOverflow { .. } => {
             "simulation: weekly external income overflow"
         }
@@ -8255,12 +8574,12 @@ fn add_phase_quality_finding(
         u64::from(stats.decision_cycles),
         100,
     );
+    let opportunity_cycles = stats.decision_cycles.saturating_sub(stats.quiet_cycles);
     let multi_family_share = scaled_ratio_u64(
         u64::from(stats.cycles_with_multiple_viable_command_kinds),
-        u64::from(stats.decision_cycles),
+        u64::from(opportunity_cycles),
         100,
     );
-    let opportunity_cycles = stats.decision_cycles.saturating_sub(stats.quiet_cycles);
     let average_choices_tenths = scaled_ratio_u64(
         u64::from(stats.total_viable_choices),
         u64::from(opportunity_cycles),
@@ -8316,7 +8635,7 @@ fn add_phase_quality_finding(
         severity: GameplayFindingSeverity::Warning,
         title: title.to_owned(),
         evidence: format!(
-            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}%, and actionable cycles averaged {} viable choices across {} families. Thresholds missed: {threshold_evidence}.",
+            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}% of actionable cycles, and actionable cycles averaged {} viable choices across {} families. Thresholds missed: {threshold_evidence}.",
             stats.decision_cycles,
             scaled_ratio_u64(
                 u64::from(stats.quiet_cycles_with_ambient_change),
@@ -8484,7 +8803,12 @@ fn add_welfare_dynamism_finding(
     }
     let crisis_exposed: Vec<_> = campaigns
         .iter()
-        .filter(|campaign| campaign.maximum_active_crises > 0)
+        .filter(|campaign| {
+            campaign
+                .observed_crisis_kinds
+                .iter()
+                .any(|kind| matches!(kind, CrisisKind::GrainShortage | CrisisKind::Epidemic))
+        })
         .collect();
     if crisis_exposed.len() < 4 {
         return;
@@ -8505,7 +8829,7 @@ fn add_welfare_dynamism_finding(
         severity: GameplayFindingSeverity::Warning,
         title: "Crises leave household welfare almost mechanically flat".to_owned(),
         evidence: format!(
-            "{mechanically_stable} of {} crisis-exposed campaigns kept their worst district at or above 95% food satisfaction; the lowest observed district value was {:.2}%. The city reacts in logs and crisis counters, but ordinary households experience little material disruption.",
+            "{mechanically_stable} of {} campaigns exposed to grain shortage or epidemic kept their worst district at or above 95% food satisfaction; the lowest observed district value was {:.2}%. Food-relevant crises are visible in state, but ordinary households experience little material disruption.",
             crisis_exposed.len(),
             f64::from(minimum) / 100.0,
         ),
@@ -9840,57 +10164,114 @@ fn add_synchronized_fantasy_timing_finding(
     campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
 ) {
-    let mut campaigns_by_seed: BTreeMap<u64, Vec<&GameplayCampaignReport>> = BTreeMap::new();
+    const SYNCHRONIZED_MILESTONE_WINDOW_DAYS: i64 = 60;
+    const SYNCHRONIZED_MILESTONE_COUNT: usize = 4;
+    let mut campaigns_by_start: BTreeMap<(u64, &'static str), Vec<&GameplayCampaignReport>> =
+        BTreeMap::new();
     for campaign in campaigns {
-        campaigns_by_seed
-            .entry(campaign.seed)
+        campaigns_by_start
+            .entry((campaign.seed, campaign.background.recipe_key()))
             .or_default()
             .push(campaign);
     }
-    let eligible_seed_cohorts = campaigns_by_seed
+    let eligible_start_cohorts = campaigns_by_start
         .values()
-        .filter(|cohort| cohort.len() >= 4)
-        .count();
-    let synchronized_seed_cohorts = campaigns_by_seed
-        .values()
-        .filter(|cohort| cohort.len() >= 4)
         .filter(|cohort| {
-            milestone_span(
-                cohort
-                    .iter()
-                    .filter_map(|campaign| campaign.fantasy_arc.first_commercial_standing_day),
-            ) <= Some(7)
-                && milestone_span(
-                    cohort
-                        .iter()
-                        .filter_map(|campaign| campaign.fantasy_arc.first_institution_support_day),
-                ) <= Some(7)
-                && milestone_span(
-                    cohort
-                        .iter()
-                        .filter_map(|campaign| campaign.fantasy_arc.first_office_campaign_day),
-                ) <= Some(7)
-                && milestone_span(
-                    cohort
-                        .iter()
-                        .filter_map(|campaign| campaign.fantasy_arc.first_office_day),
-                ) <= Some(7)
-                && milestone_span(
-                    cohort
-                        .iter()
-                        .filter_map(|campaign| campaign.fantasy_arc.first_city_shaping_action_day),
-                ) <= Some(7)
+            cohort
+                .iter()
+                .map(|campaign| campaign.persona)
+                .collect::<BTreeSet<_>>()
+                .len()
+                >= GameplayPersona::all().len()
         })
         .count();
-    if eligible_seed_cohorts > 0 && synchronized_seed_cohorts == eligible_seed_cohorts {
+    let synchronized_cohorts: Vec<_> = campaigns_by_start
+        .values()
+        .filter(|cohort| {
+            cohort
+                .iter()
+                .map(|campaign| campaign.persona)
+                .collect::<BTreeSet<_>>()
+                .len()
+                >= GameplayPersona::all().len()
+        })
+        .filter(|cohort| {
+            let milestones: [fn(&GameplayCampaignReport) -> Option<i64>; 5] = [
+                |campaign: &GameplayCampaignReport| {
+                    campaign.fantasy_arc.first_commercial_standing_day
+                },
+                |campaign: &GameplayCampaignReport| {
+                    campaign.fantasy_arc.first_institution_support_day
+                },
+                |campaign: &GameplayCampaignReport| campaign.fantasy_arc.first_office_campaign_day,
+                |campaign: &GameplayCampaignReport| campaign.fantasy_arc.first_office_day,
+                |campaign: &GameplayCampaignReport| {
+                    campaign.fantasy_arc.first_city_shaping_action_day
+                },
+            ];
+            milestones
+                .into_iter()
+                .filter(|milestone| {
+                    milestone_is_synchronized(
+                        cohort,
+                        *milestone,
+                        SYNCHRONIZED_MILESTONE_WINDOW_DAYS,
+                    )
+                })
+                .count()
+                >= SYNCHRONIZED_MILESTONE_COUNT
+        })
+        .collect();
+    let synchronized_start_cohorts = synchronized_cohorts.len();
+    let synchronized_route_cohorts = synchronized_cohorts
+        .iter()
+        .filter(|cohort| {
+            cohort
+                .iter()
+                .map(|campaign| {
+                    (
+                        campaign.fantasy_arc.first_institution_support_target,
+                        campaign.fantasy_arc.first_office_campaign_target,
+                        campaign.fantasy_arc.first_city_shaping_command,
+                    )
+                })
+                .collect::<BTreeSet<_>>()
+                .len()
+                == 1
+        })
+        .count();
+    if eligible_start_cohorts > 0
+        && scaled_ratio_usize(synchronized_route_cohorts, eligible_start_cohorts, 100) >= 50
+    {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Core fantasy timing is highly synchronized".to_owned(),
             evidence: format!(
-                "Within every one of {eligible_seed_cohorts} seed cohorts, all personas and backgrounds reached commercial standing, institutional support, office campaigning, officeholding, and city-shaping action within seven days of each other."
+                "{synchronized_route_cohorts} of {eligible_start_cohorts} same-seed, same-background persona cohorts reached at least {SYNCHRONIZED_MILESTONE_COUNT} of the five early fantasy milestones within {SYNCHRONIZED_MILESTONE_WINDOW_DAYS} days of each other while also choosing the same first institutional support target, office campaign target, and city-shaping command. Persona strategy should materially change the route and timing into commercial and institutional power."
+            ),
+        });
+    } else if synchronized_start_cohorts > 0 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Info,
+            title: "Fantasy timing converges across distinct political routes".to_owned(),
+            evidence: format!(
+                "{synchronized_start_cohorts} of {eligible_start_cohorts} same-seed, same-background persona cohorts reached at least {SYNCHRONIZED_MILESTONE_COUNT} early milestones within {SYNCHRONIZED_MILESTONE_WINDOW_DAYS} days, but their first institutional or city-shaping routes diverged. Shared eligibility gates compress timing, while persona strategy still changes how authority is pursued."
             ),
         });
     }
+}
+
+fn milestone_is_synchronized(
+    cohort: &[&GameplayCampaignReport],
+    milestone: fn(&GameplayCampaignReport) -> Option<i64>,
+    maximum_span_days: i64,
+) -> bool {
+    let days: Vec<_> = cohort
+        .iter()
+        .filter_map(|campaign| milestone(campaign))
+        .collect();
+    days.len() == cohort.len()
+        && milestone_span(days.into_iter()).is_some_and(|span| span <= maximum_span_days)
 }
 
 fn add_fantasy_arc_completion_findings(
@@ -10550,16 +10931,19 @@ fn render_fantasy_arcs(report: &GameplayHarnessReport, output: &mut String) {
         let arc = campaign.fantasy_arc;
         let _ = writeln!(
             output,
-            "  seed {:>3} {:<12} {:?}: reputation {} | commercial record {} | institutional support {} | campaign {} | office {} | city-shaping {} | labor conflict {} | heir designated {} | succession {}",
+            "  seed {:>3} {:<12} {:?}: reputation {} | commercial record {} | institutional support {} target {:?} | campaign {} target {:?} | office {} | city-shaping {} via {:?} | labor conflict {} | heir designated {} | succession {}",
             campaign.seed,
             campaign.persona.label(),
             campaign.background,
             milestone_day(arc.first_reputation_standing_day),
             milestone_day(arc.first_commercial_standing_day),
             milestone_day(arc.first_institution_support_day),
+            arc.first_institution_support_target,
             milestone_day(arc.first_office_campaign_day),
+            arc.first_office_campaign_target,
             milestone_day(arc.first_office_day),
             milestone_day(arc.first_city_shaping_action_day),
+            arc.first_city_shaping_command,
             milestone_day(arc.first_player_labor_dispute_day),
             milestone_day(arc.first_heir_designation_day),
             milestone_day(arc.first_succession_day),

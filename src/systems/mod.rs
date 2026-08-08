@@ -143,8 +143,8 @@ pub(crate) use commands::{
     WARD_ADOPTION_REPUTATION_REQUIREMENT, contract_counterparty_price_bounds,
     contract_relationship_pressure_basis_points, has_established_player_office_power,
     institution_membership_count, institution_support_day, institution_support_next_day,
-    office_nomination_next_day, player_contract_deliveries, quote_information_leverage,
-    required_office_power_for_law,
+    office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
+    quote_information_leverage, required_office_power_for_law,
 };
 pub use commands::{
     CommandError, CommandOutcome, CrisisResponse, EducationFocus, InformationFocus, LaborResponse,

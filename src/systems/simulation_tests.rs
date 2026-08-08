@@ -254,7 +254,7 @@ mod transfer_boundaries {
     use super::*;
 
     #[test]
-    fn external_income_debits_only_the_amount_households_can_receive() {
+    fn external_income_rejects_household_cash_overflow_without_mutation() {
         let mut state = make_test_campaign();
         for household in state.households.iter_mut() {
             household.weekly_income = Money::ZERO;
@@ -273,19 +273,143 @@ mod transfer_boundaries {
             household.cash = Money::from_copper(i64::MAX);
             household.weekly_income = Money::from_copper(100);
         }
-        let clearing_before = state.market.clearing_account;
+        let before = state.clone();
 
-        settle_weekly_external_income(&mut state).expect("weekly income settlement must succeed");
+        let result = settle_weekly_external_income(&mut state);
 
         assert_eq!(
-            state
-                .households
-                .get(household_id)
-                .expect("household must exist")
-                .cash,
-            Money::from_copper(i64::MAX)
+            result,
+            Err(SimulationError::HouseholdCashOverflow {
+                household_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: Money::from_copper(100),
+            })
         );
-        assert_eq!(state.market.clearing_account, clearing_before);
+        assert_state_unchanged(
+            &before,
+            &state,
+            "external income overflow must fail before the clearing account or household cash changes",
+        );
+    }
+
+    #[test]
+    fn household_purchase_rejects_market_demand_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        let household_id = state
+            .households
+            .iter()
+            .next()
+            .expect("campaign must contain a household")
+            .id();
+        let good_id = state
+            .market
+            .quotes
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain a market good");
+        let quantity = Quantity::from_milliunits(1);
+        let cost = Money::from_copper(1);
+        state
+            .households
+            .get_mut(household_id)
+            .expect("household must exist")
+            .cash = cost;
+        {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&good_id)
+                .expect("market quote must exist");
+            quote.stock = quantity;
+            quote.demand_today = Quantity::from_milliunits(i64::MAX);
+        }
+        let plan = HouseholdConsumptionPlan {
+            lines: vec![HouseholdPurchaseLine {
+                household_id,
+                good_id,
+                quantity,
+                cost,
+            }],
+            food_satisfaction: BTreeMap::new(),
+        };
+        let before = state.clone();
+
+        let result = apply_household_consumption(&mut state, plan);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::MarketDemandOverflow {
+                good_id,
+                current: Quantity::from_milliunits(i64::MAX),
+                incoming: quantity,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "market demand overflow must be rejected before household cash or market stock changes",
+        );
+    }
+
+    #[test]
+    fn household_purchase_rejects_clearing_credit_overflow_without_mutation() {
+        let mut state = make_test_campaign();
+        let household_id = state
+            .households
+            .iter()
+            .next()
+            .expect("campaign must contain a household")
+            .id();
+        let good_id = state
+            .market
+            .quotes
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain a market good");
+        let quantity = Quantity::from_milliunits(1);
+        let cost = Money::from_copper(1);
+        state
+            .households
+            .get_mut(household_id)
+            .expect("household must exist")
+            .cash = cost;
+        {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&good_id)
+                .expect("market quote must exist");
+            quote.stock = quantity;
+            quote.demand_today = Quantity::ZERO;
+        }
+        state.market.clearing_account = Money::from_copper(i64::MAX);
+        let plan = HouseholdConsumptionPlan {
+            lines: vec![HouseholdPurchaseLine {
+                household_id,
+                good_id,
+                quantity,
+                cost,
+            }],
+            food_satisfaction: BTreeMap::new(),
+        };
+        let before = state.clone();
+
+        let result = apply_household_consumption(&mut state, plan);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::MarketClearingAccountOverflow {
+                current: Money::from_copper(i64::MAX),
+                change: cost,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "clearing-account overflow must be rejected before household cash or market stock changes",
+        );
     }
 
     #[test]
@@ -497,7 +621,7 @@ mod inventory_policy {
     }
 
     #[test]
-    fn market_sale_does_not_remove_inventory_when_business_cash_has_no_headroom() {
+    fn market_sale_rejects_business_cash_overflow_before_inventory_moves() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let business_id = state
@@ -543,25 +667,115 @@ mod inventory_policy {
             .get_mut(&good_id)
             .expect("output quote must exist")
             .stock = Quantity::ZERO;
+        for contract in state
+            .contracts
+            .values_mut()
+            .filter(|contract| contract.seller_business_id == business_id)
+        {
+            contract.status = ContractStatus::Cancelled;
+        }
+        let before = state.clone();
 
-        let plan = decide_business_sales(registry, &state).expect("sale plan must resolve");
-        apply_business_sales(&mut state, plan).expect("business sales must apply");
+        let result = decide_business_sales(registry, &state);
 
-        let business = state
+        assert!(
+            matches!(
+                result,
+                Err(SimulationError::BusinessCashOverflow {
+                    business_id: failed_business_id,
+                    current,
+                    incoming,
+                }) if failed_business_id == business_id
+                    && current == Money::from_copper(i64::MAX)
+                    && incoming > Money::ZERO
+            ),
+            "an unrepresentable sale receipt must return a typed overflow error, received {result:?}"
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "sale planning must reject recipient overflow without mutating inventory, cash, or market state",
+        );
+    }
+
+    #[test]
+    fn market_sale_rejects_unrepresentable_trade_value_before_cash_checks() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let recipe = registry
+            .get_recipe(
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("business must exist")
+                    .recipe_id(),
+            )
+            .expect("business recipe must exist");
+        let good_id = recipe.output_good_id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.policy.target_output_days = 0;
+            business.inventory.insert(good_id, Quantity::from_units(10));
+            business.finance.cash = Money::ZERO;
+        }
+        let manager_id = state
             .businesses
             .get(business_id)
-            .expect("business must exist");
-        assert_eq!(business.cash(), Money::from_copper(i64::MAX));
-        assert_eq!(business.inventory_quantity(good_id), inventory);
-        assert_eq!(
-            state
+            .expect("business must exist")
+            .manager_id();
+        state
+            .characters
+            .get_mut(manager_id)
+            .expect("manager must exist")
+            .capabilities
+            .commerce = 100;
+        {
+            let quote = state
                 .market
                 .quotes
-                .get(&good_id)
-                .expect("output quote must exist")
-                .stock,
-            Quantity::ZERO,
-            "a sale that cannot be credited must not move inventory into the market"
+                .get_mut(&good_id)
+                .expect("output quote must exist");
+            quote.price = Money::from_copper(i64::MAX);
+            quote.stock = Quantity::ZERO;
+            quote.target_stock = Quantity::from_units(100);
+        }
+        for contract in state
+            .contracts
+            .values_mut()
+            .filter(|contract| contract.seller_business_id == business_id)
+        {
+            contract.status = ContractStatus::Cancelled;
+        }
+        let before = state.clone();
+
+        let result = decide_business_sales(registry, &state);
+
+        assert!(
+            matches!(
+                result,
+                Err(SimulationError::MarketTradeValueOverflow {
+                    good_id: failed_good_id,
+                    quantity,
+                    unit_price,
+                }) if failed_good_id == good_id
+                    && quantity > Quantity::from_units(1)
+                    && unit_price == Money::from_copper(i64::MAX)
+            ),
+            "trade-value overflow must be reported before revenue is narrowed, received {result:?}"
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "trade-value overflow during sale planning must not mutate the campaign",
         );
     }
 

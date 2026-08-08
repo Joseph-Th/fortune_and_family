@@ -33,6 +33,7 @@ const OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS: i64 = 90;
 const OFFICE_DUTY_FORFEITURE_WINDOW_DAYS: i64 = 90;
 const OFFICE_DUTY_REELECTION_BAN_DAYS: i64 = 180;
 const OFFICE_DUTY_FORFEITURE_THRESHOLD: usize = 3;
+const OFFICE_NOMINATION_CAMPAIGN_BONUS: u32 = 2_000;
 const OFFICE_CONCENTRATION_BACKLASH_PER_ADDITIONAL_OFFICE: i16 = 120;
 const MAX_OFFICE_CONCENTRATION_BACKLASH: i16 = 600;
 pub(crate) const DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS: i64 = 180;
@@ -331,7 +332,6 @@ struct DueContract {
 struct ContractPartySettlementState {
     owner_id: DynastyId,
     can_perform: bool,
-    can_receive: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -342,18 +342,15 @@ struct ContractSettlementState {
 
 impl ContractSettlementState {
     const fn is_fulfilled(self) -> bool {
-        self.buyer.can_perform
-            && self.buyer.can_receive
-            && self.seller.can_perform
-            && self.seller.can_receive
+        self.buyer.can_perform && self.seller.can_perform
     }
 
     const fn buyer_is_at_fault(self) -> bool {
-        !self.buyer.can_perform || !self.buyer.can_receive
+        !self.buyer.can_perform
     }
 
     const fn seller_is_at_fault(self) -> bool {
-        !self.seller.can_perform || !self.seller.can_receive
+        !self.seller.can_perform
     }
 
     const fn has_attributable_nonperformance(self) -> bool {
@@ -2590,7 +2587,13 @@ fn apply_crisis_daily_effects(
                     let crisis_demand = quote
                         .target_stock
                         .saturating_mul_ratio(i64::from(severity), 100_000);
-                    quote.demand_today = quote.demand_today.saturating_add(crisis_demand);
+                    quote.demand_today = quote.demand_today.checked_add(crisis_demand).ok_or(
+                        SimulationError::MarketDemandOverflow {
+                            good_id: bread_id,
+                            current: quote.demand_today,
+                            incoming: crisis_demand,
+                        },
+                    )?;
                 }
             }
             CrisisKind::UrbanFire => {
@@ -2734,7 +2737,7 @@ fn settle_contracts(state: &mut AppState) -> Result<(), SimulationError> {
 
 fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), SimulationError> {
     let payment = cost_for(due.quantity, due.unit_price);
-    let (seller_active, seller_owner_id, seller_can_deliver, seller_can_receive_payment) = {
+    let (seller_active, seller_owner_id, seller_can_deliver) = {
         let seller = state
             .businesses
             .get(due.seller_id)
@@ -2746,10 +2749,9 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
             ),
             seller.owner_dynasty_id(),
             seller.inventory_quantity(due.good_id) >= due.quantity,
-            seller.cash().max_nonnegative_addend() >= payment,
         )
     };
-    let (buyer_active, buyer_owner_id, buyer_can_pay, buyer_can_receive_delivery) = {
+    let (buyer_active, buyer_owner_id, buyer_can_pay) = {
         let buyer = state
             .businesses
             .get(due.buyer_id)
@@ -2761,10 +2763,6 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
             ),
             buyer.owner_dynasty_id(),
             buyer.cash() >= payment,
-            buyer
-                .inventory_quantity(due.good_id)
-                .max_nonnegative_addend()
-                >= due.quantity,
         )
     };
     if !seller_active || !buyer_active {
@@ -2782,16 +2780,39 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
         buyer: ContractPartySettlementState {
             owner_id: buyer_owner_id,
             can_perform: buyer_can_pay,
-            can_receive: buyer_can_receive_delivery,
         },
         seller: ContractPartySettlementState {
             owner_id: seller_owner_id,
             can_perform: seller_can_deliver,
-            can_receive: seller_can_receive_payment,
         },
     };
     let fulfilled = settlement.is_fulfilled();
     if fulfilled {
+        let seller_cash = state
+            .businesses
+            .get(due.seller_id)
+            .expect("contract seller must exist")
+            .cash();
+        seller_cash
+            .checked_add(payment)
+            .ok_or(SimulationError::BusinessCashOverflow {
+                business_id: due.seller_id,
+                current: seller_cash,
+                incoming: payment,
+            })?;
+        let buyer_inventory = state
+            .businesses
+            .get(due.buyer_id)
+            .expect("contract buyer must exist")
+            .inventory_quantity(due.good_id);
+        buyer_inventory.checked_add(due.quantity).ok_or(
+            SimulationError::BusinessInventoryOverflow {
+                business_id: due.buyer_id,
+                good_id: due.good_id,
+                current: buyer_inventory,
+                incoming: due.quantity,
+            },
+        )?;
         settle_fulfilled_contract(state, due, payment, settlement)?;
     } else {
         settle_failed_contract(state, due, settlement)?;
@@ -3055,16 +3076,22 @@ fn transfer_contract_money(
         .get(payer_id)
         .expect("contract payer must exist")
         .cash();
-    let recipient_headroom = state
+    let recipient_cash = state
         .businesses
         .get(recipient_id)
         .expect("contract recipient must exist")
-        .cash()
-        .max_nonnegative_addend();
-    let transferred = amount.min(payer_cash).min(recipient_headroom);
+        .cash();
+    let transferred = amount.min(payer_cash);
     if transferred <= Money::ZERO {
         return Ok(Money::ZERO);
     }
+    recipient_cash
+        .checked_add(transferred)
+        .ok_or(SimulationError::BusinessCashOverflow {
+            business_id: recipient_id,
+            current: recipient_cash,
+            incoming: transferred,
+        })?;
     let (payer_lifetime_costs, payer_finance_version) = {
         let payer = state
             .businesses
@@ -3207,30 +3234,30 @@ fn settle_due_civic_debt(
                 incoming: interest_due,
             })?;
     let amount_due = due.weekly_payment.min(accrued_balance);
-    let creditor_headroom = state
-        .dynasties
-        .get(&due.creditor_dynasty_id)
-        .expect("civic debt creditor must exist")
-        .treasury()
-        .max_nonnegative_addend();
-    if creditor_headroom < amount_due {
-        state
-            .civic_debts
-            .get_mut(&due.id)
-            .expect("civic debt must exist")
-            .next_due_day = state.clock.day().saturating_add(7);
-        return Ok(());
+    let treasury_budget = state
+        .institutions
+        .get(&treasury_id)
+        .expect("civic treasury must exist")
+        .budget;
+    if treasury_budget >= amount_due {
+        let creditor_treasury = state
+            .dynasties
+            .get(&due.creditor_dynasty_id)
+            .expect("civic debt creditor must exist")
+            .treasury();
+        creditor_treasury.checked_add(amount_due).ok_or(
+            SimulationError::DynastyTreasuryOverflow {
+                dynasty_id: due.creditor_dynasty_id,
+                current: creditor_treasury,
+                incoming: amount_due,
+            },
+        )?;
     }
     state
         .civic_debts
         .get_mut(&due.id)
         .expect("civic debt must exist")
         .balance = accrued_balance;
-    let treasury_budget = state
-        .institutions
-        .get(&treasury_id)
-        .expect("civic treasury must exist")
-        .budget;
     if treasury_budget >= amount_due {
         settle_successful_civic_debt_payment(state, treasury_id, due, amount_due);
     } else {
@@ -3438,19 +3465,19 @@ fn settle_due_loan(
         .get(&due.borrower_id)
         .expect("loan borrower must exist")
         .treasury();
-    let lender_headroom = state
-        .dynasties
-        .get(&due.lender_id)
-        .expect("loan lender must exist")
-        .treasury()
-        .max_nonnegative_addend();
-    if lender_headroom < amount_due {
-        state
-            .loans
-            .get_mut(&due.id)
-            .expect("loan must exist")
-            .next_due_day = state.clock.day().saturating_add(7);
-        return Ok(());
+    if borrower_treasury >= amount_due {
+        let lender_treasury = state
+            .dynasties
+            .get(&due.lender_id)
+            .expect("loan lender must exist")
+            .treasury();
+        lender_treasury.checked_add(amount_due).ok_or(
+            SimulationError::DynastyTreasuryOverflow {
+                dynasty_id: due.lender_id,
+                current: lender_treasury,
+                incoming: amount_due,
+            },
+        )?;
     }
     state
         .loans
@@ -3674,16 +3701,6 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
             let annual_cap = property_value.saturating_mul_ratio(limit, 10_000);
             contractual_rent.min(Money::from_copper(annual_cap.copper() / 52))
         });
-        let owner_headroom = state
-            .dynasties
-            .get(&owner_id)
-            .expect("property owner dynasty must exist")
-            .treasury()
-            .max_nonnegative_addend();
-        let receivable_rent = rent.min(owner_headroom);
-        if receivable_rent <= Money::ZERO {
-            continue;
-        }
         let paid = if let Some(tenant_id) = tenant_id {
             if owner_id == tenant_id {
                 continue;
@@ -3693,7 +3710,22 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
                 .get(&tenant_id)
                 .expect("property tenant dynasty must exist")
                 .treasury();
-            let paid = receivable_rent.min(tenant_cash);
+            let paid = rent.min(tenant_cash);
+            if paid <= Money::ZERO {
+                continue;
+            }
+            let owner_treasury = state
+                .dynasties
+                .get(&owner_id)
+                .expect("property owner dynasty must exist")
+                .treasury();
+            owner_treasury
+                .checked_add(paid)
+                .ok_or(SimulationError::DynastyTreasuryOverflow {
+                    dynasty_id: owner_id,
+                    current: owner_treasury,
+                    incoming: paid,
+                })?;
             state
                 .dynasties
                 .get_mut(&tenant_id)
@@ -3704,8 +3736,20 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
                 .expect("bounded rent payment must not exceed tenant treasury");
             paid
         } else if occupant_business_id.is_none() {
-            debit_market_clearing_account(state, receivable_rent)?;
-            receivable_rent
+            let owner_treasury = state
+                .dynasties
+                .get(&owner_id)
+                .expect("property owner dynasty must exist")
+                .treasury();
+            owner_treasury
+                .checked_add(rent)
+                .ok_or(SimulationError::DynastyTreasuryOverflow {
+                    dynasty_id: owner_id,
+                    current: owner_treasury,
+                    incoming: rent,
+                })?;
+            debit_market_clearing_account(state, rent)?;
+            rent
         } else {
             Money::ZERO
         };
@@ -3729,7 +3773,7 @@ fn distribute_business_dividends(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
-    let mut remaining_owner_headroom = BTreeMap::new();
+    let mut projected_owner_treasuries = BTreeMap::new();
     let mut dividends = Vec::new();
     for business in state.businesses.iter() {
         if business.status() != BusinessStatus::Active
@@ -3746,29 +3790,33 @@ fn distribute_business_dividends(
             .saturating_add(recipe.daily_operating_cost().saturating_mul(21));
         let excess = business.cash().saturating_sub(operating_floor);
         let owner_id = business.owner_dynasty_id();
-        let owner_headroom = remaining_owner_headroom.entry(owner_id).or_insert_with(|| {
-            state
-                .dynasties
-                .get(&owner_id)
-                .expect("dividend owner dynasty must exist")
-                .treasury()
-                .max_nonnegative_addend()
-        });
-        let dividend = Money::from_copper(excess.copper() / 10)
-            .min(Money::from_copper(1_000))
-            .min(*owner_headroom);
+        let owner_treasury = projected_owner_treasuries
+            .entry(owner_id)
+            .or_insert_with(|| {
+                state
+                    .dynasties
+                    .get(&owner_id)
+                    .expect("dividend owner dynasty must exist")
+                    .treasury()
+            });
+        let dividend = Money::from_copper(excess.copper() / 10).min(Money::from_copper(1_000));
         if dividend <= Money::ZERO {
             continue;
         }
+        let owner_treasury_after = owner_treasury.checked_add(dividend).ok_or(
+            SimulationError::DynastyTreasuryOverflow {
+                dynasty_id: owner_id,
+                current: *owner_treasury,
+                incoming: dividend,
+            },
+        )?;
         let resulting_cash = business
             .finance
             .cash
             .checked_sub(dividend)
             .expect("planned dividend must fit business cash");
         let next_finance_version = next_business_finance_version(business)?;
-        *owner_headroom = owner_headroom
-            .checked_sub(dividend)
-            .expect("planned dividend must fit remaining owner headroom");
+        *owner_treasury = owner_treasury_after;
         dividends.push((
             business.id(),
             owner_id,
@@ -3908,16 +3956,22 @@ fn pay_employment_wage(
     if wage_due <= Money::ZERO || spendable <= Money::ZERO {
         return Ok(Money::ZERO);
     }
-    let household_headroom = state
+    let household_cash = state
         .households
         .get(household_id)
         .expect("employment household must exist")
-        .cash
-        .max_nonnegative_addend();
-    let paid = wage_due.min(spendable).min(household_headroom);
+        .cash;
+    let paid = wage_due.min(spendable);
     if paid <= Money::ZERO {
         return Ok(Money::ZERO);
     }
+    household_cash
+        .checked_add(paid)
+        .ok_or(SimulationError::HouseholdCashOverflow {
+            household_id,
+            current: household_cash,
+            incoming: paid,
+        })?;
     let (resulting_lifetime_costs, next_finance_version) = {
         let business = state
             .businesses
@@ -4539,7 +4593,7 @@ pub(crate) fn run_monthly_strategic_systems(
     advance_ai_objectives(registry, state);
     update_information_reports(registry, state);
     advance_legal_case_hearings(state);
-    resolve_legal_cases(state);
+    resolve_legal_cases(state)?;
     update_external_route_risk(state);
     detect_and_advance_crises(registry, state);
     recover_external_routes(state);
@@ -4844,15 +4898,10 @@ fn preflight_office_duty_contributions(
     duties: &[OfficeDutyPlan],
 ) -> Result<(), SimulationError> {
     let mut projected_treasuries = BTreeMap::new();
+    let mut projected_institution_budgets = BTreeMap::new();
     let mut projected_contributions = BTreeMap::new();
     for duty in duties {
         let required = office_duty_required(duty.power_count, duty.office_count);
-        let institution_budget = state
-            .institutions
-            .get(&duty.institution_id)
-            .expect("office institution must exist")
-            .budget;
-        let collectible = required.min(institution_budget.max_nonnegative_addend());
         let treasury = projected_treasuries
             .entry(duty.dynasty_id)
             .or_insert_with(|| {
@@ -4862,13 +4911,29 @@ fn preflight_office_duty_contributions(
                     .expect("officeholder dynasty must exist")
                     .treasury()
             });
-        let paid = collectible.min(*treasury);
+        let paid = required.min(*treasury);
         *treasury = treasury
             .checked_sub(paid)
             .expect("projected office-duty payment must not exceed treasury");
         if paid == Money::ZERO {
             continue;
         }
+        let institution_budget = projected_institution_budgets
+            .entry(duty.institution_id)
+            .or_insert_with(|| {
+                state
+                    .institutions
+                    .get(&duty.institution_id)
+                    .expect("office institution must exist")
+                    .budget
+            });
+        *institution_budget = institution_budget.checked_add(paid).ok_or(
+            SimulationError::InstitutionBudgetOverflow {
+                institution_id: duty.institution_id,
+                current: *institution_budget,
+                incoming: paid,
+            },
+        )?;
         let contributions = projected_contributions
             .entry(duty.dynasty_id)
             .or_insert_with(|| {
@@ -4903,16 +4968,12 @@ fn apply_office_duty(
         .get(&institution_id)
         .expect("office institution must exist")
         .budget;
-    let collectible = required.min(institution_budget.max_nonnegative_addend());
-    if collectible == Money::ZERO {
-        return Ok(());
-    }
     let treasury = state
         .dynasties
         .get(&dynasty_id)
         .expect("officeholder dynasty must exist")
         .treasury();
-    let paid = collectible.min(treasury);
+    let paid = required.min(treasury);
     transfer_office_duty_payment(
         state,
         institution_id,
@@ -4921,14 +4982,14 @@ fn apply_office_duty(
         treasury,
         paid,
     )?;
-    if paid < collectible {
+    if paid < required {
         record_office_duty_shortfall(
             state,
             institution_id,
             dynasty_id,
             required,
             paid,
-            collectible.saturating_sub(paid),
+            required.saturating_sub(paid),
         );
     }
     Ok(())
@@ -4958,6 +5019,14 @@ fn transfer_office_duty_payment(
             incoming: paid,
         },
     )?;
+    let next_institution_budget =
+        institution_budget
+            .checked_add(paid)
+            .ok_or(SimulationError::InstitutionBudgetOverflow {
+                institution_id,
+                current: institution_budget,
+                incoming: paid,
+            })?;
     let dynasty = state
         .dynasties
         .get_mut(&dynasty_id)
@@ -4970,9 +5039,7 @@ fn transfer_office_duty_payment(
         .institutions
         .get_mut(&institution_id)
         .expect("office institution must exist")
-        .budget = institution_budget
-        .checked_add(paid)
-        .expect("bounded civic duty contribution must fit institution budget");
+        .budget = next_institution_budget;
     Ok(())
 }
 
@@ -5217,17 +5284,20 @@ fn apply_office_power(
                 .get(&institution_id)
                 .expect("office institution must exist")
                 .budget;
-            let revenue = Money::from_copper(100).min(institution_budget.max_nonnegative_addend());
-            if revenue > Money::ZERO {
-                state
-                    .institutions
-                    .get_mut(&institution_id)
-                    .expect("office institution must exist")
-                    .budget = institution_budget
-                    .checked_add(revenue)
-                    .expect("bounded office revenue must fit institution budget");
-                debit_market_clearing_account(state, revenue)?;
-            }
+            let revenue = Money::from_copper(100);
+            let next_budget = institution_budget.checked_add(revenue).ok_or(
+                SimulationError::InstitutionBudgetOverflow {
+                    institution_id,
+                    current: institution_budget,
+                    incoming: revenue,
+                },
+            )?;
+            debit_market_clearing_account(state, revenue)?;
+            state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("office institution must exist")
+                .budget = next_budget;
         }
         OfficePower::DebtEnforcement => adjust_reliability_reputation(state, dynasty_id, 15),
         OfficePower::CityContracts => award_city_contract(state, institution_id, dynasty_id)?,
@@ -5281,24 +5351,24 @@ fn award_city_contract(
         .get(&institution_id)
         .expect("city contract institution must exist")
         .budget;
-    let business_headroom = state
-        .businesses
-        .get(business_id)
-        .expect("city contract business must exist")
-        .cash()
-        .max_nonnegative_addend();
-    let award = Money::from_copper(250)
-        .min(institution_budget)
-        .min(business_headroom);
+    let award = Money::from_copper(250).min(institution_budget);
     if award == Money::ZERO {
         return Ok(());
     }
-    let (resulting_lifetime_revenue, next_finance_version) = {
+    let (resulting_cash, resulting_lifetime_revenue, next_finance_version) = {
         let business = state
             .businesses
             .get(business_id)
             .expect("city contract business must exist");
         (
+            business
+                .cash()
+                .checked_add(award)
+                .ok_or(SimulationError::BusinessCashOverflow {
+                    business_id,
+                    current: business.cash(),
+                    incoming: award,
+                })?,
             business.finance.lifetime_revenue.checked_add(award).ok_or(
                 SimulationError::BusinessLifetimeRevenueOverflow {
                     business_id,
@@ -5320,11 +5390,7 @@ fn award_city_contract(
         .businesses
         .get_mut(business_id)
         .expect("city contract business must exist");
-    business.finance.cash = business
-        .finance
-        .cash
-        .checked_add(award)
-        .expect("bounded city-contract award must fit business cash");
+    business.finance.cash = resulting_cash;
     business.finance.lifetime_revenue = resulting_lifetime_revenue;
     business.finance.version = next_finance_version;
     Ok(())
@@ -5435,7 +5501,7 @@ fn resolve_institution_selections(
                     .expect("candidate dynasty must exist");
                 let campaign_bonus =
                     if has_recent_office_nomination(state, institution_id, character.id(), day) {
-                        4_000
+                        OFFICE_NOMINATION_CAMPAIGN_BONUS
                     } else {
                         0
                     };
@@ -6025,7 +6091,7 @@ fn advance_legal_case_hearings(state: &mut AppState) {
     }
 }
 
-fn resolve_legal_cases(state: &mut AppState) {
+fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
     let day = state.clock.day();
     let due: Vec<_> = state
         .legal_cases
@@ -6070,7 +6136,7 @@ fn resolve_legal_cases(state: &mut AppState) {
             .saturating_add(u32::from(defendant_legitimacy));
         let plaintiff_wins = plaintiff_score >= defendant_score;
         if plaintiff_wins {
-            settle_legal_damages(state, plaintiff_id, defendant_id, damages);
+            settle_legal_damages(state, plaintiff_id, defendant_id, damages)?;
         }
         state
             .legal_cases
@@ -6101,6 +6167,7 @@ fn resolve_legal_cases(state: &mut AppState) {
             ),
         );
     }
+    Ok(())
 }
 
 fn settle_legal_damages(
@@ -6108,19 +6175,25 @@ fn settle_legal_damages(
     plaintiff_id: DynastyId,
     defendant_id: DynastyId,
     damages: Money,
-) {
+) -> Result<(), SimulationError> {
     let defendant_cash = state
         .dynasties
         .get(&defendant_id)
         .expect("legal defendant must exist")
         .treasury();
-    let plaintiff_headroom = state
+    let plaintiff_treasury = state
         .dynasties
         .get(&plaintiff_id)
         .expect("legal plaintiff must exist")
-        .treasury()
-        .max_nonnegative_addend();
-    let paid = damages.min(defendant_cash).min(plaintiff_headroom);
+        .treasury();
+    let paid = damages.min(defendant_cash);
+    plaintiff_treasury
+        .checked_add(paid)
+        .ok_or(SimulationError::DynastyTreasuryOverflow {
+            dynasty_id: plaintiff_id,
+            current: plaintiff_treasury,
+            incoming: paid,
+        })?;
     state
         .dynasties
         .get_mut(&defendant_id)
@@ -6137,7 +6210,8 @@ fn settle_legal_damages(
         .resources
         .treasury
         .checked_add(paid)
-        .expect("bounded damages must fit plaintiff treasury");
+        .expect("prevalidated damages must fit plaintiff treasury");
+    Ok(())
 }
 
 fn update_external_route_risk(state: &mut AppState) {

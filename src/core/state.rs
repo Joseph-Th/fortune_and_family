@@ -466,11 +466,14 @@ pub(crate) struct NextIds {
 macro_rules! next_id_method {
     ($method:ident, $field:ident, $id_type:ident) => {
         pub(crate) const fn $method(&mut self) -> $id_type {
+            // `u32::MAX` is an invalid exhausted allocator state. Keep
+            // `u32::MAX - 1` as the terminal valid counter value and reject an
+            // allocation that would advance the campaign into that invalid state.
+            if self.$field >= u32::MAX - 1 {
+                panic!(concat!(stringify!($id_type), " identifier space exhausted"));
+            }
             let id = $id_type::new(self.$field);
-            self.$field = self
-                .$field
-                .checked_add(1)
-                .expect(concat!(stringify!($id_type), " identifier space exhausted"));
+            self.$field += 1;
             id
         }
     };

@@ -1,7 +1,7 @@
 //! Validated multi-record transactions and shared simulation errors.
 
 use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};
-use crate::ids::{BusinessId, CivicDebtId, DynastyId, GoodId, InstitutionId, LoanId};
+use crate::ids::{BusinessId, CivicDebtId, DynastyId, GoodId, HouseholdId, InstitutionId, LoanId};
 use crate::money::{Money, Quantity};
 use thiserror::Error;
 
@@ -44,6 +44,15 @@ pub enum SimulationError {
         incoming: Money,
     },
     #[error(
+        "business {business_id} inventory for good {good_id} cannot receive {incoming}; current quantity {current} would exceed the supported quantity range"
+    )]
+    BusinessInventoryOverflow {
+        business_id: BusinessId,
+        good_id: GoodId,
+        current: Quantity,
+        incoming: Quantity,
+    },
+    #[error(
         "business {business_id} cannot record cost {incoming}; lifetime costs {current} would exceed the supported money range"
     )]
     BusinessLifetimeCostsOverflow {
@@ -81,10 +90,46 @@ pub enum SimulationError {
         current: Money,
         incoming: Money,
     },
+    #[error(
+        "dynasty {dynasty_id} cannot receive {incoming}; current treasury {current} would exceed the supported money range"
+    )]
+    DynastyTreasuryOverflow {
+        dynasty_id: DynastyId,
+        current: Money,
+        incoming: Money,
+    },
+    #[error(
+        "household {household_id} cannot receive {incoming}; current cash {current} would exceed the supported money range"
+    )]
+    HouseholdCashOverflow {
+        household_id: HouseholdId,
+        current: Money,
+        incoming: Money,
+    },
+    #[error(
+        "institution {institution_id} cannot receive {incoming}; current budget {current} would exceed the supported money range"
+    )]
+    InstitutionBudgetOverflow {
+        institution_id: InstitutionId,
+        current: Money,
+        incoming: Money,
+    },
     #[error("institution {institution_id} term number is exhausted")]
     InstitutionTermNumberExhausted { institution_id: InstitutionId },
     #[error("market quote is missing for good {good_id}")]
     MarketQuoteMissing { good_id: GoodId },
+    #[error("market clearing debit must be nonnegative, received {outgoing}")]
+    NegativeMarketDebit { outgoing: Money },
+    #[error("market supply for good {good_id} must be nonnegative, received {incoming}")]
+    NegativeMarketSupply { good_id: GoodId, incoming: Quantity },
+    #[error(
+        "market demand for good {good_id} cannot receive {incoming}; current demand {current} would exceed the supported quantity range"
+    )]
+    MarketDemandOverflow {
+        good_id: GoodId,
+        current: Quantity,
+        incoming: Quantity,
+    },
     #[error(
         "market stock for good {good_id} cannot receive {incoming}; current stock {current} would exceed the supported quantity range"
     )]
@@ -100,6 +145,14 @@ pub enum SimulationError {
         good_id: GoodId,
         current: Quantity,
         incoming: Quantity,
+    },
+    #[error(
+        "market trade for good {good_id} at quantity {quantity} and unit price {unit_price} exceeds the supported money range"
+    )]
+    MarketTradeValueOverflow {
+        good_id: GoodId,
+        quantity: Quantity,
+        unit_price: Money,
     },
     #[error(
         "weekly external income cannot include payment {incoming}; accumulated total {accumulated} would exceed the supported money range"
@@ -127,27 +180,13 @@ pub enum SimulationError {
     MarketClearingAccountOverflow { current: Money, change: Money },
 }
 
-pub(crate) fn credit_market_clearing_account(
-    state: &mut AppState,
-    incoming: Money,
-) -> Result<(), SimulationError> {
-    debug_assert!(incoming >= Money::ZERO, "market credit must be nonnegative");
-    let current = state.market.clearing_account;
-    state.market.clearing_account =
-        current
-            .checked_add(incoming)
-            .ok_or(SimulationError::MarketClearingAccountOverflow {
-                current,
-                change: incoming,
-            })?;
-    Ok(())
-}
-
 pub(crate) fn debit_market_clearing_account(
     state: &mut AppState,
     outgoing: Money,
 ) -> Result<(), SimulationError> {
-    debug_assert!(outgoing >= Money::ZERO, "market debit must be nonnegative");
+    if outgoing < Money::ZERO {
+        return Err(SimulationError::NegativeMarketDebit { outgoing });
+    }
     let current = state.market.clearing_account;
     let change = Money::from_copper(-outgoing.copper());
     state.market.clearing_account = current
@@ -161,10 +200,9 @@ pub(crate) fn add_market_supply(
     good_id: GoodId,
     incoming: Quantity,
 ) -> Result<(), SimulationError> {
-    debug_assert!(
-        incoming >= Quantity::ZERO,
-        "market supply must be nonnegative"
-    );
+    if incoming < Quantity::ZERO {
+        return Err(SimulationError::NegativeMarketSupply { good_id, incoming });
+    }
     let quote = state
         .market
         .quotes
@@ -400,24 +438,46 @@ mod tests {
     use crate::test_support::{assert_state_unchanged, make_test_campaign};
 
     #[test]
-    fn rejects_market_clearing_credit_overflow_without_mutation() {
+    fn rejects_negative_market_debit_without_mutation() {
         let mut state = make_test_campaign();
-        state.market.clearing_account = Money::from_copper(i64::MAX);
+        let outgoing = Money::from_copper(-1);
         let before = state.clone();
 
-        let result = credit_market_clearing_account(&mut state, Money::from_copper(1));
+        let result = debit_market_clearing_account(&mut state, outgoing);
 
         assert_eq!(
             result,
-            Err(SimulationError::MarketClearingAccountOverflow {
-                current: Money::from_copper(i64::MAX),
-                change: Money::from_copper(1),
-            })
+            Err(SimulationError::NegativeMarketDebit { outgoing })
         );
         assert_state_unchanged(
             &before,
             &state,
-            "overflowing market credits must not clamp the external account",
+            "negative market debits must be rejected in release and debug builds alike",
+        );
+    }
+
+    #[test]
+    fn rejects_negative_market_supply_without_mutation() {
+        let mut state = make_test_campaign();
+        let good_id = *state
+            .market
+            .quotes
+            .keys()
+            .next()
+            .expect("campaign must contain a market quote");
+        let incoming = Quantity::from_milliunits(-1);
+        let before = state.clone();
+
+        let result = add_market_supply(&mut state, good_id, incoming);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::NegativeMarketSupply { good_id, incoming })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "negative market supply must be rejected before stock or flow state changes",
         );
     }
 

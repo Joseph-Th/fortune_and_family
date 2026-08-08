@@ -674,7 +674,7 @@ mod candidates {
     fn office_candidates_include_existing_institution_members_after_cooldown() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
-        grant_office_nomination_record_for_test(&mut state);
+        grant_office_nomination_record_for_test(registry, &mut state);
         let player_character_ids: Vec<_> = state
             .characters
             .iter()
@@ -736,7 +736,7 @@ mod candidates {
     fn political_agent_does_not_stack_redundant_family_patronage_in_one_institution() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
-        grant_office_nomination_record_for_test(&mut state);
+        grant_office_nomination_record_for_test(registry, &mut state);
         let character_id = eligible_office_characters(&state)
             .first()
             .expect("player dynasty must have an office-eligible character")
@@ -770,6 +770,58 @@ mod candidates {
                 } if candidate_institution_id == institution_id
             )
         }));
+    }
+
+    #[test]
+    fn institution_capability_fit_bonus_is_bounded_to_strategic_scale() {
+        assert_eq!(institution_capability_fit_bonus(0), 0);
+        assert_eq!(institution_capability_fit_bonus(5_000), 250);
+        assert_eq!(institution_capability_fit_bonus(10_000), 500);
+        assert_eq!(institution_capability_fit_bonus(13_000), 500);
+    }
+
+    #[test]
+    fn family_education_opens_before_full_office_candidacy() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        {
+            let player = state
+                .dynasties
+                .get_mut(&player_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(20_000);
+            player.resources.reputation_reliability_basis_points =
+                INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT;
+        }
+        grant_player_contract_deliveries_for_test(
+            &mut state,
+            INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+        );
+        assert!(
+            player_contract_deliveries(&state) < OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+            "fixture must remain below the office-candidacy commercial threshold"
+        );
+        let mut candidates = Vec::new();
+
+        generate_family_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::EducateFamilyMember)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected establishment-stage education candidate; observed: {candidates:#?}"
+                )
+            });
+        apply_player_command(registry, &mut state, candidate.command)
+            .expect("generated establishment-stage education must be executable");
     }
 
     #[test]
@@ -872,6 +924,57 @@ mod candidates {
             .expect("institution must remain present");
         assert_eq!(institution.office_holder_id, None);
         assert!(!institution.members.contains(&character_id));
+    }
+
+    #[test]
+    fn legitimacy_exhausted_multi_office_dynasty_can_reduce_political_overextension() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let holder_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let second_institution = state
+            .institutions
+            .values_mut()
+            .find(|institution| institution.office_holder_id.is_none())
+            .expect("campaign must contain a second available institution");
+        second_institution.members.insert(holder_id);
+        second_institution.office_holder_id = Some(holder_id);
+        {
+            let player = state
+                .dynasties
+                .get_mut(&state.player_dynasty_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(100_000);
+            player.resources.legitimacy_basis_points = 0;
+        }
+
+        assert_eq!(count_player_offices(&state, state.player_dynasty_id), 2);
+        assert!(player_is_politically_overextended(&state));
+        assert!(
+            has_institution_withdrawal_opportunity(&state),
+            "a multi-office dynasty with no legitimacy should be able to shed an unusable office before liquidity collapses"
+        );
+
+        let mut candidates = Vec::new();
+        generate_family_candidates(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut candidates,
+        );
+        let candidate = candidates
+            .into_iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::WithdrawFromInstitution)
+            .expect("political overextension should produce an institutional-withdrawal candidate");
+
+        apply_player_command(registry, &mut state, candidate.command)
+            .expect("political-overextension withdrawal must be executable");
+        assert_eq!(count_player_offices(&state, state.player_dynasty_id), 1);
+        assert!(!player_is_politically_overextended(&state));
     }
 
     #[test]
@@ -1874,6 +1977,70 @@ mod candidates {
     }
 
     #[test]
+    fn office_power_agent_ignores_minor_deficits_and_bounds_material_need_scoring() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points = 10_000;
+        let institution = state
+            .institutions
+            .values_mut()
+            .find(|institution| institution.office_holder_id.is_some())
+            .expect("fixture must grant the player an office");
+        institution.powers = BTreeSet::from([OfficePower::PublicWorks]);
+        let district_id = registry
+            .get_institution(institution.institution_id)
+            .expect("runtime institution must have a registry definition")
+            .district_id();
+        let district = state
+            .districts
+            .get_mut(&district_id)
+            .expect("institution district must exist");
+        district.employment_basis_points = 6_200;
+        district.sanitation_basis_points = 6_200;
+        let mut candidates = Vec::new();
+
+        generate_office_power_directive_candidates(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut candidates,
+        );
+
+        assert!(
+            candidates.is_empty(),
+            "small district deficits should not turn office power into routine maintenance"
+        );
+
+        let district = state
+            .districts
+            .get_mut(&district_id)
+            .expect("institution district must exist");
+        district.employment_basis_points = 4_000;
+        district.sanitation_basis_points = 4_000;
+        generate_office_power_directive_candidates(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut candidates,
+        );
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::ExerciseOfficePower)
+            .expect("material district need should create an office-power candidate");
+        assert!(
+            candidate.score <= 1_700,
+            "need scoring should stay comparable to other strategic families before global rank adjustment: {candidate:?}"
+        );
+    }
+
+    #[test]
     fn office_duty_audits_require_an_exact_dynasty_subject_segment() {
         let mut state = make_test_campaign();
         state.player_dynasty_id = DynastyId::new(1);
@@ -2379,6 +2546,77 @@ mod candidates {
                     }
                 )
         }));
+    }
+
+    #[test]
+    fn weakened_power_broker_can_study_an_equally_embedded_rival() {
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        let counterparty_id = state
+            .relationships
+            .values()
+            .find_map(|relationship| relationship_counterparty_id(relationship, player_id))
+            .expect("campaign must contain a player counterparty relationship");
+        let counterparty_head = state
+            .dynasties
+            .get(&counterparty_id)
+            .expect("counterparty dynasty must exist")
+            .head_id();
+        for institution in state.institutions.values_mut() {
+            if institution.office_holder_id.is_some_and(|character_id| {
+                state
+                    .characters
+                    .get(character_id)
+                    .is_some_and(|character| character.dynasty_id() != player_id)
+            }) {
+                institution.office_holder_id = None;
+            }
+        }
+        let rival_institution = state
+            .institutions
+            .values_mut()
+            .find(|institution| institution.office_holder_id.is_none())
+            .expect("campaign must contain an office available for the rival fixture");
+        rival_institution.members.insert(counterparty_head);
+        rival_institution.office_holder_id = Some(counterparty_head);
+        for relationship in state.relationships.values_mut().filter(|relationship| {
+            relationship.pair.first == player_id || relationship.pair.second == player_id
+        }) {
+            relationship.trust_basis_points = 5_000;
+            relationship.resentment_basis_points = 0;
+        }
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points =
+            AGENT_INFORMATION_POLITICAL_VULNERABILITY_LEGITIMACY.saturating_sub(1);
+
+        let (focus, _) =
+            preferred_counterparty_information_focus(&state, GameplayPersona::PowerBroker).expect(
+                "a low-legitimacy officeholder should be able to study an equally embedded rival",
+            );
+        let InformationFocus::Counterparty { dynasty_id } = focus else {
+            panic!("power-broker counterparty intelligence must target another dynasty");
+        };
+        assert!(
+            count_player_offices(&state, dynasty_id)
+                >= count_player_offices(&state, state.player_dynasty_id)
+        );
+
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points = 8_000;
+        assert!(
+            preferred_counterparty_information_focus(&state, GameplayPersona::PowerBroker)
+                .is_none(),
+            "political intelligence should remain conditional rather than become scheduled housekeeping"
+        );
     }
 
     #[test]
@@ -3250,7 +3488,7 @@ mod metrics {
             player.resources.reputation_reliability_basis_points =
                 WARD_ADOPTION_REPUTATION_REQUIREMENT;
         }
-        grant_office_nomination_record_for_test(&mut state);
+        grant_office_nomination_record_for_test(registry, &mut state);
         let before = GameplaySnapshot::capture(&state);
 
         apply_player_command(
@@ -3388,12 +3626,26 @@ mod metrics {
         snapshot.quality_reputation = COMMERCIAL_STANDING_REPUTATION_REQUIREMENT;
         accumulator.observe_snapshot(&snapshot);
 
-        accumulator.record_executed_command(GameplayCommandKind::CultivateInstitutionSupport, 180);
+        accumulator.record_executed_candidate(
+            GameplayCommandKind::CultivateInstitutionSupport,
+            &PlayerCommand::CultivateInstitutionSupport {
+                institution_id: InstitutionId::new(3),
+                character_id: CharacterId::new(1),
+            },
+            180,
+        );
 
         snapshot.day = 360;
         snapshot.player_contract_deliveries = OFFICE_NOMINATION_DELIVERY_REQUIREMENT;
         accumulator.observe_snapshot(&snapshot);
-        accumulator.record_executed_command(GameplayCommandKind::NominateForOffice, 377);
+        accumulator.record_executed_candidate(
+            GameplayCommandKind::NominateForOffice,
+            &PlayerCommand::NominateForOffice {
+                institution_id: InstitutionId::new(5),
+                character_id: CharacterId::new(1),
+            },
+            377,
+        );
 
         snapshot.day = 440;
         snapshot.offices_held = 1;
@@ -3415,9 +3667,12 @@ mod metrics {
                 first_reputation_standing_day: Some(70),
                 first_commercial_standing_day: Some(360),
                 first_institution_support_day: Some(180),
+                first_institution_support_target: Some(InstitutionId::new(3)),
                 first_office_campaign_day: Some(377),
+                first_office_campaign_target: Some(InstitutionId::new(5)),
                 first_office_day: Some(440),
                 first_city_shaping_action_day: Some(454),
+                first_city_shaping_command: Some(GameplayCommandKind::StartPublicWork),
                 first_player_labor_dispute_day: Some(900),
                 first_heir_designation_day: Some(1_200),
                 first_succession_day: Some(5_200),
@@ -3464,6 +3719,7 @@ mod findings {
                 campaign.seed = campaign.seed.saturating_add(offset);
                 campaign.simulated_days = 1_800;
                 campaign.maximum_active_crises = 2;
+                campaign.observed_crisis_kinds = BTreeSet::from([CrisisKind::Epidemic]);
                 campaign.minimum_district_food_satisfaction = 9_800;
                 campaign
             })
@@ -3477,6 +3733,36 @@ mod findings {
             &findings,
             "Crises leave household welfare almost mechanically flat",
         );
+    }
+
+    #[test]
+    fn non_food_crises_do_not_trigger_food_welfare_warning() {
+        let mut report = cached_focused_report(30);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = (0..4)
+            .map(|offset| {
+                let mut campaign = baseline.clone();
+                campaign.seed = campaign.seed.saturating_add(offset);
+                campaign.simulated_days = 1_800;
+                campaign.maximum_active_crises = 2;
+                campaign.observed_crisis_kinds =
+                    BTreeSet::from([CrisisKind::UrbanFire, CrisisKind::NobleDemand]);
+                campaign.minimum_district_food_satisfaction = 9_900;
+                campaign
+            })
+            .collect();
+        report.aggregate.campaigns = 4;
+        report.aggregate.simulated_days = 7_200;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert!(findings.iter().all(|finding| {
+            finding.title != "Crises leave household welfare almost mechanically flat"
+        }));
     }
 
     #[test]
@@ -3551,6 +3837,100 @@ mod findings {
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
         finding_with_title(&findings, "Core fantasy timing is highly synchronized");
+    }
+
+    #[test]
+    fn synchronization_finding_detects_same_background_persona_railroading() {
+        let mut report = cached_focused_report(360);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = [
+            GameplayPersona::Steward,
+            GameplayPersona::Entrepreneur,
+            GameplayPersona::PowerBroker,
+            GameplayPersona::Opportunist,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, persona)| {
+            let offset = i64::try_from(index).expect("persona index must fit i64") * 20;
+            let mut campaign = baseline.clone();
+            campaign.persona = persona;
+            campaign.background = StartingBackground::Baker;
+            campaign.fantasy_arc.first_commercial_standing_day = Some(600 + offset);
+            campaign.fantasy_arc.first_institution_support_day = Some(420 + offset);
+            campaign.fantasy_arc.first_office_campaign_day = Some(630 + offset);
+            campaign.fantasy_arc.first_office_day = Some(720 + offset);
+            campaign.fantasy_arc.first_city_shaping_action_day = Some(840 + offset * 3);
+            campaign
+        })
+        .collect();
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(&findings, "Core fantasy timing is highly synchronized");
+        assert!(
+            finding.evidence.contains("same-seed, same-background"),
+            "diagnostic should explain that starts are compared like-for-like: {}",
+            finding.evidence
+        );
+    }
+
+    #[test]
+    fn synchronized_timing_with_distinct_routes_is_informational() {
+        let mut report = cached_focused_report(360);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = [
+            GameplayPersona::Steward,
+            GameplayPersona::Entrepreneur,
+            GameplayPersona::PowerBroker,
+            GameplayPersona::Opportunist,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, persona)| {
+            let mut campaign = baseline.clone();
+            campaign.persona = persona;
+            campaign.background = StartingBackground::Baker;
+            campaign.fantasy_arc.first_commercial_standing_day = Some(600);
+            campaign.fantasy_arc.first_institution_support_day = Some(420);
+            campaign.fantasy_arc.first_office_campaign_day = Some(600);
+            campaign.fantasy_arc.first_office_day = Some(720);
+            campaign.fantasy_arc.first_city_shaping_action_day = Some(870);
+            let institution_id = InstitutionId::new(
+                u32::try_from(index).expect("persona index must fit institution ID") + 1,
+            );
+            campaign.fantasy_arc.first_institution_support_target = Some(institution_id);
+            campaign.fantasy_arc.first_office_campaign_target = Some(institution_id);
+            campaign.fantasy_arc.first_city_shaping_command = Some(match persona {
+                GameplayPersona::Steward => GameplayCommandKind::StartPublicWork,
+                GameplayPersona::Entrepreneur | GameplayPersona::Opportunist => {
+                    GameplayCommandKind::ExerciseOfficePower
+                }
+                GameplayPersona::PowerBroker => GameplayCommandKind::EnactLaw,
+            });
+            campaign
+        })
+        .collect();
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Fantasy timing converges across distinct political routes",
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.title != "Core fantasy timing is highly synchronized")
+        );
     }
 
     #[test]
@@ -3655,7 +4035,7 @@ mod findings {
     }
 
     #[test]
-    fn governance_choice_depth_can_compensate_for_focused_command_families() {
+    fn governance_multi_family_share_is_measured_on_actionable_cycles() {
         let mut report = cached_focused_report(30);
         report.aggregate.phase_stats.insert(
             GameplayPhase::DynasticGovernance,
@@ -3667,10 +4047,10 @@ mod findings {
                 quiet_cycles_with_ambient_change: 28,
                 longest_quiet_streak_cycles: 2,
                 blocked_cycles: 0,
-                cycles_with_multiple_viable_command_kinds: 39,
+                cycles_with_multiple_viable_command_kinds: 22,
                 cycles_with_close_viable_command_kinds: 20,
-                cycles_with_distinct_immediate_consequences: 39,
-                cycles_with_distinct_projected_consequences: 39,
+                cycles_with_distinct_immediate_consequences: 22,
+                cycles_with_distinct_projected_consequences: 22,
                 total_viable_choices: 324,
                 total_viable_command_kinds: 137,
             },
@@ -4851,7 +5231,7 @@ fn make_test_candidate_coverage_state(registry: &Registry) -> AppState {
         .expect("player dynasty must exist");
     player.resources.treasury = Money::from_copper(100_000);
     player.resources.reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
-    grant_office_nomination_record_for_test(&mut state);
+    grant_office_nomination_record_for_test(registry, &mut state);
     grant_player_office_for_test(&mut state);
     for business_id in player_business_ids_for_test(&state) {
         let business = state
@@ -4954,7 +5334,7 @@ fn make_institution_withdrawal_available_for_test(state: &mut AppState) {
         .treasury = Money::ZERO;
 }
 
-fn grant_office_nomination_record_for_test(state: &mut AppState) {
+fn grant_player_contract_deliveries_for_test(state: &mut AppState, deliveries: u32) {
     let player_businesses: BTreeSet<_> = player_business_ids_for_test(state).into_iter().collect();
     let contract = state
         .contracts
@@ -4964,12 +5344,15 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
                 || player_businesses.contains(&contract.seller_business_id)
         })
         .expect("campaign must contain a player contract");
-    let deliveries = u16::try_from(OFFICE_NOMINATION_DELIVERY_REQUIREMENT)
-        .expect("office delivery requirement must fit contract counters");
+    let deliveries =
+        u16::try_from(deliveries).expect("test delivery count must fit contract counters");
     contract.fulfilled_deliveries = deliveries;
     contract
         .fulfilled_deliveries_by_dynasty
         .insert(state.player_dynasty_id, deliveries);
+}
+
+fn grant_office_nomination_record_for_test(registry: &Registry, state: &mut AppState) {
     let support_day = state
         .clock
         .day()
@@ -4998,6 +5381,19 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
         }
     }
     state.audit_log.sort_by_key(AuditRecord::day);
+    let institution_ids: Vec<_> = state.institutions.keys().copied().collect();
+    let mut required_deliveries = OFFICE_NOMINATION_DELIVERY_REQUIREMENT;
+    for institution_id in institution_ids {
+        for character_id in &player_character_ids {
+            required_deliveries = required_deliveries.max(office_nomination_delivery_requirement(
+                registry,
+                state,
+                institution_id,
+                *character_id,
+            ));
+        }
+    }
+    grant_player_contract_deliveries_for_test(state, required_deliveries);
 }
 
 fn make_supply_security_and_borrowing_available(state: &mut AppState) {

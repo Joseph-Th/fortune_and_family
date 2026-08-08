@@ -212,6 +212,9 @@ pub(crate) const OFFICE_NOMINATION_RECOVERY_DAYS: i64 = 720;
 const OFFICE_NOMINATION_RESOLUTION_DAYS: i64 = 120;
 pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
 pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 78;
+const OFFICE_NOMINATION_CAPABILITY_TARGET_SCORE: u32 = 10_000;
+const OFFICE_NOMINATION_CAPABILITY_DELIVERY_STEP: u32 = 100;
+const OFFICE_NOMINATION_MAX_PREPARATION_DELIVERIES: u32 = 26;
 pub(crate) const WARD_ADOPTION_INTERVAL_DAYS: i64 = 720;
 pub(crate) const WARD_ADOPTION_COST: Money = Money::from_copper(6_000);
 pub(crate) const WARD_ADOPTION_LEGITIMACY_REQUIREMENT: u16 = 3_500;
@@ -706,7 +709,7 @@ fn dispatch_player_command(
         PlayerCommand::NominateForOffice {
             institution_id,
             character_id,
-        } => apply_office_nomination(state, institution_id, character_id),
+        } => apply_office_nomination(registry, state, institution_id, character_id),
         PlayerCommand::ExerciseOfficePower {
             institution_id,
             power,
@@ -2644,6 +2647,7 @@ fn validate_institution_support_standing(state: &AppState) -> Result<(), Command
 }
 
 fn apply_office_nomination(
+    registry: &Registry,
     state: &mut AppState,
     institution_id: InstitutionId,
     character_id: CharacterId,
@@ -2668,7 +2672,7 @@ fn apply_office_nomination(
             institution_id: existing_institution_id,
         });
     }
-    validate_office_nomination_standing(state)?;
+    validate_office_nomination_standing(registry, state, institution_id, character_id)?;
     let institution = state
         .institutions
         .get(&institution_id)
@@ -3004,7 +3008,12 @@ fn apply_office_power_directive(
     })
 }
 
-fn validate_office_nomination_standing(state: &AppState) -> Result<(), CommandError> {
+fn validate_office_nomination_standing(
+    registry: &Registry,
+    state: &AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> Result<(), CommandError> {
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
@@ -3019,13 +3028,38 @@ fn validate_office_nomination_standing(state: &AppState) -> Result<(), CommandEr
         });
     }
     let delivered = player_contract_deliveries(state);
-    if delivered < OFFICE_NOMINATION_DELIVERY_REQUIREMENT {
+    let required =
+        office_nomination_delivery_requirement(registry, state, institution_id, character_id);
+    if delivered < required {
         return Err(CommandError::InsufficientOfficeCommercialRecord {
             delivered,
-            required: OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+            required,
         });
     }
     Ok(())
+}
+
+pub(crate) fn office_nomination_delivery_requirement(
+    registry: &Registry,
+    state: &AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> u32 {
+    let character = state
+        .characters
+        .get(character_id)
+        .expect("office nomination character must exist");
+    let institution_kind = registry
+        .get_institution(institution_id)
+        .expect("office nomination institution must exist in the registry")
+        .kind();
+    let capability_score =
+        super::strategic::institution_capability_score(character, institution_kind);
+    let deficit = OFFICE_NOMINATION_CAPABILITY_TARGET_SCORE.saturating_sub(capability_score);
+    let extra_deliveries = deficit.saturating_add(OFFICE_NOMINATION_CAPABILITY_DELIVERY_STEP - 1)
+        / OFFICE_NOMINATION_CAPABILITY_DELIVERY_STEP;
+    OFFICE_NOMINATION_DELIVERY_REQUIREMENT
+        .saturating_add(extra_deliveries.min(OFFICE_NOMINATION_MAX_PREPARATION_DELIVERIES))
 }
 
 pub(super) fn office_nomination_subject(
