@@ -1,8 +1,8 @@
 //! Debug-only assertions for registry, reference, index, lifecycle, and value invariants.
 
 use crate::core::{
-    AppState, AuditKind, Business, CharacterStatus, CivicDebtStatus, ContractStatus, CrisisStatus,
-    DynastyPair, EmploymentStatus, FamilyLinkKind, LegalCaseStatus, LoanStatus, PublicWorkStatus,
+    AppState, AuditKind, Business, CharacterStatus, CivicDebtStatus, ContractStatus, DynastyPair,
+    EmploymentStatus, FamilyLinkKind, LegalCaseStatus, LoanStatus, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, DistrictId, DynastyId, GoodId, HouseholdId, InstitutionId, RecipeId,
@@ -802,15 +802,16 @@ fn validate_loans(state: &AppState) {
             is_schedulable_day(loan.next_due_day),
             "Lifecycle Validity: loan due date exceeds the supported timeline"
         );
-        if matches!(
-            loan.status,
-            LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
-        ) {
+        if loan.status.is_repayment_active() {
             debug_assert!(
                 active_loan_pairs.insert((loan.lender_dynasty_id, loan.borrower_dynasty_id)),
                 "Ownership Exclusivity: a lender/borrower pair cannot have multiple repayment-active loans"
             );
         }
+        debug_assert!(
+            loan.status.has_consistent_arrears(loan.missed_payments),
+            "Lifecycle Validity: loan status does not match its missed-payment count"
+        );
         match loan.status {
             LoanStatus::Current
             | LoanStatus::Delinquent
@@ -1280,14 +1281,16 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
             "Record Reference Validity: information report target does not exist"
         );
     }
+    let mut pursuing_objectives = BTreeMap::<DynastyId, usize>::new();
     for (objective_id, objective) in &state.ai_objectives {
         debug_assert_eq!(
             *objective_id, objective.id,
             "Derived Data Consistency: AI objective key and ID differ"
         );
         debug_assert!(
-            state.dynasties.contains_key(&objective.dynasty_id),
-            "Record Reference Validity: AI objective dynasty does not exist"
+            state.dynasties.contains_key(&objective.dynasty_id)
+                && objective.dynasty_id != state.player_dynasty_id,
+            "Record Reference Validity: AI objective dynasty does not exist or is the player"
         );
         if let Some(target_id) = objective.target_dynasty_id {
             debug_assert!(
@@ -1302,6 +1305,26 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
         debug_assert!(
             !objective.rationale.trim().is_empty(),
             "No Lost Runtime State: AI objective has no rationale"
+        );
+        debug_assert_ne!(
+            objective.status,
+            crate::core::ObjectiveStatus::Planned,
+            "Lifecycle Validity: planned AI objectives are not supported by the runtime"
+        );
+        if objective.status == crate::core::ObjectiveStatus::Pursuing {
+            *pursuing_objectives.entry(objective.dynasty_id).or_default() += 1;
+        }
+    }
+    for dynasty_id in state
+        .dynasties
+        .keys()
+        .copied()
+        .filter(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+    {
+        debug_assert_eq!(
+            pursuing_objectives.get(&dynasty_id).copied(),
+            Some(1),
+            "Lifecycle Validity: every non-player dynasty must have exactly one pursuing AI objective"
         );
     }
 }
@@ -1386,10 +1409,7 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
                 "Record Reference Validity: public work sponsor does not exist"
             );
         }
-        if matches!(
-            work.status,
-            PublicWorkStatus::Building | PublicWorkStatus::Suspended
-        ) {
+        if work.status.is_unfinished() {
             debug_assert!(
                 active_public_works.insert((work.district_id, work.kind)),
                 "Ownership Exclusivity: duplicate unfinished public work exists for one district and kind"
@@ -1398,6 +1418,11 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
                 active_player_sponsored_works += 1;
             }
         }
+        debug_assert_eq!(
+            work.status == PublicWorkStatus::Completed,
+            work.spent == work.budget,
+            "Lifecycle Validity: public work completion status does not match full funding"
+        );
     }
     debug_assert!(
         active_player_sponsored_works <= super::MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
@@ -1505,12 +1530,12 @@ fn validate_routes_and_crises(state: &AppState, ids: &RegistryIds) {
                 "Registry Reference Validity: crisis district does not exist"
             );
         }
-        if crisis.status == CrisisStatus::Resolved {
-            debug_assert!(
-                crisis.severity_basis_points < 500,
-                "Lifecycle Validity: resolved crisis remains severe"
-            );
-        }
+        debug_assert!(
+            crisis
+                .status
+                .has_consistent_severity(crisis.severity_basis_points),
+            "Lifecycle Validity: crisis status does not match severity"
+        );
     }
 }
 

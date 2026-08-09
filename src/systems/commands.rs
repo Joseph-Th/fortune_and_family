@@ -1668,12 +1668,7 @@ fn apply_public_work(
         return Err(CommandError::InvalidPublicWorkBudget);
     }
     if state.public_works.values().any(|work| {
-        work.district_id == district_id
-            && work.kind == kind
-            && matches!(
-                work.status,
-                PublicWorkStatus::Building | PublicWorkStatus::Suspended
-            )
+        work.district_id == district_id && work.kind == kind && work.status.is_unfinished()
     }) {
         return Err(CommandError::DuplicateActivePublicWork { district_id, kind });
     }
@@ -1681,11 +1676,7 @@ fn apply_public_work(
         .public_works
         .values()
         .filter(|work| {
-            work.sponsor_dynasty_id == Some(state.player_dynasty_id)
-                && matches!(
-                    work.status,
-                    PublicWorkStatus::Building | PublicWorkStatus::Suspended
-                )
+            work.sponsor_dynasty_id == Some(state.player_dynasty_id) && work.status.is_unfinished()
         })
         .count();
     if active_sponsored >= MAX_ACTIVE_SPONSORED_PUBLIC_WORKS {

@@ -544,8 +544,8 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
         )
         .expect("clamped public-work progress must fit u16");
         if work.progress_basis_points != expected_progress
-            || (work.status == crate::core::PublicWorkStatus::Completed
-                && work.spent != work.budget)
+            || (work.status == crate::core::PublicWorkStatus::Completed)
+                != (work.spent == work.budget)
         {
             return Err(format!(
                 "public work {} progress does not match its spending or lifecycle",
@@ -1083,15 +1083,16 @@ fn validate_loan_records(state: &AppState) -> Result<(), String> {
         {
             return Err(format!("loan {loan_id} has an invalid dynasty reference"));
         }
-        if matches!(
-            loan.status,
-            crate::core::LoanStatus::Current
-                | crate::core::LoanStatus::Delinquent
-                | crate::core::LoanStatus::Restructured
-        ) && !active_loan_pairs.insert((loan.lender_dynasty_id, loan.borrower_dynasty_id))
+        if loan.status.is_repayment_active()
+            && !active_loan_pairs.insert((loan.lender_dynasty_id, loan.borrower_dynasty_id))
         {
             return Err(format!(
                 "loan {loan_id} duplicates an existing repayment-active lender/borrower pair"
+            ));
+        }
+        if !loan.status.has_consistent_arrears(loan.missed_payments) {
+            return Err(format!(
+                "loan {loan_id} status does not match its missed-payment count"
             ));
         }
         match loan.status {
@@ -1552,9 +1553,15 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
             ));
         }
     }
+    validate_ai_objective_records(state)
+}
+
+fn validate_ai_objective_records(state: &AppState) -> Result<(), String> {
+    let mut pursuing_objectives = BTreeMap::<crate::ids::DynastyId, usize>::new();
     for (objective_id, objective) in &state.ai_objectives {
         if objective.id != *objective_id
             || !state.dynasties.contains_key(&objective.dynasty_id)
+            || objective.dynasty_id == state.player_dynasty_id
             || objective.created_day > state.clock.day()
             || objective
                 .target_dynasty_id
@@ -1566,6 +1573,33 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
         }
         if objective.rationale.trim().is_empty() {
             return Err(format!("AI objective {objective_id} has no rationale"));
+        }
+        if objective.status == crate::core::ObjectiveStatus::Planned {
+            return Err(format!(
+                "AI objective {objective_id} uses an unsupported planned lifecycle state"
+            ));
+        }
+        if objective.status == crate::core::ObjectiveStatus::Pursuing {
+            let count = pursuing_objectives.entry(objective.dynasty_id).or_default();
+            *count += 1;
+            if *count > 1 {
+                return Err(format!(
+                    "dynasty {} has multiple pursuing AI objectives",
+                    objective.dynasty_id
+                ));
+            }
+        }
+    }
+    for dynasty_id in state
+        .dynasties
+        .keys()
+        .copied()
+        .filter(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+    {
+        if pursuing_objectives.get(&dynasty_id).copied() != Some(1) {
+            return Err(format!(
+                "dynasty {dynasty_id} does not have exactly one pursuing AI objective"
+            ));
         }
     }
     Ok(())
@@ -1583,10 +1617,7 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
         {
             return Err(format!("public work {work_id} has an invalid reference"));
         }
-        if matches!(
-            work.status,
-            crate::core::PublicWorkStatus::Building | crate::core::PublicWorkStatus::Suspended
-        ) {
+        if work.status.is_unfinished() {
             if !active_public_works.insert((work.district_id, work.kind)) {
                 return Err(format!(
                     "public work {work_id} duplicates an unfinished project of the same kind in district {}",
@@ -1654,8 +1685,9 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
             || crisis
                 .district_id
                 .is_some_and(|district_id| !state.districts.contains_key(&district_id))
-            || (crisis.status == crate::core::CrisisStatus::Resolved
-                && crisis.severity_basis_points >= 500)
+            || !crisis
+                .status
+                .has_consistent_severity(crisis.severity_basis_points)
         {
             return Err(format!("crisis {crisis_id} has an invalid reference"));
         }

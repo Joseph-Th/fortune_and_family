@@ -76,7 +76,9 @@ Economic state uses `Money` and `Quantity` from `src/money.rs`.
 - Generated records use `NextIds` owned by `AppState`.
 - Optional references use `Option`.
 - Raw strings are for authored keys and user-facing text, not runtime identity.
-- Save validation must reject missing references, stale indexes, duplicate ownership, and exhausted allocators.
+- Save validation must reject missing references, stale indexes, duplicate ownership, and allocator
+  sentinel values. The terminal valid allocator counter is serializable; its next allocation must
+  fail atomically with `IdentifierAllocationError` rather than wrap.
 
 ### Derived state and lifecycle
 

@@ -210,7 +210,9 @@ Important invariant groups:
 - Financial and quantity values remain within domain bounds.
 - Derived values match authoritative records.
 - Histories are chronological.
-- Next-ID allocators are ahead of all allocated IDs and remain allocatable.
+- Next-ID allocators are ahead of all allocated IDs and never use the reserved invalid sentinel.
+  The terminal valid counter may be persisted; a subsequent allocation must fail atomically with
+  `IdentifierAllocationError` rather than wrap or partially mutate state.
 
 ## Extension map
 

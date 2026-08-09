@@ -1329,10 +1329,18 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(),
         .saturating_mul_ratio(500, total_flow)
         .milliunits();
         let seasonal_pressure = seasonal_pressure_basis_points(good.category(), day_of_year);
-        let total_pressure = (stock_pressure + flow_pressure + seasonal_pressure).clamp(-800, 800);
+        let total_pressure = i128::from(stock_pressure)
+            .saturating_add(i128::from(flow_pressure))
+            .saturating_add(i128::from(seasonal_pressure))
+            .clamp(-800, 800);
         let previous_price = quote.price;
         let raw_price = previous_price
-            .saturating_mul_ratio(10_000 + total_pressure, 10_000)
+            .saturating_mul_ratio(
+                10_000
+                    + i64::try_from(total_pressure)
+                        .expect("clamped market pressure must fit the fixed-point ratio"),
+                10_000,
+            )
             .copper();
         let minimum_price = production_floors
             .get(&good.id())

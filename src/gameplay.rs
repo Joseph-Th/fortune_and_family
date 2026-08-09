@@ -5480,13 +5480,10 @@ fn add_borrow_candidate(
         base_borrowing_trigger
     };
     if player.treasury() >= borrowing_trigger
-        || state.loans.values().any(|loan| {
-            loan.borrower_dynasty_id == player_id
-                && matches!(
-                    loan.status,
-                    LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
-                )
-        })
+        || state
+            .loans
+            .values()
+            .any(|loan| loan.borrower_dynasty_id == player_id && loan.status.is_repayment_active())
     {
         return;
     }
@@ -5568,14 +5565,12 @@ fn same_pair_credit_blocks_new_loan(
     state.loans.values().any(|loan| {
         loan.lender_dynasty_id == lender_id
             && loan.borrower_dynasty_id == borrower_id
-            && (matches!(
-                loan.status,
-                LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
-            ) || (loan.status == LoanStatus::Defaulted
-                && state.clock.day()
-                    < loan
-                        .next_due_day
-                        .saturating_add(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS)))
+            && (loan.status.is_repayment_active()
+                || (loan.status == LoanStatus::Defaulted
+                    && state.clock.day()
+                        < loan
+                            .next_due_day
+                            .saturating_add(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS)))
     })
 }
 
@@ -5616,11 +5611,7 @@ fn active_player_lending(state: &AppState) -> usize {
         .loans
         .values()
         .filter(|loan| {
-            loan.lender_dynasty_id == state.player_dynasty_id
-                && matches!(
-                    loan.status,
-                    LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
-                )
+            loan.lender_dynasty_id == state.player_dynasty_id && loan.status.is_repayment_active()
         })
         .count()
 }
@@ -6467,11 +6458,7 @@ fn generate_public_work_candidates(
         .public_works
         .values()
         .filter(|work| {
-            work.sponsor_dynasty_id == Some(state.player_dynasty_id)
-                && matches!(
-                    work.status,
-                    PublicWorkStatus::Building | PublicWorkStatus::Suspended
-                )
+            work.sponsor_dynasty_id == Some(state.player_dynasty_id) && work.status.is_unfinished()
         })
         .count();
     if active_sponsored >= MAX_ACTIVE_SPONSORED_PUBLIC_WORKS {
@@ -6514,10 +6501,7 @@ fn generate_public_work_candidates(
             if state.public_works.values().any(|work| {
                 work.district_id == district.id()
                     && work.kind == kind
-                    && matches!(
-                        work.status,
-                        PublicWorkStatus::Building | PublicWorkStatus::Suspended
-                    )
+                    && work.status.is_unfinished()
             }) {
                 continue;
             }

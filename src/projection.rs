@@ -105,12 +105,7 @@ pub fn build_state_summary(registry: &Registry, state: &AppState) -> StateSummar
         current_loans: state
             .loans
             .values()
-            .filter(|loan| {
-                matches!(
-                    loan.status(),
-                    LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
-                )
-            })
+            .filter(|loan| loan.status().is_repayment_active())
             .count(),
         outstanding_civic_debts: state
             .civic_debts
@@ -603,11 +598,7 @@ fn build_dynasty_projection(
             .loans
             .values()
             .filter(|loan| {
-                loan.borrower_dynasty_id == dynasty_id
-                    && matches!(
-                        loan.status,
-                        LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
-                    )
+                loan.borrower_dynasty_id == dynasty_id && loan.status.is_repayment_active()
             })
             .count(),
         offices,

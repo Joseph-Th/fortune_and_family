@@ -869,10 +869,7 @@ fn validate_loan_terms(
     if let Some(existing) = state.loans.values().find(|loan| {
         loan.lender_dynasty_id == terms.lender_dynasty_id
             && loan.borrower_dynasty_id == terms.borrower_dynasty_id
-            && matches!(
-                loan.status,
-                LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
-            )
+            && loan.status.is_repayment_active()
     }) {
         return Err(StrategicError::ExistingUnsettledLoan {
             lender_dynasty_id: terms.lender_dynasty_id,
@@ -3253,12 +3250,7 @@ fn settle_loans(state: &mut AppState) -> Result<(), SimulationError> {
     let due: Vec<_> = state
         .loans
         .values()
-        .filter(|loan| {
-            matches!(
-                loan.status,
-                LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
-            ) && loan.next_due_day <= day
-        })
+        .filter(|loan| loan.status.is_repayment_active() && loan.next_due_day <= day)
         .map(|loan| DueLoan {
             id: loan.id,
             lender_id: loan.lender_dynasty_id,
@@ -4487,12 +4479,7 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<()
     let ids: Vec<_> = state
         .public_works
         .values()
-        .filter(|work| {
-            matches!(
-                work.status,
-                PublicWorkStatus::Building | PublicWorkStatus::Suspended
-            )
-        })
+        .filter(|work| work.status.is_unfinished())
         .map(|work| work.id)
         .collect();
     for id in ids {
@@ -6259,13 +6246,7 @@ fn advance_ai_debt_objective(
     let loan_id = state
         .loans
         .values()
-        .find(|loan| {
-            loan.borrower_dynasty_id == dynasty_id
-                && matches!(
-                    loan.status,
-                    LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
-                )
-        })
+        .find(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status.is_repayment_active())
         .map(|loan| loan.id);
     let Some(loan_id) = loan_id else {
         return Ok(ObjectiveProgress::Achieved);

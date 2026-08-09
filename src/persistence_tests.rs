@@ -1311,6 +1311,67 @@ mod validation {
     }
 
     #[test]
+    fn rejects_planned_ai_objective_without_runtime_progression() {
+        let mut state = make_test_campaign();
+        state
+            .ai_objectives
+            .values_mut()
+            .next()
+            .expect("campaign must contain an AI objective")
+            .status = crate::core::ObjectiveStatus::Planned;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("planned-ai-objective.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "unsupported planned lifecycle state",
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_pursuing_ai_objectives_for_one_dynasty() {
+        let mut state = make_test_campaign();
+        let mut duplicate = state
+            .ai_objectives
+            .values()
+            .next()
+            .expect("campaign must contain an AI objective")
+            .clone();
+        let duplicate_id = state.next_ids.objective();
+        duplicate.id = duplicate_id;
+        state.ai_objectives.insert(duplicate_id, duplicate);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("duplicate-pursuing-objective.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "multiple pursuing AI objectives",
+        );
+    }
+
+    #[test]
+    fn rejects_nonplayer_dynasty_without_a_pursuing_ai_objective() {
+        let mut state = make_test_campaign();
+        state
+            .ai_objectives
+            .values_mut()
+            .next()
+            .expect("campaign must contain an AI objective")
+            .status = crate::core::ObjectiveStatus::Achieved;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("missing-pursuing-objective.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "does not have exactly one pursuing AI objective",
+        );
+    }
+
+    #[test]
     fn rejects_blank_external_route_name() {
         let mut state = make_test_campaign();
         state
@@ -1520,6 +1581,26 @@ mod validation {
             .expect("serialized state must contain a public work");
         work["progress_basis_points"] = Value::from(9_999);
         let (_directory, path) = write_test_json_fixture("invalid-work-progress.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "progress does not match its spending or lifecycle",
+        );
+    }
+
+    #[test]
+    fn rejects_fully_funded_public_work_that_is_not_completed() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let work = value["public_works"]
+            .as_object_mut()
+            .and_then(|works| works.values_mut().next())
+            .expect("serialized state must contain a public work");
+        work["spent"] = work["budget"].clone();
+        work["progress_basis_points"] = Value::from(10_000);
+        work["status"] = Value::from("Building");
+        let (_directory, path) = write_test_json_fixture("unfinished-funded-work.json", &value);
 
         assert_invalid_state(
             load_state(&path),
@@ -1912,6 +1993,25 @@ mod validation {
     }
 
     #[test]
+    fn rejects_loan_status_inconsistent_with_missed_payments() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let loan = value["loans"]
+            .as_object_mut()
+            .and_then(|loans| loans.values_mut().next())
+            .expect("serialized state must contain a loan");
+        loan["status"] = Value::String("Current".to_owned());
+        loan["missed_payments"] = Value::from(1);
+        let (_directory, path) = write_test_json_fixture("current-loan-with-arrears.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "status does not match its missed-payment count",
+        );
+    }
+
+    #[test]
     fn rejects_loan_due_day_at_the_reserved_timeline_boundary() {
         let mut state = make_test_campaign();
         let loan = state
@@ -1996,6 +2096,32 @@ mod validation {
             load_state(&path),
             StateValidationKind::StrategicRecords,
             "invalid collateral relationship",
+        );
+    }
+
+    #[test]
+    fn rejects_crisis_status_inconsistent_with_severity() {
+        let mut state = make_test_campaign();
+        let crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            crisis_id,
+            Crisis {
+                id: crisis_id,
+                kind: CrisisKind::BankingPanic,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 9_000,
+                status: CrisisStatus::Active,
+                cause: "Credit panic remains severe.".to_owned(),
+            },
+        );
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("active-escalated-crisis.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "crisis",
         );
     }
 

@@ -2555,6 +2555,34 @@ mod market_prices {
     use super::*;
 
     #[test]
+    fn extreme_valid_market_flows_clamp_pressure_without_overflow() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let grain_id = registry
+            .get_good_id("grain")
+            .expect("registry must define grain");
+        let quote = state
+            .market
+            .quotes
+            .get_mut(&grain_id)
+            .expect("grain quote must exist");
+        quote.stock = Quantity::from_milliunits(i64::MAX);
+        quote.demand_today = Quantity::ZERO;
+        quote.supply_today = Quantity::from_milliunits(i64::MAX);
+        let previous_price = quote.price;
+
+        update_market_prices(registry, &mut state)
+            .expect("extreme but valid market state must update deterministically");
+
+        let updated = state
+            .market
+            .get_quote(grain_id)
+            .expect("grain quote must remain present");
+        assert_eq!(updated.previous_price(), previous_price);
+        assert!(updated.price() > Money::ZERO);
+    }
+
+    #[test]
     fn production_floor_covers_operating_labor_and_maintenance_costs() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

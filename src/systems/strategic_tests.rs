@@ -768,6 +768,37 @@ mod public_works {
     }
 
     #[test]
+    fn planned_public_work_enters_the_normal_progression_lifecycle() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let work_id = state
+            .public_works
+            .values()
+            .find(|work| work.status == PublicWorkStatus::Building)
+            .expect("bootstrap must create a building public work")
+            .id;
+        let work = state
+            .public_works
+            .get_mut(&work_id)
+            .expect("public work must exist");
+        work.status = PublicWorkStatus::Planned;
+        let spent_before = work.spent;
+
+        progress_public_works(registry, &mut state).expect("planned public work must progress");
+
+        let work = state
+            .public_works
+            .get(&work_id)
+            .expect("public work must remain present");
+        assert_eq!(work.status, PublicWorkStatus::Building);
+        assert!(
+            work.spent > spent_before,
+            "a funded planned project must enter construction instead of becoming inert"
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn completed_market_employment_bonus_survives_monthly_recalculation() {
         let mut state = make_test_campaign();
         let district_id = *state

@@ -57,6 +57,24 @@ pub enum LoanStatus {
     Restructured,
 }
 
+impl LoanStatus {
+    /// Returns whether the loan still participates in scheduled repayment.
+    #[must_use]
+    pub const fn is_repayment_active(self) -> bool {
+        matches!(self, Self::Current | Self::Delinquent | Self::Restructured)
+    }
+
+    /// Returns whether the stored missed-payment counter agrees with this lifecycle state.
+    #[must_use]
+    pub const fn has_consistent_arrears(self, missed_payments: u16) -> bool {
+        match self {
+            Self::Current | Self::Restructured | Self::Repaid => missed_payments == 0,
+            Self::Delinquent => missed_payments == 1 || missed_payments == 2,
+            Self::Defaulted => missed_payments >= 3,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Loan {
     pub(crate) id: LoanId,
@@ -546,6 +564,14 @@ pub enum PublicWorkStatus {
     Suspended,
 }
 
+impl PublicWorkStatus {
+    /// Returns whether the project still participates in the unfinished-work lifecycle.
+    #[must_use]
+    pub const fn is_unfinished(self) -> bool {
+        matches!(self, Self::Planned | Self::Building | Self::Suspended)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicWork {
     pub(crate) id: PublicWorkId,
@@ -657,6 +683,20 @@ impl CrisisStatus {
             Self::Escalated
         } else {
             Self::Active
+        }
+    }
+
+    /// Returns whether severity agrees with the persisted crisis lifecycle.
+    ///
+    /// `Emerging` is the creation state and may carry any still-active severity until the next
+    /// monthly crisis update normalizes it to `Active` or `Escalated`.
+    #[must_use]
+    pub const fn has_consistent_severity(self, severity_basis_points: u16) -> bool {
+        match self {
+            Self::Emerging => severity_basis_points >= 500,
+            Self::Active => severity_basis_points >= 500 && severity_basis_points < 8_000,
+            Self::Resolved => severity_basis_points < 500,
+            Self::Escalated => severity_basis_points >= 8_000,
         }
     }
 }
