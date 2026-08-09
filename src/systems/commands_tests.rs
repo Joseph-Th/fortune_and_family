@@ -4627,6 +4627,12 @@ mod information {
     use super::*;
     use crate::core::{RelationshipState, SupplyContract};
 
+    fn set_clock_day_for_test(state: AppState, day: i64) -> AppState {
+        let mut value = serde_json::to_value(state).expect("test state must serialize");
+        value["clock"]["day"] = serde_json::Value::from(day);
+        serde_json::from_value(value).expect("test state with adjusted clock must deserialize")
+    }
+
     struct MarketLeverageFixture {
         contract: SupplyContract,
         buyer_owner: DynastyId,
@@ -4740,6 +4746,40 @@ mod information {
         );
         assert!(outcome.summary.contains("Commissioned intelligence report"));
         validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn commission_rejects_unrepresentable_expiry_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let day = i64::MAX - INFORMATION_REPORT_LIFETIME_DAYS;
+        let mut state = set_clock_day_for_test(make_test_campaign(), day);
+        let good_id = registry
+            .goods()
+            .first()
+            .expect("registry must contain a good")
+            .id();
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CommissionInformation {
+                focus: InformationFocus::Market { good_id },
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Timeline(TimelineError::FutureDayOutOfRange {
+                base_day: day,
+                offset_days: INFORMATION_REPORT_LIFETIME_DAYS,
+            }))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "unrepresentable report expiry must be rejected before any command mutation",
+        );
     }
 
     #[test]

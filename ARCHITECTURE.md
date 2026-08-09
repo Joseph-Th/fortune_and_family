@@ -114,7 +114,7 @@ Cross-record operations may use consumed validated tokens. A token must revalida
 
 ### Time advancement
 
-`advance_days` validates the requested range and registry compatibility before mutation. It executes the complete requested range against a working copy and replaces the caller's state only after every requested day succeeds. Accounting overflow, finance-version exhaustion, or another typed simulation failure therefore leaves the original campaign unchanged. Each simulated day runs in this order:
+`advance_days` validates the requested range and registry compatibility before mutation. It executes the complete requested range against a working copy and replaces the caller's state only after every requested day succeeds. Accounting overflow, finance-version exhaustion, timeline exhaustion, or another typed simulation failure therefore leaves the original campaign unchanged. Future schedules must be created through `checked_future_day`; `i64::MAX` is outside the supported schedulable range so an obligation can never silently saturate into an unreachable due date. Each simulated day runs in this order:
 
 1. Reset market flow counters.
 2. Apply routes, laws, and active crisis effects.
@@ -189,6 +189,7 @@ Required practices:
 - Calculate all balances and ownership results before committing multi-record transfers.
 - Use fixed-point helpers from `src/money.rs`.
 - Use wide intermediates for multiply-then-divide arithmetic.
+- Use `checked_future_day` for runtime schedules instead of saturating date arithmetic.
 - Keep indexes, ownership, occupancy, collateral, employment, and lifecycle state synchronized.
 - Represent durable external work in state before an adapter performs it.
 

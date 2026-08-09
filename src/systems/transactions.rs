@@ -8,10 +8,37 @@ use crate::ids::{
 use crate::money::{Money, Quantity};
 use thiserror::Error;
 
+/// Errors produced when a runtime schedule cannot be represented on the simulation timeline.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum TimelineError {
+    #[error(
+        "scheduling {offset_days} days after day {base_day} exceeds the supported simulation range"
+    )]
+    FutureDayOutOfRange { base_day: i64, offset_days: i64 },
+}
+
+pub(crate) fn checked_future_day(base_day: i64, offset_days: i64) -> Result<i64, TimelineError> {
+    if offset_days < 0 {
+        return Err(TimelineError::FutureDayOutOfRange {
+            base_day,
+            offset_days,
+        });
+    }
+    base_day
+        .checked_add(offset_days)
+        .filter(|day| *day < i64::MAX)
+        .ok_or(TimelineError::FutureDayOutOfRange {
+            base_day,
+            offset_days,
+        })
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SimulationError {
     #[error(transparent)]
     IdentifierAllocation(#[from] IdentifierAllocationError),
+    #[error(transparent)]
+    Timeline(#[from] TimelineError),
     #[error("day count must be positive, received {days}")]
     InvalidDayCount { days: u32 },
     #[error(
@@ -441,6 +468,44 @@ pub fn validate_business_cash_transfer(
 mod tests {
     use super::*;
     use crate::test_support::{assert_state_unchanged, make_test_campaign};
+
+    #[test]
+    fn future_day_rejects_the_reserved_terminal_day() {
+        assert_eq!(
+            checked_future_day(i64::MAX - 1, 1),
+            Err(TimelineError::FutureDayOutOfRange {
+                base_day: i64::MAX - 1,
+                offset_days: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn future_day_rejects_integer_overflow() {
+        assert_eq!(
+            checked_future_day(i64::MAX - 2, 7),
+            Err(TimelineError::FutureDayOutOfRange {
+                base_day: i64::MAX - 2,
+                offset_days: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn future_day_allows_historical_bases_but_rejects_negative_offsets() {
+        assert_eq!(
+            checked_future_day(-180, 180),
+            Ok(0),
+            "pre-campaign history is part of the date domain"
+        );
+        assert_eq!(
+            checked_future_day(7, -1),
+            Err(TimelineError::FutureDayOutOfRange {
+                base_day: 7,
+                offset_days: -1,
+            })
+        );
+    }
 
     #[test]
     fn rejects_negative_market_debit_without_mutation() {

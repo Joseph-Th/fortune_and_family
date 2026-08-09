@@ -301,6 +301,10 @@ fn validate_numeric_ranges(state: &AppState) -> Result<(), String> {
     validate_civic_numeric_ranges(state)
 }
 
+const fn is_schedulable_day(day: i64) -> bool {
+    day != i64::MAX
+}
+
 fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
     if state.clock.day() < 0 || state.clock.day() == i64::MAX {
         return Err(format!(
@@ -405,6 +409,9 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         {
             return Err(format!("loan {} has an invalid financial value", loan.id));
         }
+        if !is_schedulable_day(loan.next_due_day) {
+            return Err(format!("loan {} has an invalid due date", loan.id));
+        }
     }
     for debt in state.civic_debts.values() {
         if debt.principal <= Money::ZERO
@@ -416,6 +423,9 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
                 "civic debt {} has an invalid financial value",
                 debt.id
             ));
+        }
+        if !is_schedulable_day(debt.next_due_day) {
+            return Err(format!("civic debt {} has invalid dates", debt.id));
         }
     }
     for property in state.properties.values() {
@@ -452,6 +462,9 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
                 contract.id
             ));
         }
+        if !is_schedulable_day(contract.next_due_day) || !is_schedulable_day(contract.end_day) {
+            return Err(format!("supply contract {} has invalid dates", contract.id));
+        }
     }
     for institution in state.institutions.values() {
         if institution.budget < Money::ZERO
@@ -460,6 +473,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
             || institution.term_number == u32::MAX
             || institution.term_started_day > state.clock.day()
             || institution.next_selection_day < institution.term_started_day
+            || !is_schedulable_day(institution.next_selection_day)
             || institution.active_directive.is_some_and(|directive| {
                 directive.expires_day < 0
                     || directive.expires_day == i64::MAX
@@ -553,6 +567,20 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
             return Err(format!("crisis {} has an invalid severity", crisis.id));
         }
     }
+    validate_legal_case_numeric_ranges(state)?;
+    for relationship in state.relationships.values() {
+        if relationship.trust_basis_points > 10_000
+            || relationship.fear_basis_points > 10_000
+            || relationship.respect_basis_points > 10_000
+            || relationship.resentment_basis_points > 10_000
+        {
+            return Err("relationship contains an invalid basis-point value".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn validate_legal_case_numeric_ranges(state: &AppState) -> Result<(), String> {
     for legal_case in state.legal_cases.values() {
         if legal_case.evidence_basis_points > 10_000
             || legal_case.public_attention_basis_points > 10_000
@@ -563,14 +591,8 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
                 legal_case.id
             ));
         }
-    }
-    for relationship in state.relationships.values() {
-        if relationship.trust_basis_points > 10_000
-            || relationship.fear_basis_points > 10_000
-            || relationship.respect_basis_points > 10_000
-            || relationship.resentment_basis_points > 10_000
-        {
-            return Err("relationship contains an invalid basis-point value".to_owned());
+        if !is_schedulable_day(legal_case.hearing_day) {
+            return Err(format!("legal case {} has invalid dates", legal_case.id));
         }
     }
     Ok(())
@@ -1504,6 +1526,7 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
     for (report_id, report) in &state.information_reports {
         if report.id != *report_id
             || !state.dynasties.contains_key(&report.owner_dynasty_id)
+            || !is_schedulable_day(report.expires_day)
             || report.created_day > state.clock.day()
             || report.expires_day < report.created_day
             || report.subject.trim().is_empty()
@@ -2411,7 +2434,15 @@ fn v14_active_office_directives(
         let Some(day) = record.get("day").and_then(Value::as_i64) else {
             continue;
         };
-        let expires_day = day.saturating_add(crate::systems::OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS);
+        let expires_day = day
+            .checked_add(crate::systems::OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS)
+            .filter(|expires_day| *expires_day < i64::MAX)
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 14,
+                reason: format!(
+                    "office directive on day {day} exceeds the supported simulation timeline"
+                ),
+            })?;
         if current_day > expires_day {
             continue;
         }

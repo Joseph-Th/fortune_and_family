@@ -2,8 +2,8 @@
 
 use super::SimulationError;
 use super::transactions::{
-    add_market_supply, checked_next_business_finance_version, debit_market_clearing_account,
-    next_business_finance_version, next_family_charter_version,
+    TimelineError, add_market_supply, checked_future_day, checked_next_business_finance_version,
+    debit_market_clearing_account, next_business_finance_version, next_family_charter_version,
 };
 use crate::core::{
     AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
@@ -46,6 +46,8 @@ const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
 pub enum StrategicError {
     #[error(transparent)]
     IdentifierAllocation(#[from] IdentifierAllocationError),
+    #[error(transparent)]
+    Timeline(#[from] TimelineError),
     #[error(
         "state scenario {state_scenario:?} does not match registry scenario {registry_scenario:?}"
     )]
@@ -327,6 +329,7 @@ struct DueContract {
     quantity: Quantity,
     unit_price: Money,
     penalty: Money,
+    due_day: i64,
     end_day: i64,
 }
 
@@ -400,7 +403,7 @@ impl ValidatedSupplyContract {
     /// # Errors
     ///
     /// Returns the current validation error if state changed after the token was created, or an
-    /// identifier-allocation error if durable contract feedback can no longer be allocated.
+    /// allocation or timeline error if durable contract feedback can no longer be recorded.
     pub fn commit(
         self,
         registry: &Registry,
@@ -439,7 +442,8 @@ fn commit_supply_contract(
         .owner_dynasty_id();
     let id = state.next_ids.try_contract()?;
     let day = state.clock.day();
-    let end_day = day.saturating_add(i64::from(duration_weeks).saturating_mul(7));
+    let next_due_day = checked_future_day(day, 7)?;
+    let end_day = checked_future_day(day, i64::from(duration_weeks) * 7)?;
     state.contracts.insert(
         id,
         SupplyContract {
@@ -450,7 +454,7 @@ fn commit_supply_contract(
             quantity_per_week,
             unit_price,
             penalty,
-            next_due_day: day.saturating_add(7),
+            next_due_day,
             end_day,
             fulfilled_deliveries: 0,
             fulfilled_deliveries_by_dynasty: BTreeMap::default(),
@@ -499,7 +503,7 @@ impl ValidatedLoan {
     /// # Errors
     ///
     /// Returns the current validation error if state changed after the token was created, or an
-    /// identifier-allocation error if durable loan feedback can no longer be allocated.
+    /// allocation or timeline error if durable loan feedback can no longer be recorded.
     pub fn commit(self, state: &mut AppState) -> Result<crate::ids::LoanId, StrategicError> {
         let defaulted_loan_id = validate_loan_terms(state, &self.terms)?;
         let mut next_state = state.clone();
@@ -525,6 +529,7 @@ fn commit_loan(
         Some(id) => id,
         None => state.next_ids.try_loan()?,
     };
+    let next_due_day = checked_future_day(state.clock.day(), 7)?;
     let lender = state
         .dynasties
         .get_mut(&lender_dynasty_id)
@@ -550,7 +555,7 @@ fn commit_loan(
             .expect("validated collateral must exist")
             .collateral_loan_id = Some(id);
     }
-    commit_loan_record(state, terms, id, defaulted_loan_id);
+    commit_loan_record(state, terms, id, defaulted_loan_id, next_due_day);
     let restructured = defaulted_loan_id.is_some();
     try_push_outbox(
         state,
@@ -600,6 +605,7 @@ fn commit_loan_record(
     terms: &LoanTerms,
     id: crate::ids::LoanId,
     defaulted_loan_id: Option<crate::ids::LoanId>,
+    next_due_day: i64,
 ) {
     if let Some(defaulted_loan_id) = defaulted_loan_id {
         let loan = state
@@ -616,7 +622,7 @@ fn commit_loan_record(
             .expect("revalidated loan balance must fit the supported range");
         loan.weekly_payment = terms.weekly_payment;
         loan.interest_basis_points = terms.interest_basis_points;
-        loan.next_due_day = state.clock.day().saturating_add(7);
+        loan.next_due_day = next_due_day;
         loan.missed_payments = 0;
         loan.collateral_property_id = terms.collateral_property_id;
         loan.status = LoanStatus::Restructured;
@@ -631,7 +637,7 @@ fn commit_loan_record(
                 balance: terms.principal,
                 weekly_payment: terms.weekly_payment,
                 interest_basis_points: terms.interest_basis_points,
-                next_due_day: state.clock.day().saturating_add(7),
+                next_due_day,
                 missed_payments: 0,
                 collateral_property_id: terms.collateral_property_id,
                 status: LoanStatus::Current,
@@ -737,6 +743,8 @@ fn validate_supply_contract_terms(
     if terms.duration_weeks == 0 {
         return Err(StrategicError::EmptyContractDuration);
     }
+    checked_future_day(state.clock.day(), 7)?;
+    checked_future_day(state.clock.day(), i64::from(terms.duration_weeks) * 7)?;
     checked_cost_for(terms.quantity_per_week, terms.unit_price).ok_or(
         StrategicError::ContractPaymentOverflow {
             quantity: terms.quantity_per_week,
@@ -801,7 +809,7 @@ fn validate_supply_contract_terms(
 ///
 /// # Errors
 ///
-/// Returns the same errors as [`validate_supply_contract`], plus identifier-allocation exhaustion
+/// Returns the same errors as [`validate_supply_contract`], plus allocation or timeline exhaustion
 /// while committing the contract and its durable feedback.
 pub fn sign_supply_contract(
     registry: &Registry,
@@ -836,6 +844,7 @@ fn validate_loan_terms(
             interest_basis_points: terms.interest_basis_points,
         });
     }
+    checked_future_day(state.clock.day(), 7)?;
     let lender =
         state
             .dynasties
@@ -916,9 +925,10 @@ fn validate_defaulted_loan_restructuring(
     let Some(defaulted_loan) = defaulted_loan else {
         return Ok(None);
     };
-    let available_day = defaulted_loan
-        .next_due_day
-        .saturating_add(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS);
+    let available_day = checked_future_day(
+        defaulted_loan.next_due_day,
+        DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS,
+    )?;
     if state.clock.day() < available_day {
         return Err(StrategicError::DefaultedLoanRestructuringCooldown {
             loan_id: defaulted_loan.id,
@@ -947,7 +957,7 @@ fn validate_defaulted_loan_restructuring(
 ///
 /// # Errors
 ///
-/// Returns the same errors as [`validate_loan`], plus identifier-allocation exhaustion while
+/// Returns the same errors as [`validate_loan`], plus allocation or timeline exhaustion while
 /// committing the loan and its durable feedback.
 pub fn issue_loan(
     state: &mut AppState,
@@ -1270,7 +1280,7 @@ fn record_completed_loan_repayment(
     lender_dynasty_id: DynastyId,
     borrower_dynasty_id: DynastyId,
     loan_id: crate::ids::LoanId,
-) -> Result<(), IdentifierAllocationError> {
+) -> Result<(), DurableFeedbackError> {
     adjust_dynasty_relationship(
         state,
         lender_dynasty_id,
@@ -1429,7 +1439,7 @@ pub(crate) fn business_recapitalization_target(
 ///
 /// # Errors
 ///
-/// Returns the same errors as [`quote_property_liquidation`], plus identifier-allocation exhaustion
+/// Returns the same errors as [`quote_property_liquidation`], plus allocation or timeline exhaustion
 /// while recording repayment information or durable sale feedback.
 ///
 /// # Panics
@@ -2777,6 +2787,7 @@ fn settle_contracts(state: &mut AppState) -> Result<(), SimulationError> {
             quantity: contract.quantity_per_week,
             unit_price: contract.unit_price,
             penalty: contract.penalty,
+            due_day: contract.next_due_day,
             end_day: contract.end_day,
         })
         .collect();
@@ -2787,6 +2798,11 @@ fn settle_contracts(state: &mut AppState) -> Result<(), SimulationError> {
 }
 
 fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), SimulationError> {
+    let final_delivery = due.due_day >= due.end_day
+        || due
+            .end_day
+            .checked_sub(due.due_day)
+            .is_some_and(|remaining_days| remaining_days < 7);
     let payment = cost_for(due.quantity, due.unit_price);
     let (seller_active, seller_owner_id, seller_can_deliver) = {
         let seller = state
@@ -2838,6 +2854,18 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
         },
     };
     let fulfilled = settlement.is_fulfilled();
+    let terminates_for_misses = !fulfilled
+        && state
+            .contracts
+            .get(&due.id)
+            .expect("contract must exist")
+            .missed_deliveries
+            >= 2;
+    let next_due_day = if final_delivery || terminates_for_misses {
+        None
+    } else {
+        Some(checked_future_day(due.due_day, 7)?)
+    };
     if fulfilled {
         let seller_cash = state
             .businesses
@@ -2864,11 +2892,11 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
                 incoming: due.quantity,
             },
         )?;
-        settle_fulfilled_contract(state, due, payment, settlement)?;
+        settle_fulfilled_contract(state, due, payment, settlement, next_due_day)?;
     } else {
-        settle_failed_contract(state, due, settlement)?;
+        settle_failed_contract(state, due, settlement, next_due_day)?;
     }
-    finalize_expired_contract(state, due, settlement, fulfilled)?;
+    finalize_expired_contract(state, due, settlement, fulfilled, final_delivery)?;
     Ok(())
 }
 
@@ -2931,10 +2959,13 @@ fn finalize_expired_contract(
     due: DueContract,
     settlement: ContractSettlementState,
     fulfilled: bool,
+    final_delivery: bool,
 ) -> Result<(), SimulationError> {
-    let expired_active = state.contracts.get(&due.id).is_some_and(|contract| {
-        contract.status == ContractStatus::Active && contract.next_due_day > due.end_day
-    });
+    let expired_active = final_delivery
+        && state
+            .contracts
+            .get(&due.id)
+            .is_some_and(|contract| contract.status == ContractStatus::Active);
     if !expired_active {
         return Ok(());
     }
@@ -2987,6 +3018,7 @@ fn settle_fulfilled_contract(
     due: DueContract,
     payment: Money,
     settlement: ContractSettlementState,
+    next_due_day: Option<i64>,
 ) -> Result<(), SimulationError> {
     let transferred = transfer_contract_money(state, due.buyer_id, due.seller_id, payment)?;
     debug_assert_eq!(
@@ -3020,7 +3052,9 @@ fn settle_fulfilled_contract(
             .or_default();
         *seller_deliveries = seller_deliveries.saturating_add(1);
     }
-    contract.next_due_day = contract.next_due_day.saturating_add(7);
+    if let Some(next_due_day) = next_due_day {
+        contract.next_due_day = next_due_day;
+    }
     if settlement.buyer.owner_id != settlement.seller.owner_id {
         adjust_reliability_reputation(state, settlement.buyer.owner_id, 20);
         adjust_reliability_reputation(state, settlement.seller.owner_id, 20);
@@ -3038,6 +3072,7 @@ fn settle_failed_contract(
     state: &mut AppState,
     due: DueContract,
     settlement: ContractSettlementState,
+    next_due_day: Option<i64>,
 ) -> Result<(), SimulationError> {
     let penalty_parties = match (
         settlement.seller_is_at_fault(),
@@ -3061,7 +3096,9 @@ fn settle_failed_contract(
             .get_mut(&due.id)
             .expect("contract must exist");
         contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
-        contract.next_due_day = contract.next_due_day.saturating_add(7);
+        if let Some(next_due_day) = next_due_day {
+            contract.next_due_day = next_due_day;
+        }
         if contract.missed_deliveries >= 3 {
             contract.status = ContractStatus::Breached;
             contract.breaching_dynasty_id = settlement.breaching_dynasty_id();
@@ -3306,15 +3343,35 @@ fn settle_due_civic_debt(
             },
         )?;
     }
+    let next_due_day = {
+        let debt = state
+            .civic_debts
+            .get(&due.id)
+            .expect("civic debt must exist");
+        if treasury_budget >= amount_due {
+            let remaining_balance = accrued_balance
+                .checked_sub(amount_due)
+                .expect("civic debt payment cannot exceed accrued balance");
+            if remaining_balance == Money::ZERO {
+                None
+            } else {
+                Some(checked_future_day(debt.next_due_day, 7)?)
+            }
+        } else if debt.missed_payments.saturating_add(1) >= 3 {
+            None
+        } else {
+            Some(checked_future_day(debt.next_due_day, 7)?)
+        }
+    };
     state
         .civic_debts
         .get_mut(&due.id)
         .expect("civic debt must exist")
         .balance = accrued_balance;
     if treasury_budget >= amount_due {
-        settle_successful_civic_debt_payment(state, treasury_id, due, amount_due)?;
+        settle_successful_civic_debt_payment(state, treasury_id, due, amount_due, next_due_day)?;
     } else {
-        settle_missed_civic_debt_payment(state, treasury_id, due)?;
+        settle_missed_civic_debt_payment(state, treasury_id, due, next_due_day)?;
     }
     Ok(())
 }
@@ -3324,7 +3381,17 @@ fn settle_successful_civic_debt_payment(
     treasury_id: InstitutionId,
     due: DueCivicDebt,
     payment: Money,
+    next_due_day: Option<i64>,
 ) -> Result<(), SimulationError> {
+    let remaining_balance = {
+        let debt = state
+            .civic_debts
+            .get(&due.id)
+            .expect("civic debt must exist");
+        debt.balance
+            .checked_sub(payment)
+            .expect("validated civic debt payment must not exceed debt balance")
+    };
     {
         let treasury = state
             .institutions
@@ -3351,11 +3418,10 @@ fn settle_successful_civic_debt_payment(
             .civic_debts
             .get_mut(&due.id)
             .expect("civic debt must exist");
-        debt.balance = debt
-            .balance
-            .checked_sub(payment)
-            .expect("validated civic debt payment must not exceed debt balance");
-        debt.next_due_day = debt.next_due_day.saturating_add(7);
+        debt.balance = remaining_balance;
+        if let Some(next_due_day) = next_due_day {
+            debt.next_due_day = next_due_day;
+        }
         debt.missed_payments = 0;
         if debt.balance == Money::ZERO {
             debt.status = CivicDebtStatus::Repaid;
@@ -3419,14 +3485,24 @@ fn settle_missed_civic_debt_payment(
     state: &mut AppState,
     treasury_id: InstitutionId,
     due: DueCivicDebt,
+    next_due_day: Option<i64>,
 ) -> Result<(), SimulationError> {
+    let missed_payments = {
+        let debt = state
+            .civic_debts
+            .get(&due.id)
+            .expect("civic debt must exist");
+        debt.missed_payments.saturating_add(1)
+    };
     let defaulted = {
         let debt = state
             .civic_debts
             .get_mut(&due.id)
             .expect("civic debt must exist");
-        debt.missed_payments = debt.missed_payments.saturating_add(1);
-        debt.next_due_day = debt.next_due_day.saturating_add(7);
+        debt.missed_payments = missed_payments;
+        if let Some(next_due_day) = next_due_day {
+            debt.next_due_day = next_due_day;
+        }
         debt.status = if debt.missed_payments >= 3 {
             CivicDebtStatus::Defaulted
         } else {
@@ -3534,15 +3610,32 @@ fn settle_due_loan(
             },
         )?;
     }
+    let next_due_day = {
+        let loan = state.loans.get(&due.id).expect("loan must exist");
+        if borrower_treasury >= amount_due {
+            let remaining_balance = accrued_balance
+                .checked_sub(amount_due)
+                .expect("loan payment cannot exceed accrued balance");
+            if remaining_balance == Money::ZERO {
+                None
+            } else {
+                Some(checked_future_day(loan.next_due_day, 7)?)
+            }
+        } else if loan.missed_payments.saturating_add(1) >= 3 {
+            None
+        } else {
+            Some(checked_future_day(loan.next_due_day, 7)?)
+        }
+    };
     state
         .loans
         .get_mut(&due.id)
         .expect("loan must exist")
         .balance = accrued_balance;
     if borrower_treasury >= amount_due {
-        settle_successful_loan_payment(state, due, amount_due)?;
+        settle_successful_loan_payment(state, due, amount_due, next_due_day)?;
     } else {
-        settle_missed_loan_payment(state, due)?;
+        settle_missed_loan_payment(state, due, next_due_day)?;
     }
     Ok(())
 }
@@ -3551,10 +3644,13 @@ fn settle_successful_loan_payment(
     state: &mut AppState,
     due: DueLoan,
     amount_due: Money,
+    next_due_day: Option<i64>,
 ) -> Result<(), SimulationError> {
     apply_loan_payment(state, due.id, amount_due)?;
     let loan = state.loans.get_mut(&due.id).expect("loan must exist");
-    loan.next_due_day = loan.next_due_day.saturating_add(7);
+    if let Some(next_due_day) = next_due_day {
+        loan.next_due_day = next_due_day;
+    }
     loan.missed_payments = 0;
     if loan.status != LoanStatus::Repaid {
         loan.status = LoanStatus::Current;
@@ -3563,11 +3659,21 @@ fn settle_successful_loan_payment(
     Ok(())
 }
 
-fn settle_missed_loan_payment(state: &mut AppState, due: DueLoan) -> Result<(), SimulationError> {
+fn settle_missed_loan_payment(
+    state: &mut AppState,
+    due: DueLoan,
+    next_due_day: Option<i64>,
+) -> Result<(), SimulationError> {
+    let missed_payments = {
+        let loan = state.loans.get(&due.id).expect("loan must exist");
+        loan.missed_payments.saturating_add(1)
+    };
     let defaulted = {
         let loan = state.loans.get_mut(&due.id).expect("loan must exist");
-        loan.missed_payments = loan.missed_payments.saturating_add(1);
-        loan.next_due_day = loan.next_due_day.saturating_add(7);
+        loan.missed_payments = missed_payments;
+        if let Some(next_due_day) = next_due_day {
+            loan.next_due_day = next_due_day;
+        }
         loan.status = if loan.missed_payments >= 3 {
             LoanStatus::Defaulted
         } else {
@@ -4619,6 +4725,32 @@ pub(crate) fn adjust_dynasty_relationship(
 
 pub(crate) const MAX_RELATIONSHIP_MEMORIES: usize = 12;
 
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub(crate) enum DurableFeedbackError {
+    #[error(transparent)]
+    IdentifierAllocation(#[from] IdentifierAllocationError),
+    #[error(transparent)]
+    Timeline(#[from] TimelineError),
+}
+
+impl From<DurableFeedbackError> for StrategicError {
+    fn from(error: DurableFeedbackError) -> Self {
+        match error {
+            DurableFeedbackError::IdentifierAllocation(error) => Self::IdentifierAllocation(error),
+            DurableFeedbackError::Timeline(error) => Self::Timeline(error),
+        }
+    }
+}
+
+impl From<DurableFeedbackError> for SimulationError {
+    fn from(error: DurableFeedbackError) -> Self {
+        match error {
+            DurableFeedbackError::IdentifierAllocation(error) => Self::IdentifierAllocation(error),
+            DurableFeedbackError::Timeline(error) => Self::Timeline(error),
+        }
+    }
+}
+
 pub(crate) fn remember_dynasty_interaction(
     state: &mut AppState,
     left_dynasty_id: DynastyId,
@@ -4646,7 +4778,7 @@ pub(crate) fn try_record_counterparty_information(
     first_dynasty_id: DynastyId,
     second_dynasty_id: DynastyId,
     source: &str,
-) -> Result<(), IdentifierAllocationError> {
+) -> Result<(), DurableFeedbackError> {
     let player_dynasty_id = state.player_dynasty_id;
     let counterparty_id =
         if first_dynasty_id == player_dynasty_id && second_dynasty_id != player_dynasty_id {
@@ -4677,11 +4809,12 @@ pub(crate) fn try_record_counterparty_information(
         relationship.resentment_basis_points,
         relationship.obligation
     );
+    let day = state.clock.day();
+    let expires_day = checked_future_day(day, 180)?;
+    let id = state.next_ids.try_information_report()?;
     state.information_reports.retain(|_, report| {
         report.owner_dynasty_id != player_dynasty_id || report.target != Some(target)
     });
-    let id = state.next_ids.try_information_report()?;
-    let day = state.clock.day();
     state.information_reports.insert(
         id,
         InformationReport {
@@ -4691,7 +4824,7 @@ pub(crate) fn try_record_counterparty_information(
             subject,
             confidence: InformationConfidence::Probable,
             created_day: day,
-            expires_day: day.saturating_add(180),
+            expires_day,
             source: source.to_owned(),
             summary,
         },
@@ -5224,7 +5357,7 @@ fn record_office_duty_shortfall(
             institution_id,
             &subject,
             recent_shortfalls.saturating_add(1),
-        );
+        )?;
     }
     notify_player_office_duty_outcome(
         state,
@@ -5262,10 +5395,8 @@ fn should_notify_office_duty_shortfall(state: &AppState, subject: &str) -> bool 
             record.kind() == AuditKind::OfficeDutyShortfall && record.subject() == subject
         })
         .is_none_or(|record| {
-            state.clock.day()
-                >= record
-                    .day()
-                    .saturating_add(OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS)
+            checked_future_day(record.day(), OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS)
+                .is_ok_and(|next_notification_day| state.clock.day() >= next_notification_day)
         })
 }
 
@@ -5299,20 +5430,22 @@ fn forfeit_office_for_unmet_duties(
     institution_id: crate::ids::InstitutionId,
     subject: &str,
     recent_shortfalls: usize,
-) {
+) -> Result<(), SimulationError> {
     let day = state.clock.day();
+    let next_selection_day = checked_future_day(day, 30)?;
     let institution = state
         .institutions
         .get_mut(&institution_id)
         .expect("office institution must exist");
     institution.office_holder_id = None;
-    institution.next_selection_day = day.saturating_add(30);
+    institution.next_selection_day = next_selection_day;
     state.audit_log.push(AuditRecord {
         day,
         kind: AuditKind::OfficeDutyForfeiture,
         subject: subject.into(),
         detail: format!("office forfeited after {recent_shortfalls} recent duty shortfalls"),
     });
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -5633,12 +5766,11 @@ fn resolve_institution_selections(
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
     let day = state.clock.day();
-    let due: Vec<_> = state
-        .institutions
-        .values()
-        .filter(|institution| institution.next_selection_day <= day)
-        .map(|institution| institution.institution_id)
-        .collect();
+    let due = due_institution_selections(state, day);
+    if due.is_empty() {
+        return Ok(());
+    }
+    let next_selection_day = checked_future_day(day, super::OFFICE_TERM_DAYS)?;
     let mut selections = Vec::new();
     let mut planned_office_holders = BTreeSet::new();
     for institution_id in due {
@@ -5715,7 +5847,7 @@ fn resolve_institution_selections(
             .expect("institution runtime must exist");
         institution.office_holder_id = *winner;
         institution.term_started_day = day;
-        institution.next_selection_day = day.saturating_add(super::OFFICE_TERM_DAYS);
+        institution.next_selection_day = next_selection_day;
         institution.term_number = *term_number;
     }
     for (institution_id, winner, term_number) in selections {
@@ -5730,6 +5862,15 @@ fn resolve_institution_selections(
         }
     }
     Ok(())
+}
+
+fn due_institution_selections(state: &AppState, day: i64) -> Vec<InstitutionId> {
+    state
+        .institutions
+        .values()
+        .filter(|institution| institution.next_selection_day <= day)
+        .map(|institution| institution.institution_id)
+        .collect()
 }
 
 fn apply_office_concentration_backlash(
@@ -6233,9 +6374,6 @@ fn update_information_reports(
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
     let day = state.clock.day();
-    state
-        .information_reports
-        .retain(|_, report| report.expires_day >= day);
     let most_changed = registry.goods().iter().filter_map(|good| {
         let quote = state.market.get_quote(good.id())?;
         let prior = quote.previous_price().copper().max(1);
@@ -6249,9 +6387,16 @@ fn update_information_reports(
         ))
     });
     let Some((_, good_id, name, price, causes)) = most_changed.max_by_key(|item| item.0) else {
+        state
+            .information_reports
+            .retain(|_, report| report.expires_day >= day);
         return Ok(());
     };
+    let expires_day = checked_future_day(day, 120)?;
     let id = state.next_ids.try_information_report()?;
+    state
+        .information_reports
+        .retain(|_, report| report.expires_day >= day);
     state.information_reports.insert(
         id,
         InformationReport {
@@ -6261,7 +6406,7 @@ fn update_information_reports(
             subject: format!("Monthly market report: {name}"),
             confidence: InformationConfidence::Confirmed,
             created_day: day,
-            expires_day: day.saturating_add(120),
+            expires_day,
             source: "House ledgers, guild correspondence, and market inspection".to_owned(),
             summary: format!("{name} is priced at {price}; identified causes: {causes:?}."),
         },

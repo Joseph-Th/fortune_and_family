@@ -1,6 +1,8 @@
 //! Canonical player-command validation and dispatch across simulation subsystems.
 
-use super::transactions::{next_business_finance_version, next_family_charter_version};
+use super::transactions::{
+    TimelineError, checked_future_day, next_business_finance_version, next_family_charter_version,
+};
 use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
     acquire_business, available_supply_contract_capacity, buy_unowned_property,
@@ -234,6 +236,8 @@ pub(crate) const COMMISSIONED_INFORMATION_SOURCE: &str = "Commissioned intellige
 pub enum CommandError {
     #[error(transparent)]
     IdentifierAllocation(#[from] IdentifierAllocationError),
+    #[error(transparent)]
+    Timeline(#[from] TimelineError),
     #[error(transparent)]
     Strategic(#[from] StrategicError),
     #[error(transparent)]
@@ -605,13 +609,25 @@ pub enum CommandError {
     MissingNotification { message_id: OutboxMessageId },
 }
 
+impl From<super::strategic::DurableFeedbackError> for CommandError {
+    fn from(error: super::strategic::DurableFeedbackError) -> Self {
+        match error {
+            super::strategic::DurableFeedbackError::IdentifierAllocation(error) => {
+                Self::IdentifierAllocation(error)
+            }
+            super::strategic::DurableFeedbackError::Timeline(error) => Self::Timeline(error),
+        }
+    }
+}
+
 /// Applies a validated player command through the owning subsystem's canonical mutation path.
 ///
 /// # Errors
 ///
 /// Returns a dedicated error when a command references missing records, violates ownership,
-/// exceeds available funds, supplies invalid terms, or exhausts an identifier space needed for
-/// committed records or durable feedback. Failed commands leave state unchanged.
+/// exceeds available funds, supplies invalid terms, exhausts an identifier space needed for
+/// committed records or durable feedback, or cannot represent a required future schedule. Failed
+/// commands leave state unchanged.
 pub fn apply_player_command(
     registry: &Registry,
     state: &mut AppState,
@@ -846,14 +862,19 @@ fn apply_institution_withdrawal(
     }
     let resigned_office = institution.office_holder_id == Some(character_id);
     let day = state.clock.day();
+    let replacement_selection_day = resigned_office
+        .then(|| checked_future_day(day, 30))
+        .transpose()?;
     let institution = state
         .institutions
         .get_mut(&institution_id)
         .expect("validated institution must exist");
     institution.members.remove(&character_id);
-    if resigned_office {
+    if let Some(replacement_selection_day) = replacement_selection_day {
         institution.office_holder_id = None;
-        institution.next_selection_day = institution.next_selection_day.min(day.saturating_add(30));
+        institution.next_selection_day = institution
+            .next_selection_day
+            .min(replacement_selection_day);
     }
     state.audit_log.push(AuditRecord {
         day,
@@ -1037,7 +1058,8 @@ fn apply_business_policy(
         })
         .map(AuditRecord::day)
     {
-        let next_change_day = last_change_day.saturating_add(BUSINESS_POLICY_CHANGE_INTERVAL_DAYS);
+        let next_change_day =
+            checked_future_day(last_change_day, BUSINESS_POLICY_CHANGE_INTERVAL_DAYS)?;
         if state.clock.day() < next_change_day {
             return Err(CommandError::BusinessPolicyCooldown {
                 business_id,
@@ -1391,6 +1413,7 @@ struct ValidatedCivicDebtIssuance {
     creditor_treasury_after: Money,
     treasury_budget_after: Money,
     weekly_payment: Money,
+    next_due_day: i64,
 }
 
 fn validate_civic_debt_issuance(
@@ -1437,6 +1460,7 @@ fn validate_civic_debt_issuance(
             .expect("validated civic debt creditor must cover the principal"),
         treasury_budget_after,
         weekly_payment: ceil_positive_money_div(principal, CIVIC_DEBT_TERM_WEEKS),
+        next_due_day: checked_future_day(state.clock.day(), 7)?,
     })
 }
 
@@ -1470,7 +1494,7 @@ fn commit_civic_debt_issuance(
             weekly_payment: issuance.weekly_payment,
             interest_basis_points: CIVIC_DEBT_INTEREST_BASIS_POINTS,
             issued_day: state.clock.day(),
-            next_due_day: state.clock.day().saturating_add(7),
+            next_due_day: issuance.next_due_day,
             missed_payments: 0,
             status: CivicDebtStatus::Current,
         },
@@ -1525,7 +1549,8 @@ fn validate_law_sponsorship(
         .map(|law| law.enacted_day)
         .max()
     {
-        let next_enactment_day = last_enactment_day.saturating_add(LAW_SPONSORSHIP_INTERVAL_DAYS);
+        let next_enactment_day =
+            checked_future_day(last_enactment_day, LAW_SPONSORSHIP_INTERVAL_DAYS)?;
         if state.clock.day() < next_enactment_day {
             return Err(CommandError::LawCooldown { next_enactment_day });
         }
@@ -1552,7 +1577,7 @@ fn validate_law_sponsorship(
             required: required_power,
         });
     }
-    let available_day = player_office_power_available_day(state, required_power)
+    let available_day = checked_player_office_power_available_day(state, required_power)?
         .expect("validated office power must have an availability day");
     if state.clock.day() < available_day {
         return Err(CommandError::LawSponsorshipPowerNotEstablished {
@@ -1670,25 +1695,14 @@ fn apply_public_work(
         });
     }
     let subject = format!("dynasty:{}", state.player_dynasty_id);
-    if let Some(last_start_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::PublicWorkStarted && record.subject() == subject)
-        .map(AuditRecord::day)
-    {
-        let next_start_day = last_start_day.saturating_add(PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS);
-        if state.clock.day() < next_start_day {
-            return Err(CommandError::PublicWorkCooldown { next_start_day });
-        }
-    }
+    validate_public_work_cooldown(state, &subject)?;
     if !has_player_office(state) {
         return Err(CommandError::PublicWorkSponsorshipRequiresOffice);
     }
     if !has_player_office_power(state, OfficePower::PublicWorks) {
         return Err(CommandError::PublicWorkSponsorshipRequiresPower);
     }
-    let available_day = player_office_power_available_day(state, OfficePower::PublicWorks)
+    let available_day = checked_player_office_power_available_day(state, OfficePower::PublicWorks)?
         .expect("validated public-works office must have an availability day");
     if state.clock.day() < available_day {
         return Err(CommandError::PublicWorkPowerNotEstablished { available_day });
@@ -1738,6 +1752,23 @@ fn apply_public_work(
     })
 }
 
+fn validate_public_work_cooldown(state: &AppState, subject: &str) -> Result<(), CommandError> {
+    if let Some(last_start_day) = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::PublicWorkStarted && record.subject() == subject)
+        .map(AuditRecord::day)
+    {
+        let next_start_day =
+            checked_future_day(last_start_day, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS)?;
+        if state.clock.day() < next_start_day {
+            return Err(CommandError::PublicWorkCooldown { next_start_day });
+        }
+    }
+    Ok(())
+}
+
 fn has_player_office(state: &AppState) -> bool {
     state.institutions.values().any(|institution| {
         institution.office_holder_id.is_some_and(|character_id| {
@@ -1765,7 +1796,16 @@ pub(crate) fn player_office_power_available_day(
     state: &AppState,
     power: OfficePower,
 ) -> Option<i64> {
-    state
+    checked_player_office_power_available_day(state, power).unwrap_or(Some(i64::MAX))
+}
+
+fn checked_player_office_power_available_day(
+    state: &AppState,
+    power: OfficePower,
+) -> Result<Option<i64>, TimelineError> {
+    let mut earliest = None;
+    let mut range_error = None;
+    for institution in state
         .institutions
         .values()
         .filter(|institution| institution.powers.contains(&power))
@@ -1777,12 +1817,22 @@ pub(crate) fn player_office_power_available_day(
                     .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
             })
         })
-        .map(|institution| {
-            institution
-                .term_started_day
-                .saturating_add(OFFICE_POWER_ESTABLISHMENT_DAYS)
-        })
-        .min()
+    {
+        match checked_future_day(
+            institution.term_started_day,
+            OFFICE_POWER_ESTABLISHMENT_DAYS,
+        ) {
+            Ok(available_day) => {
+                earliest = Some(earliest.map_or(available_day, |day: i64| day.min(available_day)));
+            }
+            Err(error) if range_error.is_none() => range_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    match earliest {
+        Some(day) => Ok(Some(day)),
+        None => range_error.map_or(Ok(None), Err),
+    }
 }
 
 pub(crate) fn has_established_player_office_power(state: &AppState, power: OfficePower) -> bool {
@@ -1840,11 +1890,12 @@ fn apply_legal_case(
         .map(|legal_case| legal_case.filed_day)
         .max()
     {
-        let next_filing_day = last_filing_day.saturating_add(LEGAL_CASE_FILING_INTERVAL_DAYS);
+        let next_filing_day = checked_future_day(last_filing_day, LEGAL_CASE_FILING_INTERVAL_DAYS)?;
         if state.clock.day() < next_filing_day {
             return Err(CommandError::LegalCaseCooldown { next_filing_day });
         }
     }
+    let hearing_day = checked_future_day(state.clock.day(), 60)?;
     spend_player_treasury(state, LEGAL_CASE_FILING_COST)?;
     let id = state.next_ids.try_legal_case()?;
     state.legal_cases.insert(
@@ -1857,7 +1908,7 @@ fn apply_legal_case(
             evidence_basis_points,
             public_attention_basis_points: 1_500,
             filed_day: state.clock.day(),
-            hearing_day: state.clock.day().saturating_add(60),
+            hearing_day,
             damages,
             status: LegalCaseStatus::Filed,
         },
@@ -1901,7 +1952,8 @@ fn apply_governance(
         })
         .map(AuditRecord::day)
     {
-        let next_change_day = last_change_day.saturating_add(HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS);
+        let next_change_day =
+            checked_future_day(last_change_day, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS)?;
         if state.clock.day() < next_change_day {
             return Err(CommandError::HouseGovernanceCooldown { next_change_day });
         }
@@ -1950,7 +2002,7 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
         .map(AuditRecord::day)
     {
         let next_meeting_day =
-            last_meeting_day.saturating_add(FAMILY_COUNCIL_MEETING_INTERVAL_DAYS);
+            checked_future_day(last_meeting_day, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS)?;
         if state.clock.day() < next_meeting_day {
             return Err(CommandError::FamilyCouncilMeetingCooldown { next_meeting_day });
         }
@@ -2062,7 +2114,7 @@ fn validate_heir_designation(
     }
     if let Some(last_designation_day) = last_designation_day {
         let next_designation_day =
-            last_designation_day.saturating_add(HEIR_DESIGNATION_INTERVAL_DAYS);
+            checked_future_day(last_designation_day, HEIR_DESIGNATION_INTERVAL_DAYS)?;
         if state.clock.day() < next_designation_day {
             return Err(CommandError::HeirDesignationCooldown {
                 next_designation_day,
@@ -2268,7 +2320,7 @@ fn validate_ward_adoption(state: &AppState) -> Result<WardAdoptionContext, Comma
         .find(|record| record.kind() == AuditKind::WardAdoption)
         .map(AuditRecord::day)
     {
-        let next_adoption_day = last_adoption_day.saturating_add(WARD_ADOPTION_INTERVAL_DAYS);
+        let next_adoption_day = checked_future_day(last_adoption_day, WARD_ADOPTION_INTERVAL_DAYS)?;
         if state.clock.day() < next_adoption_day {
             return Err(CommandError::WardAdoptionCooldown { next_adoption_day });
         }
@@ -2433,7 +2485,8 @@ fn apply_family_education(
         .find(|record| record.kind() == AuditKind::FamilyEducation)
         .map(AuditRecord::day)
     {
-        let next_education_day = last_education_day.saturating_add(FAMILY_EDUCATION_INTERVAL_DAYS);
+        let next_education_day =
+            checked_future_day(last_education_day, FAMILY_EDUCATION_INTERVAL_DAYS)?;
         if state.clock.day() < next_education_day {
             return Err(CommandError::FamilyEducationCooldown { next_education_day });
         }
@@ -2557,6 +2610,8 @@ fn apply_institution_support(
         .map(Character::dynasty_id)
         .filter(|dynasty_id| *dynasty_id != state.player_dynasty_id)
         .collect();
+    let established_day =
+        checked_future_day(state.clock.day(), INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)?;
     spend_player_treasury(state, INSTITUTION_SUPPORT_COST)?;
     let institution = state
         .institutions
@@ -2579,7 +2634,13 @@ fn apply_institution_support(
         character_id,
         member_dynasties,
     );
-    finish_institution_patronage(state, institution_id, character_id, subject)
+    finish_institution_patronage(
+        state,
+        institution_id,
+        character_id,
+        subject,
+        established_day,
+    )
 }
 
 fn record_institution_patronage_relationships(
@@ -2612,6 +2673,7 @@ fn finish_institution_patronage(
     institution_id: InstitutionId,
     character_id: CharacterId,
     subject: String,
+    established_day: i64,
 ) -> Result<CommandOutcome, CommandError> {
     let day = state.clock.day();
     state.audit_log.push(AuditRecord {
@@ -2620,7 +2682,6 @@ fn finish_institution_patronage(
         subject: subject.into(),
         detail: format!("contribution={}", INSTITUTION_SUPPORT_COST.copper()),
     });
-    let established_day = day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS);
     super::strategic::try_push_outbox(
         state,
         OutboxKind::Politics,
@@ -2705,7 +2766,7 @@ fn apply_office_nomination(
             character_id,
         },
     )?;
-    let available_day = support_day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS);
+    let available_day = checked_future_day(support_day, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)?;
     if state.clock.day() < available_day {
         return Err(CommandError::InstitutionSupportNotEstablished {
             institution_id,
@@ -2721,11 +2782,8 @@ fn apply_office_nomination(
         });
     }
     let campaign_cost = Money::from_copper(300);
+    let selection_day = checked_future_day(state.clock.day(), OFFICE_NOMINATION_RESOLUTION_DAYS)?;
     spend_player_treasury(state, campaign_cost)?;
-    let selection_day = state
-        .clock
-        .day()
-        .saturating_add(OFFICE_NOMINATION_RESOLUTION_DAYS);
     let institution = state
         .institutions
         .get_mut(&institution_id)
@@ -2792,9 +2850,10 @@ fn validate_office_power_directive(
             power,
         });
     }
-    let available_day = institution
-        .term_started_day
-        .saturating_add(OFFICE_POWER_ESTABLISHMENT_DAYS);
+    let available_day = checked_future_day(
+        institution.term_started_day,
+        OFFICE_POWER_ESTABLISHMENT_DAYS,
+    )?;
     if state.clock.day() < available_day {
         return Err(CommandError::OfficePowerDirectiveNotEstablished {
             institution_id,
@@ -2823,7 +2882,7 @@ fn validate_office_power_directive(
         .map(AuditRecord::day)
     {
         let next_directive_day =
-            last_directive_day.saturating_add(OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS);
+            checked_future_day(last_directive_day, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS)?;
         if state.clock.day() < next_directive_day {
             return Err(CommandError::OfficePowerDirectiveCooldown {
                 institution_id,
@@ -2973,6 +3032,8 @@ fn apply_office_power_directive(
         legitimacy,
         subject,
     } = validate_office_power_directive(registry, state, institution_id, power)?;
+    let directive_expires_day =
+        checked_future_day(state.clock.day(), OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS)?;
     state
         .dynasties
         .get_mut(&state.player_dynasty_id)
@@ -2982,10 +3043,6 @@ fn apply_office_power_directive(
         .checked_sub(OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST)
         .expect("validated office directive legitimacy cost must fit");
     apply_office_power_directive_effect(state, institution_id, district_id, power);
-    let directive_expires_day = state
-        .clock
-        .day()
-        .saturating_add(OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS);
     state
         .institutions
         .get_mut(&institution_id)
@@ -3085,22 +3142,26 @@ pub(super) fn office_nomination_subject(
     format!("institution:{institution_id}:character:{character_id}")
 }
 
+fn future_day_or_terminal(day: i64, offset_days: i64) -> i64 {
+    checked_future_day(day, offset_days).unwrap_or(i64::MAX)
+}
+
 pub(crate) fn office_nomination_next_day(
     state: &AppState,
     character_id: CharacterId,
 ) -> Option<i64> {
     let campaign = latest_character_campaign_day(state, AuditKind::OfficeNomination, character_id)
         .map(|day| {
-            let resolution_day = day.saturating_add(OFFICE_NOMINATION_RESOLUTION_DAYS);
+            let resolution_day = future_day_or_terminal(day, OFFICE_NOMINATION_RESOLUTION_DAYS);
             let interval = if state.clock.day() < resolution_day {
                 OFFICE_NOMINATION_INTERVAL_DAYS
             } else {
                 OFFICE_NOMINATION_RECOVERY_DAYS
             };
-            day.saturating_add(interval)
+            future_day_or_terminal(day, interval)
         });
     let dynasty_office_resignation = latest_player_office_resignation_day(state)
-        .map(|day| day.saturating_add(INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
+        .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
     campaign.into_iter().chain(dynasty_office_resignation).max()
 }
 
@@ -3117,12 +3178,12 @@ pub(crate) fn institution_support_next_day(
 ) -> Option<i64> {
     let patronage =
         latest_character_campaign_day(state, AuditKind::InstitutionPatronage, character_id)
-            .map(|day| day.saturating_add(INSTITUTION_SUPPORT_INTERVAL_DAYS));
+            .map(|day| future_day_or_terminal(day, INSTITUTION_SUPPORT_INTERVAL_DAYS));
     let withdrawal =
         latest_character_campaign_day(state, AuditKind::InstitutionWithdrawal, character_id)
-            .map(|day| day.saturating_add(INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
+            .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
     let dynasty_office_resignation = latest_player_office_resignation_day(state)
-        .map(|day| day.saturating_add(INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
+        .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
     patronage
         .into_iter()
         .chain(withdrawal)
@@ -3574,12 +3635,13 @@ fn commission_information(
     focus: InformationFocus,
 ) -> Result<CommandOutcome, CommandError> {
     let plan = resolve_information_commission(registry, state, focus)?;
+    let day = state.clock.day();
+    let expires_day = checked_future_day(day, INFORMATION_REPORT_LIFETIME_DAYS)?;
     spend_player_treasury(state, INFORMATION_COMMISSION_COST)?;
     state.information_reports.retain(|_, report| {
         report.owner_dynasty_id != state.player_dynasty_id || report.target != Some(plan.target)
     });
     let id = state.next_ids.try_information_report()?;
-    let day = state.clock.day();
     state.information_reports.insert(
         id,
         InformationReport {
@@ -3589,7 +3651,7 @@ fn commission_information(
             subject: plan.subject.clone(),
             confidence: InformationConfidence::Confirmed,
             created_day: day,
-            expires_day: day.saturating_add(INFORMATION_REPORT_LIFETIME_DAYS),
+            expires_day,
             source: COMMISSIONED_INFORMATION_SOURCE.to_owned(),
             summary: plan.summary,
         },
@@ -3636,7 +3698,7 @@ fn resolve_information_commission(
         .max();
     if let Some(last_commission_day) = report_commission_day.max(audit_commission_day) {
         let next_commission_day =
-            last_commission_day.saturating_add(INFORMATION_COMMISSION_INTERVAL_DAYS);
+            checked_future_day(last_commission_day, INFORMATION_COMMISSION_INTERVAL_DAYS)?;
         if state.clock.day() < next_commission_day {
             return Err(CommandError::InformationCommissionCooldown {
                 next_commission_day,

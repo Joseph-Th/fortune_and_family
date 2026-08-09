@@ -171,7 +171,8 @@ pub(crate) use strategic::{
     projected_dynasty_monthly_office_duty_with_additional_offices,
 };
 pub use transactions::{
-    SimulationError, ValidatedCashTransfer, transfer_business_cash, validate_business_cash_transfer,
+    SimulationError, TimelineError, ValidatedCashTransfer, transfer_business_cash,
+    validate_business_cash_transfer,
 };
 
 #[cfg(test)]

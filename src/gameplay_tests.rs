@@ -562,6 +562,7 @@ mod harness {
             "scores:",
             "Experience health",
             "ending civic conditions:",
+            "player-issued",
             "Command coverage",
             "Strongest observed command consequences",
             "Findings",
@@ -3128,6 +3129,58 @@ mod candidates {
     }
 
     #[test]
+    fn opportunist_uses_surplus_capital_for_speculative_credit_without_existing_distress() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        for dynasty in state
+            .dynasties
+            .values_mut()
+            .filter(|dynasty| dynasty.id() != player_id)
+        {
+            dynasty.resources.treasury = Money::from_copper(100_000);
+        }
+        for loan in state.loans.values_mut() {
+            if matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted) {
+                loan.status = LoanStatus::Repaid;
+                loan.balance = Money::ZERO;
+            }
+        }
+        assert!(
+            state
+                .dynasties
+                .values()
+                .filter(|dynasty| dynasty.id() != player_id)
+                .all(|dynasty| lending_pressure(&state, dynasty.id()) == 0)
+        );
+
+        let mut opportunist_candidates = Vec::new();
+        add_lend_candidate(
+            &state,
+            GameplayPersona::Opportunist,
+            &mut opportunist_candidates,
+        );
+        assert!(opportunist_candidates.iter().any(|candidate| {
+            candidate.kind == GameplayCommandKind::ExtendCredit
+                && candidate.description.contains("high-yield short-term loan")
+        }));
+
+        let mut steward_candidates = Vec::new();
+        add_lend_candidate(&state, GameplayPersona::Steward, &mut steward_candidates);
+        assert!(
+            steward_candidates
+                .iter()
+                .all(|candidate| candidate.kind != GameplayCommandKind::ExtendCredit),
+            "speculative lending without external pressure should remain specific to the stress persona"
+        );
+    }
+
+    #[test]
     fn delinquent_player_credit_creates_a_legal_grievance() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -3432,14 +3485,36 @@ mod metrics {
             "high unrest should make a school the steward's strongest need-driven project"
         );
         assert!(
-            public_work_candidate_priority(440, district, GameplayPersona::Steward, shortlist[0],)
-                > public_work_candidate_priority(
-                    440,
-                    district,
-                    GameplayPersona::Steward,
-                    shortlist[1],
-                ),
+            public_work_candidate_priority(
+                440,
+                district,
+                GameplayPersona::Steward,
+                shortlist[0],
+                0,
+            ) > public_work_candidate_priority(
+                440,
+                district,
+                GameplayPersona::Steward,
+                shortlist[1],
+                0,
+            ),
             "final candidate ranking must preserve the need ordering used to build the shortlist"
+        );
+        assert!(
+            public_work_candidate_priority(
+                440,
+                district,
+                GameplayPersona::Steward,
+                shortlist[0],
+                1,
+            ) < public_work_candidate_priority(
+                440,
+                district,
+                GameplayPersona::Steward,
+                shortlist[1],
+                0,
+            ),
+            "after completing the strongest project kind once, a close unmet need should be able to become the better civic investment"
         );
     }
 
@@ -3498,6 +3573,56 @@ mod metrics {
                 .contains(&GameplayDomain::Loans),
             "municipal debt changes must be attributed to the finance domain"
         );
+    }
+
+    #[test]
+    fn snapshots_attribute_player_lending_distress_separately() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let borrower_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| {
+                *dynasty_id != player_id
+                    && !same_pair_credit_blocks_new_loan(&state, player_id, *dynasty_id)
+            })
+            .expect("campaign must contain an unused player-lending counterparty");
+        let loan_id = issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: player_id,
+                borrower_dynasty_id: borrower_id,
+                principal: Money::from_copper(1_000),
+                weekly_payment: Money::from_copper(50),
+                interest_basis_points: 700,
+                collateral_property_id: None,
+            },
+        )
+        .expect("test player loan must be issuable");
+        state
+            .loans
+            .get_mut(&loan_id)
+            .expect("new player loan must exist")
+            .status = LoanStatus::Delinquent;
+        let unrelated_loan_id = state
+            .loans
+            .values()
+            .find(|loan| loan.id != loan_id && loan.lender_dynasty_id != player_id)
+            .expect("campaign must contain an unrelated private loan")
+            .id;
+        state
+            .loans
+            .get_mut(&unrelated_loan_id)
+            .expect("unrelated loan must exist")
+            .status = LoanStatus::Defaulted;
+
+        let snapshot = GameplaySnapshot::capture(&state);
+
+        assert_eq!(snapshot.player_delinquent_lending, 1);
+        assert_eq!(snapshot.player_defaulted_lending, 0);
+        assert!(snapshot.delinquent_loans >= 1);
+        assert!(snapshot.defaulted_loans >= 1);
     }
 
     #[test]
@@ -4435,14 +4560,80 @@ mod findings {
             .first_mut()
             .expect("focused configuration must produce one campaign");
         campaign.simulated_days = 3_600;
-        campaign.maximum_delinquent_loans = 0;
+        campaign.maximum_delinquent_loans = 1;
         campaign.maximum_defaulted_loans = 0;
+        campaign.maximum_player_delinquent_lending = 0;
+        campaign.maximum_player_defaulted_lending = 0;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
         finding_with_title(
             &findings,
-            "Long-horizon lending never encounters credit distress",
+            "Long-horizon player lending never encounters credit distress",
+        );
+    }
+
+    #[test]
+    fn deep_audit_reports_missing_credit_enforcement_coverage() {
+        let mut report = cached_focused_report(30);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = (0_u64..3)
+            .map(|seed_offset| {
+                let mut campaign = baseline.clone();
+                campaign.seed = campaign.seed.saturating_add(seed_offset);
+                campaign.persona = GameplayPersona::Opportunist;
+                campaign.simulated_days = 3_600;
+                campaign.maximum_player_delinquent_lending = u16::from(seed_offset == 0);
+                campaign
+                    .commands
+                    .get_mut(&GameplayCommandKind::ExtendCredit)
+                    .expect("credit statistics must exist")
+                    .executed = 0;
+                campaign
+                    .commands
+                    .get_mut(&GameplayCommandKind::FileLegalCase)
+                    .expect("legal statistics must exist")
+                    .executed = 0;
+                campaign
+            })
+            .collect();
+        report.aggregate.campaigns = 3;
+        report.aggregate.simulated_days = 10_800;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(
+            &findings,
+            "Risk-seeking audit never reaches player credit enforcement",
+        );
+        assert!(
+            finding
+                .evidence
+                .contains("3 long-horizon opportunist campaigns"),
+            "coverage finding should state how much stress-policy evidence was available: {}",
+            finding.evidence
+        );
+        assert!(
+            finding
+                .evidence
+                .contains("1 campaign(s) recorded delinquency"),
+            "coverage finding should distinguish player-issued distress from unrelated private loans: {}",
+            finding.evidence
+        );
+
+        report
+            .campaigns
+            .first_mut()
+            .expect("coverage report must contain a campaign")
+            .player_debt_enforcement_cases = 1;
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        assert_finding_absent(
+            &findings,
+            "Risk-seeking audit never reaches player credit enforcement",
         );
     }
 
@@ -4718,7 +4909,7 @@ mod findings {
                 cycles_with_distinct_immediate_option_consequences: 72,
                 cycles_with_distinct_projected_option_consequences: 72,
                 total_viable_choices: 324,
-                total_viable_command_kinds: 137,
+                total_viable_command_kinds: 150,
             },
         );
 
@@ -4727,6 +4918,47 @@ mod findings {
         assert_finding_absent(
             &findings,
             "Dynastic governance remains intermittent and strategically narrow",
+        );
+    }
+
+    #[test]
+    fn governance_target_depth_cannot_substitute_for_cross_system_breadth() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.phase_stats.insert(
+            GameplayPhase::DynasticGovernance,
+            GameplayPhaseStats {
+                decision_cycles: 100,
+                substantive_actions: 72,
+                institutional_campaign_actions: 0,
+                quiet_cycles: 28,
+                quiet_cycles_with_ambient_change: 28,
+                longest_quiet_streak_cycles: 2,
+                blocked_cycles: 0,
+                cycles_with_multiple_viable_command_kinds: 30,
+                cycles_with_close_viable_command_kinds: 20,
+                cycles_with_distinct_immediate_consequences: 30,
+                cycles_with_distinct_projected_consequences: 30,
+                cycles_with_multiple_viable_options: 72,
+                cycles_with_close_viable_options: 20,
+                cycles_with_distinct_immediate_option_consequences: 72,
+                cycles_with_distinct_projected_option_consequences: 72,
+                total_viable_choices: 360,
+                total_viable_command_kinds: 110,
+            },
+        );
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(
+            &findings,
+            "Dynastic governance remains intermittent and strategically narrow",
+        );
+        assert!(
+            finding
+                .evidence
+                .contains("average family breadth 1.5 < 1.6 families"),
+            "mature phase diagnostics must report cross-system family breadth even when many concrete targets are viable: {}",
+            finding.evidence
         );
     }
 
@@ -4820,6 +5052,43 @@ mod findings {
         finding_with_title(
             &findings,
             "Institutional campaigning dominates the decision loop",
+        );
+    }
+
+    #[test]
+    fn findings_surface_repetitive_public_work_portfolios() {
+        let mut report = cached_focused_report(30);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused report must contain one campaign")
+            .clone();
+        report.campaigns = (0_u64..4)
+            .map(|seed_offset| {
+                let mut campaign = template.clone();
+                campaign.seed = campaign.seed.saturating_add(seed_offset);
+                campaign.simulated_days = 1_800;
+                campaign
+                    .commands
+                    .get_mut(&GameplayCommandKind::StartPublicWork)
+                    .expect("public-work statistics must exist")
+                    .executed = 3;
+                campaign.end.player_completed_public_work_kinds.clear();
+                campaign
+                    .end
+                    .player_completed_public_work_kinds
+                    .insert(PublicWorkKind::School);
+                campaign
+            })
+            .collect();
+        report.aggregate.campaigns = 4;
+        report.aggregate.simulated_days = 7_200;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Civic construction portfolios converge on one project type",
         );
     }
 

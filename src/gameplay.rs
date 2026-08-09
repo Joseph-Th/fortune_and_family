@@ -139,6 +139,7 @@ const NOTIFICATION_BATCH_THRESHOLD: usize = 8;
 const AGENT_LOAN_AMORTIZATION_WEEKS: i64 = 104;
 const AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS: i64 = 26;
 const AGENT_OPPORTUNIST_LOAN_INTEREST_BASIS_POINTS: u16 = 1_800;
+const AGENT_OPPORTUNIST_SPECULATIVE_LENDING_TREASURY: Money = Money::from_copper(75_000);
 const AGENT_EXTERNAL_CREDIT_TREASURY_PRESSURE: Money = Money::from_copper(25_000);
 const AGENT_OFFICE_DUTY_RESERVE_MONTHS: i64 = 12;
 const AGENT_OFFICE_LIQUIDITY_BUFFER: Money = Money::from_copper(5_000);
@@ -532,6 +533,11 @@ pub struct GameplaySnapshot {
     pub restructured_loans: u16,
     pub defaulted_loans: u16,
     pub repaid_loans: u16,
+    pub player_current_lending: u16,
+    pub player_delinquent_lending: u16,
+    pub player_restructured_lending: u16,
+    pub player_defaulted_lending: u16,
+    pub player_repaid_lending: u16,
     pub total_loan_balance: Money,
     pub loan_state_checksum: u64,
     pub current_civic_debts: u16,
@@ -710,6 +716,11 @@ struct StrategicSnapshotPart {
     restructured_loans: u16,
     defaulted_loans: u16,
     repaid_loans: u16,
+    player_current_lending: u16,
+    player_delinquent_lending: u16,
+    player_restructured_lending: u16,
+    player_defaulted_lending: u16,
+    player_repaid_lending: u16,
     total_loan_balance: Money,
     civic_debt: CivicDebtSnapshotPart,
     player_properties: u16,
@@ -728,6 +739,49 @@ struct StrategicSnapshotPart {
     maximum_contract_relationship_pressure_basis_points: u16,
     relationship_obligation_total: i64,
     relationship_memory_count: u16,
+}
+
+#[derive(Debug)]
+struct LoanSnapshotPart {
+    current: u16,
+    delinquent: u16,
+    restructured: u16,
+    defaulted: u16,
+    repaid: u16,
+    player_current: u16,
+    player_delinquent: u16,
+    player_restructured: u16,
+    player_defaulted: u16,
+    player_repaid: u16,
+    total_balance: Money,
+}
+
+impl LoanSnapshotPart {
+    fn capture(state: &AppState, player_id: DynastyId) -> Self {
+        Self {
+            current: count_loan_status(state, LoanStatus::Current),
+            delinquent: count_loan_status(state, LoanStatus::Delinquent),
+            restructured: count_loan_status(state, LoanStatus::Restructured),
+            defaulted: count_loan_status(state, LoanStatus::Defaulted),
+            repaid: count_loan_status(state, LoanStatus::Repaid),
+            player_current: count_player_lending_status(state, player_id, LoanStatus::Current),
+            player_delinquent: count_player_lending_status(
+                state,
+                player_id,
+                LoanStatus::Delinquent,
+            ),
+            player_restructured: count_player_lending_status(
+                state,
+                player_id,
+                LoanStatus::Restructured,
+            ),
+            player_defaulted: count_player_lending_status(state, player_id, LoanStatus::Defaulted),
+            player_repaid: count_player_lending_status(state, player_id, LoanStatus::Repaid),
+            total_balance: state.loans.values().fold(Money::ZERO, |total, loan| {
+                total.saturating_add(loan.balance)
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -880,6 +934,7 @@ impl StrategicSnapshotPart {
         };
         let relationships = RelationshipSnapshotPart::capture(state, player_id);
         let properties = PropertySnapshotPart::capture(state, player_id);
+        let loans = LoanSnapshotPart::capture(state, player_id);
         Self {
             active_contracts: count_contract_status(state, ContractStatus::Active),
             fulfilled_contracts: count_contract_status(state, ContractStatus::Fulfilled),
@@ -908,14 +963,17 @@ impl StrategicSnapshotPart {
                 .map(|contract| u32::from(contract.missed_deliveries))
                 .sum(),
             player_contract_deliveries: player_contract_deliveries(state),
-            current_loans: count_loan_status(state, LoanStatus::Current),
-            delinquent_loans: count_loan_status(state, LoanStatus::Delinquent),
-            restructured_loans: count_loan_status(state, LoanStatus::Restructured),
-            defaulted_loans: count_loan_status(state, LoanStatus::Defaulted),
-            repaid_loans: count_loan_status(state, LoanStatus::Repaid),
-            total_loan_balance: state.loans.values().fold(Money::ZERO, |total, loan| {
-                total.saturating_add(loan.balance)
-            }),
+            current_loans: loans.current,
+            delinquent_loans: loans.delinquent,
+            restructured_loans: loans.restructured,
+            defaulted_loans: loans.defaulted,
+            repaid_loans: loans.repaid,
+            player_current_lending: loans.player_current,
+            player_delinquent_lending: loans.player_delinquent,
+            player_restructured_lending: loans.player_restructured,
+            player_defaulted_lending: loans.player_defaulted,
+            player_repaid_lending: loans.player_repaid,
+            total_loan_balance: loans.total_balance,
             civic_debt: CivicDebtSnapshotPart::capture(state),
             player_properties: properties.player_properties,
             player_pledged_properties: properties.player_pledged_properties,
@@ -1359,6 +1417,11 @@ macro_rules! assemble_gameplay_snapshot {
             restructured_loans: $strategic.restructured_loans,
             defaulted_loans: $strategic.defaulted_loans,
             repaid_loans: $strategic.repaid_loans,
+            player_current_lending: $strategic.player_current_lending,
+            player_delinquent_lending: $strategic.player_delinquent_lending,
+            player_restructured_lending: $strategic.player_restructured_lending,
+            player_defaulted_lending: $strategic.player_defaulted_lending,
+            player_repaid_lending: $strategic.player_repaid_lending,
             total_loan_balance: $strategic.total_loan_balance,
             loan_state_checksum: stable_serialized_checksum(&$state.loans),
             current_civic_debts: $strategic.civic_debt.current,
@@ -1486,6 +1549,8 @@ pub struct GameplayDecisionContext {
     pub delinquent_loans: u16,
     pub restructured_loans: u16,
     pub defaulted_loans: u16,
+    pub player_delinquent_lending: u16,
+    pub player_defaulted_lending: u16,
     pub player_properties: u16,
     pub player_pledged_properties: u16,
     pub player_collateral_balance: Money,
@@ -1524,6 +1589,8 @@ impl From<&GameplaySnapshot> for GameplayDecisionContext {
             delinquent_loans: snapshot.delinquent_loans,
             restructured_loans: snapshot.restructured_loans,
             defaulted_loans: snapshot.defaulted_loans,
+            player_delinquent_lending: snapshot.player_delinquent_lending,
+            player_defaulted_lending: snapshot.player_defaulted_lending,
             player_properties: snapshot.player_properties,
             player_pledged_properties: snapshot.player_pledged_properties,
             player_collateral_balance: snapshot.player_collateral_balance,
@@ -1864,6 +1931,8 @@ pub struct GameplayCampaignReport {
     pub maximum_player_disputed_employment: u16,
     pub maximum_delinquent_loans: u16,
     pub maximum_defaulted_loans: u16,
+    pub maximum_player_delinquent_lending: u16,
+    pub maximum_player_defaulted_lending: u16,
     pub maximum_delinquent_civic_debts: u16,
     pub maximum_defaulted_civic_debts: u16,
     pub maximum_offices_held: u16,
@@ -1880,6 +1949,7 @@ pub struct GameplayCampaignReport {
     pub longest_recovery_pressure_days: u32,
     pub terminal_recovery_pressure_days: u32,
     pub commission_leverage_pairs: u16,
+    pub player_debt_enforcement_cases: u16,
     pub fantasy_arc: GameplayFantasyArc,
     pub trace: Vec<GameplayTraceStep>,
 }
@@ -2168,6 +2238,8 @@ struct CampaignAccumulator {
     maximum_player_disputed_employment: u16,
     maximum_delinquent_loans: u16,
     maximum_defaulted_loans: u16,
+    maximum_player_delinquent_lending: u16,
+    maximum_player_defaulted_lending: u16,
     maximum_delinquent_civic_debts: u16,
     maximum_defaulted_civic_debts: u16,
     maximum_offices_held: u16,
@@ -2189,6 +2261,7 @@ struct CampaignAccumulator {
     current_recovery_pressure_days: u32,
     longest_recovery_pressure_days: u32,
     commission_leverage_pairs: u16,
+    player_debt_enforcement_cases: u16,
     last_information_commission_day: Option<i64>,
     starting_generation: Option<u16>,
     fantasy_arc: GameplayFantasyArc,
@@ -2229,6 +2302,8 @@ impl CampaignAccumulator {
             maximum_player_disputed_employment: 0,
             maximum_delinquent_loans: 0,
             maximum_defaulted_loans: 0,
+            maximum_player_delinquent_lending: 0,
+            maximum_player_defaulted_lending: 0,
             maximum_delinquent_civic_debts: 0,
             maximum_defaulted_civic_debts: 0,
             maximum_offices_held: 0,
@@ -2250,6 +2325,7 @@ impl CampaignAccumulator {
             current_recovery_pressure_days: 0,
             longest_recovery_pressure_days: 0,
             commission_leverage_pairs: 0,
+            player_debt_enforcement_cases: 0,
             last_information_commission_day: None,
             starting_generation: None,
             fantasy_arc: GameplayFantasyArc::default(),
@@ -2338,6 +2414,13 @@ impl CampaignAccumulator {
                 self.fantasy_arc
                     .first_office_campaign_target
                     .get_or_insert(*institution_id);
+            }
+            PlayerCommand::FileLegalCase {
+                kind: LegalCaseKind::Debt,
+                ..
+            } => {
+                self.player_debt_enforcement_cases =
+                    self.player_debt_enforcement_cases.saturating_add(1);
             }
             PlayerCommand::TransferBusinessCash { .. }
             | PlayerCommand::AcquireBusiness { .. }
@@ -2554,6 +2637,12 @@ impl CampaignAccumulator {
         self.maximum_delinquent_loans =
             self.maximum_delinquent_loans.max(snapshot.delinquent_loans);
         self.maximum_defaulted_loans = self.maximum_defaulted_loans.max(snapshot.defaulted_loans);
+        self.maximum_player_delinquent_lending = self
+            .maximum_player_delinquent_lending
+            .max(snapshot.player_delinquent_lending);
+        self.maximum_player_defaulted_lending = self
+            .maximum_player_defaulted_lending
+            .max(snapshot.player_defaulted_lending);
         self.maximum_delinquent_civic_debts = self
             .maximum_delinquent_civic_debts
             .max(snapshot.delinquent_civic_debts);
@@ -2730,9 +2819,7 @@ fn run_campaign(
         )?;
         remaining = remaining.saturating_sub(step_days);
     }
-    if terminal_phase_needs_decision(&accumulator) {
-        run_terminal_decision_cycle(registry, config, persona, &mut state, &mut accumulator)?;
-    }
+    run_terminal_phase_if_needed(registry, config, persona, &mut state, &mut accumulator)?;
     validate_invariants(registry, &state);
     let end = GameplaySnapshot::capture(&state);
     let scores = score_campaign(&accumulator, &start, &end);
@@ -2784,6 +2871,8 @@ fn run_campaign(
         maximum_player_disputed_employment: accumulator.maximum_player_disputed_employment,
         maximum_delinquent_loans: accumulator.maximum_delinquent_loans,
         maximum_defaulted_loans: accumulator.maximum_defaulted_loans,
+        maximum_player_delinquent_lending: accumulator.maximum_player_delinquent_lending,
+        maximum_player_defaulted_lending: accumulator.maximum_player_defaulted_lending,
         maximum_delinquent_civic_debts: accumulator.maximum_delinquent_civic_debts,
         maximum_defaulted_civic_debts: accumulator.maximum_defaulted_civic_debts,
         maximum_offices_held: accumulator.maximum_offices_held,
@@ -2801,9 +2890,23 @@ fn run_campaign(
         longest_recovery_pressure_days: accumulator.longest_recovery_pressure_days,
         terminal_recovery_pressure_days: accumulator.current_recovery_pressure_days,
         commission_leverage_pairs: accumulator.commission_leverage_pairs,
+        player_debt_enforcement_cases: accumulator.player_debt_enforcement_cases,
         fantasy_arc: accumulator.fantasy_arc,
         trace,
     })
+}
+
+fn run_terminal_phase_if_needed(
+    registry: &Registry,
+    config: &GameplayHarnessConfig,
+    persona: GameplayPersona,
+    state: &mut AppState,
+    accumulator: &mut CampaignAccumulator,
+) -> Result<(), GameplayHarnessError> {
+    if terminal_phase_needs_decision(accumulator) {
+        run_terminal_decision_cycle(registry, config, persona, state, accumulator)?;
+    }
+    Ok(())
 }
 
 fn terminal_phase_needs_decision(accumulator: &CampaignAccumulator) -> bool {
@@ -5522,14 +5625,21 @@ fn active_player_lending(state: &AppState) -> usize {
         .count()
 }
 
-fn eligible_lending_borrower(state: &AppState) -> Option<&crate::core::Dynasty> {
-    state
+fn eligible_lending_borrower(
+    state: &AppState,
+    persona: GameplayPersona,
+) -> Option<&crate::core::Dynasty> {
+    let eligible: Vec<_> = state
         .dynasties
         .values()
         .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
         .filter(|dynasty| {
             !same_pair_credit_blocks_new_loan(state, state.player_dynasty_id, dynasty.id())
         })
+        .collect();
+    let pressured = eligible
+        .iter()
+        .copied()
         .filter(|dynasty| lending_pressure(state, dynasty.id()) > 0)
         .min_by_key(|dynasty| {
             (
@@ -5537,7 +5647,23 @@ fn eligible_lending_borrower(state: &AppState) -> Option<&crate::core::Dynasty> 
                 dynasty.treasury(),
                 dynasty.id(),
             )
-        })
+        });
+    if pressured.is_some() {
+        return pressured;
+    }
+    let player_treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    if persona != GameplayPersona::Opportunist
+        || player_treasury < AGENT_OPPORTUNIST_SPECULATIVE_LENDING_TREASURY
+    {
+        return None;
+    }
+    eligible
+        .into_iter()
+        .min_by_key(|dynasty| (dynasty.treasury(), dynasty.id()))
 }
 
 fn lending_pressure(state: &AppState, dynasty_id: DynastyId) -> u8 {
@@ -5585,7 +5711,7 @@ fn has_extend_credit_opportunity(state: &AppState, persona: GameplayPersona) -> 
     can_restructure
         || (player.treasury() >= lending_reserve
             && active_player_lending(state) < lending_limit
-            && eligible_lending_borrower(state).is_some())
+            && eligible_lending_borrower(state, persona).is_some())
 }
 
 fn add_lend_candidate(state: &AppState, persona: GameplayPersona, candidates: &mut Vec<Candidate>) {
@@ -5604,7 +5730,7 @@ fn add_lend_candidate(state: &AppState, persona: GameplayPersona, candidates: &m
         if player.treasury() < lending_reserve || active_player_lending(state) >= lending_limit {
             return;
         }
-        let Some(borrower) = eligible_lending_borrower(state) else {
+        let Some(borrower) = eligible_lending_borrower(state, persona) else {
             return;
         };
         borrower
@@ -6408,10 +6534,30 @@ fn generate_public_work_candidates(
                     district.name(),
                     public_work_intent(kind)
                 ),
-                public_work_candidate_priority(bonus, runtime, persona, kind),
+                public_work_candidate_priority(
+                    bonus,
+                    runtime,
+                    persona,
+                    kind,
+                    completed_player_public_works_of_kind(state, kind),
+                ),
             );
         }
     }
+}
+
+const PUBLIC_WORK_PORTFOLIO_REPEAT_PENALTY: i64 = 200;
+
+fn completed_player_public_works_of_kind(state: &AppState, kind: PublicWorkKind) -> usize {
+    state
+        .public_works
+        .values()
+        .filter(|work| {
+            work.sponsor_dynasty_id == Some(state.player_dynasty_id)
+                && work.status == PublicWorkStatus::Completed
+                && work.kind == kind
+        })
+        .count()
 }
 
 fn public_work_candidate_priority(
@@ -6419,10 +6565,15 @@ fn public_work_candidate_priority(
     district: &crate::core::DistrictRuntime,
     persona: GameplayPersona,
     kind: PublicWorkKind,
+    completed_same_kind: usize,
 ) -> i64 {
+    let repeat_penalty = i64::try_from(completed_same_kind.min(4))
+        .unwrap_or(4)
+        .saturating_mul(PUBLIC_WORK_PORTFOLIO_REPEAT_PENALTY);
     base_bonus
         .saturating_add(public_work_persona_bonus(persona, kind))
         .saturating_add(public_work_need_score(district, kind) / 10)
+        .saturating_sub(repeat_penalty)
 }
 
 fn preferred_public_work_kinds(
@@ -8510,6 +8661,7 @@ const LOAN_COLLATERAL_LARGE: &str = "loan counterparty collateral too large";
 const fn command_error_category(error: &CommandError) -> &'static str {
     match error {
         CommandError::IdentifierAllocation(_) => "identifier allocation exhausted",
+        CommandError::Timeline(_) => "timeline range exhausted",
         CommandError::Strategic(source) => strategic_error_category(source),
         CommandError::Simulation(source) => simulation_error_category(source),
         CommandError::MissingBusiness { .. } => "missing business",
@@ -8612,6 +8764,7 @@ const fn command_error_category(error: &CommandError) -> &'static str {
 const fn strategic_error_category(error: &StrategicError) -> &'static str {
     match error {
         StrategicError::IdentifierAllocation(_) => "strategic: identifier allocation exhausted",
+        StrategicError::Timeline(_) => "strategic: timeline range exhausted",
         StrategicError::RegistryMismatch { .. } => "strategic: registry mismatch",
         StrategicError::MissingBusiness { .. } => "strategic: missing business",
         StrategicError::BusinessInactive { .. } => "strategic: inactive business",
@@ -8683,6 +8836,7 @@ const fn strategic_error_category(error: &StrategicError) -> &'static str {
 const fn simulation_error_category(error: &SimulationError) -> &'static str {
     match error {
         SimulationError::IdentifierAllocation(_) => "simulation: identifier allocation exhausted",
+        SimulationError::Timeline(_) => "simulation: timeline range exhausted",
         SimulationError::InvalidDayCount { .. } => "simulation: invalid day count",
         SimulationError::DayRangeExhausted { .. } => "simulation: day range exhausted",
         SimulationError::RegistryMismatch { .. } => "simulation: registry mismatch",
@@ -9435,6 +9589,57 @@ struct PhaseQualityThresholds {
     minimum_multi_family_share: u64,
     minimum_average_choices_tenths: u64,
     minimum_average_families_tenths: u64,
+    require_family_breadth: bool,
+}
+
+#[derive(Clone, Copy)]
+struct PhaseQualityMeasures {
+    action_share: u64,
+    quiet_share: u64,
+    static_quiet_share: u64,
+    multi_family_share: u64,
+    average_choices_tenths: u64,
+    average_families_tenths: u64,
+}
+
+impl PhaseQualityMeasures {
+    fn from_stats(stats: GameplayPhaseStats) -> Self {
+        let decision_cycles = u64::from(stats.decision_cycles);
+        let opportunity_cycles =
+            u64::from(stats.decision_cycles.saturating_sub(stats.quiet_cycles));
+        Self {
+            action_share: scaled_ratio_u64(
+                u64::from(stats.substantive_actions),
+                decision_cycles,
+                100,
+            ),
+            quiet_share: scaled_ratio_u64(u64::from(stats.quiet_cycles), decision_cycles, 100),
+            static_quiet_share: scaled_ratio_u64(
+                u64::from(
+                    stats
+                        .quiet_cycles
+                        .saturating_sub(stats.quiet_cycles_with_ambient_change),
+                ),
+                decision_cycles,
+                100,
+            ),
+            multi_family_share: scaled_ratio_u64(
+                u64::from(stats.cycles_with_multiple_viable_command_kinds),
+                opportunity_cycles,
+                100,
+            ),
+            average_choices_tenths: scaled_ratio_u64(
+                u64::from(stats.total_viable_choices),
+                opportunity_cycles,
+                10,
+            ),
+            average_families_tenths: scaled_ratio_u64(
+                u64::from(stats.total_viable_command_kinds),
+                opportunity_cycles,
+                10,
+            ),
+        }
+    }
 }
 
 fn add_phase_quality_findings(
@@ -9456,6 +9661,7 @@ fn add_phase_quality_findings(
             minimum_multi_family_share: 25,
             minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 16,
+            require_family_breadth: false,
         },
     );
     add_phase_quality_finding(
@@ -9472,6 +9678,7 @@ fn add_phase_quality_findings(
             minimum_multi_family_share: 25,
             minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 15,
+            require_family_breadth: false,
         },
     );
     add_phase_quality_finding(
@@ -9487,7 +9694,8 @@ fn add_phase_quality_findings(
             maximum_quiet_streak_cycles: 10,
             minimum_multi_family_share: 30,
             minimum_average_choices_tenths: 30,
-            minimum_average_families_tenths: 20,
+            minimum_average_families_tenths: 16,
+            require_family_breadth: true,
         },
     );
     add_phase_quality_finding(
@@ -9503,7 +9711,8 @@ fn add_phase_quality_findings(
             maximum_quiet_streak_cycles: 8,
             minimum_multi_family_share: 30,
             minimum_average_choices_tenths: 25,
-            minimum_average_families_tenths: 18,
+            minimum_average_families_tenths: 16,
+            require_family_breadth: true,
         },
     );
 }
@@ -9525,77 +9734,14 @@ fn add_phase_quality_finding(
     if stats.decision_cycles < 20 {
         return;
     }
-    let action_share = scaled_ratio_u64(
-        u64::from(stats.substantive_actions),
-        u64::from(stats.decision_cycles),
-        100,
-    );
-    let quiet_share = scaled_ratio_u64(
-        u64::from(stats.quiet_cycles),
-        u64::from(stats.decision_cycles),
-        100,
-    );
-    let static_quiet_cycles = stats
-        .quiet_cycles
-        .saturating_sub(stats.quiet_cycles_with_ambient_change);
-    let static_quiet_share = scaled_ratio_u64(
-        u64::from(static_quiet_cycles),
-        u64::from(stats.decision_cycles),
-        100,
-    );
-    let opportunity_cycles = stats.decision_cycles.saturating_sub(stats.quiet_cycles);
-    let multi_family_share = scaled_ratio_u64(
-        u64::from(stats.cycles_with_multiple_viable_command_kinds),
-        u64::from(opportunity_cycles),
-        100,
-    );
-    let average_choices_tenths = scaled_ratio_u64(
-        u64::from(stats.total_viable_choices),
-        u64::from(opportunity_cycles),
-        10,
-    );
-    let average_families_tenths = scaled_ratio_u64(
-        u64::from(stats.total_viable_command_kinds),
-        u64::from(opportunity_cycles),
-        10,
-    );
-    let choice_depth_is_sufficient = average_families_tenths
-        >= thresholds.minimum_average_families_tenths
-        || average_choices_tenths >= thresholds.minimum_average_choices_tenths;
-    let mut missed_thresholds = Vec::new();
-    if action_share < thresholds.minimum_action_share {
-        missed_thresholds.push(format!(
-            "action share {action_share}% < {}%",
-            thresholds.minimum_action_share
-        ));
-    }
-    if static_quiet_share >= thresholds.maximum_static_quiet_share {
-        missed_thresholds.push(format!(
-            "static quiet share {static_quiet_share}% >= {}%",
-            thresholds.maximum_static_quiet_share
-        ));
-    }
-    if stats.longest_quiet_streak_cycles > thresholds.maximum_quiet_streak_cycles {
-        missed_thresholds.push(format!(
-            "longest quiet streak {} > {} cycles",
-            stats.longest_quiet_streak_cycles, thresholds.maximum_quiet_streak_cycles
-        ));
-    }
-    if multi_family_share < thresholds.minimum_multi_family_share {
-        missed_thresholds.push(format!(
-            "multi-family share {multi_family_share}% < {}%",
-            thresholds.minimum_multi_family_share
-        ));
-    }
-    if !choice_depth_is_sufficient {
-        missed_thresholds.push(format!(
-            "choice depth {} choices / {} families < {} choices or {} families",
-            format_tenths(average_choices_tenths),
-            format_tenths(average_families_tenths),
-            format_tenths(thresholds.minimum_average_choices_tenths),
-            format_tenths(thresholds.minimum_average_families_tenths)
-        ));
-    }
+    let measures = PhaseQualityMeasures::from_stats(stats);
+    let action_share = measures.action_share;
+    let quiet_share = measures.quiet_share;
+    let static_quiet_share = measures.static_quiet_share;
+    let multi_family_share = measures.multi_family_share;
+    let average_choices_tenths = measures.average_choices_tenths;
+    let average_families_tenths = measures.average_families_tenths;
+    let missed_thresholds = phase_quality_missed_thresholds(stats, measures, thresholds);
     if missed_thresholds.is_empty() {
         return;
     }
@@ -9617,6 +9763,72 @@ fn add_phase_quality_finding(
             format_tenths(average_families_tenths)
         ),
     });
+}
+
+fn phase_quality_missed_thresholds(
+    stats: GameplayPhaseStats,
+    measures: PhaseQualityMeasures,
+    thresholds: PhaseQualityThresholds,
+) -> Vec<String> {
+    let choices_are_sufficient =
+        measures.average_choices_tenths >= thresholds.minimum_average_choices_tenths;
+    let families_are_sufficient =
+        measures.average_families_tenths >= thresholds.minimum_average_families_tenths;
+    let choice_depth_is_sufficient = if thresholds.require_family_breadth {
+        choices_are_sufficient && families_are_sufficient
+    } else {
+        choices_are_sufficient || families_are_sufficient
+    };
+    let mut missed_thresholds = Vec::new();
+    if measures.action_share < thresholds.minimum_action_share {
+        missed_thresholds.push(format!(
+            "action share {}% < {}%",
+            measures.action_share, thresholds.minimum_action_share
+        ));
+    }
+    if measures.static_quiet_share >= thresholds.maximum_static_quiet_share {
+        missed_thresholds.push(format!(
+            "static quiet share {}% >= {}%",
+            measures.static_quiet_share, thresholds.maximum_static_quiet_share
+        ));
+    }
+    if stats.longest_quiet_streak_cycles > thresholds.maximum_quiet_streak_cycles {
+        missed_thresholds.push(format!(
+            "longest quiet streak {} > {} cycles",
+            stats.longest_quiet_streak_cycles, thresholds.maximum_quiet_streak_cycles
+        ));
+    }
+    if measures.multi_family_share < thresholds.minimum_multi_family_share {
+        missed_thresholds.push(format!(
+            "multi-family share {}% < {}%",
+            measures.multi_family_share, thresholds.minimum_multi_family_share
+        ));
+    }
+    if thresholds.require_family_breadth {
+        if !choices_are_sufficient {
+            missed_thresholds.push(format!(
+                "average choice depth {} < {} choices",
+                format_tenths(measures.average_choices_tenths),
+                format_tenths(thresholds.minimum_average_choices_tenths)
+            ));
+        }
+        if !families_are_sufficient {
+            missed_thresholds.push(format!(
+                "average family breadth {} < {} families",
+                format_tenths(measures.average_families_tenths),
+                format_tenths(thresholds.minimum_average_families_tenths)
+            ));
+        }
+    } else if !choice_depth_is_sufficient {
+        missed_thresholds.push(format!(
+            "choice depth {} choices / {} families < {} choices or {} families",
+            format_tenths(measures.average_choices_tenths),
+            format_tenths(measures.average_families_tenths),
+            format_tenths(thresholds.minimum_average_choices_tenths),
+            format_tenths(thresholds.minimum_average_families_tenths)
+        ));
+    }
+    missed_thresholds
 }
 
 fn phase_worst_streak_evidence(
@@ -9844,19 +10056,21 @@ fn add_long_horizon_risk_findings(
     if average_campaign_days(aggregate) < 3_600 || campaigns.is_empty() {
         return;
     }
+    add_risk_seeking_credit_coverage_finding(campaigns, findings);
     let credit_actions = aggregate
         .commands
         .get(&GameplayCommandKind::ExtendCredit)
         .map_or(0, |stats| stats.executed);
-    let credit_distress = campaigns.iter().any(|campaign| {
-        campaign.maximum_delinquent_loans > 0 || campaign.maximum_defaulted_loans > 0
+    let player_lending_distress = campaigns.iter().any(|campaign| {
+        campaign.maximum_player_delinquent_lending > 0
+            || campaign.maximum_player_defaulted_lending > 0
     });
-    if credit_actions >= 50 && !credit_distress {
+    if credit_actions >= 50 && !player_lending_distress {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
-            title: "Long-horizon lending never encounters credit distress".to_owned(),
+            title: "Long-horizon player lending never encounters credit distress".to_owned(),
             evidence: format!(
-                "Agents extended credit {credit_actions} times, but no campaign ever recorded a delinquent or defaulted private loan. Credit is profitable and relational, but its downside remained untested."
+                "Agents extended player credit {credit_actions} times, but no campaign ever recorded a delinquent or defaulted loan issued by the player dynasty. Distress on unrelated private loans no longer counts as coverage of the player's lending risk."
             ),
         });
     }
@@ -9886,6 +10100,52 @@ fn add_long_horizon_risk_findings(
             ),
         });
     }
+}
+
+fn add_risk_seeking_credit_coverage_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let opportunist_campaigns: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| {
+            campaign.persona == GameplayPersona::Opportunist && campaign.simulated_days >= 3_600
+        })
+        .collect();
+    if opportunist_campaigns.len() < 3 {
+        return;
+    }
+    let credit_actions: u32 = opportunist_campaigns
+        .iter()
+        .map(|campaign| {
+            campaign
+                .commands
+                .get(&GameplayCommandKind::ExtendCredit)
+                .map_or(0, |stats| stats.executed)
+        })
+        .sum();
+    let debt_enforcement_actions: u32 = opportunist_campaigns
+        .iter()
+        .map(|campaign| u32::from(campaign.player_debt_enforcement_cases))
+        .sum();
+    let distressed_campaigns = opportunist_campaigns
+        .iter()
+        .filter(|campaign| {
+            campaign.maximum_player_delinquent_lending > 0
+                || campaign.maximum_player_defaulted_lending > 0
+        })
+        .count();
+    if debt_enforcement_actions > 0 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Risk-seeking audit never reaches player credit enforcement".to_owned(),
+        evidence: format!(
+            "Across {} long-horizon opportunist campaigns, agents extended external credit {credit_actions} time(s), {distressed_campaigns} campaign(s) recorded delinquency or default on player-issued loans, and agents filed {debt_enforcement_actions} player debt-enforcement case(s). Contract-breach litigation and unrelated private-loan distress do not count as proof that player credit enforcement was tested.",
+            opportunist_campaigns.len(),
+        ),
+    });
 }
 
 fn add_long_substantive_gap_finding(
@@ -10749,6 +11009,7 @@ fn add_system_health_findings(
     add_economic_health_findings(campaigns, findings);
     add_business_condition_finding(campaigns, findings);
     add_public_work_health_finding(aggregate, campaigns, findings);
+    add_public_work_portfolio_variety_finding(campaigns, findings);
     add_political_health_finding(aggregate, campaigns, findings);
     add_feed_health_findings(aggregate, campaigns, findings);
 }
@@ -10943,6 +11204,41 @@ fn add_public_work_health_finding(
         evidence: format!(
             "{overloaded} of {} campaigns exceeded four unfinished projects; agents started {starts}, completed {completed}, and ended with {suspended} suspended projects.",
             campaigns.len()
+        ),
+    });
+}
+
+fn add_public_work_portfolio_variety_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let active_builders: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| campaign.simulated_days >= 1_800)
+        .filter(|campaign| {
+            campaign
+                .commands
+                .get(&GameplayCommandKind::StartPublicWork)
+                .is_some_and(|stats| stats.executed >= 3)
+        })
+        .collect();
+    if active_builders.len() < 4 {
+        return;
+    }
+    let single_kind_builders = active_builders
+        .iter()
+        .filter(|campaign| campaign.end.player_completed_public_work_kinds.len() <= 1)
+        .count();
+    let share = scaled_ratio_usize(single_kind_builders, active_builders.len(), 100);
+    if share < 50 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Civic construction portfolios converge on one project type".to_owned(),
+        evidence: format!(
+            "{single_kind_builders} of {} mature campaigns that sponsored at least three public works completed no more than one player-sponsored project kind ({share}%). Repeated civic investment should react to changing district needs instead of becoming a persona-specific construction routine.",
+            active_builders.len()
         ),
     });
 }
@@ -12186,6 +12482,7 @@ struct HealthSummary {
     peak_offices: (u16, u16),
     peak_unread: (u16, u16),
     peak_private_credit_distress: (u16, u16),
+    peak_player_lending_distress: (u16, u16),
     peak_civic_credit_distress: (u16, u16),
     available_offices: u16,
     represented_institutions: (u16, u16),
@@ -12193,6 +12490,7 @@ struct HealthSummary {
     breached_contracts: u64,
     repaid_loans: u64,
     defaulted_loans: u64,
+    player_debt_enforcement_cases: u64,
     repaid_civic_debts: u64,
     defaulted_civic_debts: u64,
     completed_works: u64,
@@ -12236,6 +12534,7 @@ impl HealthSummary {
                 first.maximum_unread_notifications,
             ),
             peak_private_credit_distress: (0, 0),
+            peak_player_lending_distress: (0, 0),
             peak_civic_credit_distress: (0, 0),
             available_offices: first.end.available_offices,
             represented_institutions: (
@@ -12246,6 +12545,7 @@ impl HealthSummary {
             breached_contracts: 0,
             repaid_loans: 0,
             defaulted_loans: 0,
+            player_debt_enforcement_cases: 0,
             repaid_civic_debts: 0,
             defaulted_civic_debts: 0,
             completed_works: 0,
@@ -12291,6 +12591,14 @@ impl HealthSummary {
             .peak_private_credit_distress
             .1
             .max(campaign.maximum_defaulted_loans);
+        self.peak_player_lending_distress.0 = self
+            .peak_player_lending_distress
+            .0
+            .max(campaign.maximum_player_delinquent_lending);
+        self.peak_player_lending_distress.1 = self
+            .peak_player_lending_distress
+            .1
+            .max(campaign.maximum_player_defaulted_lending);
         self.peak_civic_credit_distress.0 = self
             .peak_civic_credit_distress
             .0
@@ -12320,6 +12628,9 @@ impl HealthSummary {
         self.defaulted_loans = self
             .defaulted_loans
             .saturating_add(u64::from(campaign.end.defaulted_loans));
+        self.player_debt_enforcement_cases = self
+            .player_debt_enforcement_cases
+            .saturating_add(u64::from(campaign.player_debt_enforcement_cases));
         self.repaid_civic_debts = self
             .repaid_civic_debts
             .saturating_add(u64::from(campaign.end.repaid_civic_debts));
@@ -12404,11 +12715,12 @@ fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
     );
     let _ = writeln!(
         output,
-        "  outcomes: player contracts {} fulfilled / {} breached | private loans {} repaid / {} defaulted | civic debts {} repaid / {} defaulted | public works {} completed / {} suspended\n",
+        "  outcomes: player contracts {} fulfilled / {} breached | private loans {} repaid / {} defaulted | player debt enforcement {} case(s) | civic debts {} repaid / {} defaulted | public works {} completed / {} suspended\n",
         summary.fulfilled_contracts,
         summary.breached_contracts,
         summary.repaid_loans,
         summary.defaulted_loans,
+        summary.player_debt_enforcement_cases,
         summary.repaid_civic_debts,
         summary.defaulted_civic_debts,
         summary.completed_works,
@@ -12416,9 +12728,11 @@ fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
     );
     let _ = writeln!(
         output,
-        "  peak credit distress in one campaign: private {} delinquent / {} defaulted | civic {} delinquent / {} defaulted\n",
+        "  peak credit distress in one campaign: private {} delinquent / {} defaulted | player-issued {} delinquent / {} defaulted | civic {} delinquent / {} defaulted\n",
         summary.peak_private_credit_distress.0,
         summary.peak_private_credit_distress.1,
+        summary.peak_player_lending_distress.0,
+        summary.peak_player_lending_distress.1,
         summary.peak_civic_credit_distress.0,
         summary.peak_civic_credit_distress.1,
     );
@@ -13080,6 +13394,16 @@ fn count_loan_status(state: &AppState, status: LoanStatus) -> u16 {
             .loans
             .values()
             .filter(|loan| loan.status == status)
+            .count(),
+    )
+}
+
+fn count_player_lending_status(state: &AppState, player_id: DynastyId, status: LoanStatus) -> u16 {
+    usize_to_u16(
+        state
+            .loans
+            .values()
+            .filter(|loan| loan.lender_dynasty_id == player_id && loan.status == status)
             .count(),
     )
 }

@@ -2,7 +2,8 @@
 
 use super::SimulationError;
 use super::transactions::{
-    debit_market_clearing_account, next_business_finance_version, next_family_charter_version,
+    checked_future_day, debit_market_clearing_account, next_business_finance_version,
+    next_family_charter_version,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
@@ -111,9 +112,9 @@ struct SuccessionShock {
 ///
 /// # Errors
 ///
-/// Returns an error for a zero day count, an exhausted day range, a registry mismatch, missing
-/// market definitions, identifier-allocation exhaustion, or a business finance ledger that cannot
-/// represent a required mutation. The campaign is unchanged when any requested day fails.
+/// Returns an error for a zero day count, an exhausted day or schedule range, a registry mismatch,
+/// missing market definitions, identifier-allocation exhaustion, or a business finance ledger that
+/// cannot represent a required mutation. The campaign is unchanged when any requested day fails.
 pub fn advance_days(
     registry: &Registry,
     state: &mut AppState,
@@ -1699,6 +1700,12 @@ fn synchronize_character_incapacitation(
     dynasty_id: DynastyId,
     character_name: &str,
 ) -> Result<(), SimulationError> {
+    let replacement_selection_day = state
+        .institutions
+        .values()
+        .any(|institution| institution.office_holder_id == Some(character_id))
+        .then(|| checked_future_day(state.clock.day(), 30))
+        .transpose()?;
     for link in state.family_links.values_mut().filter(|link| {
         link.active
             && link.kind == FamilyLinkKind::Ward
@@ -1718,7 +1725,7 @@ fn synchronize_character_incapacitation(
             institution.office_holder_id = None;
             institution.next_selection_day = institution
                 .next_selection_day
-                .min(state.clock.day().saturating_add(30));
+                .min(replacement_selection_day.expect("office replacement day was preflighted"));
         }
     }
     let replacement_manager_id = state
@@ -2036,14 +2043,18 @@ fn retire_outgoing_head(state: &mut AppState, outgoing_head_id: CharacterId) {
     }
 }
 
-fn update_institutions_for_succession(state: &mut AppState, outgoing_head_id: CharacterId) {
+fn update_institutions_for_succession(
+    state: &mut AppState,
+    outgoing_head_id: CharacterId,
+    replacement_selection_day: Option<i64>,
+) {
     for institution in state.institutions.values_mut() {
         institution.members.remove(&outgoing_head_id);
         if institution.office_holder_id == Some(outgoing_head_id) {
             institution.office_holder_id = None;
             institution.next_selection_day = institution
                 .next_selection_day
-                .min(state.clock.day().saturating_add(30));
+                .min(replacement_selection_day.expect("office replacement day was preflighted"));
         }
     }
 }
@@ -2209,6 +2220,12 @@ fn apply_successions(
             next_charter_version,
             new_heir_capabilities,
         } = line;
+        let replacement_selection_day = state
+            .institutions
+            .values()
+            .any(|institution| institution.office_holder_id == Some(outgoing_head_id))
+            .then(|| checked_future_day(state.clock.day(), 30))
+            .transpose()?;
         retire_outgoing_head(state, outgoing_head_id);
         {
             let incoming = state
@@ -2219,7 +2236,7 @@ fn apply_successions(
             incoming.runtime.loyalty_basis_points = 10_000;
         }
 
-        update_institutions_for_succession(state, outgoing_head_id);
+        update_institutions_for_succession(state, outgoing_head_id, replacement_selection_day);
         transfer_succession_business_management(
             state,
             dynasty_id,

@@ -2708,6 +2708,52 @@ mod contracts {
     }
 
     #[test]
+    fn successful_final_delivery_fulfills_without_a_phantom_due_date() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let due_day = state.clock.day();
+        let (buyer_id, seller_id, good_id, quantity, payment) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.next_due_day = due_day;
+            contract.end_day = due_day + 3;
+            (
+                contract.buyer_business_id,
+                contract.seller_business_id,
+                contract.good_id,
+                contract.quantity_per_week,
+                cost_for(contract.quantity_per_week, contract.unit_price),
+            )
+        };
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .inventory
+            .insert(good_id, quantity);
+        state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist")
+            .finance
+            .cash = payment;
+
+        settle_contracts(&mut state).expect("final contract settlement must succeed");
+
+        let contract = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must remain auditable");
+        assert_eq!(contract.status, ContractStatus::Fulfilled);
+        assert_eq!(
+            contract.next_due_day, due_day,
+            "a fulfilled contract must preserve its final historical due date"
+        );
+    }
+
+    #[test]
     fn missed_final_delivery_cannot_end_as_fulfilled() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
@@ -3859,6 +3905,12 @@ mod property_liquidation {
 mod loans {
     use super::*;
 
+    fn set_clock_day_for_test(state: AppState, day: i64) -> AppState {
+        let mut value = serde_json::to_value(state).expect("test state must serialize");
+        value["clock"]["day"] = serde_json::Value::from(day);
+        serde_json::from_value(value).expect("test state with adjusted clock must deserialize")
+    }
+
     fn insert_test_civic_debt(state: &mut AppState) -> (crate::ids::CivicDebtId, DynastyId) {
         let creditor_dynasty_id = state
             .dynasties
@@ -4421,6 +4473,88 @@ mod loans {
     }
 
     #[test]
+    fn final_loan_payment_preserves_the_historical_due_day() {
+        let mut state = make_test_campaign();
+        let loan_id = current_loan_id(&state);
+        let due_day = state.clock.day();
+        let borrower_id = {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.balance = Money::from_copper(100);
+            loan.weekly_payment = Money::from_copper(100);
+            loan.interest_basis_points = 0;
+            loan.next_due_day = due_day;
+            loan.borrower_dynasty_id
+        };
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::from_copper(100);
+
+        settle_loans(&mut state).expect("final loan settlement must succeed");
+
+        let loan = state
+            .loans
+            .get(&loan_id)
+            .expect("loan must remain auditable");
+        assert_eq!(loan.status, LoanStatus::Repaid);
+        assert_eq!(loan.balance, Money::ZERO);
+        assert_eq!(
+            loan.next_due_day, due_day,
+            "a repaid loan must not manufacture a future payment date"
+        );
+    }
+
+    #[test]
+    fn loan_due_date_range_failure_is_atomic() {
+        let loan_id = current_loan_id(&make_test_campaign());
+        let day = i64::MAX - 1;
+        let mut state = set_clock_day_for_test(make_test_campaign(), day);
+        for loan in state.loans.values_mut() {
+            if loan.id == loan_id {
+                loan.balance = Money::from_copper(200);
+                loan.weekly_payment = Money::from_copper(100);
+                loan.interest_basis_points = 0;
+                loan.next_due_day = day;
+                loan.status = LoanStatus::Current;
+            } else {
+                loan.status = LoanStatus::Repaid;
+                loan.balance = Money::ZERO;
+            }
+        }
+        let borrower_id = state
+            .loans
+            .get(&loan_id)
+            .expect("loan must exist")
+            .borrower_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::from_copper(1_000);
+        let before = state.clone();
+
+        let result = settle_loans(&mut state);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::Timeline(
+                TimelineError::FutureDayOutOfRange {
+                    base_day: day,
+                    offset_days: 7,
+                }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an unrepresentable next loan due date must fail before interest or payment mutation",
+        );
+    }
+
+    #[test]
     fn civic_debt_payment_moves_treasury_budget_to_the_creditor() {
         let registry = test_registry();
         let mut state = make_test_campaign();
@@ -4497,7 +4631,13 @@ mod loans {
                 .expect("debt must exist");
             debt.balance = Money::from_copper(100);
             debt.weekly_payment = Money::from_copper(100);
+            debt.interest_basis_points = 0;
         }
+        let due_day = state
+            .civic_debts
+            .get(&debt_id)
+            .expect("debt must exist")
+            .next_due_day;
         let pair = DynastyPair::new(state.player_dynasty_id, creditor_dynasty_id);
         state
             .relationships
@@ -4511,6 +4651,10 @@ mod loans {
         assert_eq!(debt.balance, Money::ZERO);
         assert_eq!(debt.status, CivicDebtStatus::Repaid);
         assert_eq!(debt.missed_payments, 0);
+        assert_eq!(
+            debt.next_due_day, due_day,
+            "repaid civic debt must preserve its final historical due day"
+        );
         assert_eq!(
             state
                 .relationships

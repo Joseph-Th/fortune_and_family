@@ -1912,6 +1912,45 @@ mod validation {
     }
 
     #[test]
+    fn rejects_loan_due_day_at_the_reserved_timeline_boundary() {
+        let mut state = make_test_campaign();
+        let loan = state
+            .loans
+            .values_mut()
+            .next()
+            .expect("campaign must contain a loan");
+        loan.next_due_day = i64::MAX;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("exhausted-loan-due-day.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid due date",
+        );
+    }
+
+    #[test]
+    fn rejects_information_report_expiry_at_the_reserved_timeline_boundary() {
+        let mut state = make_test_campaign();
+        let report = state
+            .information_reports
+            .values_mut()
+            .next()
+            .expect("campaign must contain an information report");
+        report.expires_day = i64::MAX;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("exhausted-information-expiry.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "information report",
+        );
+    }
+
+    #[test]
     fn rejects_operational_employment_for_an_insolvent_business() {
         let state = make_test_campaign();
         let business_id = state

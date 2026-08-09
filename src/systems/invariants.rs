@@ -33,6 +33,10 @@ impl RegistryIds {
     }
 }
 
+const fn is_schedulable_day(day: i64) -> bool {
+    day != i64::MAX
+}
+
 /// Asserts all cheap runtime invariants in debug builds.
 ///
 /// # Panics
@@ -475,7 +479,8 @@ fn validate_institutions(registry: &Registry, state: &AppState, ids: &RegistryId
                 && institution.term_number > 0
                 && institution.term_number < u32::MAX
                 && institution.term_started_day <= state.clock.day()
-                && institution.next_selection_day >= institution.term_started_day,
+                && institution.next_selection_day >= institution.term_started_day
+                && is_schedulable_day(institution.next_selection_day),
             "Lifecycle Validity: institution budget or term timing is invalid"
         );
         debug_assert!(
@@ -583,6 +588,10 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             "Registry Reference Validity: contract good does not exist"
         );
         validate_contract_financial_values(contract);
+        debug_assert!(
+            is_schedulable_day(contract.next_due_day) && is_schedulable_day(contract.end_day),
+            "Lifecycle Validity: contract schedule exceeds the supported timeline"
+        );
         debug_assert!(
             contract.next_due_day <= contract.end_day || contract.status != ContractStatus::Active,
             "Lifecycle Validity: active contract due date exceeds its term"
@@ -789,6 +798,10 @@ fn validate_loans(state: &AppState) {
             loan.interest_basis_points <= 10_000,
             "Lifecycle Validity: loan interest is outside basis-point range"
         );
+        debug_assert!(
+            is_schedulable_day(loan.next_due_day),
+            "Lifecycle Validity: loan due date exceeds the supported timeline"
+        );
         if matches!(
             loan.status,
             LoanStatus::Current | LoanStatus::Delinquent | LoanStatus::Restructured
@@ -896,7 +909,9 @@ fn validate_civic_debts(state: &AppState) {
             "Lifecycle Validity: civic debt balance or interest is invalid"
         );
         debug_assert!(
-            debt.issued_day <= state.clock.day() && debt.next_due_day >= debt.issued_day,
+            is_schedulable_day(debt.next_due_day)
+                && debt.issued_day <= state.clock.day()
+                && debt.next_due_day >= debt.issued_day,
             "Lifecycle Validity: civic debt dates are invalid"
         );
         match debt.status {
@@ -1241,7 +1256,9 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
             "Record Reference Validity: information report owner does not exist"
         );
         debug_assert!(
-            report.created_day <= state.clock.day() && report.expires_day >= report.created_day,
+            is_schedulable_day(report.expires_day)
+                && report.created_day <= state.clock.day()
+                && report.expires_day >= report.created_day,
             "Lifecycle Validity: information report dates are invalid"
         );
         debug_assert!(
@@ -1409,7 +1426,9 @@ fn validate_legal_cases(state: &AppState) {
             "Lifecycle Validity: legal case measure is outside basis-point range"
         );
         debug_assert!(
-            case.filed_day <= state.clock.day() && case.hearing_day >= case.filed_day,
+            is_schedulable_day(case.hearing_day)
+                && case.filed_day <= state.clock.day()
+                && case.hearing_day >= case.filed_day,
             "Lifecycle Validity: legal case dates are invalid"
         );
         debug_assert!(
