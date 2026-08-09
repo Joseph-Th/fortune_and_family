@@ -1,12 +1,17 @@
 //! Validated multi-record transactions and shared simulation errors.
 
 use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};
-use crate::ids::{BusinessId, CivicDebtId, DynastyId, GoodId, HouseholdId, InstitutionId, LoanId};
+use crate::ids::{
+    BusinessId, CivicDebtId, DynastyId, GoodId, HouseholdId, IdentifierAllocationError,
+    InstitutionId, LoanId,
+};
 use crate::money::{Money, Quantity};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SimulationError {
+    #[error(transparent)]
+    IdentifierAllocation(#[from] IdentifierAllocationError),
     #[error("day count must be positive, received {days}")]
     InvalidDayCount { days: u32 },
     #[error(

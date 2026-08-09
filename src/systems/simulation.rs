@@ -111,9 +111,9 @@ struct SuccessionShock {
 ///
 /// # Errors
 ///
-/// Returns an error for a zero day count, an exhausted day range, a registry mismatch, or missing
-/// market definitions, and when a business finance ledger cannot represent a required mutation.
-/// The campaign is unchanged when any requested day fails.
+/// Returns an error for a zero day count, an exhausted day range, a registry mismatch, missing
+/// market definitions, identifier-allocation exhaustion, or a business finance ledger that cannot
+/// represent a required mutation. The campaign is unchanged when any requested day fails.
 pub fn advance_days(
     registry: &Registry,
     state: &mut AppState,
@@ -180,9 +180,9 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
     apply_maintenance(state, maintenance_plan)?;
 
     apply_market_spoilage(registry, state);
-    update_market_prices(registry, state);
+    update_market_prices(registry, state)?;
     super::strategic::apply_law_price_controls(registry, state);
-    update_business_lifecycle(registry, state);
+    update_business_lifecycle(registry, state)?;
 
     state.clock.advance_one_day();
     if state.clock.is_week_boundary() {
@@ -1298,7 +1298,7 @@ fn apply_market_spoilage(registry: &Registry, state: &mut AppState) {
     }
 }
 
-fn update_market_prices(registry: &Registry, state: &mut AppState) {
+fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     let day_of_year = state.clock.day_of_year();
     let production_floors = production_price_floors(registry, state);
     let mut price_shocks = Vec::new();
@@ -1364,7 +1364,7 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) {
             .then_with(|| left.0.cmp(&right.0))
     });
     for (good_name, price, change_basis_points) in price_shocks.into_iter().take(3) {
-        let id = state.next_ids.chronicle();
+        let id = state.next_ids.try_chronicle()?;
         state.chronicle.push(ChronicleEntry {
             id,
             day: state.clock.day(),
@@ -1372,6 +1372,7 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) {
             summary: format!("{good_name} moved by {change_basis_points} basis points to {price}."),
         });
     }
+    Ok(())
 }
 
 fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<GoodId, Money> {
@@ -1488,7 +1489,10 @@ fn decide_market_causes(
     causes
 }
 
-fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
+fn update_business_lifecycle(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let snapshots: Vec<_> = state
         .businesses
         .iter()
@@ -1565,7 +1569,7 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
                 format!("Business {business_id} closed after unresolved insolvency."),
             ),
         };
-        let id = state.next_ids.chronicle();
+        let id = state.next_ids.try_chronicle()?;
         state.chronicle.push(ChronicleEntry {
             id,
             day: state.clock.day(),
@@ -1573,6 +1577,7 @@ fn update_business_lifecycle(registry: &Registry, state: &mut AppState) {
             summary,
         });
     }
+    Ok(())
 }
 
 fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationError> {
@@ -1622,7 +1627,7 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
 
 fn process_year_boundary(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     let year = state.clock.year(registry.scenario().start_year());
-    let id = state.next_ids.chronicle();
+    let id = state.next_ids.try_chronicle()?;
     state.chronicle.push(ChronicleEntry {
         id,
         day: state.clock.day(),
@@ -1631,13 +1636,13 @@ fn process_year_boundary(registry: &Registry, state: &mut AppState) -> Result<()
     });
 
     update_campaign_phases(state);
-    update_character_health(state);
+    update_character_health(state)?;
     let succession_plan = decide_successions(state)?;
-    apply_successions(state, succession_plan);
+    apply_successions(state, succession_plan)?;
     Ok(())
 }
 
-fn update_character_health(state: &mut AppState) {
+fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> {
     let epidemic_severity = state
         .crises
         .values()
@@ -1683,8 +1688,9 @@ fn update_character_health(state: &mut AppState) {
         }
     }
     for (character_id, dynasty_id, character_name) in newly_incapacitated {
-        synchronize_character_incapacitation(state, character_id, dynasty_id, &character_name);
+        synchronize_character_incapacitation(state, character_id, dynasty_id, &character_name)?;
     }
+    Ok(())
 }
 
 fn synchronize_character_incapacitation(
@@ -1692,7 +1698,7 @@ fn synchronize_character_incapacitation(
     character_id: CharacterId,
     dynasty_id: DynastyId,
     character_name: &str,
-) {
+) -> Result<(), SimulationError> {
     for link in state.family_links.values_mut().filter(|link| {
         link.active
             && link.kind == FamilyLinkKind::Ward
@@ -1742,15 +1748,16 @@ fn synchronize_character_incapacitation(
             .manager_id = replacement_manager_id;
     }
     if dynasty_id == state.player_dynasty_id {
-        super::strategic::push_outbox(
+        super::strategic::try_push_outbox(
             state,
             OutboxKind::Family,
             format!("{character_name} became incapacitated"),
             format!(
                 "Character {character_id} left active family, institutional, and business duties because their health reached zero."
             ),
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn resolve_annual_health(current: u16, age_years: i64, epidemic_severity: u16) -> u16 {
@@ -2078,8 +2085,8 @@ fn create_succession_heir(
     new_heir_birth_day: i64,
     new_heir_link_kind: FamilyLinkKind,
     new_heir_capabilities: CharacterCapabilities,
-) -> CharacterId {
-    let new_heir_id = state.next_ids.character();
+) -> Result<CharacterId, SimulationError> {
+    let new_heir_id = state.next_ids.try_character()?;
     state.characters.insert(Character {
         identity: CharacterIdentity {
             id: new_heir_id,
@@ -2095,7 +2102,7 @@ fn create_succession_heir(
             role: CharacterRole::Heir,
         },
     });
-    let family_link_id = state.next_ids.family_link();
+    let family_link_id = state.next_ids.try_family_link()?;
     state.family_links.insert(
         family_link_id,
         FamilyLink {
@@ -2107,9 +2114,8 @@ fn create_succession_heir(
             property_claim_basis_points: 8_000,
         },
     );
-    new_heir_id
+    Ok(new_heir_id)
 }
-
 fn apply_family_succession_transition(
     state: &mut AppState,
     dynasty_id: DynastyId,
@@ -2160,8 +2166,8 @@ fn record_succession_transition(
     formally_prepared: bool,
     family_unity_loss: u16,
     legitimacy_loss: u16,
-) {
-    let id = state.next_ids.chronicle();
+) -> Result<(), SimulationError> {
+    let id = state.next_ids.try_chronicle()?;
     state.chronicle.push(ChronicleEntry {
         id,
         day: state.clock.day(),
@@ -2171,18 +2177,22 @@ fn record_succession_transition(
         ),
     });
     if dynasty_id == state.player_dynasty_id {
-        super::strategic::push_outbox(
+        super::strategic::try_push_outbox(
             state,
             OutboxKind::Family,
             "A new generation inherited the house".to_owned(),
             format!(
                 "Character {incoming_head_id} succeeded character {outgoing_head_id}. Family unity fell by {family_unity_loss} bp and legitimacy by {legitimacy_loss} bp. Formal heir preparation was {formally_prepared}, so the severity of the transition reflects the dynasty's succession planning."
             ),
-        );
+        )?;
     }
+    Ok(())
 }
 
-fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
+fn apply_successions(
+    state: &mut AppState,
+    lines: Vec<SuccessionLine>,
+) -> Result<(), SimulationError> {
     for line in lines {
         let SuccessionLine {
             dynasty_id,
@@ -2224,7 +2234,7 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
             new_heir_birth_day,
             new_heir_link_kind,
             new_heir_capabilities,
-        );
+        )?;
         apply_family_succession_transition(
             state,
             dynasty_id,
@@ -2259,8 +2269,9 @@ fn apply_successions(state: &mut AppState, lines: Vec<SuccessionLine>) {
             formally_prepared,
             family_unity_loss,
             legitimacy_loss,
-        );
+        )?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

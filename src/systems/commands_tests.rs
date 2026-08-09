@@ -964,6 +964,46 @@ mod validation {
     }
 
     #[test]
+    fn contract_price_bounds_use_the_non_player_buyer_when_player_is_seller() {
+        let mut state = make_test_campaign();
+        let terms = player_buyer_contract_terms(&state);
+        let player_business_id = terms.buyer_business_id;
+        let non_player_business_id = terms.seller_business_id;
+        let non_player_dynasty_id = state
+            .businesses
+            .get(non_player_business_id)
+            .expect("non-player business must exist")
+            .owner_dynasty_id();
+        let pair = DynastyPair::new(state.player_dynasty_id, non_player_dynasty_id);
+        {
+            let relationship = state
+                .relationships
+                .get_mut(&pair)
+                .expect("counterparty relationship must exist");
+            relationship.trust_basis_points = 1_000;
+            relationship.resentment_basis_points = 7_000;
+        }
+        let market_price = state
+            .market
+            .get_quote(terms.good_id)
+            .expect("contract good must have a market quote")
+            .price();
+
+        let bounds = contract_counterparty_price_bounds(
+            &state,
+            non_player_business_id,
+            player_business_id,
+            market_price,
+        );
+
+        assert_eq!(bounds.relationship_pressure_basis_points, 2_500);
+        assert!(
+            bounds.maximum_buyer_price < market_price,
+            "a hostile non-player buyer must demand a discount from the player seller"
+        );
+    }
+
+    #[test]
     fn non_player_contract_counterparty_requires_meaningful_breach_penalty() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -2494,7 +2534,7 @@ mod politics {
             },
         )
         .expect("supported member must be able to withdraw");
-        for _ in 0..INSTITUTION_SUPPORT_INTERVAL_DAYS {
+        for _ in 0..INSTITUTION_WITHDRAWAL_RECOVERY_DAYS {
             state.clock.advance_one_day();
         }
         state

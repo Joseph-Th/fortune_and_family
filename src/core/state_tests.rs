@@ -57,30 +57,88 @@ mod aggregates {
 
 mod id_allocation {
     use super::*;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use crate::ids::IdentifierAllocationError;
+    use crate::systems::{SimulationError, StrategicError, buy_unowned_property};
 
     #[test]
-    fn allocator_stops_at_the_terminal_valid_counter_without_corrupting_it() {
+    fn allocator_reports_exhaustion_without_corrupting_the_terminal_counter() {
         let mut next_ids = NextIds::new();
         next_ids.business = u32::MAX - 2;
 
-        let final_usable_id = next_ids.business();
+        let final_usable_id = next_ids
+            .try_business()
+            .expect("penultimate counter must still allocate");
 
         assert_eq!(final_usable_id.value(), u32::MAX - 2);
         assert_eq!(next_ids.business, u32::MAX - 1);
 
         let before = next_ids.clone();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _ = next_ids.business();
-        }));
+        let result = next_ids.try_business();
 
-        assert!(
-            result.is_err(),
-            "allocation must stop before advancing into the exhausted sentinel"
+        assert_eq!(
+            result,
+            Err(IdentifierAllocationError::Business),
+            "allocation must report exhaustion before advancing into the invalid sentinel"
         );
         assert_eq!(
             next_ids, before,
             "allocation exhaustion must not advance the counter into an invalid save state"
+        );
+    }
+
+    #[test]
+    fn public_transaction_rolls_back_when_feedback_identifier_space_is_exhausted() {
+        let mut state = make_test_campaign();
+        let player_dynasty_id = state.player_dynasty_id;
+        let (property_id, price) = state
+            .properties
+            .values()
+            .find(|property| property.owner_dynasty_id.is_none())
+            .map(|property| (property.id, property.value))
+            .expect("campaign must contain an unowned property");
+        state
+            .dynasties
+            .get_mut(&player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = price;
+        state.next_ids.outbox = u32::MAX - 1;
+        let before = state.clone();
+
+        let result = buy_unowned_property(&mut state, player_dynasty_id, property_id);
+
+        assert_eq!(
+            result,
+            Err(StrategicError::IdentifierAllocation(
+                IdentifierAllocationError::OutboxMessage
+            ))
+        );
+        assert_state_eq(
+            &before,
+            &state,
+            "feedback identifier exhaustion must roll back the entire property purchase",
+        );
+    }
+
+    #[test]
+    fn simulation_rolls_back_when_chronicle_identifier_space_is_exhausted() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state.next_ids.chronicle = u32::MAX - 1;
+        let before = state.clone();
+
+        let result = advance_days(registry, &mut state, 360);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::IdentifierAllocation(
+                IdentifierAllocationError::ChronicleEntry
+            ))
+        );
+        assert_state_eq(
+            &before,
+            &state,
+            "identifier exhaustion during simulation must discard the candidate state",
         );
     }
 }

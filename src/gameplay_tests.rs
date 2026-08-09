@@ -561,6 +561,7 @@ mod harness {
         for heading in [
             "scores:",
             "Experience health",
+            "ending civic conditions:",
             "Command coverage",
             "Strongest observed command consequences",
             "Findings",
@@ -569,6 +570,10 @@ mod harness {
         ] {
             assert!(rendered.contains(heading), "report must contain {heading}");
         }
+        assert!(
+            rendered.contains("civic | laws") && rendered.contains("| works"),
+            "campaign summaries must expose readable civic identity instead of only checksums"
+        );
         serde_json::to_string(&report).expect("report must serialize to JSON");
         assert!(
             !report.limitations.is_empty()
@@ -978,6 +983,171 @@ mod candidates {
                 .iter()
                 .any(|candidate| candidate.kind == GameplayCommandKind::WithdrawFromInstitution),
             "financial overextension must surface an executable resignation candidate"
+        );
+    }
+
+    #[test]
+    fn office_retreat_uses_the_same_forward_reserve_as_other_office_decisions() {
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        let reserve = player_committed_duty_reserve(&state);
+        assert_eq!(reserve, player_office_duty_reserve(&state, 0));
+        assert!(reserve > AGENT_OFFICE_LIQUIDITY_BUFFER);
+
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = reserve;
+        assert!(
+            !has_institution_withdrawal_opportunity(&state),
+            "meeting the full forward reserve should not force an office retreat"
+        );
+
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = reserve.saturating_sub(Money::from_copper(1));
+        assert!(
+            has_institution_withdrawal_opportunity(&state),
+            "falling below the same reserve used to block discretionary spending should surface a retreat option"
+        );
+    }
+
+    #[test]
+    fn pending_office_campaigns_are_reserved_as_a_portfolio() {
+        let mut state = make_test_campaign();
+        let player = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        let character_id = player.head_id();
+        let institution_ids: Vec<_> = state.institutions.keys().copied().take(2).collect();
+        assert_eq!(
+            institution_ids.len(),
+            2,
+            "campaign must contain two institutions"
+        );
+        let base_reserve = player_office_duty_reserve(&state, 0);
+
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeNomination,
+            subject: format!(
+                "institution:{}:character:{}",
+                institution_ids[0], character_id
+            )
+            .into(),
+            detail: "campaign_cost=300".to_owned(),
+        });
+        let one_campaign_reserve = player_office_duty_reserve(&state, 0);
+
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeNomination,
+            subject: format!(
+                "institution:{}:character:{}",
+                institution_ids[1], character_id
+            )
+            .into(),
+            detail: "campaign_cost=300".to_owned(),
+        });
+        let two_campaign_reserve = player_office_duty_reserve(&state, 0);
+
+        assert!(one_campaign_reserve > base_reserve);
+        assert!(
+            two_campaign_reserve > one_campaign_reserve,
+            "a second unresolved campaign must reserve for the larger possible office portfolio"
+        );
+    }
+
+    #[test]
+    fn voluntary_withdrawal_creates_a_real_reentry_recovery_period() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        grant_player_contract_deliveries_for_test(
+            &mut state,
+            INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+        );
+        let player_id = state.player_dynasty_id;
+        let player = state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist");
+        player.resources.reputation_quality_basis_points =
+            INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT;
+        player.resources.reputation_reliability_basis_points =
+            INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT;
+        player.resources.treasury = Money::from_copper(100_000);
+        let (institution_id, character_id) = state
+            .institutions
+            .values()
+            .find_map(|institution| {
+                institution.office_holder_id.and_then(|character_id| {
+                    state.characters.get(character_id).and_then(|character| {
+                        (character.dynasty_id() == state.player_dynasty_id)
+                            .then_some((institution.institution_id, character_id))
+                    })
+                })
+            })
+            .expect("coverage fixture must contain a player officeholder");
+        let withdrawal_day = state.clock.day();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::WithdrawFromInstitution {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("voluntary withdrawal must succeed");
+
+        let recovery_day =
+            withdrawal_day.saturating_add(crate::systems::INSTITUTION_WITHDRAWAL_RECOVERY_DAYS);
+        assert_eq!(
+            institution_support_next_day(&state, character_id),
+            Some(recovery_day)
+        );
+        let alternate_character_id = state
+            .characters
+            .iter()
+            .find(|character| {
+                character.id() != character_id
+                    && character.dynasty_id() == state.player_dynasty_id
+                    && character.status() == CharacterStatus::Active
+            })
+            .map(crate::core::Character::id)
+            .expect("campaign must contain another active family member");
+        assert_eq!(
+            institution_support_next_day(&state, alternate_character_id),
+            Some(recovery_day),
+            "an office resignation must create dynasty-wide political recovery rather than inviting an immediate family-member swap"
+        );
+        assert_eq!(
+            office_nomination_next_day(&state, alternate_character_id),
+            Some(recovery_day),
+            "existing support in another institution must not bypass the dynasty-wide recovery period"
+        );
+        let error = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect_err("a resigned character must not immediately buy back institutional support");
+        assert_eq!(
+            error,
+            CommandError::InstitutionSupportCooldown {
+                next_support_day: recovery_day
+            }
         );
     }
 
@@ -1990,6 +2160,86 @@ mod candidates {
         assert!(candidates.iter().any(|(kind, value)| {
             *kind == LawKind::PublicDebtAuthorization && (10_000..=100_000).contains(value)
         }));
+    }
+
+    #[test]
+    fn law_relevance_distinguishes_persona_preference_from_world_pressure() {
+        let mut state = make_test_campaign();
+
+        assert!(law_persona_bonus(GameplayPersona::Entrepreneur, LawKind::ForeignMerchantToll) > 0);
+        assert!(
+            law_persona_bonus(
+                GameplayPersona::Entrepreneur,
+                LawKind::GuildEntryRestriction
+            ) < 0,
+            "entrepreneur policy should not drift toward restrictive guild law merely because the office permits it"
+        );
+        assert_eq!(
+            law_context_relevance_bonus(&state, LawKind::InterestLimit),
+            0,
+            "credit regulation should not become generic legislative maintenance without debt distress"
+        );
+        state
+            .loans
+            .values_mut()
+            .next()
+            .expect("campaign must contain a loan")
+            .status = LoanStatus::Delinquent;
+        assert!(
+            law_context_relevance_bonus(&state, LawKind::InterestLimit) > 0,
+            "actual credit distress should make an interest limit strategically relevant"
+        );
+    }
+
+    #[test]
+    fn opportunist_defers_debt_office_until_credit_exists() {
+        let mut state = make_test_campaign();
+        for loan in state.loans.values_mut() {
+            loan.status = LoanStatus::Repaid;
+        }
+        for debt in state.civic_debts.values_mut() {
+            debt.status = CivicDebtStatus::Repaid;
+        }
+
+        assert_eq!(
+            office_power_ascent_bonus(
+                &state,
+                GameplayPersona::Opportunist,
+                OfficePower::DebtEnforcement,
+            ),
+            0,
+            "a debt-enforcement office should not be the opportunist's default first political route in a city with no active credit"
+        );
+
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival lender");
+        issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(1_000),
+                weekly_payment: Money::from_copper(100),
+                interest_basis_points: 500,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture credit must be issuable");
+
+        assert_eq!(
+            office_power_ascent_bonus(
+                &state,
+                GameplayPersona::Opportunist,
+                OfficePower::DebtEnforcement,
+            ),
+            office_power_persona_bonus(GameplayPersona::Opportunist, OfficePower::DebtEnforcement,),
+            "once credit exists, debt enforcement becomes a coherent opportunist political target"
+        );
     }
 
     #[test]
@@ -3139,6 +3389,61 @@ mod metrics {
     }
 
     #[test]
+    fn public_work_preferences_expose_distinct_need_and_persona_routes() {
+        let mut state = make_test_campaign();
+        let district = state
+            .districts
+            .values_mut()
+            .next()
+            .expect("campaign must contain a district");
+        district.employment_basis_points = 2_000;
+        district.sanitation_basis_points = 9_000;
+        district.safety_basis_points = 9_000;
+        district.unrest_basis_points = 1_000;
+
+        let entrepreneur = preferred_public_work_kinds(district, GameplayPersona::Entrepreneur);
+        let steward = preferred_public_work_kinds(district, GameplayPersona::Steward);
+
+        assert_eq!(entrepreneur[0], PublicWorkKind::Market);
+        assert_ne!(entrepreneur[0], entrepreneur[1]);
+        assert_ne!(
+            entrepreneur, steward,
+            "different governing priorities should expose different project shortlists under the same district conditions"
+        );
+    }
+
+    #[test]
+    fn public_work_candidate_ranking_preserves_material_need() {
+        let mut state = make_test_campaign();
+        let district = state
+            .districts
+            .values_mut()
+            .next()
+            .expect("campaign must contain a district");
+        district.employment_basis_points = 8_000;
+        district.sanitation_basis_points = 9_000;
+        district.safety_basis_points = 9_000;
+        district.unrest_basis_points = 4_500;
+
+        let shortlist = preferred_public_work_kinds(district, GameplayPersona::Steward);
+        assert_eq!(
+            shortlist[0],
+            PublicWorkKind::School,
+            "high unrest should make a school the steward's strongest need-driven project"
+        );
+        assert!(
+            public_work_candidate_priority(440, district, GameplayPersona::Steward, shortlist[0],)
+                > public_work_candidate_priority(
+                    440,
+                    district,
+                    GameplayPersona::Steward,
+                    shortlist[1],
+                ),
+            "final candidate ranking must preserve the need ordering used to build the shortlist"
+        );
+    }
+
+    #[test]
     fn terminal_phase_transition_requests_one_decision_cycle() {
         let mut accumulator = CampaignAccumulator::new();
         accumulator.fantasy_arc.first_succession_day = Some(7_200);
@@ -3196,15 +3501,14 @@ mod metrics {
     }
 
     #[test]
-    fn snapshots_detect_district_changes_that_do_not_move_average_unrest() {
+    fn snapshots_measure_material_district_conditions() {
         let mut state = make_test_campaign();
         let earlier = GameplaySnapshot::capture(&state);
-        state
-            .districts
-            .values_mut()
-            .next()
-            .expect("campaign must contain a district")
-            .sanitation_basis_points += 1;
+        for district in state.districts.values_mut() {
+            district.employment_basis_points = district.employment_basis_points.saturating_add(100);
+            district.sanitation_basis_points = district.sanitation_basis_points.saturating_add(100);
+            district.safety_basis_points = district.safety_basis_points.saturating_add(100);
+        }
         let later = GameplaySnapshot::capture(&state);
 
         assert!(
@@ -3212,6 +3516,41 @@ mod metrics {
                 .changed_domains(&later)
                 .contains(&GameplayDomain::Districts)
         );
+        assert_eq!(
+            later.average_district_employment,
+            earlier.average_district_employment.saturating_add(100)
+        );
+        assert_eq!(
+            later.average_district_sanitation,
+            earlier.average_district_sanitation.saturating_add(100)
+        );
+        assert_eq!(
+            later.average_district_safety,
+            earlier.average_district_safety.saturating_add(100)
+        );
+        assert_eq!(
+            earlier.district_conditions.len(),
+            later.district_conditions.len()
+        );
+        for (before, after) in earlier
+            .district_conditions
+            .iter()
+            .zip(&later.district_conditions)
+        {
+            assert_eq!(before.district_id, after.district_id);
+            assert_eq!(
+                after.employment_basis_points,
+                before.employment_basis_points.saturating_add(100)
+            );
+            assert_eq!(
+                after.sanitation_basis_points,
+                before.sanitation_basis_points.saturating_add(100)
+            );
+            assert_eq!(
+                after.safety_basis_points,
+                before.safety_basis_points.saturating_add(100)
+            );
+        }
     }
 
     #[test]
@@ -3629,26 +3968,27 @@ mod metrics {
 
     #[test]
     fn personas_value_distinct_institutional_powers() {
-        let public_works = BTreeSet::from([OfficePower::PublicWorks]);
-        let market_tolls = BTreeSet::from([OfficePower::MarketTolls]);
-        let debt = BTreeSet::from([OfficePower::DebtEnforcement]);
-        let taxation = BTreeSet::from([OfficePower::Taxation]);
-
         assert!(
-            institution_power_bonus(GameplayPersona::Steward, &public_works)
-                > institution_power_bonus(GameplayPersona::Entrepreneur, &public_works)
+            office_power_persona_bonus(GameplayPersona::Steward, OfficePower::PublicWorks)
+                > office_power_persona_bonus(
+                    GameplayPersona::Entrepreneur,
+                    OfficePower::PublicWorks,
+                )
         );
         assert!(
-            institution_power_bonus(GameplayPersona::Entrepreneur, &market_tolls)
-                > institution_power_bonus(GameplayPersona::Steward, &market_tolls)
+            office_power_persona_bonus(GameplayPersona::Entrepreneur, OfficePower::MarketTolls)
+                > office_power_persona_bonus(GameplayPersona::Steward, OfficePower::MarketTolls)
         );
         assert!(
-            institution_power_bonus(GameplayPersona::Opportunist, &debt)
-                > institution_power_bonus(GameplayPersona::Steward, &debt)
+            office_power_persona_bonus(GameplayPersona::Opportunist, OfficePower::DebtEnforcement)
+                > office_power_persona_bonus(
+                    GameplayPersona::Steward,
+                    OfficePower::DebtEnforcement
+                )
         );
         assert!(
-            institution_power_bonus(GameplayPersona::PowerBroker, &taxation)
-                > institution_power_bonus(GameplayPersona::Entrepreneur, &taxation)
+            office_power_persona_bonus(GameplayPersona::PowerBroker, OfficePower::Taxation)
+                > office_power_persona_bonus(GameplayPersona::Entrepreneur, OfficePower::Taxation)
         );
     }
 
@@ -3964,6 +4304,119 @@ mod findings {
         assert!(findings.iter().all(|finding| {
             finding.title != "Crises leave household welfare almost mechanically flat"
         }));
+    }
+
+    #[test]
+    fn materially_convergent_cities_are_reported_despite_civic_identity_variation() {
+        let mut report = cached_focused_report(360);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = [1_u64, 2]
+            .into_iter()
+            .flat_map(|seed| {
+                [
+                    GameplayPersona::Steward,
+                    GameplayPersona::Entrepreneur,
+                    GameplayPersona::PowerBroker,
+                    GameplayPersona::Opportunist,
+                ]
+                .into_iter()
+                .enumerate()
+                .map({
+                    let baseline = baseline.clone();
+                    move |(index, persona)| {
+                        let offset = u16::try_from(index).expect("persona index must fit") * 20;
+                        let mut campaign = baseline.clone();
+                        campaign.seed = seed;
+                        campaign.persona = persona;
+                        campaign.background = StartingBackground::Baker;
+                        campaign.simulated_days = 3_600;
+                        campaign.end.active_law_checksum = i64::try_from(index).unwrap_or(0) + 1;
+                        campaign.end.average_food_satisfaction = 9_800 + offset;
+                        campaign.end.average_district_unrest = 700 + offset;
+                        campaign.end.average_district_employment = 6_000 + offset;
+                        campaign.end.average_district_sanitation = 7_000 + offset;
+                        campaign.end.average_district_safety = 7_500 + offset;
+                        campaign
+                    }
+                })
+            })
+            .collect();
+        report.aggregate.campaigns = 8;
+        report.aggregate.simulated_days = 28_800;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(
+            &findings,
+            "Different civic strategies converge on similar material city conditions",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn localized_civic_divergence_is_not_erased_by_citywide_averages() {
+        let mut report = cached_focused_report(360);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = [1_u64, 2]
+            .into_iter()
+            .flat_map(|seed| {
+                [
+                    GameplayPersona::Steward,
+                    GameplayPersona::Entrepreneur,
+                    GameplayPersona::PowerBroker,
+                    GameplayPersona::Opportunist,
+                ]
+                .into_iter()
+                .enumerate()
+                .map({
+                    let baseline = baseline.clone();
+                    move |(index, persona)| {
+                        let mut campaign = baseline.clone();
+                        campaign.seed = seed;
+                        campaign.persona = persona;
+                        campaign.background = StartingBackground::Baker;
+                        campaign.simulated_days = 3_600;
+                        campaign.end.active_law_checksum = i64::try_from(index).unwrap_or(0) + 1;
+                        campaign.end.average_food_satisfaction = 9_900;
+                        campaign.end.average_district_unrest = 700;
+                        campaign.end.average_district_employment = 6_000;
+                        campaign.end.average_district_sanitation = 7_000;
+                        campaign.end.average_district_safety = 7_500;
+                        let local_offset =
+                            u16::try_from(index).expect("persona index must fit") * 250;
+                        let district = campaign
+                            .end
+                            .district_conditions
+                            .first_mut()
+                            .expect("campaign snapshot must contain district conditions");
+                        district.employment_basis_points = district
+                            .employment_basis_points
+                            .saturating_add(local_offset);
+                        district.sanitation_basis_points = district
+                            .sanitation_basis_points
+                            .saturating_add(local_offset);
+                        campaign
+                    }
+                })
+            })
+            .collect();
+        report.aggregate.campaigns = 8;
+        report.aggregate.simulated_days = 28_800;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(
+            &findings,
+            "Different civic strategies converge on similar material city conditions",
+        );
     }
 
     #[test]
@@ -4302,6 +4755,14 @@ mod findings {
                 total_viable_command_kinds: 160,
             },
         );
+        report
+            .campaigns
+            .first_mut()
+            .expect("focused report must contain one campaign")
+            .phase_stats
+            .entry(GameplayPhase::DynasticGovernance)
+            .or_default()
+            .longest_quiet_streak_cycles = 11;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
@@ -4314,6 +4775,13 @@ mod findings {
                 .evidence
                 .contains("Thresholds missed: longest quiet streak 11 > 10 cycles"),
             "phase warning must identify the exact failed quality gate: {}",
+            finding.evidence
+        );
+        assert!(
+            finding
+                .evidence
+                .contains("Worst uninterrupted quiet streak: 11 cycles in seed"),
+            "phase warning must identify the campaign that produced the longest drought: {}",
             finding.evidence
         );
 
@@ -5598,15 +6066,13 @@ fn candidate_kinds_for_test(
     registry: &Registry,
     state: &AppState,
 ) -> BTreeSet<GameplayCommandKind> {
-    ranked_candidates(
-        registry,
-        state,
-        GameplayPersona::Opportunist,
-        &CampaignAccumulator::new(),
-    )
-    .into_iter()
-    .map(|candidate| candidate.kind)
-    .collect()
+    GameplayPersona::all()
+        .into_iter()
+        .flat_map(|persona| {
+            ranked_candidates(registry, state, persona, &CampaignAccumulator::new())
+        })
+        .map(|candidate| candidate.kind)
+        .collect()
 }
 
 fn player_business_ids_for_test(state: &AppState) -> Vec<BusinessId> {

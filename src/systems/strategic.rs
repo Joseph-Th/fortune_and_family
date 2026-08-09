@@ -17,7 +17,7 @@ use crate::core::{
 };
 use crate::ids::{
     BusinessId, CharacterId, CivicDebtId, DistrictId, DynastyId, EmploymentId, GoodId, HouseholdId,
-    InstitutionId, PropertyId,
+    IdentifierAllocationError, InstitutionId, PropertyId,
 };
 use crate::money::{Money, Quantity, checked_cost_for, cost_for, rounded_cost_copper_wide};
 use crate::registry::{InstitutionKind, Registry};
@@ -44,6 +44,8 @@ const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StrategicError {
+    #[error(transparent)]
+    IdentifierAllocation(#[from] IdentifierAllocationError),
     #[error(
         "state scenario {state_scenario:?} does not match registry scenario {registry_scenario:?}"
     )]
@@ -397,21 +399,25 @@ impl ValidatedSupplyContract {
     ///
     /// # Errors
     ///
-    /// Returns the current validation error if state changed after the token was created.
+    /// Returns the current validation error if state changed after the token was created, or an
+    /// identifier-allocation error if durable contract feedback can no longer be allocated.
     pub fn commit(
         self,
         registry: &Registry,
         state: &mut AppState,
     ) -> Result<crate::ids::ContractId, StrategicError> {
         validate_supply_contract_terms(registry, state, &self.terms)?;
-        Ok(commit_supply_contract(state, &self.terms))
+        let mut next_state = state.clone();
+        let id = commit_supply_contract(&mut next_state, &self.terms)?;
+        *state = next_state;
+        Ok(id)
     }
 }
 
 fn commit_supply_contract(
     state: &mut AppState,
     terms: &SupplyContractTerms,
-) -> crate::ids::ContractId {
+) -> Result<crate::ids::ContractId, StrategicError> {
     let &SupplyContractTerms {
         buyer_business_id,
         seller_business_id,
@@ -431,7 +437,7 @@ fn commit_supply_contract(
         .get(seller_business_id)
         .expect("validated contract seller must exist")
         .owner_dynasty_id();
-    let id = state.next_ids.contract();
+    let id = state.next_ids.try_contract()?;
     let day = state.clock.day();
     let end_day = day.saturating_add(i64::from(duration_weeks).saturating_mul(7));
     state.contracts.insert(
@@ -453,14 +459,14 @@ fn commit_supply_contract(
             status: ContractStatus::Active,
         },
     );
-    push_outbox(
+    try_push_outbox(
         state,
         OutboxKind::Contract,
         format!("Supply contract {id} signed"),
         format!(
             "Business {seller_business_id} will deliver {quantity_per_week} of good {good_id} to business {buyer_business_id} each week."
         ),
-    );
+    )?;
     adjust_dynasty_relationship(
         state,
         buyer_owner_id,
@@ -473,13 +479,13 @@ fn commit_supply_contract(
         seller_owner_id,
         &format!("Supply contract {id} was signed."),
     );
-    record_counterparty_information(
+    try_record_counterparty_information(
         state,
         buyer_owner_id,
         seller_owner_id,
         "Contract negotiation and delivery records",
-    );
-    id
+    )?;
+    Ok(id)
 }
 
 #[derive(Debug)]
@@ -492,10 +498,14 @@ impl ValidatedLoan {
     ///
     /// # Errors
     ///
-    /// Returns the current validation error if state changed after the token was created.
+    /// Returns the current validation error if state changed after the token was created, or an
+    /// identifier-allocation error if durable loan feedback can no longer be allocated.
     pub fn commit(self, state: &mut AppState) -> Result<crate::ids::LoanId, StrategicError> {
         let defaulted_loan_id = validate_loan_terms(state, &self.terms)?;
-        Ok(commit_loan(state, &self.terms, defaulted_loan_id))
+        let mut next_state = state.clone();
+        let id = commit_loan(&mut next_state, &self.terms, defaulted_loan_id)?;
+        *state = next_state;
+        Ok(id)
     }
 }
 
@@ -503,7 +513,7 @@ fn commit_loan(
     state: &mut AppState,
     terms: &LoanTerms,
     defaulted_loan_id: Option<crate::ids::LoanId>,
-) -> crate::ids::LoanId {
+) -> Result<crate::ids::LoanId, StrategicError> {
     let &LoanTerms {
         lender_dynasty_id,
         borrower_dynasty_id,
@@ -511,7 +521,10 @@ fn commit_loan(
         collateral_property_id,
         ..
     } = terms;
-    let id = defaulted_loan_id.unwrap_or_else(|| state.next_ids.loan());
+    let id = match defaulted_loan_id {
+        Some(id) => id,
+        None => state.next_ids.try_loan()?,
+    };
     let lender = state
         .dynasties
         .get_mut(&lender_dynasty_id)
@@ -539,7 +552,7 @@ fn commit_loan(
     }
     commit_loan_record(state, terms, id, defaulted_loan_id);
     let restructured = defaulted_loan_id.is_some();
-    push_outbox(
+    try_push_outbox(
         state,
         OutboxKind::Finance,
         if restructured {
@@ -556,7 +569,7 @@ fn commit_loan(
                 "Dynasty {lender_dynasty_id} lent {principal} to dynasty {borrower_dynasty_id}."
             )
         },
-    );
+    )?;
     adjust_dynasty_relationship(
         state,
         lender_dynasty_id,
@@ -573,13 +586,13 @@ fn commit_loan(
             format!("Loan {id} was issued for {principal}.")
         },
     );
-    record_counterparty_information(
+    try_record_counterparty_information(
         state,
         lender_dynasty_id,
         borrower_dynasty_id,
         "Credit underwriting and repayment records",
-    );
-    id
+    )?;
+    Ok(id)
 }
 
 fn commit_loan_record(
@@ -788,7 +801,8 @@ fn validate_supply_contract_terms(
 ///
 /// # Errors
 ///
-/// Returns the same errors as [`validate_supply_contract`].
+/// Returns the same errors as [`validate_supply_contract`], plus identifier-allocation exhaustion
+/// while committing the contract and its durable feedback.
 pub fn sign_supply_contract(
     registry: &Registry,
     state: &mut AppState,
@@ -933,7 +947,8 @@ fn validate_defaulted_loan_restructuring(
 ///
 /// # Errors
 ///
-/// Returns the same errors as [`validate_loan`].
+/// Returns the same errors as [`validate_loan`], plus identifier-allocation exhaustion while
+/// committing the loan and its durable feedback.
 pub fn issue_loan(
     state: &mut AppState,
     terms: LoanTerms,
@@ -945,12 +960,20 @@ pub fn issue_loan(
 ///
 /// # Errors
 ///
-/// Returns an error when the property or buyer is missing, the property is owned, or funds are insufficient.
-///
-/// # Panics
-///
-/// Panics if validated records are removed between validation and commit within this call.
+/// Returns an error when the property or buyer is missing, the property is owned, funds are
+/// insufficient, or durable feedback identifiers are exhausted.
 pub fn buy_unowned_property(
+    state: &mut AppState,
+    buyer_dynasty_id: DynastyId,
+    property_id: PropertyId,
+) -> Result<(), StrategicError> {
+    let mut next_state = state.clone();
+    commit_unowned_property_purchase(&mut next_state, buyer_dynasty_id, property_id)?;
+    *state = next_state;
+    Ok(())
+}
+
+fn commit_unowned_property_purchase(
     state: &mut AppState,
     buyer_dynasty_id: DynastyId,
     property_id: PropertyId,
@@ -990,12 +1013,12 @@ pub fn buy_unowned_property(
         .get_mut(&property_id)
         .expect("validated property must exist")
         .owner_dynasty_id = Some(buyer_dynasty_id);
-    push_outbox(
+    try_push_outbox(
         state,
         OutboxKind::Property,
         format!("Property {property_id} acquired"),
         format!("Dynasty {buyer_dynasty_id} acquired the property for {price}."),
-    );
+    )?;
     Ok(())
 }
 
@@ -1247,7 +1270,7 @@ fn record_completed_loan_repayment(
     lender_dynasty_id: DynastyId,
     borrower_dynasty_id: DynastyId,
     loan_id: crate::ids::LoanId,
-) {
+) -> Result<(), IdentifierAllocationError> {
     adjust_dynasty_relationship(
         state,
         lender_dynasty_id,
@@ -1260,12 +1283,13 @@ fn record_completed_loan_repayment(
         borrower_dynasty_id,
         &format!("Loan {loan_id} was repaid in full."),
     );
-    record_counterparty_information(
+    try_record_counterparty_information(
         state,
         lender_dynasty_id,
         borrower_dynasty_id,
         "Completed loan repayment records",
-    );
+    )?;
+    Ok(())
 }
 
 /// Transfers dynasty treasury into one of its businesses and rehabilitates operating condition.
@@ -1405,12 +1429,33 @@ pub(crate) fn business_recapitalization_target(
 ///
 /// # Errors
 ///
-/// Returns the same errors as [`quote_property_liquidation`].
+/// Returns the same errors as [`quote_property_liquidation`], plus identifier-allocation exhaustion
+/// while recording repayment information or durable sale feedback.
 ///
 /// # Panics
 ///
-/// Panics only if validated dynasty or property records disappear during the synchronous commit.
+/// Panics only if synchronized dynasty, property, loan, or business records violate internal
+/// invariants after successful validation.
 pub fn sell_owned_property(
+    registry: &Registry,
+    state: &mut AppState,
+    seller_dynasty_id: DynastyId,
+    buyer_dynasty_id: DynastyId,
+    property_id: PropertyId,
+) -> Result<PropertyLiquidationQuote, StrategicError> {
+    let mut next_state = state.clone();
+    let quote = commit_owned_property_sale(
+        registry,
+        &mut next_state,
+        seller_dynasty_id,
+        buyer_dynasty_id,
+        property_id,
+    )?;
+    *state = next_state;
+    Ok(quote)
+}
+
+fn commit_owned_property_sale(
     registry: &Registry,
     state: &mut AppState,
     seller_dynasty_id: DynastyId,
@@ -1458,7 +1503,7 @@ pub fn sell_owned_property(
             lien.lender_dynasty_id,
             seller_dynasty_id,
             lien.loan_id,
-        );
+        )?;
     }
     let property = state
         .properties
@@ -1467,7 +1512,7 @@ pub fn sell_owned_property(
     property.collateral_loan_id = None;
     property.owner_dynasty_id = Some(buyer_dynasty_id);
     property.tenant_dynasty_id = occupant_owner_id.filter(|owner_id| *owner_id != buyer_dynasty_id);
-    push_outbox(
+    try_push_outbox(
         state,
         OutboxKind::Property,
         format!("Property {property_id} sold"),
@@ -1482,7 +1527,7 @@ pub fn sell_owned_property(
                 quote.price, quote.lien_payoff
             )
         },
-    );
+    )?;
     adjust_dynasty_relationship(
         state,
         seller_dynasty_id,
@@ -1646,12 +1691,13 @@ struct ValidatedBusinessAcquisition {
 /// # Errors
 ///
 /// Returns an error for an unavailable business, invalid manager, insufficient recapitalization,
-/// or insufficient buyer treasury funds. Failed acquisitions leave state unchanged.
+/// insufficient buyer treasury funds, or identifier-allocation exhaustion while recording the
+/// acquisition and related feedback. Failed acquisitions leave state unchanged.
 ///
 /// # Panics
 ///
-/// Panics only if validated records are removed or altered between validation and commit within
-/// this call.
+/// Panics only if synchronized business, dynasty, character, or property records violate internal
+/// invariants after successful validation.
 pub fn acquire_business(
     registry: &Registry,
     state: &mut AppState,
@@ -1668,13 +1714,15 @@ pub fn acquire_business(
         manager_id,
         recapitalization,
     )?;
+    let mut next_state = state.clone();
     commit_business_acquisition(
-        state,
+        &mut next_state,
         buyer_dynasty_id,
         manager_id,
         recapitalization,
         validated,
-    );
+    )?;
+    *state = next_state;
     Ok(validated.quote)
 }
 
@@ -1814,7 +1862,7 @@ fn commit_business_acquisition(
     manager_id: CharacterId,
     recapitalization: Money,
     validated: ValidatedBusinessAcquisition,
-) {
+) -> Result<(), StrategicError> {
     let quote = validated.quote;
     let business_id = quote.business_id;
     state
@@ -1864,16 +1912,17 @@ fn commit_business_acquisition(
     business.operations.status = BusinessStatus::Active;
     synchronize_business_property_tenancy(state, business_id, buyer_dynasty_id);
     super::synchronize_employment_for_business_status(state, business_id, BusinessStatus::Active);
-    cancel_internalized_contracts(state, business_id, buyer_dynasty_id);
+    cancel_internalized_contracts(state, business_id, buyer_dynasty_id)?;
 
-    record_business_acquisition(state, buyer_dynasty_id, manager_id, recapitalization, quote);
+    record_business_acquisition(state, buyer_dynasty_id, manager_id, recapitalization, quote)?;
+    Ok(())
 }
 
 fn cancel_internalized_contracts(
     state: &mut AppState,
     acquired_business_id: BusinessId,
     buyer_dynasty_id: DynastyId,
-) {
+) -> Result<(), StrategicError> {
     let contract_ids: Vec<_> = state
         .contracts
         .iter()
@@ -1909,15 +1958,16 @@ fn cancel_internalized_contracts(
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Contract,
             format!("Contracts cancelled after business {acquired_business_id} acquisition"),
             format!(
                 "Contracts {ids} became internal to dynasty {buyer_dynasty_id} and were cancelled rather than counted as external commercial performance."
             ),
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn synchronize_business_property_tenancy(
@@ -1943,9 +1993,9 @@ fn record_business_acquisition(
     manager_id: CharacterId,
     recapitalization: Money,
     quote: BusinessAcquisitionQuote,
-) {
+) -> Result<(), StrategicError> {
     let business_id = quote.business_id;
-    let chronicle_id = state.next_ids.chronicle();
+    let chronicle_id = state.next_ids.try_chronicle()?;
     state.chronicle.push(ChronicleEntry {
         id: chronicle_id,
         day: state.clock.day(),
@@ -1966,7 +2016,7 @@ fn record_business_acquisition(
             recapitalization.copper()
         ),
     });
-    push_outbox(
+    try_push_outbox(
         state,
         OutboxKind::Finance,
         format!("Business {business_id} acquired"),
@@ -1974,7 +2024,8 @@ fn record_business_acquisition(
             "The dynasty paid {} and supplied {} working capital. Character {manager_id} now manages the enterprise.",
             quote.purchase_price, recapitalization
         ),
-    );
+    )?;
+    Ok(())
 }
 
 pub(crate) fn initialize_strategic_state(registry: &Registry, state: &mut AppState) {
@@ -2703,7 +2754,7 @@ pub(crate) fn run_weekly_strategic_systems(
     settle_property_rents(state)?;
     settle_employment(registry, state)?;
     distribute_business_dividends(registry, state)?;
-    progress_public_works(registry, state);
+    progress_public_works(registry, state)?;
     update_relationships_from_obligations(state);
     update_quality_reputations(state);
     apply_law_economic_effects(registry, state)?;
@@ -2773,7 +2824,7 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
             seller_owner_id,
             buyer_active,
             seller_active,
-        );
+        )?;
         return Ok(());
     }
     let settlement = ContractSettlementState {
@@ -2817,7 +2868,7 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
     } else {
         settle_failed_contract(state, due, settlement)?;
     }
-    finalize_expired_contract(state, due, settlement, fulfilled);
+    finalize_expired_contract(state, due, settlement, fulfilled)?;
     Ok(())
 }
 
@@ -2828,7 +2879,7 @@ fn terminate_inactive_contract(
     seller_owner_id: DynastyId,
     buyer_active: bool,
     seller_active: bool,
-) {
+) -> Result<(), SimulationError> {
     let contract = state
         .contracts
         .get_mut(&contract_id)
@@ -2859,19 +2910,20 @@ fn terminate_inactive_contract(
             seller_owner_id,
             &format!("Supply contract {contract_id} ended because a party became inactive."),
         );
-        record_counterparty_information(
+        try_record_counterparty_information(
             state,
             buyer_owner_id,
             seller_owner_id,
             "Contract termination and business-status records",
-        );
+        )?;
     }
-    push_outbox(
+    try_push_outbox(
         state,
         OutboxKind::Contract,
         format!("Contract {contract_id} terminated"),
         "An inactive contract party could no longer perform the scheduled obligation.".to_owned(),
-    );
+    )?;
+    Ok(())
 }
 
 fn finalize_expired_contract(
@@ -2879,12 +2931,12 @@ fn finalize_expired_contract(
     due: DueContract,
     settlement: ContractSettlementState,
     fulfilled: bool,
-) {
+) -> Result<(), SimulationError> {
     let expired_active = state.contracts.get(&due.id).is_some_and(|contract| {
         contract.status == ContractStatus::Active && contract.next_due_day > due.end_day
     });
     if !expired_active {
-        return;
+        return Ok(());
     }
     let contract = state
         .contracts
@@ -2912,21 +2964,22 @@ fn finalize_expired_contract(
             settlement.seller.owner_id,
             &memory,
         );
-        record_counterparty_information(
+        try_record_counterparty_information(
             state,
             settlement.buyer.owner_id,
             settlement.seller.owner_id,
             "Completed contract performance records",
-        );
+        )?;
     }
     if !fulfilled {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Contract,
             format!("Contract {} expired in breach", due.id),
             "The final scheduled delivery was not completed before the contract ended.".to_owned(),
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn settle_fulfilled_contract(
@@ -3016,7 +3069,7 @@ fn settle_failed_contract(
         contract.status == ContractStatus::Breached
     };
     if breached {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Contract,
             format!("Contract {} breached", due.id),
@@ -3024,7 +3077,7 @@ fn settle_failed_contract(
                 "Repeated nonperformance caused supply contract {} to terminate.",
                 due.id
             ),
-        );
+        )?;
     }
     if settlement.has_attributable_nonperformance()
         && settlement.buyer.owner_id != settlement.seller.owner_id
@@ -3051,12 +3104,12 @@ fn settle_failed_contract(
                     due.id
                 ),
             );
-            record_counterparty_information(
+            try_record_counterparty_information(
                 state,
                 settlement.buyer.owner_id,
                 settlement.seller.owner_id,
                 "Contract breach and penalty records",
-            );
+            )?;
         }
     }
     Ok(())
@@ -3259,9 +3312,9 @@ fn settle_due_civic_debt(
         .expect("civic debt must exist")
         .balance = accrued_balance;
     if treasury_budget >= amount_due {
-        settle_successful_civic_debt_payment(state, treasury_id, due, amount_due);
+        settle_successful_civic_debt_payment(state, treasury_id, due, amount_due)?;
     } else {
-        settle_missed_civic_debt_payment(state, treasury_id, due);
+        settle_missed_civic_debt_payment(state, treasury_id, due)?;
     }
     Ok(())
 }
@@ -3271,7 +3324,7 @@ fn settle_successful_civic_debt_payment(
     treasury_id: InstitutionId,
     due: DueCivicDebt,
     payment: Money,
-) {
+) -> Result<(), SimulationError> {
     {
         let treasury = state
             .institutions
@@ -3340,16 +3393,16 @@ fn settle_successful_civic_debt_payment(
                 due.creditor_dynasty_id,
                 &format!("Civic debt {} was repaid in full.", due.id),
             );
-            record_counterparty_information(
+            try_record_counterparty_information(
                 state,
                 sponsor_dynasty_id,
                 due.creditor_dynasty_id,
                 "Completed municipal debt repayment records",
-            );
+            )?;
         }
     }
     if repaid {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Finance,
             format!("Civic debt {} repaid", due.id),
@@ -3357,15 +3410,16 @@ fn settle_successful_civic_debt_payment(
                 "The city treasury repaid dynasty {} in full.",
                 due.creditor_dynasty_id
             ),
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn settle_missed_civic_debt_payment(
     state: &mut AppState,
     treasury_id: InstitutionId,
     due: DueCivicDebt,
-) {
+) -> Result<(), SimulationError> {
     let defaulted = {
         let debt = state
             .civic_debts
@@ -3421,16 +3475,16 @@ fn settle_missed_civic_debt_payment(
                 due.creditor_dynasty_id,
                 &format!("Civic debt {} defaulted.", due.id),
             );
-            record_counterparty_information(
+            try_record_counterparty_information(
                 state,
                 sponsor_dynasty_id,
                 due.creditor_dynasty_id,
                 "Municipal debt default and civic treasury records",
-            );
+            )?;
         }
     }
     if defaulted {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Finance,
             format!("Civic debt {} defaulted", due.id),
@@ -3438,8 +3492,9 @@ fn settle_missed_civic_debt_payment(
                 "The city treasury defaulted on its obligation to dynasty {}.",
                 due.creditor_dynasty_id
             ),
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn settle_due_loan(
@@ -3485,15 +3540,19 @@ fn settle_due_loan(
         .expect("loan must exist")
         .balance = accrued_balance;
     if borrower_treasury >= amount_due {
-        settle_successful_loan_payment(state, due, amount_due);
+        settle_successful_loan_payment(state, due, amount_due)?;
     } else {
-        settle_missed_loan_payment(state, due);
+        settle_missed_loan_payment(state, due)?;
     }
     Ok(())
 }
 
-fn settle_successful_loan_payment(state: &mut AppState, due: DueLoan, amount_due: Money) {
-    apply_loan_payment(state, due.id, amount_due);
+fn settle_successful_loan_payment(
+    state: &mut AppState,
+    due: DueLoan,
+    amount_due: Money,
+) -> Result<(), SimulationError> {
+    apply_loan_payment(state, due.id, amount_due)?;
     let loan = state.loans.get_mut(&due.id).expect("loan must exist");
     loan.next_due_day = loan.next_due_day.saturating_add(7);
     loan.missed_payments = 0;
@@ -3501,9 +3560,10 @@ fn settle_successful_loan_payment(state: &mut AppState, due: DueLoan, amount_due
         loan.status = LoanStatus::Current;
     }
     adjust_reliability_reputation(state, due.borrower_id, 10);
+    Ok(())
 }
 
-fn settle_missed_loan_payment(state: &mut AppState, due: DueLoan) {
+fn settle_missed_loan_payment(state: &mut AppState, due: DueLoan) -> Result<(), SimulationError> {
     let defaulted = {
         let loan = state.loans.get_mut(&due.id).expect("loan must exist");
         loan.missed_payments = loan.missed_payments.saturating_add(1);
@@ -3517,7 +3577,7 @@ fn settle_missed_loan_payment(state: &mut AppState, due: DueLoan) {
     };
     if defaulted {
         seize_defaulted_collateral(state, due);
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Finance,
             format!("Loan {} defaulted", due.id),
@@ -3525,7 +3585,7 @@ fn settle_missed_loan_payment(state: &mut AppState, due: DueLoan) {
                 "Dynasty {} defaulted on its obligation to dynasty {}.",
                 due.borrower_id, due.lender_id
             ),
-        );
+        )?;
     }
     adjust_reliability_reputation(state, due.borrower_id, if defaulted { -400 } else { -60 });
     adjust_dynasty_relationship(
@@ -3547,13 +3607,14 @@ fn settle_missed_loan_payment(state: &mut AppState, due: DueLoan) {
             due.borrower_id,
             &format!("Loan {} defaulted.", due.id),
         );
-        record_counterparty_information(
+        try_record_counterparty_information(
             state,
             due.lender_id,
             due.borrower_id,
             "Loan default and collateral records",
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) {
@@ -3604,9 +3665,13 @@ fn weekly_interest_due(balance: Money, annual_interest_basis_points: u16) -> Mon
     )
 }
 
-fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount: Money) -> Money {
+fn apply_loan_payment(
+    state: &mut AppState,
+    loan_id: crate::ids::LoanId,
+    amount: Money,
+) -> Result<Money, SimulationError> {
     if amount <= Money::ZERO {
-        return Money::ZERO;
+        return Ok(Money::ZERO);
     }
     let (lender_id, borrower_id, balance, collateral) = {
         let loan = state.loans.get(&loan_id).expect("loan must exist");
@@ -3619,7 +3684,7 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
     };
     let payment = amount.min(balance);
     if payment <= Money::ZERO {
-        return Money::ZERO;
+        return Ok(Money::ZERO);
     }
     let borrower_treasury = state
         .dynasties
@@ -3668,7 +3733,7 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
         property.collateral_loan_id = None;
     }
     if repaid {
-        record_completed_loan_repayment(state, lender_id, borrower_id, loan_id);
+        record_completed_loan_repayment(state, lender_id, borrower_id, loan_id)?;
     } else {
         adjust_dynasty_relationship(
             state,
@@ -3677,9 +3742,8 @@ fn apply_loan_payment(state: &mut AppState, loan_id: crate::ids::LoanId, amount:
             RelationshipDelta::new(4, 2, 0, -1, 0),
         );
     }
-    payment
+    Ok(payment)
 }
-
 fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
     let rents: Vec<_> = state
         .properties
@@ -3943,7 +4007,7 @@ fn settle_employment_agreement(
         paid,
         wage_due,
     );
-    emit_employment_outcome(state, business_id, recovered, became_disputed);
+    emit_employment_outcome(state, business_id, recovered, became_disputed)?;
     Ok(())
 }
 
@@ -4126,24 +4190,25 @@ fn emit_employment_outcome(
     business_id: BusinessId,
     recovered: bool,
     became_disputed: bool,
-) {
+) -> Result<(), SimulationError> {
     if recovered {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::District,
             format!("Labor dispute at business {business_id} settled"),
             "Sustained full wage payments restored a workable labor agreement.".to_owned(),
-        );
+        )?;
     }
     if became_disputed {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::District,
             format!("Labor dispute at business {business_id}"),
             "Accumulated wage, workload, or workplace-condition pressure caused organized resistance."
                 .to_owned(),
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn business_labor_utilization_basis_points(
@@ -4225,11 +4290,24 @@ fn apply_public_work_completion(
     let Some(district) = state.districts.get_mut(&district_id) else {
         return;
     };
+    let employment_bonus = public_work_employment_bonus_basis_points(kind);
+    if employment_bonus > 0 {
+        district.employment_basis_points = district
+            .employment_basis_points
+            .saturating_add(employment_bonus)
+            .min(10_000);
+    }
     match kind {
-        PublicWorkKind::Drainage | PublicWorkKind::Hospital => {
+        PublicWorkKind::Drainage => {
             district.sanitation_basis_points = district
                 .sanitation_basis_points
                 .saturating_add(1_200)
+                .min(10_000);
+        }
+        PublicWorkKind::Hospital => {
+            district.sanitation_basis_points = district
+                .sanitation_basis_points
+                .saturating_add(900)
                 .min(10_000);
         }
         PublicWorkKind::WatchStation => {
@@ -4238,21 +4316,67 @@ fn apply_public_work_completion(
                 .saturating_add(1_200)
                 .min(10_000);
         }
+        PublicWorkKind::Road | PublicWorkKind::Bridge => {
+            district.safety_basis_points =
+                district.safety_basis_points.saturating_add(250).min(10_000);
+        }
+        PublicWorkKind::Granary => {
+            district.sanitation_basis_points = district
+                .sanitation_basis_points
+                .saturating_add(250)
+                .min(10_000);
+        }
+        PublicWorkKind::Market | PublicWorkKind::School => {}
+    }
+    let unrest_relief = match kind {
+        PublicWorkKind::WatchStation => 250,
+        PublicWorkKind::Granary | PublicWorkKind::Hospital | PublicWorkKind::School => 700,
         PublicWorkKind::Road
         | PublicWorkKind::Bridge
         | PublicWorkKind::Market
-        | PublicWorkKind::Granary
-        | PublicWorkKind::School => {
-            district.employment_basis_points = district
-                .employment_basis_points
-                .saturating_add(600)
+        | PublicWorkKind::Drainage => 500,
+    };
+    district.unrest_basis_points = district.unrest_basis_points.saturating_sub(unrest_relief);
+    if kind == PublicWorkKind::Granary {
+        for household in state
+            .households
+            .iter_mut()
+            .filter(|household| household.district_id() == district_id)
+        {
+            household.food_satisfaction_basis_points = household
+                .food_satisfaction_basis_points
+                .saturating_add(500)
                 .min(10_000);
         }
     }
-    district.unrest_basis_points = district.unrest_basis_points.saturating_sub(500);
 }
 
-fn progress_public_works(registry: &Registry, state: &mut AppState) {
+const fn public_work_employment_bonus_basis_points(kind: PublicWorkKind) -> u16 {
+    match kind {
+        PublicWorkKind::Market => 800,
+        PublicWorkKind::Road | PublicWorkKind::Bridge => 500,
+        PublicWorkKind::Granary | PublicWorkKind::School => 300,
+        PublicWorkKind::Drainage | PublicWorkKind::WatchStation | PublicWorkKind::Hospital => 0,
+    }
+}
+
+fn completed_public_work_employment_bonus_basis_points(
+    state: &AppState,
+    district_id: DistrictId,
+) -> u16 {
+    state
+        .public_works
+        .values()
+        .filter(|work| {
+            work.district_id == district_id && work.status == PublicWorkStatus::Completed
+        })
+        .fold(0_u16, |bonus, work| {
+            bonus.saturating_add(public_work_employment_bonus_basis_points(work.kind))
+        })
+        .min(8_000)
+}
+
+fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     let treasury_id = registry.get_institution_id("treasury");
     let ids: Vec<_> = state
         .public_works
@@ -4321,12 +4445,12 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) {
                 .get(&id)
                 .is_some_and(|work| work.status == PublicWorkStatus::Suspended)
         {
-            push_outbox(
+            try_push_outbox(
                 state,
                 OutboxKind::Politics,
                 format!("Public work {id} suspended"),
                 "Civic treasury funding is insufficient to continue construction.".to_owned(),
-            );
+            )?;
         }
         if let Some((district_id, kind)) = completion {
             state
@@ -4335,15 +4459,16 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) {
                 .expect("public work must exist")
                 .status = PublicWorkStatus::Completed;
             apply_public_work_completion(state, district_id, kind);
-            push_outbox(
+            try_push_outbox(
                 state,
                 OutboxKind::Politics,
                 format!("Public work {id} completed"),
                 "A civic construction project has permanently changed district conditions."
                     .to_owned(),
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 fn update_relationships_from_obligations(state: &mut AppState) {
@@ -4516,12 +4641,12 @@ pub(crate) fn remember_dynasty_interaction(
     relationship.last_interaction_day = day;
 }
 
-pub(crate) fn record_counterparty_information(
+pub(crate) fn try_record_counterparty_information(
     state: &mut AppState,
     first_dynasty_id: DynastyId,
     second_dynasty_id: DynastyId,
     source: &str,
-) {
+) -> Result<(), IdentifierAllocationError> {
     let player_dynasty_id = state.player_dynasty_id;
     let counterparty_id =
         if first_dynasty_id == player_dynasty_id && second_dynasty_id != player_dynasty_id {
@@ -4529,7 +4654,7 @@ pub(crate) fn record_counterparty_information(
         } else if second_dynasty_id == player_dynasty_id && first_dynasty_id != player_dynasty_id {
             first_dynasty_id
         } else {
-            return;
+            return Ok(());
         };
     let counterparty = state
         .dynasties
@@ -4555,7 +4680,7 @@ pub(crate) fn record_counterparty_information(
     state.information_reports.retain(|_, report| {
         report.owner_dynasty_id != player_dynasty_id || report.target != Some(target)
     });
-    let id = state.next_ids.information_report();
+    let id = state.next_ids.try_information_report()?;
     let day = state.clock.day();
     state.information_reports.insert(
         id,
@@ -4571,6 +4696,7 @@ pub(crate) fn record_counterparty_information(
             summary,
         },
     );
+    Ok(())
 }
 
 fn adjust_basis_points(current: u16, delta: i16) -> u16 {
@@ -4605,12 +4731,12 @@ pub(crate) fn run_monthly_strategic_systems(
     apply_office_duties(state)?;
     apply_office_power_effects(registry, state)?;
     apply_active_office_directives(registry, state)?;
-    advance_ai_objectives(registry, state);
-    update_information_reports(registry, state);
-    advance_legal_case_hearings(state);
+    advance_ai_objectives(registry, state)?;
+    update_information_reports(registry, state)?;
+    advance_legal_case_hearings(state)?;
     resolve_legal_cases(state)?;
     update_external_route_risk(state);
-    detect_and_advance_crises(registry, state);
+    detect_and_advance_crises(registry, state)?;
     recover_external_routes(state);
     Ok(())
 }
@@ -4830,6 +4956,22 @@ pub(crate) fn projected_dynasty_monthly_office_duty(
     dynasty_id: DynastyId,
     additional_office_power_count: usize,
 ) -> Money {
+    let additional_offices = (additional_office_power_count > 0)
+        .then_some(additional_office_power_count)
+        .into_iter()
+        .collect::<Vec<_>>();
+    projected_dynasty_monthly_office_duty_with_additional_offices(
+        state,
+        dynasty_id,
+        &additional_offices,
+    )
+}
+
+pub(crate) fn projected_dynasty_monthly_office_duty_with_additional_offices(
+    state: &AppState,
+    dynasty_id: DynastyId,
+    additional_office_power_counts: &[usize],
+) -> Money {
     let held_power_counts: Vec<_> = state
         .institutions
         .values()
@@ -4845,10 +4987,10 @@ pub(crate) fn projected_dynasty_monthly_office_duty(
         .collect();
     let office_count = held_power_counts
         .len()
-        .saturating_add(usize::from(additional_office_power_count > 0));
+        .saturating_add(additional_office_power_counts.len());
     held_power_counts
         .into_iter()
-        .chain((additional_office_power_count > 0).then_some(additional_office_power_count))
+        .chain(additional_office_power_counts.iter().copied())
         .fold(Money::ZERO, |total, power_count| {
             total.saturating_add(office_duty_required(power_count, office_count))
         })
@@ -5005,11 +5147,10 @@ fn apply_office_duty(
             required,
             paid,
             required.saturating_sub(paid),
-        );
+        )?;
     }
     Ok(())
 }
-
 fn transfer_office_duty_payment(
     state: &mut AppState,
     institution_id: crate::ids::InstitutionId,
@@ -5065,7 +5206,7 @@ fn record_office_duty_shortfall(
     required: Money,
     paid: Money,
     shortfall: Money,
-) {
+) -> Result<(), SimulationError> {
     let subject = office_duty_subject(institution_id, dynasty_id);
     let recent_shortfalls = recent_office_duty_shortfalls(state, &subject);
     let should_notify = should_notify_office_duty_shortfall(state, &subject);
@@ -5096,9 +5237,9 @@ fn record_office_duty_shortfall(
             forfeited,
             should_notify,
         },
-    );
+    )?;
+    Ok(())
 }
-
 fn recent_office_duty_shortfalls(state: &AppState, subject: &str) -> usize {
     state
         .audit_log
@@ -5185,20 +5326,23 @@ struct OfficeDutyOutcome {
     should_notify: bool,
 }
 
-fn notify_player_office_duty_outcome(state: &mut AppState, outcome: OfficeDutyOutcome) {
+fn notify_player_office_duty_outcome(
+    state: &mut AppState,
+    outcome: OfficeDutyOutcome,
+) -> Result<(), SimulationError> {
     if outcome.dynasty_id != state.player_dynasty_id {
-        return;
+        return Ok(());
     }
     if outcome.forfeited {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Politics,
             format!("Office forfeited at institution {}", outcome.institution_id),
             "Repeatedly unmet civic duties forced the dynasty to surrender the office. The institution will select a replacement next month, and the dynasty cannot immediately return to the same office."
                 .to_owned(),
-        );
+        )?;
     } else if outcome.should_notify {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Politics,
             format!(
@@ -5209,8 +5353,9 @@ fn notify_player_office_duty_outcome(state: &mut AppState, outcome: OfficeDutyOu
                 "The dynasty funded {} of a {} monthly civic duty. The {} shortfall reduced institutional and dynastic standing.",
                 outcome.paid, outcome.required, outcome.shortfall
             ),
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn office_duty_subject(institution_id: crate::ids::InstitutionId, dynasty_id: DynastyId) -> String {
@@ -5438,21 +5583,19 @@ fn update_district_conditions(state: &mut AppState) {
                 })
                 .map(|employment| u32::from(employment.workers)),
         );
+        let infrastructure_employment_bonus =
+            completed_public_work_employment_bonus_basis_points(state, district_id);
         let district = state
             .districts
             .get_mut(&district_id)
             .expect("district runtime must exist");
-        district.employment_basis_points =
-            u16::try_from((active_jobs.saturating_mul(100)).min(10_000))
-                .unwrap_or(10_000)
-                .max(2_000);
-        let hardship = 10_000_u16.saturating_sub(satisfaction);
-        let unsafe_pressure = 10_000_u16.saturating_sub(district.safety_basis_points) / 3;
-        district.unrest_basis_points = ((u32::from(district.unrest_basis_points) * 3
-            + u32::from(hardship)
-            + u32::from(unsafe_pressure))
-            / 5)
-        .min(10_000) as u16;
+        let employment_from_jobs = u16::try_from((active_jobs.saturating_mul(100)).min(10_000))
+            .unwrap_or(10_000)
+            .max(2_000);
+        district.employment_basis_points = employment_from_jobs
+            .saturating_add(infrastructure_employment_bonus)
+            .min(10_000);
+        district.unrest_basis_points = district_unrest_next_basis_points(district, satisfaction);
         let desirability = u32::from(district.safety_basis_points)
             .saturating_add(u32::from(district.sanitation_basis_points));
         district.rent_index_basis_points = u16::try_from(
@@ -5462,6 +5605,27 @@ fn update_district_conditions(state: &mut AppState) {
         )
         .expect("bounded district rent index must fit u16");
     }
+}
+
+fn district_unrest_next_basis_points(district: &DistrictRuntime, food_satisfaction: u16) -> u16 {
+    let food_pressure = 10_000_u16.saturating_sub(food_satisfaction);
+    let safety_pressure = 10_000_u16.saturating_sub(district.safety_basis_points) / 3;
+    let employment_pressure = 6_000_u16.saturating_sub(district.employment_basis_points);
+    let sanitation_pressure = 7_000_u16.saturating_sub(district.sanitation_basis_points) / 2;
+    let rent_pressure = district.rent_index_basis_points.saturating_sub(11_000) / 2;
+    let pressure = u32::from(food_pressure)
+        .saturating_add(u32::from(safety_pressure))
+        .saturating_add(u32::from(employment_pressure))
+        .saturating_add(u32::from(sanitation_pressure))
+        .saturating_add(u32::from(rent_pressure));
+    u16::try_from(
+        (u32::from(district.unrest_basis_points)
+            .saturating_mul(3)
+            .saturating_add(pressure)
+            / 5)
+        .min(10_000),
+    )
+    .expect("bounded district unrest must fit u16")
 }
 
 fn resolve_institution_selections(
@@ -5557,12 +5721,12 @@ fn resolve_institution_selections(
     for (institution_id, winner, term_number) in selections {
         if let Some(winner) = winner {
             apply_office_concentration_backlash(state, institution_id, winner);
-            push_outbox(
+            try_push_outbox(
                 state,
                 OutboxKind::Politics,
                 format!("Institution {institution_id} selected a new officeholder"),
                 format!("Character {winner} now holds the office for term {term_number}."),
-            );
+            )?;
         }
     }
     Ok(())
@@ -5713,7 +5877,15 @@ fn institution_relationship_support(
         .map_or(0, |average| (average / 4).min(3_000))
 }
 
-fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
+fn ai_strategic_attempt<T>(result: &Result<T, StrategicError>) -> Result<bool, SimulationError> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(StrategicError::IdentifierAllocation(error)) => Err((*error).into()),
+        Err(_) => Ok(false),
+    }
+}
+
+fn advance_ai_objectives(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     let day = state.clock.day();
     let objectives: Vec<_> = state
         .ai_objectives
@@ -5730,15 +5902,17 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
         .collect();
     for (objective_id, dynasty_id, kind, created_day) in objectives {
         let progress = match kind {
-            ObjectiveKind::AcquireProperty => advance_ai_property_objective(state, dynasty_id),
+            ObjectiveKind::AcquireProperty => advance_ai_property_objective(state, dynasty_id)?,
             ObjectiveKind::WinOffice => advance_ai_office_objective(state, dynasty_id),
-            ObjectiveKind::SecureSupply => advance_ai_supply_objective(registry, state, dynasty_id),
-            ObjectiveKind::ReduceDebt => advance_ai_debt_objective(state, dynasty_id),
+            ObjectiveKind::SecureSupply => {
+                advance_ai_supply_objective(registry, state, dynasty_id)?
+            }
+            ObjectiveKind::ReduceDebt => advance_ai_debt_objective(state, dynasty_id)?,
             ObjectiveKind::ImproveLegitimacy => advance_ai_legitimacy_objective(state, dynasty_id),
             ObjectiveKind::AccumulateCash => ObjectiveProgress::from_achieved(
                 ai_net_liquid_position(state, dynasty_id) > i128::from(120_000),
             ),
-            ObjectiveKind::ContainRival => advance_ai_rival_objective(state, dynasty_id),
+            ObjectiveKind::ContainRival => advance_ai_rival_objective(state, dynasty_id)?,
         };
         let terminal = match progress {
             ObjectiveProgress::Achieved => Some((
@@ -5766,7 +5940,7 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
                     " The house abandoned this route after two years without decisive progress.",
                 );
             }
-            let new_id = state.next_ids.objective();
+            let new_id = state.next_ids.try_objective()?;
             state.ai_objectives.insert(
                 new_id,
                 AiObjective {
@@ -5782,6 +5956,7 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) {
             );
         }
     }
+    Ok(())
 }
 
 fn ai_net_liquid_position(state: &AppState, dynasty_id: DynastyId) -> i128 {
@@ -5810,18 +5985,23 @@ const fn next_objective_kind(kind: ObjectiveKind) -> ObjectiveKind {
     }
 }
 
-fn advance_ai_property_objective(state: &mut AppState, dynasty_id: DynastyId) -> ObjectiveProgress {
+fn advance_ai_property_objective(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+) -> Result<ObjectiveProgress, SimulationError> {
     let property_id = state
         .properties
         .values()
         .filter(|property| property.owner_dynasty_id.is_none())
         .min_by_key(|property| (property.value, property.id))
         .map(|property| property.id);
-    ObjectiveProgress::from_achieved(
-        property_id.is_some_and(|property_id| {
-            buy_unowned_property(state, dynasty_id, property_id).is_ok()
-        }),
-    )
+    let achieved = match property_id {
+        Some(property_id) => {
+            ai_strategic_attempt(&buy_unowned_property(state, dynasty_id, property_id))?
+        }
+        None => false,
+    };
+    Ok(ObjectiveProgress::from_achieved(achieved))
 }
 
 fn advance_ai_office_objective(state: &mut AppState, dynasty_id: DynastyId) -> ObjectiveProgress {
@@ -5859,7 +6039,7 @@ fn advance_ai_supply_objective(
     registry: &Registry,
     state: &mut AppState,
     dynasty_id: DynastyId,
-) -> ObjectiveProgress {
+) -> Result<ObjectiveProgress, SimulationError> {
     let owner_businesses: Vec<_> = state
         .businesses
         .ids_for_owner(dynasty_id)
@@ -5893,7 +6073,7 @@ fn advance_ai_supply_objective(
                     && contract.good_id == input.good_id()
             });
             if already {
-                return ObjectiveProgress::Achieved;
+                return Ok(ObjectiveProgress::Achieved);
             }
             let seller_id = state.businesses.iter().find_map(|seller| {
                 let seller_recipe = registry.get_recipe(seller.recipe_id())?;
@@ -5923,15 +6103,18 @@ fn advance_ai_supply_objective(
                 penalty: Money::from_copper(500),
                 duration_weeks: 26,
             };
-            if sign_supply_contract(registry, state, terms).is_ok() {
-                return ObjectiveProgress::Achieved;
+            if ai_strategic_attempt(&sign_supply_contract(registry, state, terms))? {
+                return Ok(ObjectiveProgress::Achieved);
             }
         }
     }
-    ObjectiveProgress::Pending
+    Ok(ObjectiveProgress::Pending)
 }
 
-fn advance_ai_debt_objective(state: &mut AppState, dynasty_id: DynastyId) -> ObjectiveProgress {
+fn advance_ai_debt_objective(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+) -> Result<ObjectiveProgress, SimulationError> {
     let loan_id = state
         .loans
         .values()
@@ -5944,7 +6127,7 @@ fn advance_ai_debt_objective(state: &mut AppState, dynasty_id: DynastyId) -> Obj
         })
         .map(|loan| loan.id);
     let Some(loan_id) = loan_id else {
-        return ObjectiveProgress::Achieved;
+        return Ok(ObjectiveProgress::Achieved);
     };
     let treasury = state
         .dynasties
@@ -5957,13 +6140,13 @@ fn advance_ai_debt_objective(state: &mut AppState, dynasty_id: DynastyId) -> Obj
         .expect("AI loan must exist")
         .balance;
     let extra = Money::from_copper(1_000).min(treasury).min(balance);
-    apply_loan_payment(state, loan_id, extra);
-    ObjectiveProgress::from_achieved(
+    apply_loan_payment(state, loan_id, extra)?;
+    Ok(ObjectiveProgress::from_achieved(
         state
             .loans
             .get(&loan_id)
             .is_some_and(|loan| loan.status == LoanStatus::Repaid),
-    )
+    ))
 }
 
 fn advance_ai_legitimacy_objective(
@@ -5994,13 +6177,16 @@ fn advance_ai_legitimacy_objective(
     ObjectiveProgress::Pending
 }
 
-fn advance_ai_rival_objective(state: &mut AppState, dynasty_id: DynastyId) -> ObjectiveProgress {
+fn advance_ai_rival_objective(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+) -> Result<ObjectiveProgress, SimulationError> {
     if dynasty_id == state.player_dynasty_id {
-        return ObjectiveProgress::Achieved;
+        return Ok(ObjectiveProgress::Achieved);
     }
     let pair = DynastyPair::new(dynasty_id, state.player_dynasty_id);
     let Some(relationship) = state.relationships.get_mut(&pair) else {
-        return ObjectiveProgress::Achieved;
+        return Ok(ObjectiveProgress::Achieved);
     };
     relationship.trust_basis_points = relationship.trust_basis_points.saturating_sub(75);
     relationship.fear_basis_points = relationship
@@ -6025,24 +6211,27 @@ fn advance_ai_rival_objective(state: &mut AppState, dynasty_id: DynastyId) -> Ob
                 "House {rival_name} completed a containment campaign that hardened bilateral commercial relations."
             ),
         );
-        record_counterparty_information(
+        try_record_counterparty_information(
             state,
             dynasty_id,
             state.player_dynasty_id,
             "Rival patronage, guild correspondence, and commercial refusals",
-        );
-        push_outbox(
+        )?;
+        try_push_outbox(
             state,
             OutboxKind::Information,
             format!("House {rival_name} is containing the dynasty"),
             "A sustained rival campaign has reduced trust and increased resentment. Future contracts with that house may require a premium or discount until relations improve."
                 .to_owned(),
-        );
+        )?;
     }
-    ObjectiveProgress::from_achieved(achieved)
+    Ok(ObjectiveProgress::from_achieved(achieved))
 }
 
-fn update_information_reports(registry: &Registry, state: &mut AppState) {
+fn update_information_reports(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let day = state.clock.day();
     state
         .information_reports
@@ -6060,9 +6249,9 @@ fn update_information_reports(registry: &Registry, state: &mut AppState) {
         ))
     });
     let Some((_, good_id, name, price, causes)) = most_changed.max_by_key(|item| item.0) else {
-        return;
+        return Ok(());
     };
-    let id = state.next_ids.information_report();
+    let id = state.next_ids.try_information_report()?;
     state.information_reports.insert(
         id,
         InformationReport {
@@ -6077,9 +6266,10 @@ fn update_information_reports(registry: &Registry, state: &mut AppState) {
             summary: format!("{name} is priced at {price}; identified causes: {causes:?}."),
         },
     );
+    Ok(())
 }
 
-fn advance_legal_case_hearings(state: &mut AppState) {
+fn advance_legal_case_hearings(state: &mut AppState) -> Result<(), SimulationError> {
     let day = state.clock.day();
     let entering_hearing: Vec<_> = state
         .legal_cases
@@ -6097,13 +6287,14 @@ fn advance_legal_case_hearings(state: &mut AppState) {
             .get_mut(&legal_case_id)
             .expect("legal case must exist")
             .status = LegalCaseStatus::Hearing;
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Legal,
             format!("Legal case {legal_case_id} entered hearing"),
             "The court began formal proceedings ahead of judgment.".to_owned(),
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
@@ -6168,7 +6359,7 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
             defendant_id,
             RelationshipDelta::new(-60, 20, 50, 120, 0),
         );
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Legal,
             format!("Legal case {id} decided"),
@@ -6180,7 +6371,7 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
                     defendant_id
                 }
             ),
-        );
+        )?;
     }
     Ok(())
 }
@@ -6243,9 +6434,12 @@ fn update_external_route_risk(state: &mut AppState) {
     }
 }
 
-fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
+fn detect_and_advance_crises(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let day = state.clock.day();
-    advance_existing_crises(state);
+    advance_existing_crises(state)?;
     let has_grain_crisis = state
         .crises
         .values()
@@ -6266,7 +6460,7 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
                 None,
                 4_500,
                 "Bread inventories and household food satisfaction fell below safe levels.",
-            );
+            )?;
         }
     }
     let defaulted_loans = state
@@ -6298,9 +6492,9 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
             None,
             3_800,
             "Multiple defaults damaged confidence in city credit.",
-        );
+        )?;
     }
-    detect_trade_disruption(state);
+    detect_trade_disruption(state)?;
     if day > 0
         && day % 720 == 0
         && !has_active_crisis(state, CrisisKind::NobleDemand)
@@ -6313,12 +6507,13 @@ fn detect_and_advance_crises(registry: &Registry, state: &mut AppState) {
             district_id,
             3_000,
             "The regional prince demanded an extraordinary payment from Rivergate.",
-        );
+        )?;
     }
-    detect_periodic_crises(state, day);
+    detect_periodic_crises(state, day)?;
+    Ok(())
 }
 
-fn advance_existing_crises(state: &mut AppState) {
+fn advance_existing_crises(state: &mut AppState) -> Result<(), SimulationError> {
     let mut resolved = Vec::new();
     let mut escalated = Vec::new();
     let addressed_subjects: BTreeSet<_> = state
@@ -6353,23 +6548,24 @@ fn advance_existing_crises(state: &mut AppState) {
         }
     }
     for (crisis_id, kind) in escalated {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Crisis,
             format!("Crisis {crisis_id} escalated"),
             format!(
                 "The {kind:?} crisis intensified because no effective response had contained it."
             ),
-        );
+        )?;
     }
     for (crisis_id, kind) in resolved {
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Crisis,
             format!("Crisis {crisis_id} resolved"),
             format!("The {kind:?} crisis has subsided below an active threat level."),
-        );
+        )?;
     }
+    Ok(())
 }
 
 pub(crate) fn crisis_response_contains_crisis(record: &AuditRecord) -> bool {
@@ -6387,18 +6583,19 @@ fn has_active_crisis(state: &AppState, kind: CrisisKind) -> bool {
         .any(|crisis| crisis.kind == kind && crisis.status.is_active())
 }
 
-fn detect_periodic_crises(state: &mut AppState, day: i64) {
+fn detect_periodic_crises(state: &mut AppState, day: i64) -> Result<(), SimulationError> {
     if day <= 0 || day % 180 != 0 {
-        return;
+        return Ok(());
     }
-    detect_urban_fire(state);
-    detect_epidemic(state);
-    detect_guild_revolt(state);
+    detect_urban_fire(state)?;
+    detect_epidemic(state)?;
+    detect_guild_revolt(state)?;
+    Ok(())
 }
 
-fn detect_urban_fire(state: &mut AppState) {
+fn detect_urban_fire(state: &mut AppState) -> Result<(), SimulationError> {
     if has_active_crisis(state, CrisisKind::UrbanFire) {
-        return;
+        return Ok(());
     }
     let Some((district_id, safety)) = state
         .districts
@@ -6406,7 +6603,7 @@ fn detect_urban_fire(state: &mut AppState) {
         .min_by_key(|(_, district)| district.safety_basis_points)
         .map(|(id, district)| (*id, district.safety_basis_points))
     else {
-        return;
+        return Ok(());
     };
     let fire_code = active_law_value(state, LawKind::FireCode)
         .unwrap_or(0)
@@ -6419,8 +6616,9 @@ fn detect_urban_fire(state: &mut AppState) {
             Some(district_id),
             urban_fire_severity_basis_points(safety, fire_code),
             "Unsafe buildings and weak fire prevention allowed an urban fire to spread.",
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn urban_fire_probability_basis_points(safety: u16, fire_code: i64) -> u16 {
@@ -6442,9 +6640,9 @@ fn urban_fire_severity_basis_points(safety: u16, fire_code: i64) -> u16 {
     u16::try_from(severity).unwrap_or(9_000)
 }
 
-fn detect_epidemic(state: &mut AppState) {
+fn detect_epidemic(state: &mut AppState) -> Result<(), SimulationError> {
     if has_active_crisis(state, CrisisKind::Epidemic) {
-        return;
+        return Ok(());
     }
     let Some((district_id, sanitation)) = state
         .districts
@@ -6452,7 +6650,7 @@ fn detect_epidemic(state: &mut AppState) {
         .min_by_key(|(_, district)| district.sanitation_basis_points)
         .map(|(id, district)| (*id, district.sanitation_basis_points))
     else {
-        return;
+        return Ok(());
     };
     let deficiency = 10_000_u16.saturating_sub(sanitation);
     let chance = deficiency.saturating_div(4).saturating_add(250).min(10_000);
@@ -6463,13 +6661,14 @@ fn detect_epidemic(state: &mut AppState) {
             Some(district_id),
             3_000_u16.saturating_add(deficiency / 5).min(9_000),
             "Poor sanitation allowed an epidemic to take hold.",
-        );
+        )?;
     }
+    Ok(())
 }
 
-fn detect_trade_disruption(state: &mut AppState) {
+fn detect_trade_disruption(state: &mut AppState) -> Result<(), SimulationError> {
     if has_active_crisis(state, CrisisKind::TradeDisruption) {
-        return;
+        return Ok(());
     }
     let disruption = state
         .external_routes
@@ -6484,13 +6683,14 @@ fn detect_trade_disruption(state: &mut AppState) {
             None,
             disruption,
             "External trade routes became too disrupted to sustain normal commerce.",
-        );
+        )?;
     }
+    Ok(())
 }
 
-fn detect_guild_revolt(state: &mut AppState) {
+fn detect_guild_revolt(state: &mut AppState) -> Result<(), SimulationError> {
     if has_active_crisis(state, CrisisKind::GuildRevolt) {
-        return;
+        return Ok(());
     }
     let disputed_district = state.employment.values().find_map(|agreement| {
         (agreement.status == EmploymentStatus::Disputed)
@@ -6527,8 +6727,9 @@ fn detect_guild_revolt(state: &mut AppState) {
                 )
                 .min(9_000),
             "Labor disputes and restrictive guild rules triggered organized resistance.",
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn guild_revolt_probability_basis_points(disputed_count: usize, restriction: i64) -> u16 {
@@ -6552,8 +6753,8 @@ fn insert_crisis(
     district_id: Option<DistrictId>,
     severity_basis_points: u16,
     cause: &str,
-) -> crate::ids::CrisisId {
-    let id = state.next_ids.crisis();
+) -> Result<crate::ids::CrisisId, SimulationError> {
+    let id = state.next_ids.try_crisis()?;
     state.crises.insert(
         id,
         Crisis {
@@ -6566,18 +6767,18 @@ fn insert_crisis(
             cause: cause.to_owned(),
         },
     );
-    push_outbox(
+    try_push_outbox(
         state,
         OutboxKind::Crisis,
         format!("Crisis emerged: {kind:?}"),
         cause.to_owned(),
-    );
-    id
+    )?;
+    Ok(id)
 }
 
 pub(crate) fn run_annual_strategic_systems(state: &mut AppState) -> Result<(), SimulationError> {
     educate_family_members(state);
-    form_dynastic_marriage(state);
+    form_dynastic_marriage(state)?;
     update_family_councils(state)?;
     Ok(())
 }
@@ -6604,9 +6805,9 @@ fn educate_family_members(state: &mut AppState) {
     }
 }
 
-fn form_dynastic_marriage(state: &mut AppState) {
+fn form_dynastic_marriage(state: &mut AppState) -> Result<(), SimulationError> {
     if state.clock.day() % 1_800 != 0 {
-        return;
+        return Ok(());
     }
     let heirs: Vec<_> = state
         .dynasties
@@ -6638,9 +6839,9 @@ fn form_dynastic_marriage(state: &mut AppState) {
             .map(|right| (*left, *right))
     });
     let Some(((left_dynasty, left_heir), (right_dynasty, right_heir))) = selected_pair else {
-        return;
+        return Ok(());
     };
-    let id = state.next_ids.family_link();
+    let id = state.next_ids.try_family_link()?;
     state.family_links.insert(
         id,
         FamilyLink {
@@ -6663,14 +6864,15 @@ fn form_dynastic_marriage(state: &mut AppState) {
             .memories
             .push("A dynastic marriage joined the two houses.".to_owned());
     }
-    push_outbox(
+    try_push_outbox(
         state,
         OutboxKind::Family,
         "Dynastic marriage concluded".to_owned(),
         format!(
             "The heirs of dynasties {left_dynasty} and {right_dynasty} entered a marriage compact."
         ),
-    );
+    )?;
+    Ok(())
 }
 
 fn update_family_councils(state: &mut AppState) -> Result<(), SimulationError> {
@@ -6758,20 +6960,25 @@ fn update_family_councils(state: &mut AppState) -> Result<(), SimulationError> {
                 "automatic=true;from={prior:?};governance={governance:?};reason=low_unity"
             ),
         });
-        push_outbox(
+        try_push_outbox(
             state,
             OutboxKind::Family,
             format!("House {dynasty_id} charter changed under pressure"),
             format!(
                 "Low family unity forced a transition from {prior:?} to {governance:?} governance."
             ),
-        );
+        )?;
     }
     Ok(())
 }
 
-pub(crate) fn push_outbox(state: &mut AppState, kind: OutboxKind, subject: String, body: String) {
-    let id = state.next_ids.outbox();
+pub(crate) fn try_push_outbox(
+    state: &mut AppState,
+    kind: OutboxKind,
+    subject: String,
+    body: String,
+) -> Result<(), IdentifierAllocationError> {
+    let id = state.next_ids.try_outbox()?;
     state.outbox.push(OutboxMessage {
         id,
         day: state.clock.day(),
@@ -6780,6 +6987,12 @@ pub(crate) fn push_outbox(state: &mut AppState, kind: OutboxKind, subject: Strin
         body,
         acknowledged: false,
     });
+    Ok(())
+}
+
+pub(crate) fn push_outbox(state: &mut AppState, kind: OutboxKind, subject: String, body: String) {
+    try_push_outbox(state, kind, subject, body)
+        .expect("bootstrap identifier space must be available");
 }
 
 #[cfg(test)]

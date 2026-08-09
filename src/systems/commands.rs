@@ -18,7 +18,7 @@ use crate::core::{
 };
 use crate::ids::{
     BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId,
-    InformationReportId, InstitutionId, OutboxMessageId, PropertyId,
+    IdentifierAllocationError, InformationReportId, InstitutionId, OutboxMessageId, PropertyId,
 };
 use crate::money::Money;
 use crate::registry::Registry;
@@ -203,13 +203,14 @@ pub(crate) const OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS: i64 = 180;
 pub(crate) const OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST: u16 = 100;
 pub(crate) const INSTITUTION_SUPPORT_INTERVAL_DAYS: i64 = 360;
 pub(crate) const INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS: i64 = 180;
+pub(crate) const INSTITUTION_WITHDRAWAL_RECOVERY_DAYS: i64 = OFFICE_NOMINATION_RECOVERY_DAYS;
 pub(crate) const INSTITUTION_SUPPORT_COST: Money = Money::from_copper(1_200);
 pub(crate) const INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT: u16 = 5_500;
 pub(crate) const INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT: u32 = 52;
 pub(crate) const MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER: usize = 2;
 pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_RECOVERY_DAYS: i64 = 720;
-const OFFICE_NOMINATION_RESOLUTION_DAYS: i64 = 120;
+pub(crate) const OFFICE_NOMINATION_RESOLUTION_DAYS: i64 = 120;
 pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
 pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 78;
 const OFFICE_NOMINATION_CAPABILITY_TARGET_SCORE: u32 = 10_000;
@@ -231,6 +232,8 @@ pub(crate) const COMMISSIONED_INFORMATION_SOURCE: &str = "Commissioned intellige
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum CommandError {
+    #[error(transparent)]
+    IdentifierAllocation(#[from] IdentifierAllocationError),
     #[error(transparent)]
     Strategic(#[from] StrategicError),
     #[error(transparent)]
@@ -607,7 +610,8 @@ pub enum CommandError {
 /// # Errors
 ///
 /// Returns a dedicated error when a command references missing records, violates ownership,
-/// exceeds available funds, or supplies invalid terms. Failed commands leave state unchanged.
+/// exceeds available funds, supplies invalid terms, or exhausts an identifier space needed for
+/// committed records or durable feedback. Failed commands leave state unchanged.
 pub fn apply_player_command(
     registry: &Registry,
     state: &mut AppState,
@@ -851,7 +855,13 @@ fn apply_institution_withdrawal(
         institution.office_holder_id = None;
         institution.next_selection_day = institution.next_selection_day.min(day.saturating_add(30));
     }
-    super::strategic::push_outbox(
+    state.audit_log.push(AuditRecord {
+        day,
+        kind: AuditKind::InstitutionWithdrawal,
+        subject: institution_support_subject(institution_id, character_id).into(),
+        detail: format!("resigned_office={resigned_office}"),
+    });
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Politics,
         format!("Character {character_id} withdrew from institution {institution_id}"),
@@ -860,7 +870,7 @@ fn apply_institution_withdrawal(
         } else {
             "The dynasty surrendered this institutional membership.".to_owned()
         },
-    );
+    )?;
     Ok(CommandOutcome {
         summary: if resigned_office {
             format!(
@@ -904,14 +914,14 @@ fn apply_cash_transfer(
     ensure_owned_business(state, from_business_id)?;
     ensure_owned_business(state, to_business_id)?;
     transfer_business_cash(state, from_business_id, to_business_id, amount)?;
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Finance,
         format!("Portfolio cash moved to business {to_business_id}"),
         format!(
             "The dynasty transferred {amount} from business {from_business_id} to business {to_business_id}."
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!(
             "Transferred {amount} from business {from_business_id} to business {to_business_id}."
@@ -959,14 +969,14 @@ fn apply_business_investment(
     let rehabilitation =
         capitalize_owned_business(state, state.player_dynasty_id, business_id, amount)
             .expect("prevalidated player business capitalization must commit");
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Finance,
         format!("Business {business_id} capitalized"),
         format!(
             "The dynasty invested {amount} into the enterprise, restoring {rehabilitation} basis points of operating condition."
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!(
             "Invested {amount} in business {business_id} and restored {rehabilitation} basis points of condition."
@@ -1055,14 +1065,14 @@ fn apply_business_policy(
             minimum_cash_reserve.copper()
         ),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Finance,
         format!("Business {business_id} operating policy updated"),
         format!(
             "The enterprise now targets {target_input_days} input days, {target_output_days} output days, a {minimum_cash_reserve} cash reserve, {maintenance_basis_points} maintenance basis points, and {quality_target_basis_points} quality basis points."
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Updated operating policy for business {business_id}."),
     })
@@ -1216,8 +1226,13 @@ pub(crate) fn contract_counterparty_price_bounds(
         .get(seller_business_id)
         .map(crate::core::Business::owner_dynasty_id);
     let counterparty_id = match (buyer_owner, seller_owner) {
-        (Some(owner), Some(_)) | (Some(_), Some(owner)) if owner != player_id => Some(owner),
-        _ => None,
+        (Some(buyer_owner), Some(seller_owner)) if buyer_owner == player_id => {
+            (seller_owner != player_id).then_some(seller_owner)
+        }
+        (Some(buyer_owner), Some(seller_owner)) if seller_owner == player_id => {
+            (buyer_owner != player_id).then_some(buyer_owner)
+        }
+        (Some(_) | None, Some(_) | None) => None,
     };
     let relationship_pressure_basis_points = counterparty_id.map_or(0, |counterparty_id| {
         contract_relationship_pressure_basis_points(state, counterparty_id)
@@ -1430,7 +1445,7 @@ fn commit_civic_debt_issuance(
     law_id: crate::ids::LawId,
     sponsor_dynasty_id: DynastyId,
     issuance: ValidatedCivicDebtIssuance,
-) -> crate::ids::CivicDebtId {
+) -> Result<crate::ids::CivicDebtId, CommandError> {
     state
         .dynasties
         .get_mut(&issuance.creditor_dynasty_id)
@@ -1442,7 +1457,7 @@ fn commit_civic_debt_issuance(
         .get_mut(&issuance.treasury_id)
         .expect("validated civic treasury must exist")
         .budget = issuance.treasury_budget_after;
-    let id = state.next_ids.civic_debt();
+    let id = state.next_ids.try_civic_debt()?;
     state.civic_debts.insert(
         id,
         CivicDebt {
@@ -1472,13 +1487,13 @@ fn commit_civic_debt_issuance(
         issuance.creditor_dynasty_id,
         &format!("Civic debt {id} financed the city treasury."),
     );
-    super::strategic::record_counterparty_information(
+    super::strategic::try_record_counterparty_information(
         state,
         sponsor_dynasty_id,
         issuance.creditor_dynasty_id,
         "Municipal debt underwriting and treasury records",
-    );
-    id
+    )?;
+    Ok(id)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1577,7 +1592,7 @@ fn apply_law(
     {
         law.active = false;
     }
-    let id = state.next_ids.law();
+    let id = state.next_ids.try_law()?;
     state.laws.insert(
         id,
         EnactedLaw {
@@ -1591,8 +1606,9 @@ fn apply_law(
     );
     let civic_debt_id = validation
         .civic_debt_issuance
-        .map(|issuance| commit_civic_debt_issuance(state, id, state.player_dynasty_id, issuance));
-    super::strategic::push_outbox(
+        .map(|issuance| commit_civic_debt_issuance(state, id, state.player_dynasty_id, issuance))
+        .transpose()?;
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Law,
         format!("Law {id} enacted"),
@@ -1604,7 +1620,7 @@ fn apply_law(
                 )
             },
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: civic_debt_id.map_or_else(
             || format!("Enacted law {id}: {kind:?}."),
@@ -1686,7 +1702,7 @@ fn apply_public_work(
     )
     .unwrap_or(10_000)
     .min(10_000);
-    let id = state.next_ids.public_work();
+    let id = state.next_ids.try_public_work()?;
     state.public_works.insert(
         id,
         PublicWork {
@@ -1711,12 +1727,12 @@ fn apply_public_work(
             contribution.copper()
         ),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Politics,
         format!("Public work {id} started"),
         format!("Construction began on a {kind:?} project in district {district_id}."),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Started public work {id}."),
     })
@@ -1830,7 +1846,7 @@ fn apply_legal_case(
         }
     }
     spend_player_treasury(state, LEGAL_CASE_FILING_COST)?;
-    let id = state.next_ids.legal_case();
+    let id = state.next_ids.try_legal_case()?;
     state.legal_cases.insert(
         id,
         LegalCase {
@@ -1852,12 +1868,12 @@ fn apply_legal_case(
         defendant_dynasty_id,
         super::strategic::RelationshipDelta::new(-100, -30, 0, 150, 0),
     );
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Legal,
         format!("Legal case {id} filed"),
         format!("A {kind:?} case was filed against dynasty {defendant_dynasty_id}."),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Filed legal case {id}."),
     })
@@ -1904,14 +1920,14 @@ fn apply_governance(
         subject: subject.into(),
         detail: format!("governance={governance:?}"),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Family,
         "House charter amended".to_owned(),
         format!(
             "The dynasty adopted {governance:?} governance, changing administrative coordination, family cohesion, and succession risk."
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Changed house governance to {governance:?}."),
     })
@@ -1971,14 +1987,14 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
             FAMILY_COUNCIL_MEETING_COST.copper()
         ),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Family,
         "Family council convened".to_owned(),
         format!(
             "The dynasty spent {FAMILY_COUNCIL_MEETING_COST} on settlements, hospitality, and internal obligations. Family unity rose from {unity_before} to {unity_after} bp and active council members gained loyalty."
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Convened the family council; unity is now {unity_after} bp."),
     })
@@ -2122,7 +2138,7 @@ fn apply_heir(
             prior_heir_id.map_or_else(|| "none".to_owned(), |id| id.to_string())
         ),
     });
-    let chronicle_id = state.next_ids.chronicle();
+    let chronicle_id = state.next_ids.try_chronicle()?;
     let chronicle_summary = if confirmation {
         format!("Dynasty {dynasty_id} formally confirmed character {character_id} as heir.")
     } else {
@@ -2145,7 +2161,7 @@ fn apply_heir(
     } else {
         format!("Designated character {character_id} as heir.")
     };
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Family,
         if confirmation {
@@ -2156,7 +2172,7 @@ fn apply_heir(
         format!(
             "The family charter now names character {character_id} as successor. The change cost {HEIR_DESIGNATION_LEGITIMACY_COST} legitimacy and {HEIR_DESIGNATION_UNITY_COST} family unity."
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: outcome_summary,
     })
@@ -2173,10 +2189,10 @@ fn apply_adopt_ward(
         dynasty_name,
     } = context;
     spend_player_treasury(state, WARD_ADOPTION_COST)?;
-    let ward_id = state.next_ids.character();
+    let ward_id = state.next_ids.try_character()?;
     let ward_name = format!("{dynasty_name} Ward {ward_id}");
     insert_ward_character(state, dynasty_id, ward_id, ward_name.clone(), focus);
-    insert_ward_family_link(state, head_id, ward_id);
+    insert_ward_family_link(state, head_id, ward_id)?;
     let council = state
         .family_councils
         .get_mut(&dynasty_id)
@@ -2193,7 +2209,7 @@ fn apply_adopt_ward(
         .saturating_sub(250);
     dynasty.resources.administrative_capacity =
         dynasty.resources.administrative_capacity.saturating_add(8);
-    record_ward_adoption(state, dynasty_id, ward_id, &ward_name, focus);
+    record_ward_adoption(state, dynasty_id, ward_id, &ward_name, focus)?;
     Ok(CommandOutcome {
         summary: format!("Adopted ward {ward_id} with {focus:?} training."),
     })
@@ -2288,8 +2304,12 @@ fn insert_ward_character(
     });
 }
 
-fn insert_ward_family_link(state: &mut AppState, head_id: CharacterId, ward_id: CharacterId) {
-    let family_link_id = state.next_ids.family_link();
+fn insert_ward_family_link(
+    state: &mut AppState,
+    head_id: CharacterId,
+    ward_id: CharacterId,
+) -> Result<(), CommandError> {
+    let family_link_id = state.next_ids.try_family_link()?;
     state.family_links.insert(
         family_link_id,
         FamilyLink {
@@ -2301,6 +2321,7 @@ fn insert_ward_family_link(state: &mut AppState, head_id: CharacterId, ward_id: 
             property_claim_basis_points: 1_500,
         },
     );
+    Ok(())
 }
 
 fn record_ward_adoption(
@@ -2309,30 +2330,30 @@ fn record_ward_adoption(
     ward_id: CharacterId,
     ward_name: &str,
     focus: EducationFocus,
-) {
+) -> Result<(), CommandError> {
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::WardAdoption,
         subject: format!("dynasty:{dynasty_id}:character:{ward_id}").into(),
         detail: format!("focus={focus:?};cost={}", WARD_ADOPTION_COST.copper()),
     });
-    let chronicle_id = state.next_ids.chronicle();
+    let chronicle_id = state.next_ids.try_chronicle()?;
     state.chronicle.push(ChronicleEntry {
         id: chronicle_id,
         day: state.clock.day(),
         kind: ChronicleKind::FamilyExpanded,
         summary: format!("{ward_name} entered the dynasty as a ward focused on {focus:?}."),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Family,
         format!("Ward adopted: {ward_name}"),
         format!(
             "The dynasty spent {WARD_ADOPTION_COST} to adopt and train a new {focus:?}-focused household member."
         ),
-    );
+    )?;
+    Ok(())
 }
-
 fn active_player_ward_count(state: &AppState) -> usize {
     state
         .family_links
@@ -2441,12 +2462,12 @@ fn apply_family_education(
         .into(),
         detail: format!("focus={focus:?};cost={}", FAMILY_EDUCATION_COST.copper()),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Family,
         format!("Family education completed for character {character_id}"),
         format!("The dynasty spent {FAMILY_EDUCATION_COST} on advanced {focus:?} training."),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Educated character {character_id} in {focus:?}."),
     })
@@ -2558,12 +2579,7 @@ fn apply_institution_support(
         character_id,
         member_dynasties,
     );
-    Ok(finish_institution_patronage(
-        state,
-        institution_id,
-        character_id,
-        subject,
-    ))
+    finish_institution_patronage(state, institution_id, character_id, subject)
 }
 
 fn record_institution_patronage_relationships(
@@ -2596,7 +2612,7 @@ fn finish_institution_patronage(
     institution_id: InstitutionId,
     character_id: CharacterId,
     subject: String,
-) -> CommandOutcome {
+) -> Result<CommandOutcome, CommandError> {
     let day = state.clock.day();
     state.audit_log.push(AuditRecord {
         day,
@@ -2605,19 +2621,19 @@ fn finish_institution_patronage(
         detail: format!("contribution={}", INSTITUTION_SUPPORT_COST.copper()),
     });
     let established_day = day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS);
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Politics,
         format!("Institutional support cultivated for character {character_id}"),
         format!(
             "The dynasty patronized institution {institution_id}; character {character_id}'s support will be established by day {established_day}."
         ),
-    );
-    CommandOutcome {
+    )?;
+    Ok(CommandOutcome {
         summary: format!(
             "Cultivated support for character {character_id} in institution {institution_id}."
         ),
-    }
+    })
 }
 
 fn validate_institution_support_standing(state: &AppState) -> Result<(), CommandError> {
@@ -2732,14 +2748,14 @@ fn apply_office_nomination(
         subject: subject.into(),
         detail: format!("campaign_cost={}", campaign_cost.copper()),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Politics,
         format!("Office campaign launched for character {character_id}"),
         format!(
             "The dynasty nominated character {character_id} to institution {institution_id}; selection is scheduled by day {selection_day}."
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Nominated character {character_id} for institution {institution_id}."),
     })
@@ -2986,7 +3002,7 @@ fn apply_office_power_directive(
             "district={district_id};power={power:?};legitimacy_cost={OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST}"
         ),
     });
-    let chronicle_id = state.next_ids.chronicle();
+    let chronicle_id = state.next_ids.try_chronicle()?;
     state.chronicle.push(ChronicleEntry {
         id: chronicle_id,
         day: state.clock.day(),
@@ -2995,14 +3011,14 @@ fn apply_office_power_directive(
             "The player dynasty directed institution {institution_id} to exercise {power:?} in district {district_id}."
         ),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Politics,
         format!("{power:?} directive issued through institution {institution_id}"),
         format!(
             "The dynasty spent {OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST} legitimacy to intensify {power:?} policy in district {district_id}."
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Exercised {power:?} through institution {institution_id}."),
     })
@@ -3073,15 +3089,19 @@ pub(crate) fn office_nomination_next_day(
     state: &AppState,
     character_id: CharacterId,
 ) -> Option<i64> {
-    latest_character_campaign_day(state, AuditKind::OfficeNomination, character_id).map(|day| {
-        let resolution_day = day.saturating_add(OFFICE_NOMINATION_RESOLUTION_DAYS);
-        let interval = if state.clock.day() < resolution_day {
-            OFFICE_NOMINATION_INTERVAL_DAYS
-        } else {
-            OFFICE_NOMINATION_RECOVERY_DAYS
-        };
-        day.saturating_add(interval)
-    })
+    let campaign = latest_character_campaign_day(state, AuditKind::OfficeNomination, character_id)
+        .map(|day| {
+            let resolution_day = day.saturating_add(OFFICE_NOMINATION_RESOLUTION_DAYS);
+            let interval = if state.clock.day() < resolution_day {
+                OFFICE_NOMINATION_INTERVAL_DAYS
+            } else {
+                OFFICE_NOMINATION_RECOVERY_DAYS
+            };
+            day.saturating_add(interval)
+        });
+    let dynasty_office_resignation = latest_player_office_resignation_day(state)
+        .map(|day| day.saturating_add(INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
+    campaign.into_iter().chain(dynasty_office_resignation).max()
 }
 
 pub(crate) fn institution_support_subject(
@@ -3095,8 +3115,36 @@ pub(crate) fn institution_support_next_day(
     state: &AppState,
     character_id: CharacterId,
 ) -> Option<i64> {
-    latest_character_campaign_day(state, AuditKind::InstitutionPatronage, character_id)
-        .map(|day| day.saturating_add(INSTITUTION_SUPPORT_INTERVAL_DAYS))
+    let patronage =
+        latest_character_campaign_day(state, AuditKind::InstitutionPatronage, character_id)
+            .map(|day| day.saturating_add(INSTITUTION_SUPPORT_INTERVAL_DAYS));
+    let withdrawal =
+        latest_character_campaign_day(state, AuditKind::InstitutionWithdrawal, character_id)
+            .map(|day| day.saturating_add(INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
+    let dynasty_office_resignation = latest_player_office_resignation_day(state)
+        .map(|day| day.saturating_add(INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
+    patronage
+        .into_iter()
+        .chain(withdrawal)
+        .chain(dynasty_office_resignation)
+        .max()
+}
+
+fn latest_player_office_resignation_day(state: &AppState) -> Option<i64> {
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::InstitutionWithdrawal
+                && record.detail() == "resigned_office=true"
+                && record
+                    .audit_subject()
+                    .institution_character_ids()
+                    .and_then(|(_, character_id)| state.characters.get(character_id))
+                    .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+        })
+        .map(AuditRecord::day)
 }
 
 pub(crate) fn institution_membership_count(state: &AppState, character_id: CharacterId) -> usize {
@@ -3234,12 +3282,12 @@ fn apply_crisis_response(
             adjust_district_unrest(state, district_id, 600, true);
         }
     }
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Crisis,
         format!("Response applied to crisis {crisis_id}"),
         format!("The dynasty chose {response:?}."),
-    );
+    )?;
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::CrisisResponse,
@@ -3437,12 +3485,12 @@ fn apply_labor_response(
             adjust_district_unrest(state, Some(district_id), 400, true);
         }
     }
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::District,
         format!("Labor dispute {employment_id} resolved"),
         format!("The dynasty chose {response:?}."),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Resolved labor dispute {employment_id} with {response:?}."),
     })
@@ -3530,7 +3578,7 @@ fn commission_information(
     state.information_reports.retain(|_, report| {
         report.owner_dynasty_id != state.player_dynasty_id || report.target != Some(plan.target)
     });
-    let id = state.next_ids.information_report();
+    let id = state.next_ids.try_information_report()?;
     let day = state.clock.day();
     state.information_reports.insert(
         id,
@@ -3552,12 +3600,12 @@ fn commission_information(
         subject: format!("dynasty:{}", state.player_dynasty_id).into(),
         detail: format!("report={id};subject={}", plan.subject),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Information,
         "Commissioned intelligence delivered".to_owned(),
         format!("{} is now available to the dynasty.", plan.subject),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!("Commissioned intelligence report {id}: {}.", plan.subject),
     })
@@ -3992,7 +4040,7 @@ fn leverage_information(
         subject: format!("information-report:{report_id}").into(),
         detail: plan.quote.description.clone(),
     });
-    super::strategic::push_outbox(
+    super::strategic::try_push_outbox(
         state,
         OutboxKind::Information,
         "Commissioned intelligence converted into action".to_owned(),
@@ -4000,7 +4048,7 @@ fn leverage_information(
             "{} at a cost of {}.",
             plan.quote.description, plan.quote.cost
         ),
-    );
+    )?;
     Ok(CommandOutcome {
         summary: format!(
             "Leveraged intelligence report {report_id}: {}.",

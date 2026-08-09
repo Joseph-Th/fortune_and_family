@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use thiserror::Error;
 
 macro_rules! define_id {
     ($name:ident) => {
@@ -54,3 +55,45 @@ define_id!(ExternalRouteId);
 define_id!(CrisisId);
 define_id!(OutboxMessageId);
 define_id!(ChronicleEntryId);
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum IdentifierAllocationError {
+    #[error("dynasty identifier space is exhausted")]
+    Dynasty,
+    #[error("character identifier space is exhausted")]
+    Character,
+    #[error("household identifier space is exhausted")]
+    Household,
+    #[error("business identifier space is exhausted")]
+    Business,
+    #[error("contract identifier space is exhausted")]
+    Contract,
+    #[error("property identifier space is exhausted")]
+    Property,
+    #[error("loan identifier space is exhausted")]
+    Loan,
+    #[error("civic debt identifier space is exhausted")]
+    CivicDebt,
+    #[error("employment identifier space is exhausted")]
+    Employment,
+    #[error("family link identifier space is exhausted")]
+    FamilyLink,
+    #[error("law identifier space is exhausted")]
+    Law,
+    #[error("information report identifier space is exhausted")]
+    InformationReport,
+    #[error("objective identifier space is exhausted")]
+    Objective,
+    #[error("public work identifier space is exhausted")]
+    PublicWork,
+    #[error("legal case identifier space is exhausted")]
+    LegalCase,
+    #[error("external route identifier space is exhausted")]
+    ExternalRoute,
+    #[error("crisis identifier space is exhausted")]
+    Crisis,
+    #[error("outbox message identifier space is exhausted")]
+    OutboxMessage,
+    #[error("chronicle entry identifier space is exhausted")]
+    ChronicleEntry,
+}

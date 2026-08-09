@@ -9,8 +9,9 @@ use super::{
 };
 use crate::ids::{
     BusinessId, CharacterId, ChronicleEntryId, CivicDebtId, ContractId, CrisisId, DistrictId,
-    DynastyId, EmploymentId, ExternalRouteId, FamilyLinkId, HouseholdId, InformationReportId,
-    LawId, LegalCaseId, LoanId, ObjectiveId, OutboxMessageId, PropertyId, PublicWorkId,
+    DynastyId, EmploymentId, ExternalRouteId, FamilyLinkId, HouseholdId, IdentifierAllocationError,
+    InformationReportId, LawId, LegalCaseId, LoanId, ObjectiveId, OutboxMessageId, PropertyId,
+    PublicWorkId,
 };
 use crate::rng::DeterministicRng;
 use serde::{Deserialize, Serialize};
@@ -463,18 +464,43 @@ pub(crate) struct NextIds {
     chronicle: u32,
 }
 
-macro_rules! next_id_method {
-    ($method:ident, $field:ident, $id_type:ident) => {
-        pub(crate) const fn $method(&mut self) -> $id_type {
+macro_rules! try_next_id_method {
+    ($try_method:ident, $field:ident, $id_type:ident, $error:ident) => {
+        pub(crate) const fn $try_method(&mut self) -> Result<$id_type, IdentifierAllocationError> {
             // `u32::MAX` is an invalid exhausted allocator state. Keep
             // `u32::MAX - 1` as the terminal valid counter value and reject an
             // allocation that would advance the campaign into that invalid state.
             if self.$field >= u32::MAX - 1 {
-                panic!(concat!(stringify!($id_type), " identifier space exhausted"));
+                return Err(IdentifierAllocationError::$error);
             }
             let id = $id_type::new(self.$field);
             self.$field += 1;
-            id
+            Ok(id)
+        }
+    };
+}
+
+macro_rules! next_id_method {
+    ($method:ident, $try_method:ident, $field:ident, $id_type:ident, $error:ident) => {
+        try_next_id_method!($try_method, $field, $id_type, $error);
+        pub(crate) const fn $method(&mut self) -> $id_type {
+            match self.$try_method() {
+                Ok(id) => id,
+                Err(_) => panic!(concat!(stringify!($id_type), " identifier space exhausted")),
+            }
+        }
+    };
+}
+
+macro_rules! test_next_id_method {
+    ($method:ident, $try_method:ident, $field:ident, $id_type:ident, $error:ident) => {
+        try_next_id_method!($try_method, $field, $id_type, $error);
+        #[cfg(test)]
+        pub(crate) const fn $method(&mut self) -> $id_type {
+            match self.$try_method() {
+                Ok(id) => id,
+                Err(_) => panic!(concat!(stringify!($id_type), " identifier space exhausted")),
+            }
         }
     };
 }
@@ -504,25 +530,73 @@ impl NextIds {
         }
     }
 
-    next_id_method!(dynasty, dynasty, DynastyId);
-    next_id_method!(character, character, CharacterId);
-    next_id_method!(household, household, HouseholdId);
-    next_id_method!(business, business, BusinessId);
-    next_id_method!(contract, contract, ContractId);
-    next_id_method!(property, property, PropertyId);
-    next_id_method!(loan, loan, LoanId);
-    next_id_method!(civic_debt, civic_debt, CivicDebtId);
-    next_id_method!(employment, employment, EmploymentId);
-    next_id_method!(family_link, family_link, FamilyLinkId);
-    next_id_method!(law, law, LawId);
-    next_id_method!(information_report, information_report, InformationReportId);
-    next_id_method!(objective, objective, ObjectiveId);
-    next_id_method!(public_work, public_work, PublicWorkId);
-    next_id_method!(legal_case, legal_case, LegalCaseId);
-    next_id_method!(external_route, external_route, ExternalRouteId);
-    next_id_method!(crisis, crisis, CrisisId);
-    next_id_method!(outbox, outbox, OutboxMessageId);
-    next_id_method!(chronicle, chronicle, ChronicleEntryId);
+    next_id_method!(dynasty, try_dynasty, dynasty, DynastyId, Dynasty);
+    next_id_method!(character, try_character, character, CharacterId, Character);
+    next_id_method!(household, try_household, household, HouseholdId, Household);
+    next_id_method!(business, try_business, business, BusinessId, Business);
+    test_next_id_method!(contract, try_contract, contract, ContractId, Contract);
+    next_id_method!(property, try_property, property, PropertyId, Property);
+    test_next_id_method!(loan, try_loan, loan, LoanId, Loan);
+    test_next_id_method!(
+        civic_debt,
+        try_civic_debt,
+        civic_debt,
+        CivicDebtId,
+        CivicDebt
+    );
+    next_id_method!(
+        employment,
+        try_employment,
+        employment,
+        EmploymentId,
+        Employment
+    );
+    next_id_method!(
+        family_link,
+        try_family_link,
+        family_link,
+        FamilyLinkId,
+        FamilyLink
+    );
+    next_id_method!(law, try_law, law, LawId, Law);
+    next_id_method!(
+        information_report,
+        try_information_report,
+        information_report,
+        InformationReportId,
+        InformationReport
+    );
+    next_id_method!(objective, try_objective, objective, ObjectiveId, Objective);
+    next_id_method!(
+        public_work,
+        try_public_work,
+        public_work,
+        PublicWorkId,
+        PublicWork
+    );
+    next_id_method!(
+        legal_case,
+        try_legal_case,
+        legal_case,
+        LegalCaseId,
+        LegalCase
+    );
+    next_id_method!(
+        external_route,
+        try_external_route,
+        external_route,
+        ExternalRouteId,
+        ExternalRoute
+    );
+    test_next_id_method!(crisis, try_crisis, crisis, CrisisId, Crisis);
+    test_next_id_method!(outbox, try_outbox, outbox, OutboxMessageId, OutboxMessage);
+    next_id_method!(
+        chronicle,
+        try_chronicle,
+        chronicle,
+        ChronicleEntryId,
+        ChronicleEntry
+    );
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

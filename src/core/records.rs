@@ -586,6 +586,7 @@ pub enum AuditKind {
     PublicWorkStarted,
     CrisisResponse,
     InstitutionPatronage,
+    InstitutionWithdrawal,
     OfficeNomination,
     OfficeDutyShortfall,
     OfficeDutyForfeiture,

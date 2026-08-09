@@ -23,11 +23,12 @@ use crate::systems::{
     LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
     MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
-    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
-    OFFICE_POWER_ESTABLISHMENT_DAYS, PRIVATE_LOAN_COUNTERPARTY_RESERVE,
-    PROPERTY_COUNTERPARTY_BUYER_RESERVE, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, SimulationError, StrategicError, SupplyContractTerms,
-    WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
+    OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, OFFICE_POWER_ESTABLISHMENT_DAYS,
+    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
+    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
+    SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
+    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT, advance_days,
     apply_player_command, available_household_workers, available_supply_contract_capacity,
     build_new_game, business_recapitalization_target, contract_counterparty_price_bounds,
@@ -35,8 +36,10 @@ use crate::systems::{
     has_established_player_office_power, institution_capability_score,
     institution_membership_count, institution_support_day, institution_support_next_day,
     office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
-    projected_dynasty_monthly_office_duty, quote_business_acquisition, quote_information_leverage,
-    quote_property_liquidation, required_office_power_for_law, validate_invariants,
+    projected_dynasty_monthly_office_duty,
+    projected_dynasty_monthly_office_duty_with_additional_offices, quote_business_acquisition,
+    quote_information_leverage, quote_property_liquidation, required_office_power_for_law,
+    validate_invariants,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,7 +97,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 41;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 42;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -485,6 +488,15 @@ pub struct GameplayScores {
     pub overall: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameplayDistrictCondition {
+    pub district_id: DistrictId,
+    pub employment_basis_points: u16,
+    pub sanitation_basis_points: u16,
+    pub safety_basis_points: u16,
+    pub unrest_basis_points: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameplaySnapshot {
     pub day: i64,
@@ -567,6 +579,7 @@ pub struct GameplaySnapshot {
     pub institution_budget_total: Money,
     pub institution_state_checksum: u64,
     pub active_laws: u16,
+    pub active_law_kinds: Vec<LawKind>,
     pub law_value_checksum: i64,
     pub active_law_checksum: i64,
     pub law_state_checksum: u64,
@@ -574,11 +587,16 @@ pub struct GameplaySnapshot {
     pub building_public_works: u16,
     pub completed_public_works: u16,
     pub suspended_public_works: u16,
+    pub player_completed_public_work_kinds: BTreeSet<PublicWorkKind>,
     pub player_completed_public_work_checksum: i64,
     pub public_work_state_checksum: u64,
     pub average_food_satisfaction: u16,
     pub minimum_district_food_satisfaction: u16,
     pub average_district_unrest: u16,
+    pub average_district_employment: u16,
+    pub average_district_sanitation: u16,
+    pub average_district_safety: u16,
+    pub district_conditions: Vec<GameplayDistrictCondition>,
     pub district_state_checksum: u64,
     pub open_legal_cases: u16,
     pub decided_legal_cases: u16,
@@ -962,13 +980,86 @@ struct CivicSnapshotPart {
     player_institutions_represented: u16,
     institution_budget_total: Money,
     active_laws: u16,
+    active_law_kinds: Vec<LawKind>,
     law_value_checksum: i64,
     active_law_checksum: i64,
     public_work_progress_total: u32,
     building_public_works: u16,
     completed_public_works: u16,
     suspended_public_works: u16,
+    player_completed_public_work_kinds: BTreeSet<PublicWorkKind>,
     player_completed_public_work_checksum: i64,
+}
+
+#[derive(Debug)]
+struct LawSnapshotPart {
+    active: u16,
+    kinds: Vec<LawKind>,
+    value_checksum: i64,
+    checksum: i64,
+}
+
+impl LawSnapshotPart {
+    fn capture(state: &AppState) -> Self {
+        let active = || state.laws.values().filter(|law| law.active);
+        Self {
+            active: usize_to_u16(active().count()),
+            kinds: active().map(|law| law.kind).collect(),
+            value_checksum: active().map(|law| law.value).sum(),
+            checksum: active().fold(0_i64, |total, law| {
+                total
+                    .saturating_add((law.kind as i64).saturating_mul(10_007))
+                    .saturating_add(law.value)
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PublicWorkSnapshotPart {
+    progress_total: u32,
+    building: u16,
+    completed: u16,
+    suspended: u16,
+    player_completed_kinds: BTreeSet<PublicWorkKind>,
+    player_completed_checksum: i64,
+}
+
+impl PublicWorkSnapshotPart {
+    fn capture(state: &AppState, player_id: DynastyId) -> Self {
+        let player_completed = || {
+            state.public_works.values().filter(|work| {
+                work.sponsor_dynasty_id == Some(player_id)
+                    && work.status == PublicWorkStatus::Completed
+            })
+        };
+        Self {
+            progress_total: state
+                .public_works
+                .values()
+                .map(|work| u32::from(work.progress_basis_points))
+                .sum(),
+            building: count_public_work_status(state, PublicWorkStatus::Building),
+            completed: count_public_work_status(state, PublicWorkStatus::Completed),
+            suspended: count_public_work_status(state, PublicWorkStatus::Suspended),
+            player_completed_kinds: player_completed().map(|work| work.kind).collect(),
+            player_completed_checksum: player_completed().fold(0_i64, |total, work| {
+                total
+                    .saturating_add(i64::from(work.district_id.value()).saturating_mul(101))
+                    .saturating_add(work.kind as i64)
+            }),
+        }
+    }
+}
+
+fn count_public_work_status(state: &AppState, status: PublicWorkStatus) -> u16 {
+    usize_to_u16(
+        state
+            .public_works
+            .values()
+            .filter(|work| work.status == status)
+            .count(),
+    )
 }
 
 impl CivicSnapshotPart {
@@ -981,6 +1072,8 @@ impl CivicSnapshotPart {
             .family_councils
             .get(&player_id)
             .expect("player family council must exist");
+        let laws = LawSnapshotPart::capture(state);
+        let public_works = PublicWorkSnapshotPart::capture(state, player_id);
         Self {
             legitimacy: player.resources.legitimacy_basis_points,
             quality_reputation: player.resources.reputation_quality_basis_points,
@@ -1016,61 +1109,98 @@ impl CivicSnapshotPart {
                 .fold(Money::ZERO, |total, institution| {
                     total.saturating_add(institution.budget)
                 }),
-            active_laws: usize_to_u16(state.laws.values().filter(|law| law.active).count()),
-            law_value_checksum: state
-                .laws
-                .values()
-                .filter(|law| law.active)
-                .map(|law| law.value)
-                .sum(),
-            active_law_checksum: state.laws.values().filter(|law| law.active).fold(
-                0_i64,
-                |total, law| {
-                    total
-                        .saturating_add((law.kind as i64).saturating_mul(10_007))
-                        .saturating_add(law.value)
-                },
-            ),
-            public_work_progress_total: state
-                .public_works
-                .values()
-                .map(|work| u32::from(work.progress_basis_points))
-                .sum(),
-            building_public_works: usize_to_u16(
-                state
-                    .public_works
-                    .values()
-                    .filter(|work| work.status == PublicWorkStatus::Building)
-                    .count(),
-            ),
-            completed_public_works: usize_to_u16(
-                state
-                    .public_works
-                    .values()
-                    .filter(|work| work.status == PublicWorkStatus::Completed)
-                    .count(),
-            ),
-            suspended_public_works: usize_to_u16(
-                state
-                    .public_works
-                    .values()
-                    .filter(|work| work.status == PublicWorkStatus::Suspended)
-                    .count(),
-            ),
-            player_completed_public_work_checksum: state
-                .public_works
-                .values()
-                .filter(|work| {
-                    work.sponsor_dynasty_id == Some(player_id)
-                        && work.status == PublicWorkStatus::Completed
-                })
-                .fold(0_i64, |total, work| {
-                    total
-                        .saturating_add(i64::from(work.district_id.value()).saturating_mul(101))
-                        .saturating_add(work.kind as i64)
-                }),
+            active_laws: laws.active,
+            active_law_kinds: laws.kinds,
+            law_value_checksum: laws.value_checksum,
+            active_law_checksum: laws.checksum,
+            public_work_progress_total: public_works.progress_total,
+            building_public_works: public_works.building,
+            completed_public_works: public_works.completed,
+            suspended_public_works: public_works.suspended,
+            player_completed_public_work_kinds: public_works.player_completed_kinds,
+            player_completed_public_work_checksum: public_works.player_completed_checksum,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct DistrictConditionSnapshot {
+    employment: u16,
+    sanitation: u16,
+    safety: u16,
+    unrest: u16,
+    conditions: Vec<GameplayDistrictCondition>,
+}
+
+impl DistrictConditionSnapshot {
+    fn capture(state: &AppState) -> Self {
+        let conditions: Vec<_> = state
+            .districts
+            .values()
+            .map(|district| GameplayDistrictCondition {
+                district_id: district.district_id,
+                employment_basis_points: district.employment_basis_points,
+                sanitation_basis_points: district.sanitation_basis_points,
+                safety_basis_points: district.safety_basis_points,
+                unrest_basis_points: district.unrest_basis_points,
+            })
+            .collect();
+        Self {
+            employment: average_u16(
+                conditions
+                    .iter()
+                    .map(|district| district.employment_basis_points),
+            ),
+            sanitation: average_u16(
+                conditions
+                    .iter()
+                    .map(|district| district.sanitation_basis_points),
+            ),
+            safety: average_u16(
+                conditions
+                    .iter()
+                    .map(|district| district.safety_basis_points),
+            ),
+            unrest: average_u16(
+                conditions
+                    .iter()
+                    .map(|district| district.unrest_basis_points),
+            ),
+            conditions,
+        }
+    }
+}
+
+fn count_open_legal_cases(state: &AppState) -> u16 {
+    usize_to_u16(
+        state
+            .legal_cases
+            .values()
+            .filter(|case| {
+                matches!(
+                    case.status,
+                    LegalCaseStatus::Filed | LegalCaseStatus::Hearing
+                )
+            })
+            .count(),
+    )
+}
+
+fn count_decided_legal_cases(state: &AppState) -> u16 {
+    usize_to_u16(
+        state
+            .legal_cases
+            .values()
+            .filter(|case| {
+                matches!(
+                    case.status,
+                    LegalCaseStatus::DecidedForPlaintiff
+                        | LegalCaseStatus::DecidedForDefendant
+                        | LegalCaseStatus::Settled
+                )
+            })
+            .count(),
+    )
 }
 
 #[derive(Debug)]
@@ -1078,6 +1208,10 @@ struct WorldSnapshotPart {
     average_food_satisfaction: u16,
     minimum_district_food_satisfaction: u16,
     average_district_unrest: u16,
+    average_district_employment: u16,
+    average_district_sanitation: u16,
+    average_district_safety: u16,
+    district_conditions: Vec<GameplayDistrictCondition>,
     open_legal_cases: u16,
     decided_legal_cases: u16,
     active_crises: u16,
@@ -1094,6 +1228,7 @@ struct WorldSnapshotPart {
 
 impl WorldSnapshotPart {
     fn capture(state: &AppState) -> Self {
+        let district = DistrictConditionSnapshot::capture(state);
         Self {
             average_food_satisfaction:
                 crate::core::population_weighted_food_satisfaction_basis_points(
@@ -1101,38 +1236,13 @@ impl WorldSnapshotPart {
                 )
                 .unwrap_or(0),
             minimum_district_food_satisfaction: minimum_district_food_satisfaction(state),
-            average_district_unrest: average_u16(
-                state
-                    .districts
-                    .values()
-                    .map(|district| district.unrest_basis_points),
-            ),
-            open_legal_cases: usize_to_u16(
-                state
-                    .legal_cases
-                    .values()
-                    .filter(|case| {
-                        matches!(
-                            case.status,
-                            LegalCaseStatus::Filed | LegalCaseStatus::Hearing
-                        )
-                    })
-                    .count(),
-            ),
-            decided_legal_cases: usize_to_u16(
-                state
-                    .legal_cases
-                    .values()
-                    .filter(|case| {
-                        matches!(
-                            case.status,
-                            LegalCaseStatus::DecidedForPlaintiff
-                                | LegalCaseStatus::DecidedForDefendant
-                                | LegalCaseStatus::Settled
-                        )
-                    })
-                    .count(),
-            ),
+            average_district_unrest: district.unrest,
+            average_district_employment: district.employment,
+            average_district_sanitation: district.sanitation,
+            average_district_safety: district.safety,
+            district_conditions: district.conditions,
+            open_legal_cases: count_open_legal_cases(state),
+            decided_legal_cases: count_decided_legal_cases(state),
             active_crises: usize_to_u16(
                 state
                     .crises
@@ -1300,6 +1410,7 @@ macro_rules! assemble_gameplay_snapshot {
             institution_budget_total: $civic.institution_budget_total,
             institution_state_checksum: stable_serialized_checksum(&$state.institutions),
             active_laws: $civic.active_laws,
+            active_law_kinds: $civic.active_law_kinds,
             law_value_checksum: $civic.law_value_checksum,
             active_law_checksum: $civic.active_law_checksum,
             law_state_checksum: stable_serialized_checksum(&$state.laws),
@@ -1307,11 +1418,16 @@ macro_rules! assemble_gameplay_snapshot {
             building_public_works: $civic.building_public_works,
             completed_public_works: $civic.completed_public_works,
             suspended_public_works: $civic.suspended_public_works,
+            player_completed_public_work_kinds: $civic.player_completed_public_work_kinds,
             player_completed_public_work_checksum: $civic.player_completed_public_work_checksum,
             public_work_state_checksum: stable_serialized_checksum(&$state.public_works),
             average_food_satisfaction: $world.average_food_satisfaction,
             minimum_district_food_satisfaction: $world.minimum_district_food_satisfaction,
             average_district_unrest: $world.average_district_unrest,
+            average_district_employment: $world.average_district_employment,
+            average_district_sanitation: $world.average_district_sanitation,
+            average_district_safety: $world.average_district_safety,
+            district_conditions: $world.district_conditions,
             district_state_checksum: stable_serialized_checksum(&$state.districts),
             open_legal_cases: $world.open_legal_cases,
             decided_legal_cases: $world.decided_legal_cases,
@@ -1381,6 +1497,10 @@ pub struct GameplayDecisionContext {
     pub active_laws: u16,
     pub building_public_works: u16,
     pub suspended_public_works: u16,
+    pub average_district_employment: u16,
+    pub average_district_sanitation: u16,
+    pub average_district_safety: u16,
+    pub average_district_unrest: u16,
     pub active_wards: u16,
     pub family_unity: u16,
     pub generation: u16,
@@ -1415,6 +1535,10 @@ impl From<&GameplaySnapshot> for GameplayDecisionContext {
             active_laws: snapshot.active_laws,
             building_public_works: snapshot.building_public_works,
             suspended_public_works: snapshot.suspended_public_works,
+            average_district_employment: snapshot.average_district_employment,
+            average_district_sanitation: snapshot.average_district_sanitation,
+            average_district_safety: snapshot.average_district_safety,
+            average_district_unrest: snapshot.average_district_unrest,
             active_wards: snapshot.active_wards,
             family_unity: snapshot.family_unity,
             generation: snapshot.generation,
@@ -1455,6 +1579,9 @@ pub enum GameplayMeasure {
     CompletedPublicWorks,
     AverageFoodSatisfaction,
     AverageDistrictUnrest,
+    AverageDistrictEmployment,
+    AverageDistrictSanitation,
+    AverageDistrictSafety,
     ActiveCrises,
     ContractRelationshipPressure,
     PlayerDisputedEmployment,
@@ -1497,6 +1624,9 @@ impl GameplayConsequenceProfile {
         record!(CompletedPublicWorks, completed_public_works);
         record!(AverageFoodSatisfaction, average_food_satisfaction);
         record!(AverageDistrictUnrest, average_district_unrest);
+        record!(AverageDistrictEmployment, average_district_employment);
+        record!(AverageDistrictSanitation, average_district_sanitation);
+        record!(AverageDistrictSafety, average_district_safety);
         record!(ActiveCrises, active_crises);
         record!(
             ContractRelationshipPressure,
@@ -1529,6 +1659,9 @@ fn impact_outcome_fingerprint(snapshot: &GameplaySnapshot) -> u64 {
         u64::from(snapshot.completed_public_works),
         u64::from(snapshot.average_food_satisfaction),
         u64::from(snapshot.average_district_unrest),
+        u64::from(snapshot.average_district_employment),
+        u64::from(snapshot.average_district_sanitation),
+        u64::from(snapshot.average_district_safety),
         u64::from(snapshot.active_crises),
         u64::from(snapshot.maximum_contract_relationship_pressure_basis_points),
         u64::from(snapshot.player_disputed_employment),
@@ -2501,6 +2634,7 @@ fn gameplay_harness_limitations() -> Vec<String> {
         "Stress personas can prove that risky legal, labor, and financial routes exist, but they cannot prove that those risks are legible or attractive to a human player.".to_owned(),
         "AI-objective progress measures rival activity, but the harness cannot prove that a human recognizes which house caused a setback or understands that rival's intent.".to_owned(),
         "Counterfactual attribution can only detect consequences represented by the report snapshot and configured consequence horizon.".to_owned(),
+        "Material civic endpoints include per-district employment, sanitation, safety, and unrest, but the harness does not judge whether those neighborhood differences are fair, narratively legible, or understandable to a human player.".to_owned(),
         "Persistent state and chronicle changes approximate historical imprint; the harness cannot judge whether the game presents that legacy as a coherent remembered story.".to_owned(),
     ]
 }
@@ -3666,11 +3800,8 @@ fn candidate_preserves_office_duty_reserve(
     if candidate_is_emergency_spending(state, candidate) {
         return true;
     }
-    let additional_powers = match &candidate.command {
-        PlayerCommand::NominateForOffice { institution_id, .. } => state
-            .institutions
-            .get(institution_id)
-            .map_or(0, |institution| institution.powers.len()),
+    let nomination_institution_id = match &candidate.command {
+        PlayerCommand::NominateForOffice { institution_id, .. } => Some(*institution_id),
         PlayerCommand::TransferBusinessCash { .. }
         | PlayerCommand::AcquireBusiness { .. }
         | PlayerCommand::InvestInBusiness { .. }
@@ -3694,7 +3825,7 @@ fn candidate_preserves_office_duty_reserve(
         | PlayerCommand::ResolveLaborDispute { .. }
         | PlayerCommand::CommissionInformation { .. }
         | PlayerCommand::LeverageInformation { .. }
-        | PlayerCommand::AcknowledgeNotification { .. } => 0,
+        | PlayerCommand::AcknowledgeNotification { .. } => None,
     };
     let reserve = if matches!(candidate.command, PlayerCommand::ConveneFamilyCouncil)
         && state
@@ -3705,9 +3836,13 @@ fn candidate_preserves_office_duty_reserve(
             }) {
         player_family_recovery_office_duty_reserve(state)
     } else {
-        player_office_duty_reserve(state, additional_powers)
+        nomination_institution_id.map_or_else(
+            || player_office_duty_reserve(state, 0),
+            |institution_id| player_office_duty_reserve_for_nomination(state, institution_id),
+        )
     };
-    let reserve = if additional_powers > 0 && player_has_office_duty_forfeiture(state) {
+    let reserve = if nomination_institution_id.is_some() && player_has_office_duty_forfeiture(state)
+    {
         reserve.saturating_mul(3)
     } else {
         reserve
@@ -3777,14 +3912,74 @@ fn candidate_is_emergency_spending(state: &AppState, candidate: &Candidate) -> b
 }
 
 fn player_office_duty_reserve(state: &AppState, additional_powers: usize) -> Money {
-    let monthly_duty =
-        projected_dynasty_monthly_office_duty(state, state.player_dynasty_id, additional_powers);
+    let mut additional_offices: Vec<_> = pending_player_nomination_power_counts(state)
+        .into_values()
+        .collect();
+    if additional_powers > 0 {
+        additional_offices.push(additional_powers);
+    }
+    let monthly_duty = projected_dynasty_monthly_office_duty_with_additional_offices(
+        state,
+        state.player_dynasty_id,
+        &additional_offices,
+    );
     if monthly_duty == Money::ZERO {
         return Money::ZERO;
     }
     monthly_duty
         .saturating_mul(AGENT_OFFICE_DUTY_RESERVE_MONTHS)
         .saturating_add(AGENT_OFFICE_LIQUIDITY_BUFFER)
+}
+
+fn player_office_duty_reserve_for_nomination(
+    state: &AppState,
+    institution_id: InstitutionId,
+) -> Money {
+    let mut pending = pending_player_nomination_power_counts(state);
+    if let Some(institution) = state.institutions.get(&institution_id) {
+        pending
+            .entry(institution_id)
+            .or_insert(institution.powers.len());
+    }
+    let additional_offices: Vec<_> = pending.into_values().collect();
+    let monthly_duty = projected_dynasty_monthly_office_duty_with_additional_offices(
+        state,
+        state.player_dynasty_id,
+        &additional_offices,
+    );
+    if monthly_duty == Money::ZERO {
+        return Money::ZERO;
+    }
+    monthly_duty
+        .saturating_mul(AGENT_OFFICE_DUTY_RESERVE_MONTHS)
+        .saturating_add(AGENT_OFFICE_LIQUIDITY_BUFFER)
+}
+
+fn pending_player_nomination_power_counts(state: &AppState) -> BTreeMap<InstitutionId, usize> {
+    let day = state.clock.day();
+    state
+        .audit_log
+        .iter()
+        .filter(|record| {
+            record.kind() == AuditKind::OfficeNomination
+                && day
+                    < record
+                        .day()
+                        .saturating_add(OFFICE_NOMINATION_RESOLUTION_DAYS)
+        })
+        .filter_map(|record| {
+            let (institution_id, character_id) =
+                record.audit_subject().institution_character_ids()?;
+            let character = state.characters.get(character_id)?;
+            if character.dynasty_id() != state.player_dynasty_id {
+                return None;
+            }
+            state
+                .institutions
+                .get(&institution_id)
+                .map(|institution| (institution_id, institution.powers.len()))
+        })
+        .collect()
 }
 
 fn player_family_recovery_office_duty_reserve(state: &AppState) -> Money {
@@ -5958,12 +6153,19 @@ fn generate_law_candidates(
         {
             continue;
         }
+        let persona_bonus = law_persona_bonus(persona, kind);
+        let context_bonus = law_context_relevance_bonus(state, kind);
+        if persona_bonus <= 0 && context_bonus <= 0 {
+            continue;
+        }
         push_candidate(
             candidates,
             GameplayCommandKind::EnactLaw,
             PlayerCommand::EnactLaw { kind, value },
             format!("enact {kind:?} with value {value}"),
-            law_bonus.saturating_add(law_persona_bonus(persona, kind)),
+            law_bonus
+                .saturating_add(persona_bonus)
+                .saturating_add(context_bonus),
         );
     }
 }
@@ -6062,6 +6264,70 @@ fn law_persona_bonus(persona: GameplayPersona, kind: LawKind) -> i64 {
     }
 }
 
+fn law_context_relevance_bonus(state: &AppState, kind: LawKind) -> i64 {
+    let food_satisfaction =
+        crate::core::population_weighted_food_satisfaction_basis_points(state.households.iter())
+            .unwrap_or(10_000);
+    match kind {
+        LawKind::BreadPriceCeiling => {
+            if food_satisfaction < 9_700 {
+                420
+            } else {
+                0
+            }
+        }
+        LawKind::ForeignMerchantToll | LawKind::GuildEntryRestriction => 0,
+        LawKind::InterestLimit => {
+            if state
+                .loans
+                .values()
+                .any(|loan| matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted))
+            {
+                420
+            } else {
+                0
+            }
+        }
+        LawKind::FireCode => {
+            if state
+                .districts
+                .values()
+                .map(|district| district.safety_basis_points)
+                .min()
+                .is_some_and(|safety| safety < 6_000)
+            {
+                360
+            } else {
+                0
+            }
+        }
+        LawKind::RentRestriction => {
+            if average_u16(
+                state
+                    .districts
+                    .values()
+                    .map(|district| district.rent_index_basis_points),
+            ) > 11_000
+            {
+                320
+            } else {
+                0
+            }
+        }
+        LawKind::EmergencyImports => {
+            let grain_crisis = state.crises.values().any(|crisis| {
+                crisis.kind == CrisisKind::GrainShortage && crisis.status.is_active()
+            });
+            if food_satisfaction < 9_800 || grain_crisis {
+                520
+            } else {
+                0
+            }
+        }
+        LawKind::PublicDebtAuthorization => 520,
+    }
+}
+
 fn generate_public_work_candidates(
     registry: &Registry,
     state: &AppState,
@@ -6107,7 +6373,7 @@ fn generate_public_work_candidates(
     {
         return;
     }
-    let bonus = match persona {
+    let bonus: i64 = match persona {
         GameplayPersona::PowerBroker => 520,
         GameplayPersona::Steward => 440,
         GameplayPersona::Entrepreneur => 180,
@@ -6118,40 +6384,179 @@ fn generate_public_work_candidates(
             .districts
             .get(&district.id())
             .expect("district runtime must exist");
-        let kind = weakest_district_work(runtime);
-        if state.public_works.values().any(|work| {
-            work.district_id == district.id()
-                && work.kind == kind
-                && matches!(
-                    work.status,
-                    PublicWorkStatus::Building | PublicWorkStatus::Suspended
-                )
-        }) {
-            continue;
+        for kind in preferred_public_work_kinds(runtime, persona) {
+            if state.public_works.values().any(|work| {
+                work.district_id == district.id()
+                    && work.kind == kind
+                    && matches!(
+                        work.status,
+                        PublicWorkStatus::Building | PublicWorkStatus::Suspended
+                    )
+            }) {
+                continue;
+            }
+            push_candidate(
+                candidates,
+                GameplayCommandKind::StartPublicWork,
+                PlayerCommand::StartPublicWork {
+                    district_id: district.id(),
+                    kind,
+                    budget: Money::from_copper(12_000),
+                },
+                format!(
+                    "start {kind:?} in {} to {}",
+                    district.name(),
+                    public_work_intent(kind)
+                ),
+                public_work_candidate_priority(bonus, runtime, persona, kind),
+            );
         }
-        push_candidate(
-            candidates,
-            GameplayCommandKind::StartPublicWork,
-            PlayerCommand::StartPublicWork {
-                district_id: district.id(),
-                kind,
-                budget: Money::from_copper(12_000),
-            },
-            format!("start {kind:?} in {}", district.name()),
-            bonus,
-        );
     }
 }
 
-fn weakest_district_work(district: &crate::core::DistrictRuntime) -> PublicWorkKind {
-    if district.sanitation_basis_points <= district.safety_basis_points
-        && district.sanitation_basis_points <= district.employment_basis_points
-    {
-        PublicWorkKind::Drainage
-    } else if district.safety_basis_points <= district.employment_basis_points {
-        PublicWorkKind::WatchStation
-    } else {
-        PublicWorkKind::Market
+fn public_work_candidate_priority(
+    base_bonus: i64,
+    district: &crate::core::DistrictRuntime,
+    persona: GameplayPersona,
+    kind: PublicWorkKind,
+) -> i64 {
+    base_bonus
+        .saturating_add(public_work_persona_bonus(persona, kind))
+        .saturating_add(public_work_need_score(district, kind) / 10)
+}
+
+fn preferred_public_work_kinds(
+    district: &crate::core::DistrictRuntime,
+    persona: GameplayPersona,
+) -> [PublicWorkKind; 2] {
+    let mut scored = [
+        PublicWorkKind::Road,
+        PublicWorkKind::Bridge,
+        PublicWorkKind::Market,
+        PublicWorkKind::Granary,
+        PublicWorkKind::Drainage,
+        PublicWorkKind::WatchStation,
+        PublicWorkKind::Hospital,
+        PublicWorkKind::School,
+    ]
+    .map(|kind| {
+        (
+            public_work_need_score(district, kind)
+                .saturating_add(public_work_shortlist_bonus(persona, kind)),
+            kind,
+        )
+    });
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    [scored[0].1, scored[1].1]
+}
+
+fn public_work_need_score(district: &crate::core::DistrictRuntime, kind: PublicWorkKind) -> i64 {
+    let employment_need = i64::from(10_000_u16.saturating_sub(district.employment_basis_points));
+    let sanitation_need = i64::from(10_000_u16.saturating_sub(district.sanitation_basis_points));
+    let safety_need = i64::from(10_000_u16.saturating_sub(district.safety_basis_points));
+    let unrest = i64::from(district.unrest_basis_points);
+    match kind {
+        PublicWorkKind::Drainage => sanitation_need,
+        PublicWorkKind::Hospital => sanitation_need.saturating_mul(4) / 5 + unrest / 3,
+        PublicWorkKind::WatchStation => safety_need,
+        PublicWorkKind::Road => employment_need.saturating_mul(3) / 5 + safety_need / 3,
+        PublicWorkKind::Bridge => employment_need.saturating_mul(3) / 5 + safety_need / 4,
+        PublicWorkKind::Market => employment_need,
+        PublicWorkKind::Granary => {
+            employment_need / 3 + sanitation_need / 3 + unrest.saturating_mul(2) / 3
+        }
+        PublicWorkKind::School => employment_need / 2 + unrest,
+    }
+}
+
+const fn public_work_persona_bonus(persona: GameplayPersona, kind: PublicWorkKind) -> i64 {
+    match persona {
+        GameplayPersona::Steward => match kind {
+            PublicWorkKind::Drainage
+            | PublicWorkKind::Granary
+            | PublicWorkKind::Hospital
+            | PublicWorkKind::School => 260,
+            PublicWorkKind::Road
+            | PublicWorkKind::Bridge
+            | PublicWorkKind::Market
+            | PublicWorkKind::WatchStation => 40,
+        },
+        GameplayPersona::Entrepreneur => match kind {
+            PublicWorkKind::Road | PublicWorkKind::Bridge | PublicWorkKind::Market => 260,
+            PublicWorkKind::Granary => 120,
+            PublicWorkKind::Drainage
+            | PublicWorkKind::WatchStation
+            | PublicWorkKind::Hospital
+            | PublicWorkKind::School => 20,
+        },
+        GameplayPersona::PowerBroker => match kind {
+            PublicWorkKind::Road | PublicWorkKind::Market | PublicWorkKind::WatchStation => 260,
+            PublicWorkKind::Bridge => 160,
+            PublicWorkKind::Granary
+            | PublicWorkKind::Drainage
+            | PublicWorkKind::Hospital
+            | PublicWorkKind::School => 20,
+        },
+        GameplayPersona::Opportunist => match kind {
+            PublicWorkKind::Bridge | PublicWorkKind::Market | PublicWorkKind::WatchStation => 260,
+            PublicWorkKind::Road => 140,
+            PublicWorkKind::Granary
+            | PublicWorkKind::Drainage
+            | PublicWorkKind::Hospital
+            | PublicWorkKind::School => 20,
+        },
+    }
+}
+
+const fn public_work_shortlist_bonus(persona: GameplayPersona, kind: PublicWorkKind) -> i64 {
+    match persona {
+        GameplayPersona::Steward => match kind {
+            PublicWorkKind::Drainage
+            | PublicWorkKind::Granary
+            | PublicWorkKind::Hospital
+            | PublicWorkKind::School => 2_500,
+            PublicWorkKind::Road
+            | PublicWorkKind::Bridge
+            | PublicWorkKind::Market
+            | PublicWorkKind::WatchStation => 100,
+        },
+        GameplayPersona::Entrepreneur => match kind {
+            PublicWorkKind::Road | PublicWorkKind::Bridge | PublicWorkKind::Market => 2_000,
+            PublicWorkKind::Granary => 700,
+            PublicWorkKind::Drainage
+            | PublicWorkKind::WatchStation
+            | PublicWorkKind::Hospital
+            | PublicWorkKind::School => 100,
+        },
+        GameplayPersona::PowerBroker => match kind {
+            PublicWorkKind::Road | PublicWorkKind::Market | PublicWorkKind::WatchStation => 2_200,
+            PublicWorkKind::Bridge => 900,
+            PublicWorkKind::Granary
+            | PublicWorkKind::Drainage
+            | PublicWorkKind::Hospital
+            | PublicWorkKind::School => 100,
+        },
+        GameplayPersona::Opportunist => match kind {
+            PublicWorkKind::Bridge | PublicWorkKind::Market | PublicWorkKind::WatchStation => 2_000,
+            PublicWorkKind::Road => 900,
+            PublicWorkKind::Granary
+            | PublicWorkKind::Drainage
+            | PublicWorkKind::Hospital
+            | PublicWorkKind::School => 100,
+        },
+    }
+}
+
+const fn public_work_intent(kind: PublicWorkKind) -> &'static str {
+    match kind {
+        PublicWorkKind::Road => "expand employment and improve street safety",
+        PublicWorkKind::Bridge => "expand employment and improve route safety",
+        PublicWorkKind::Market => "create durable commercial employment",
+        PublicWorkKind::Granary => "stabilize provisioning and create local employment",
+        PublicWorkKind::Drainage => "improve sanitation",
+        PublicWorkKind::WatchStation => "improve safety",
+        PublicWorkKind::Hospital => "improve sanitation and social stability",
+        PublicWorkKind::School => "create local employment and reduce unrest",
     }
 }
 
@@ -6991,6 +7396,7 @@ fn generate_institution_withdrawal_candidates(
         .treasury();
     let monthly_cost = player_monthly_committed_duty_cost(state);
     let severe_liquidity = treasury < monthly_cost.saturating_mul(3);
+    let reserve_pressure = treasury < player_committed_duty_reserve(state);
     let business_distress = player_has_severe_business_distress(state);
     let political_paralysis = player_is_politically_overextended(state);
     let persona_bonus: i64 = match persona {
@@ -7007,6 +7413,8 @@ fn generate_institution_withdrawal_candidates(
         1_600
     } else if business_distress {
         1_200
+    } else if reserve_pressure {
+        1_000
     } else {
         700
     };
@@ -7060,6 +7468,16 @@ fn player_monthly_committed_duty_cost(state: &AppState) -> Money {
         })
 }
 
+fn player_committed_duty_reserve(state: &AppState) -> Money {
+    let monthly_cost = player_monthly_committed_duty_cost(state);
+    if monthly_cost == Money::ZERO {
+        return Money::ZERO;
+    }
+    monthly_cost
+        .saturating_mul(AGENT_OFFICE_DUTY_RESERVE_MONTHS)
+        .saturating_add(AGENT_OFFICE_LIQUIDITY_BUFFER)
+}
+
 fn player_has_severe_business_distress(state: &AppState) -> bool {
     state.businesses.iter().any(|business| {
         business.owner_dynasty_id() == state.player_dynasty_id
@@ -7091,7 +7509,7 @@ fn has_institution_withdrawal_opportunity(state: &AppState) -> bool {
         .treasury();
     has_recent_player_office_duty_shortfall(state)
         || player_is_politically_overextended(state)
-        || treasury < monthly_cost.saturating_mul(6)
+        || treasury < player_committed_duty_reserve(state)
         || (player_has_severe_business_distress(state)
             && treasury
                 < monthly_cost
@@ -7466,12 +7884,41 @@ const fn office_power_persona_bonus(persona: GameplayPersona, power: OfficePower
     }
 }
 
-fn institution_power_bonus(persona: GameplayPersona, powers: &BTreeSet<OfficePower>) -> i64 {
+fn institution_power_bonus(
+    state: &AppState,
+    persona: GameplayPersona,
+    powers: &BTreeSet<OfficePower>,
+) -> i64 {
     powers
         .iter()
-        .map(|power| office_power_persona_bonus(persona, *power))
+        .map(|power| office_power_ascent_bonus(state, persona, *power))
         .max()
         .unwrap_or(0)
+}
+
+fn office_power_ascent_bonus(
+    state: &AppState,
+    persona: GameplayPersona,
+    power: OfficePower,
+) -> i64 {
+    if persona == GameplayPersona::Opportunist
+        && power == OfficePower::DebtEnforcement
+        && !city_credit_power_is_relevant(state)
+    {
+        return 0;
+    }
+    office_power_persona_bonus(persona, power)
+}
+
+fn city_credit_power_is_relevant(state: &AppState) -> bool {
+    state
+        .loans
+        .values()
+        .any(|loan| loan.status != LoanStatus::Repaid)
+        || state
+            .civic_debts
+            .values()
+            .any(|debt| debt.status != CivicDebtStatus::Repaid)
 }
 
 fn institution_ascent_power_bonus(
@@ -7480,7 +7927,7 @@ fn institution_ascent_power_bonus(
     institution: &crate::core::InstitutionRuntime,
     persona: GameplayPersona,
 ) -> i64 {
-    let base = institution_power_bonus(persona, &institution.powers);
+    let base = institution_power_bonus(state, persona, &institution.powers);
     let kind = registry
         .get_institution(institution.institution_id)
         .expect("runtime institution must have a registry definition")
@@ -8058,9 +8505,11 @@ const SUPPORT_EXISTS: &str = "institution support already established";
 const SUPPORT_MISSING: &str = "institution support not established";
 const REPORT_UNCOMMISSIONED: &str = "intelligence report not commissioned";
 const REPORT_NO_LEVERAGE: &str = "intelligence report has no leverage";
+const LOAN_COLLATERAL_LARGE: &str = "loan counterparty collateral too large";
 
 const fn command_error_category(error: &CommandError) -> &'static str {
     match error {
+        CommandError::IdentifierAllocation(_) => "identifier allocation exhausted",
         CommandError::Strategic(source) => strategic_error_category(source),
         CommandError::Simulation(source) => simulation_error_category(source),
         CommandError::MissingBusiness { .. } => "missing business",
@@ -8071,9 +8520,7 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::LoanCounterpartyInterestTooHigh { .. } => "loan counterparty interest high",
         CommandError::LoanCounterpartyPaymentTooLow { .. } => "loan counterparty payment low",
         CommandError::LoanCounterpartyPaymentTooHigh { .. } => "loan counterparty payment high",
-        CommandError::LoanCounterpartyCollateralTooLarge { .. } => {
-            "loan counterparty collateral too large"
-        }
+        CommandError::LoanCounterpartyCollateralTooLarge { .. } => LOAN_COLLATERAL_LARGE,
         CommandError::ContractCounterpartyPriceTooLow { .. } => "contract counterparty price low",
         CommandError::ContractCounterpartyPriceTooHigh { .. } => "contract counterparty price high",
         CommandError::ContractCounterpartyPenaltyOutOfRange { .. } => {
@@ -8164,6 +8611,7 @@ const fn command_error_category(error: &CommandError) -> &'static str {
 
 const fn strategic_error_category(error: &StrategicError) -> &'static str {
     match error {
+        StrategicError::IdentifierAllocation(_) => "strategic: identifier allocation exhausted",
         StrategicError::RegistryMismatch { .. } => "strategic: registry mismatch",
         StrategicError::MissingBusiness { .. } => "strategic: missing business",
         StrategicError::BusinessInactive { .. } => "strategic: inactive business",
@@ -8234,6 +8682,7 @@ const fn strategic_error_category(error: &StrategicError) -> &'static str {
 
 const fn simulation_error_category(error: &SimulationError) -> &'static str {
     match error {
+        SimulationError::IdentifierAllocation(_) => "simulation: identifier allocation exhausted",
         SimulationError::InvalidDayCount { .. } => "simulation: invalid day count",
         SimulationError::DayRangeExhausted { .. } => "simulation: day range exhausted",
         SimulationError::RegistryMismatch { .. } => "simulation: registry mismatch",
@@ -8811,7 +9260,7 @@ fn derive_findings(
     add_institutional_reach_finding(campaigns, &mut findings);
     add_property_concentration_finding(aggregate, campaigns, &mut findings);
     add_strategic_cadence_finding(aggregate, campaigns, &mut findings);
-    add_phase_quality_findings(aggregate, &mut findings);
+    add_phase_quality_findings(aggregate, campaigns, &mut findings);
     add_core_fantasy_findings(aggregate, campaigns, &mut findings);
     add_variance_finding(campaigns, &mut findings);
     if findings.is_empty() {
@@ -8988,9 +9437,14 @@ struct PhaseQualityThresholds {
     minimum_average_families_tenths: u64,
 }
 
-fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<GameplayFinding>) {
+fn add_phase_quality_findings(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
     add_phase_quality_finding(
         aggregate,
+        campaigns,
         findings,
         GameplayPhase::Establishment,
         "establishment",
@@ -9006,6 +9460,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
     );
     add_phase_quality_finding(
         aggregate,
+        campaigns,
         findings,
         GameplayPhase::InstitutionalAscent,
         "ascent",
@@ -9021,6 +9476,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
     );
     add_phase_quality_finding(
         aggregate,
+        campaigns,
         findings,
         GameplayPhase::DynasticGovernance,
         "governance",
@@ -9036,6 +9492,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
     );
     add_phase_quality_finding(
         aggregate,
+        campaigns,
         findings,
         GameplayPhase::SuccessionLegacy,
         "succession and legacy",
@@ -9053,6 +9510,7 @@ fn add_phase_quality_findings(aggregate: &GameplayAggregate, findings: &mut Vec<
 
 fn add_phase_quality_finding(
     aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
     phase: GameplayPhase,
     phase_label: &str,
@@ -9142,11 +9600,12 @@ fn add_phase_quality_finding(
         return;
     }
     let threshold_evidence = missed_thresholds.join("; ");
+    let worst_streak_evidence = phase_worst_streak_evidence(campaigns, phase);
     findings.push(GameplayFinding {
         severity: GameplayFindingSeverity::Warning,
         title: title.to_owned(),
         evidence: format!(
-            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}% of actionable cycles, and actionable cycles averaged {} viable choices across {} families. Thresholds missed: {threshold_evidence}.",
+            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}% of actionable cycles, and actionable cycles averaged {} viable choices across {} families. Thresholds missed: {threshold_evidence}.{worst_streak_evidence}",
             stats.decision_cycles,
             scaled_ratio_u64(
                 u64::from(stats.quiet_cycles_with_ambient_change),
@@ -9158,6 +9617,36 @@ fn add_phase_quality_finding(
             format_tenths(average_families_tenths)
         ),
     });
+}
+
+fn phase_worst_streak_evidence(
+    campaigns: &[GameplayCampaignReport],
+    phase: GameplayPhase,
+) -> String {
+    campaigns
+        .iter()
+        .filter_map(|campaign| {
+            campaign
+                .phase_stats
+                .get(&phase)
+                .map(|stats| (campaign, stats.longest_quiet_streak_cycles))
+        })
+        .max_by_key(|(campaign, streak)| {
+            (
+                *streak,
+                campaign.seed,
+                campaign.persona,
+                campaign.background.recipe_key(),
+            )
+        })
+        .map_or_else(String::new, |(campaign, streak)| {
+            format!(
+                " Worst uninterrupted quiet streak: {streak} cycles in seed {}, {} {:?}.",
+                campaign.seed,
+                campaign.persona.label(),
+                campaign.background
+            )
+        })
 }
 
 fn add_repetitive_command_streak_finding(
@@ -10584,6 +11073,7 @@ fn add_core_fantasy_findings(
     add_player_labor_agency_finding(aggregate, campaigns, findings);
     add_persona_convergence_finding(campaigns, findings);
     add_civic_convergence_finding(aggregate, campaigns, findings);
+    add_material_civic_outcome_convergence_finding(aggregate, campaigns, findings);
     add_house_governance_convergence_finding(aggregate, campaigns, findings);
     add_power_exposure_finding(aggregate, campaigns, findings);
     add_office_duty_failure_finding(aggregate, campaigns, findings);
@@ -11223,6 +11713,125 @@ fn add_civic_convergence_finding(
     }
 }
 
+fn add_material_civic_outcome_convergence_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if campaigns.len() < 8 || average_campaign_days(aggregate) < 3_600 {
+        return;
+    }
+    let mut campaigns_by_start: BTreeMap<(u64, &'static str), Vec<&GameplayCampaignReport>> =
+        BTreeMap::new();
+    for campaign in campaigns {
+        campaigns_by_start
+            .entry((campaign.seed, campaign.background.recipe_key()))
+            .or_default()
+            .push(campaign);
+    }
+    let mut eligible = 0_usize;
+    let mut materially_converged = 0_usize;
+    let mut dimension_convergence = [0_usize; 5];
+    for cohort in campaigns_by_start.values() {
+        if cohort
+            .iter()
+            .map(|campaign| campaign.persona)
+            .collect::<BTreeSet<_>>()
+            .len()
+            < GameplayPersona::all().len()
+        {
+            continue;
+        }
+        eligible = eligible.saturating_add(1);
+        let civic_identity_variants = cohort
+            .iter()
+            .map(|campaign| {
+                (
+                    campaign.end.active_law_checksum,
+                    campaign.end.player_completed_public_work_checksum,
+                    campaign.end.player_office_checksum,
+                    campaign.end.house_governance as u8,
+                )
+            })
+            .collect::<BTreeSet<_>>()
+            .len();
+        if civic_identity_variants <= 1 {
+            continue;
+        }
+        let converged = [
+            endpoint_span(cohort, |campaign| campaign.end.average_food_satisfaction) <= 200,
+            district_endpoint_span(cohort, |district| district.unrest_basis_points) <= 400,
+            district_endpoint_span(cohort, |district| district.employment_basis_points) <= 500,
+            district_endpoint_span(cohort, |district| district.sanitation_basis_points) <= 500,
+            district_endpoint_span(cohort, |district| district.safety_basis_points) <= 500,
+        ];
+        for (count, converged) in dimension_convergence.iter_mut().zip(converged) {
+            if converged {
+                *count = count.saturating_add(1);
+            }
+        }
+        let converged_dimensions = converged.into_iter().filter(|converged| *converged).count();
+        if converged_dimensions >= 4 {
+            materially_converged = materially_converged.saturating_add(1);
+        }
+    }
+    if eligible == 0 || materially_converged == 0 {
+        return;
+    }
+    let share = scaled_ratio_usize(materially_converged, eligible, 100);
+    findings.push(GameplayFinding {
+        severity: if share >= 50 {
+            GameplayFindingSeverity::Warning
+        } else {
+            GameplayFindingSeverity::Info
+        },
+        title: "Different civic strategies converge on similar material city conditions".to_owned(),
+        evidence: format!(
+            "{materially_converged} of {eligible} same-start persona cohorts ended within the convergence band in at least four of five material measures despite different laws, public works, offices, or governance. Food uses the citywide endpoint; district measures compare the largest same-district persona span so localized projects are not averaged away. Converged by measure: food {}/{eligible}, unrest {}/{eligible}, employment {}/{eligible}, sanitation {}/{eligible}, safety {}/{eligible}.",
+            dimension_convergence[0],
+            dimension_convergence[1],
+            dimension_convergence[2],
+            dimension_convergence[3],
+            dimension_convergence[4],
+        ),
+    });
+}
+
+fn endpoint_span(
+    cohort: &[&GameplayCampaignReport],
+    measure: impl Fn(&GameplayCampaignReport) -> u16,
+) -> u16 {
+    let minimum = cohort.iter().map(|campaign| measure(campaign)).min();
+    let maximum = cohort.iter().map(|campaign| measure(campaign)).max();
+    minimum
+        .zip(maximum)
+        .map_or(0, |(minimum, maximum)| maximum.saturating_sub(minimum))
+}
+
+fn district_endpoint_span(
+    cohort: &[&GameplayCampaignReport],
+    measure: impl Fn(&GameplayDistrictCondition) -> u16 + Copy,
+) -> u16 {
+    let mut ranges = BTreeMap::<DistrictId, (u16, u16)>::new();
+    for campaign in cohort {
+        for district in &campaign.end.district_conditions {
+            let value = measure(district);
+            ranges
+                .entry(district.district_id)
+                .and_modify(|range| {
+                    range.0 = range.0.min(value);
+                    range.1 = range.1.max(value);
+                })
+                .or_insert((value, value));
+        }
+    }
+    ranges
+        .values()
+        .map(|(minimum, maximum)| maximum.saturating_sub(*minimum))
+        .max()
+        .unwrap_or(0)
+}
+
 fn add_house_governance_convergence_finding(
     aggregate: &GameplayAggregate,
     campaigns: &[GameplayCampaignReport],
@@ -11569,6 +12178,10 @@ fn milestone_day(day: Option<i64>) -> String {
 struct HealthSummary {
     minimum_food: (u16, u16),
     minimum_district_food: (u16, u16),
+    end_district_employment: (u16, u16),
+    end_district_sanitation: (u16, u16),
+    end_district_safety: (u16, u16),
+    end_district_unrest: (u16, u16),
     operating_businesses: (u16, u16),
     peak_offices: (u16, u16),
     peak_unread: (u16, u16),
@@ -11596,6 +12209,22 @@ impl HealthSummary {
             minimum_district_food: (
                 first.minimum_district_food_satisfaction,
                 first.minimum_district_food_satisfaction,
+            ),
+            end_district_employment: (
+                first.end.average_district_employment,
+                first.end.average_district_employment,
+            ),
+            end_district_sanitation: (
+                first.end.average_district_sanitation,
+                first.end.average_district_sanitation,
+            ),
+            end_district_safety: (
+                first.end.average_district_safety,
+                first.end.average_district_safety,
+            ),
+            end_district_unrest: (
+                first.end.average_district_unrest,
+                first.end.average_district_unrest,
             ),
             operating_businesses: (
                 first.minimum_operating_businesses,
@@ -11635,6 +12264,7 @@ impl HealthSummary {
             .minimum_district_food
             .1
             .max(campaign.minimum_district_food_satisfaction);
+        self.observe_civic_conditions(&campaign.end);
         self.operating_businesses.0 = self
             .operating_businesses
             .0
@@ -11703,6 +12333,30 @@ impl HealthSummary {
             .suspended_works
             .saturating_add(u64::from(campaign.end.suspended_public_works));
     }
+
+    fn observe_civic_conditions(&mut self, snapshot: &GameplaySnapshot) {
+        update_range(
+            &mut self.end_district_employment,
+            snapshot.average_district_employment,
+        );
+        update_range(
+            &mut self.end_district_sanitation,
+            snapshot.average_district_sanitation,
+        );
+        update_range(
+            &mut self.end_district_safety,
+            snapshot.average_district_safety,
+        );
+        update_range(
+            &mut self.end_district_unrest,
+            snapshot.average_district_unrest,
+        );
+    }
+}
+
+fn update_range(range: &mut (u16, u16), value: u16) {
+    range.0 = range.0.min(value);
+    range.1 = range.1.max(value);
 }
 
 fn summarize_health(campaigns: &[GameplayCampaignReport]) -> Option<HealthSummary> {
@@ -11735,6 +12389,18 @@ fn render_health_summary(report: &GameplayHarnessReport, output: &mut String) {
         summary.available_offices,
         summary.peak_unread.0,
         summary.peak_unread.1
+    );
+    let _ = writeln!(
+        output,
+        "  ending civic conditions: employment {:.2}-{:.2}% | sanitation {:.2}-{:.2}% | safety {:.2}-{:.2}% | unrest {:.2}-{:.2}%",
+        f64::from(summary.end_district_employment.0) / 100.0,
+        f64::from(summary.end_district_employment.1) / 100.0,
+        f64::from(summary.end_district_sanitation.0) / 100.0,
+        f64::from(summary.end_district_sanitation.1) / 100.0,
+        f64::from(summary.end_district_safety.0) / 100.0,
+        f64::from(summary.end_district_safety.1) / 100.0,
+        f64::from(summary.end_district_unrest.0) / 100.0,
+        f64::from(summary.end_district_unrest.1) / 100.0,
     );
     let _ = writeln!(
         output,
@@ -11959,6 +12625,16 @@ fn render_campaign_summaries(report: &GameplayHarnessReport, output: &mut String
             campaign.end.active_businesses,
             campaign.end.distressed_businesses,
             campaign.end.insolvent_businesses
+        );
+        let _ = writeln!(
+            output,
+            "      civic | laws {:?} | works {:?} | employment {:.2}% | sanitation {:.2}% | safety {:.2}% | unrest {:.2}%",
+            campaign.end.active_law_kinds,
+            campaign.end.player_completed_public_work_kinds,
+            f64::from(campaign.end.average_district_employment) / 100.0,
+            f64::from(campaign.end.average_district_sanitation) / 100.0,
+            f64::from(campaign.end.average_district_safety) / 100.0,
+            f64::from(campaign.end.average_district_unrest) / 100.0,
         );
     }
     let _ = writeln!(output);
@@ -12240,6 +12916,7 @@ fn compare_dynasty_and_civic(
         domains.insert(GameplayDomain::Institutions);
     }
     if earlier.active_laws != later.active_laws
+        || earlier.active_law_kinds != later.active_law_kinds
         || earlier.law_value_checksum != later.law_value_checksum
         || earlier.active_law_checksum != later.active_law_checksum
         || earlier.law_state_checksum != later.law_state_checksum
@@ -12249,10 +12926,15 @@ fn compare_dynasty_and_civic(
     if earlier.average_food_satisfaction != later.average_food_satisfaction
         || earlier.minimum_district_food_satisfaction != later.minimum_district_food_satisfaction
         || earlier.average_district_unrest != later.average_district_unrest
+        || earlier.average_district_employment != later.average_district_employment
+        || earlier.average_district_sanitation != later.average_district_sanitation
+        || earlier.average_district_safety != later.average_district_safety
+        || earlier.district_conditions != later.district_conditions
         || earlier.public_work_progress_total != later.public_work_progress_total
         || earlier.building_public_works != later.building_public_works
         || earlier.completed_public_works != later.completed_public_works
         || earlier.suspended_public_works != later.suspended_public_works
+        || earlier.player_completed_public_work_kinds != later.player_completed_public_work_kinds
         || earlier.player_completed_public_work_checksum
             != later.player_completed_public_work_checksum
         || earlier.public_work_state_checksum != later.public_work_state_checksum

@@ -743,7 +743,7 @@ mod public_works {
             .expect("public work must exist")
             .spent;
 
-        progress_public_works(registry, &mut state);
+        progress_public_works(registry, &mut state).expect("public-work progression must succeed");
 
         let treasury_after = state
             .institutions
@@ -765,6 +765,122 @@ mod public_works {
             "recorded project spending must equal the treasury funds consumed"
         );
         validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn completed_market_employment_bonus_survives_monthly_recalculation() {
+        let mut state = make_test_campaign();
+        let district_id = *state
+            .districts
+            .keys()
+            .next()
+            .expect("campaign must contain a district");
+        update_district_conditions(&mut state);
+        let baseline = state
+            .districts
+            .get(&district_id)
+            .expect("district must exist")
+            .employment_basis_points;
+        let work_id = state.next_ids.public_work();
+        state.public_works.insert(
+            work_id,
+            PublicWork {
+                id: work_id,
+                district_id,
+                kind: PublicWorkKind::Market,
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                budget: Money::from_copper(12_000),
+                spent: Money::from_copper(12_000),
+                progress_basis_points: 10_000,
+                status: PublicWorkStatus::Completed,
+            },
+        );
+
+        update_district_conditions(&mut state);
+        let after_first_update = state
+            .districts
+            .get(&district_id)
+            .expect("district must exist")
+            .employment_basis_points;
+        update_district_conditions(&mut state);
+        let after_second_update = state
+            .districts
+            .get(&district_id)
+            .expect("district must exist")
+            .employment_basis_points;
+
+        assert_eq!(
+            after_first_update,
+            baseline.saturating_add(800).min(10_000),
+            "completed market infrastructure must add durable employment capacity"
+        );
+        assert_eq!(
+            after_second_update, after_first_update,
+            "monthly district recomputation must preserve completed public-work employment effects"
+        );
+    }
+
+    #[test]
+    fn district_unrest_responds_to_material_living_conditions() {
+        let baseline = DistrictRuntime {
+            district_id: DistrictId::new(1),
+            rent_index_basis_points: 10_000,
+            employment_basis_points: 6_000,
+            sanitation_basis_points: 7_000,
+            safety_basis_points: 10_000,
+            unrest_basis_points: 1_000,
+            dynasty_support: Vec::new(),
+        };
+        let stable = district_unrest_next_basis_points(&baseline, 10_000);
+
+        for stressed in [
+            DistrictRuntime {
+                employment_basis_points: 3_000,
+                ..baseline.clone()
+            },
+            DistrictRuntime {
+                sanitation_basis_points: 4_000,
+                ..baseline.clone()
+            },
+            DistrictRuntime {
+                safety_basis_points: 4_000,
+                ..baseline.clone()
+            },
+            DistrictRuntime {
+                rent_index_basis_points: 14_000,
+                ..baseline.clone()
+            },
+        ] {
+            assert!(
+                district_unrest_next_basis_points(&stressed, 10_000) > stable,
+                "employment, sanitation, safety, and rent pressure must each affect public unrest"
+            );
+        }
+        assert!(
+            district_unrest_next_basis_points(&baseline, 5_000) > stable,
+            "food hardship must continue to affect public unrest"
+        );
+    }
+
+    #[test]
+    fn infrastructure_employment_reduces_following_month_unrest_pressure() {
+        let mut district = DistrictRuntime {
+            district_id: DistrictId::new(1),
+            rent_index_basis_points: 10_000,
+            employment_basis_points: 2_500,
+            sanitation_basis_points: 7_000,
+            safety_basis_points: 10_000,
+            unrest_basis_points: 2_000,
+            dynasty_support: Vec::new(),
+        };
+        let without_market = district_unrest_next_basis_points(&district, 10_000);
+        district.employment_basis_points = district.employment_basis_points.saturating_add(800);
+        let with_market = district_unrest_next_basis_points(&district, 10_000);
+
+        assert!(
+            with_market < without_market,
+            "durable employment created by infrastructure must translate into lower unrest pressure"
+        );
     }
 }
 
@@ -4126,7 +4242,8 @@ mod loans {
         let loan_id = current_loan_id(&state);
         let before = state.clone();
 
-        let paid = apply_loan_payment(&mut state, loan_id, Money::from_copper(-1));
+        let paid = apply_loan_payment(&mut state, loan_id, Money::from_copper(-1))
+            .expect("loan payment must succeed");
 
         assert_eq!(paid, Money::ZERO);
         assert_state_unchanged(
@@ -4776,7 +4893,7 @@ mod legal_cases {
         }
         let outbox_before = state.outbox.len();
 
-        advance_legal_case_hearings(&mut state);
+        advance_legal_case_hearings(&mut state).expect("legal-case hearing update must succeed");
 
         assert_eq!(
             state
@@ -4879,7 +4996,8 @@ mod crises {
             Some(affected_district),
             5_000,
             "test epidemic",
-        );
+        )
+        .expect("test crisis insertion must succeed");
 
         apply_crisis_daily_effects(registry, &mut state).expect("daily crisis effects must apply");
 
@@ -4921,7 +5039,8 @@ mod crises {
             None,
             5_000,
             "test shortage",
-        );
+        )
+        .expect("test crisis insertion must succeed");
 
         apply_crisis_daily_effects(registry, &mut state).expect("daily crisis effects must apply");
 
@@ -4952,7 +5071,8 @@ mod crises {
             None,
             5_000,
             "test shortage overflow",
-        );
+        )
+        .expect("test crisis insertion must succeed");
         let crisis_demand = {
             let quote = state
                 .market
@@ -4992,9 +5112,10 @@ mod crises {
             None,
             8_500,
             "test escalation",
-        );
+        )
+        .expect("test crisis insertion must succeed");
 
-        detect_and_advance_crises(registry, &mut state);
+        detect_and_advance_crises(registry, &mut state).expect("crisis advancement must succeed");
 
         assert_eq!(
             state
@@ -5016,10 +5137,11 @@ mod crises {
             None,
             7_900,
             "test escalation",
-        );
+        )
+        .expect("test crisis insertion must succeed");
         let outbox_before = state.outbox.len();
 
-        detect_and_advance_crises(registry, &mut state);
+        detect_and_advance_crises(registry, &mut state).expect("crisis advancement must succeed");
 
         let crisis = state.crises.get(&crisis_id).expect("crisis must exist");
         assert_eq!(crisis.status, CrisisStatus::Escalated);
@@ -5048,7 +5170,8 @@ mod crises {
             None,
             4_500,
             "test exploitation",
-        );
+        )
+        .expect("test crisis insertion must succeed");
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
@@ -5056,7 +5179,7 @@ mod crises {
             detail: "response=Exploit".to_owned(),
         });
 
-        detect_and_advance_crises(registry, &mut state);
+        detect_and_advance_crises(registry, &mut state).expect("crisis advancement must succeed");
 
         let crisis = state.crises.get(&crisis_id).expect("crisis must exist");
         assert_eq!(crisis.status, CrisisStatus::Active);
@@ -5076,7 +5199,8 @@ mod crises {
             None,
             550,
             "test resolution",
-        );
+        )
+        .expect("test crisis insertion must succeed");
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
@@ -5085,7 +5209,7 @@ mod crises {
         });
         let outbox_before = state.outbox.len();
 
-        detect_and_advance_crises(registry, &mut state);
+        detect_and_advance_crises(registry, &mut state).expect("crisis advancement must succeed");
 
         assert_eq!(
             state
@@ -5128,14 +5252,15 @@ mod crises {
             None,
             400,
             "historical panic",
-        );
+        )
+        .expect("test crisis insertion must succeed");
         {
             let crisis = state.crises.get_mut(&crisis_id).expect("crisis must exist");
             crisis.severity_basis_points = 0;
             crisis.status = CrisisStatus::Resolved;
         }
 
-        detect_and_advance_crises(registry, &mut state);
+        detect_and_advance_crises(registry, &mut state).expect("crisis advancement must succeed");
 
         assert_eq!(
             state
@@ -5155,7 +5280,7 @@ mod crises {
             route.disruption_basis_points = 7_500;
         }
 
-        detect_trade_disruption(&mut state);
+        detect_trade_disruption(&mut state).expect("trade disruption detection must succeed");
 
         assert!(
             has_active_crisis(&state, CrisisKind::TradeDisruption),
@@ -5185,7 +5310,8 @@ mod crises {
             None,
             10_000,
             "test panic",
-        );
+        )
+        .expect("test crisis insertion must succeed");
 
         apply_crisis_daily_effects(registry, &mut state).expect("daily crisis effects must apply");
 
@@ -5236,7 +5362,8 @@ mod crises {
             Some(district_id),
             10_000,
             "test demand",
-        );
+        )
+        .expect("test crisis insertion must succeed");
 
         apply_crisis_daily_effects(registry, &mut state).expect("daily crisis effects must apply");
 
@@ -5400,7 +5527,8 @@ mod routes {
             None,
             8_000,
             "test route disruption",
-        );
+        )
+        .expect("test crisis insertion must succeed");
 
         run_daily_strategic_systems(registry, &mut state)
             .expect("daily strategic systems must run");
@@ -5624,7 +5752,7 @@ mod ai {
             .expect("selected loan must exist")
             .balance = Money::from_copper(20_000);
 
-        advance_ai_objectives(registry, &mut state);
+        advance_ai_objectives(registry, &mut state).expect("AI objective advancement must succeed");
 
         assert_eq!(
             state
@@ -5659,7 +5787,8 @@ mod ai {
 
         let mut progress = ObjectiveProgress::Pending;
         for _ in 0..40 {
-            progress = advance_ai_rival_objective(&mut state, dynasty_id);
+            progress = advance_ai_rival_objective(&mut state, dynasty_id)
+                .expect("AI rival objective must succeed");
         }
 
         assert_eq!(progress, ObjectiveProgress::Achieved);
@@ -5726,7 +5855,7 @@ mod ai {
         }
         let objective_count_before = state.ai_objectives.len();
 
-        advance_ai_objectives(registry, &mut state);
+        advance_ai_objectives(registry, &mut state).expect("AI objective advancement must succeed");
 
         let abandoned = state
             .ai_objectives
@@ -5844,7 +5973,8 @@ mod ai {
             .treasury();
 
         assert_eq!(
-            advance_ai_debt_objective(&mut state, borrower_id),
+            advance_ai_debt_objective(&mut state, borrower_id)
+                .expect("AI debt objective must succeed"),
             ObjectiveProgress::Achieved,
             "the AI objective must report completion after full repayment"
         );
@@ -5941,7 +6071,8 @@ mod ai {
         });
 
         assert_eq!(
-            advance_ai_supply_objective(registry, &mut state, dynasty_id),
+            advance_ai_supply_objective(registry, &mut state, dynasty_id)
+                .expect("AI supply objective must succeed"),
             ObjectiveProgress::Achieved
         );
         assert!(state.contracts.values().any(|contract| {

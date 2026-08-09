@@ -1542,7 +1542,8 @@ mod business_lifecycle {
             business.inventory.clear();
         }
 
-        update_business_lifecycle(registry, &mut state);
+        update_business_lifecycle(registry, &mut state)
+            .expect("business lifecycle update must succeed");
 
         assert_eq!(
             state
@@ -1583,7 +1584,8 @@ mod business_lifecycle {
             business.finance.cash = reserve;
         }
 
-        update_business_lifecycle(registry, &mut state);
+        update_business_lifecycle(registry, &mut state)
+            .expect("business lifecycle update must succeed");
 
         assert_eq!(
             state
@@ -1613,7 +1615,8 @@ mod business_lifecycle {
             .operations
             .status = BusinessStatus::Closed;
 
-        update_business_lifecycle(registry, &mut state);
+        update_business_lifecycle(registry, &mut state)
+            .expect("business lifecycle update must succeed");
 
         assert_eq!(
             state
@@ -1647,7 +1650,8 @@ mod business_lifecycle {
         }
         let chronicle_before = state.chronicle.len();
 
-        update_business_lifecycle(registry, &mut state);
+        update_business_lifecycle(registry, &mut state)
+            .expect("business lifecycle update must succeed");
 
         assert_eq!(
             state
@@ -1695,7 +1699,8 @@ mod business_lifecycle {
         }
         let chronicle_before = state.chronicle.len();
 
-        update_business_lifecycle(registry, &mut state);
+        update_business_lifecycle(registry, &mut state)
+            .expect("business lifecycle update must succeed");
 
         assert_eq!(
             state
@@ -1972,7 +1977,7 @@ mod health_and_succession {
 
         let successions =
             decide_successions(&mut state).expect("forced succession must remain representable");
-        apply_successions(&mut state, successions);
+        apply_successions(&mut state, successions).expect("succession application must succeed");
 
         let institution = state
             .institutions
@@ -2045,7 +2050,7 @@ mod health_and_succession {
 
         let successions =
             decide_successions(&mut state).expect("forced succession must remain representable");
-        apply_successions(&mut state, successions);
+        apply_successions(&mut state, successions).expect("succession application must succeed");
 
         assert!(
             !state
@@ -2185,8 +2190,9 @@ mod health_and_succession {
         assert!(prepared_line.family_loyalty_loss < unprepared_line.family_loyalty_loss);
         assert!(prepared_line.legitimacy_loss < unprepared_line.legitimacy_loss);
 
-        apply_successions(&mut unprepared, unprepared_lines);
-        apply_successions(&mut prepared, prepared_lines);
+        apply_successions(&mut unprepared, unprepared_lines)
+            .expect("unprepared succession must succeed");
+        apply_successions(&mut prepared, prepared_lines).expect("prepared succession must succeed");
 
         assert!(
             prepared
@@ -2430,7 +2436,7 @@ mod health_and_succession {
             business_id,
         } = make_incapacitation_fixture();
 
-        update_character_health(&mut state);
+        update_character_health(&mut state).expect("character health update must succeed");
 
         let character = state
             .characters
@@ -2512,7 +2518,7 @@ mod health_and_succession {
             },
         );
 
-        update_character_health(&mut state);
+        update_character_health(&mut state).expect("character health update must succeed");
 
         let heir = state
             .characters
@@ -2583,7 +2589,7 @@ mod market_prices {
             quote.supply_today = Quantity::from_units(10_000);
         }
 
-        update_market_prices(registry, &mut state);
+        update_market_prices(registry, &mut state).expect("market price update must succeed");
 
         assert!(
             state

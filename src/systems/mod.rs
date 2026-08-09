@@ -122,8 +122,6 @@ pub(crate) fn synchronize_employment_for_business_status(
 }
 
 pub use bootstrap::{NewGameError, build_new_game};
-#[cfg(test)]
-pub(crate) use commands::INSTITUTION_SUPPORT_INTERVAL_DAYS;
 pub(crate) use commands::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
     COMMISSIONED_INFORMATION_SOURCE, FAMILY_COUNCIL_MEETING_COST,
@@ -136,19 +134,24 @@ pub(crate) use commands::{
     LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
     MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
-    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
-    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
-    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT,
-    WARD_ADOPTION_INTERVAL_DAYS, WARD_ADOPTION_LEGITIMACY_REQUIREMENT,
-    WARD_ADOPTION_REPUTATION_REQUIREMENT, contract_counterparty_price_bounds,
-    contract_relationship_pressure_basis_points, has_established_player_office_power,
-    institution_membership_count, institution_support_day, institution_support_next_day,
-    office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
-    quote_information_leverage, required_office_power_for_law,
+    OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
+    OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, PRIVATE_LOAN_COUNTERPARTY_RESERVE,
+    PROPERTY_COUNTERPARTY_BUYER_RESERVE, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST,
+    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT,
+    contract_counterparty_price_bounds, contract_relationship_pressure_basis_points,
+    has_established_player_office_power, institution_membership_count, institution_support_day,
+    institution_support_next_day, office_nomination_delivery_requirement,
+    office_nomination_next_day, player_contract_deliveries, quote_information_leverage,
+    required_office_power_for_law,
 };
 pub use commands::{
     CommandError, CommandOutcome, CrisisResponse, EducationFocus, InformationFocus, LaborResponse,
     PlayerCommand, apply_player_command,
+};
+#[cfg(test)]
+pub(crate) use commands::{
+    INSTITUTION_SUPPORT_INTERVAL_DAYS, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS,
 };
 pub use invariants::validate_invariants;
 pub use simulation::advance_days;
@@ -165,6 +168,7 @@ pub(crate) use strategic::{
     capitalize_owned_business, crisis_response_contains_crisis, dynasty_office_administrative_load,
     effective_property_weekly_rent, initialize_strategic_state, institution_capability_score,
     projected_dynasty_monthly_office_duty,
+    projected_dynasty_monthly_office_duty_with_additional_offices,
 };
 pub use transactions::{
     SimulationError, ValidatedCashTransfer, transfer_business_cash, validate_business_cash_transfer,
