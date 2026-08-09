@@ -17,7 +17,7 @@ use crate::rng::DeterministicRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 15;
+pub const CURRENT_SCHEMA_VERSION: u32 = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGameConfig {
@@ -574,7 +574,7 @@ impl NextIds {
         PublicWorkId,
         PublicWork
     );
-    next_id_method!(
+    test_next_id_method!(
         legal_case,
         try_legal_case,
         legal_case,

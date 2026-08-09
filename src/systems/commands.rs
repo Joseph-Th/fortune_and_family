@@ -5,9 +5,9 @@ use super::transactions::{
 };
 use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
-    acquire_business, available_supply_contract_capacity, buy_unowned_property,
-    capitalize_owned_business, quote_property_liquidation, sell_owned_property,
-    transfer_business_cash, validate_loan, validate_supply_contract,
+    acquire_business, available_supply_contract_capacity, business_recapitalization_target,
+    buy_unowned_property, capitalize_owned_business, quote_property_liquidation,
+    sell_owned_property, transfer_business_cash, validate_loan, validate_supply_contract,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
@@ -15,8 +15,8 @@ use crate::core::{
     ChronicleKind, CivicDebt, CivicDebtStatus, ContractStatus, CrisisStatus, DynastyPair,
     EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind, HouseGovernance,
     InformationConfidence, InformationReport, InformationTarget, LawKind, LegalCase, LegalCaseKind,
-    LegalCaseStatus, LoanStatus, OfficeDirectiveState, OfficePower, OutboxKind, PublicWork,
-    PublicWorkKind, PublicWorkStatus,
+    LegalCaseStatus, LegalClaimSource, LoanStatus, OfficeDirectiveState, OfficePower, OutboxKind,
+    PublicWork, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId,
@@ -176,6 +176,9 @@ struct BusinessPolicyInput {
 pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 180;
 pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 90;
 pub(crate) const LEGAL_CASE_FILING_COST: Money = Money::from_copper(300);
+const LEGAL_DELINQUENT_DEBT_EVIDENCE_BASIS_POINTS: u16 = 7_500;
+const LEGAL_DEFAULTED_DEBT_EVIDENCE_BASIS_POINTS: u16 = 9_000;
+const LEGAL_CONTRACT_BREACH_EVIDENCE_BASIS_POINTS: u16 = 8_500;
 pub(crate) const LAW_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const LAW_LEGITIMACY_REQUIREMENT: u16 = 3_000;
 pub(crate) const LAW_LEGITIMACY_COST: u16 = 250;
@@ -183,6 +186,8 @@ pub(crate) const CIVIC_DEBT_INTEREST_BASIS_POINTS: u16 = 600;
 pub(crate) const CIVIC_DEBT_TERM_WEEKS: i64 = 104;
 pub(crate) const CIVIC_DEBT_CREDITOR_RESERVE: Money = Money::from_copper(10_000);
 pub(crate) const PRIVATE_LOAN_COUNTERPARTY_RESERVE: Money = Money::from_copper(10_000);
+pub(crate) const PRIVATE_LOAN_COUNTERPARTY_BORROWER_LIQUIDITY_TARGET: Money =
+    Money::from_copper(25_000);
 const PRIVATE_LOAN_COUNTERPARTY_MIN_INTEREST_BASIS_POINTS: u16 = 400;
 const PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS: u16 = 2_500;
 const PRIVATE_LOAN_COUNTERPARTY_MAX_AMORTIZATION_WEEKS: i64 = 260;
@@ -294,6 +299,10 @@ pub enum CommandError {
         exposure: Money,
         minimum_exposure: Money,
     },
+    #[error(
+        "non-player borrower {borrower_dynasty_id} has no material financing pressure and declines unsolicited credit"
+    )]
+    LoanCounterpartyNoFinancingNeed { borrower_dynasty_id: DynastyId },
     #[error(
         "non-player contract seller requires at least {minimum_price} per unit; proposed price is {unit_price}"
     )]
@@ -412,6 +421,23 @@ pub enum CommandError {
     SameLegalParty,
     #[error("legal evidence or damages are invalid")]
     InvalidLegalTerms,
+    #[error("there is no grounded {kind:?} claim against dynasty {defendant_dynasty_id}")]
+    LegalClaimNotGrounded {
+        defendant_dynasty_id: DynastyId,
+        kind: LegalCaseKind,
+    },
+    #[error(
+        "legal evidence {evidence_basis_points} exceeds the supported claim evidence {maximum_basis_points}"
+    )]
+    LegalEvidenceExceedsClaim {
+        evidence_basis_points: u16,
+        maximum_basis_points: u16,
+    },
+    #[error("legal damages {damages} exceed the supported claim amount {maximum_damages}")]
+    LegalDamagesExceedClaim {
+        damages: Money,
+        maximum_damages: Money,
+    },
     #[error("an unresolved {kind:?} case against dynasty {defendant_dynasty_id} already exists")]
     DuplicateActiveLegalCase {
         defendant_dynasty_id: DynastyId,
@@ -690,7 +716,7 @@ fn dispatch_player_command(
             },
         ),
         PlayerCommand::CreateSupplyContract { terms } => apply_contract(registry, state, &terms),
-        PlayerCommand::IssueLoan { terms } => apply_loan(state, &terms),
+        PlayerCommand::IssueLoan { terms } => apply_loan(registry, state, &terms),
         PlayerCommand::BuyProperty { property_id } => apply_property_purchase(state, property_id),
         PlayerCommand::SellProperty {
             property_id,
@@ -770,11 +796,16 @@ fn apply_contract(
     })
 }
 
-fn apply_loan(state: &mut AppState, terms: &LoanTerms) -> Result<CommandOutcome, CommandError> {
+fn apply_loan(
+    registry: &Registry,
+    state: &mut AppState,
+    terms: &LoanTerms,
+) -> Result<CommandOutcome, CommandError> {
     ensure_player_loan_party(state, terms)?;
     let validated = validate_loan(state, terms.clone())?;
     ensure_non_player_loan_counterparty_accepts(state, terms)?;
     let id = validated.commit(state)?;
+    deploy_non_player_financing_package(registry, state, terms)?;
     Ok(CommandOutcome {
         summary: format!("Issued loan {id}."),
     })
@@ -1295,6 +1326,30 @@ fn ensure_player_loan_party(state: &AppState, terms: &LoanTerms) -> Result<(), C
     Ok(())
 }
 
+pub(crate) fn private_loan_borrower_financing_pressure(
+    state: &AppState,
+    dynasty_id: DynastyId,
+) -> u8 {
+    if state.loans.values().any(|loan| {
+        loan.borrower_dynasty_id == dynasty_id
+            && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
+    }) {
+        return 3;
+    }
+    if state.businesses.iter().any(|business| {
+        business.owner_dynasty_id() == dynasty_id
+            && matches!(
+                business.status(),
+                BusinessStatus::Distressed | BusinessStatus::Insolvent
+            )
+    }) {
+        return 2;
+    }
+    u8::from(state.dynasties.get(&dynasty_id).is_some_and(|dynasty| {
+        dynasty.treasury() < PRIVATE_LOAN_COUNTERPARTY_BORROWER_LIQUIDITY_TARGET
+    }))
+}
+
 fn ensure_non_player_loan_counterparty_accepts(
     state: &AppState,
     terms: &LoanTerms,
@@ -1368,6 +1423,63 @@ fn ensure_non_player_loan_counterparty_accepts(
                 });
             }
         }
+        if private_loan_borrower_financing_pressure(state, terms.borrower_dynasty_id) == 0 {
+            return Err(CommandError::LoanCounterpartyNoFinancingNeed {
+                borrower_dynasty_id: terms.borrower_dynasty_id,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn deploy_non_player_financing_package(
+    registry: &Registry,
+    state: &mut AppState,
+    terms: &LoanTerms,
+) -> Result<(), CommandError> {
+    if terms.borrower_dynasty_id == state.player_dynasty_id {
+        return Ok(());
+    }
+    let business_id = state
+        .businesses
+        .iter()
+        .filter(|business| business.owner_dynasty_id() == terms.borrower_dynasty_id)
+        .filter(|business| {
+            matches!(
+                business.status(),
+                BusinessStatus::Distressed | BusinessStatus::Insolvent
+            )
+        })
+        .min_by_key(|business| {
+            (
+                match business.status() {
+                    BusinessStatus::Insolvent => 0_u8,
+                    BusinessStatus::Distressed => 1,
+                    BusinessStatus::Active | BusinessStatus::Closed => 2,
+                },
+                business.cash(),
+                business.id(),
+            )
+        })
+        .map(crate::core::Business::id);
+    let Some(business_id) = business_id else {
+        return Ok(());
+    };
+    let business = state
+        .businesses
+        .get(business_id)
+        .expect("selected borrower business must exist");
+    let target_cash = business_recapitalization_target(registry, state, business);
+    let shortfall = target_cash.saturating_sub(business.cash());
+    let treasury = state
+        .dynasties
+        .get(&terms.borrower_dynasty_id)
+        .expect("validated loan borrower must exist")
+        .treasury();
+    let deployable = treasury.saturating_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE);
+    let amount = shortfall.min(deployable);
+    if amount > Money::ZERO {
+        capitalize_owned_business(state, terms.borrower_dynasty_id, business_id, amount)?;
     }
     Ok(())
 }
@@ -1470,6 +1582,7 @@ fn commit_civic_debt_issuance(
     sponsor_dynasty_id: DynastyId,
     issuance: ValidatedCivicDebtIssuance,
 ) -> Result<crate::ids::CivicDebtId, CommandError> {
+    let id = state.next_ids.try_civic_debt()?;
     state
         .dynasties
         .get_mut(&issuance.creditor_dynasty_id)
@@ -1481,7 +1594,6 @@ fn commit_civic_debt_issuance(
         .get_mut(&issuance.treasury_id)
         .expect("validated civic treasury must exist")
         .budget = issuance.treasury_budget_after;
-    let id = state.next_ids.try_civic_debt()?;
     state.civic_debts.insert(
         id,
         CivicDebt {
@@ -1842,6 +1954,131 @@ pub(crate) const fn required_office_power_for_law(kind: LawKind) -> OfficePower 
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LegalClaimQuote {
+    pub defendant_dynasty_id: DynastyId,
+    pub kind: LegalCaseKind,
+    pub claim_source: LegalClaimSource,
+    pub evidence_basis_points: u16,
+    pub maximum_damages: Money,
+    pub description: String,
+}
+
+pub(crate) fn quote_player_legal_claim(
+    state: &AppState,
+    defendant_dynasty_id: DynastyId,
+    kind: LegalCaseKind,
+) -> Result<LegalClaimQuote, CommandError> {
+    if defendant_dynasty_id == state.player_dynasty_id {
+        return Err(CommandError::SameLegalParty);
+    }
+    if !state.dynasties.contains_key(&defendant_dynasty_id) {
+        return Err(CommandError::MissingDynasty {
+            dynasty_id: defendant_dynasty_id,
+        });
+    }
+    let player_id = state.player_dynasty_id;
+    match kind {
+        LegalCaseKind::Debt => state
+            .loans
+            .values()
+            .filter(|loan| {
+                loan.lender_dynasty_id == player_id
+                    && loan.borrower_dynasty_id == defendant_dynasty_id
+                    && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
+                    && player_legal_claim_source_unused(
+                        state,
+                        LegalClaimSource::Loan { loan_id: loan.id },
+                    )
+            })
+            .max_by_key(|loan| {
+                (
+                    u8::from(loan.status == LoanStatus::Defaulted),
+                    loan.balance,
+                    loan.id,
+                )
+            })
+            .map(|loan| {
+                let evidence_basis_points = if loan.status == LoanStatus::Defaulted {
+                    LEGAL_DEFAULTED_DEBT_EVIDENCE_BASIS_POINTS
+                } else {
+                    LEGAL_DELINQUENT_DEBT_EVIDENCE_BASIS_POINTS
+                };
+                LegalClaimQuote {
+                    defendant_dynasty_id,
+                    kind,
+                    claim_source: LegalClaimSource::Loan { loan_id: loan.id },
+                    evidence_basis_points,
+                    maximum_damages: loan.balance,
+                    description: format!(
+                        "enforce {:?} loan {} with {} outstanding",
+                        loan.status, loan.id, loan.balance
+                    ),
+                }
+            })
+            .ok_or(CommandError::LegalClaimNotGrounded {
+                defendant_dynasty_id,
+                kind,
+            }),
+        LegalCaseKind::ContractBreach => {
+            quote_player_contract_breach_claim(state, defendant_dynasty_id)
+        }
+        LegalCaseKind::Property
+        | LegalCaseKind::Corruption
+        | LegalCaseKind::Fraud
+        | LegalCaseKind::Inheritance => Err(CommandError::LegalClaimNotGrounded {
+            defendant_dynasty_id,
+            kind,
+        }),
+    }
+}
+
+fn quote_player_contract_breach_claim(
+    state: &AppState,
+    defendant_dynasty_id: DynastyId,
+) -> Result<LegalClaimQuote, CommandError> {
+    state
+        .contracts
+        .values()
+        .filter(|contract| {
+            contract.status == ContractStatus::Breached
+                && contract.breaching_dynasty_id == Some(defendant_dynasty_id)
+                && contract.breach_victim_dynasty_id == Some(state.player_dynasty_id)
+                && contract.unpaid_breach_penalty > Money::ZERO
+                && player_legal_claim_source_unused(
+                    state,
+                    LegalClaimSource::Contract {
+                        contract_id: contract.id,
+                    },
+                )
+        })
+        .max_by_key(|contract| (contract.penalty, contract.id))
+        .map(|contract| LegalClaimQuote {
+            defendant_dynasty_id,
+            kind: LegalCaseKind::ContractBreach,
+            claim_source: LegalClaimSource::Contract {
+                contract_id: contract.id,
+            },
+            evidence_basis_points: LEGAL_CONTRACT_BREACH_EVIDENCE_BASIS_POINTS,
+            maximum_damages: contract.unpaid_breach_penalty,
+            description: format!(
+                "recover {} still unpaid on breached supply contract {}",
+                contract.unpaid_breach_penalty, contract.id
+            ),
+        })
+        .ok_or(CommandError::LegalClaimNotGrounded {
+            defendant_dynasty_id,
+            kind: LegalCaseKind::ContractBreach,
+        })
+}
+
+fn player_legal_claim_source_unused(state: &AppState, claim_source: LegalClaimSource) -> bool {
+    !state.legal_cases.values().any(|legal_case| {
+        legal_case.plaintiff_dynasty_id == state.player_dynasty_id
+            && legal_case.claim_source == Some(claim_source)
+    })
+}
+
 fn apply_legal_case(
     state: &mut AppState,
     defendant_dynasty_id: DynastyId,
@@ -1886,6 +2123,19 @@ fn apply_legal_case(
             return Err(CommandError::LegalCaseCooldown { next_filing_day });
         }
     }
+    let claim = quote_player_legal_claim(state, defendant_dynasty_id, kind)?;
+    if evidence_basis_points > claim.evidence_basis_points {
+        return Err(CommandError::LegalEvidenceExceedsClaim {
+            evidence_basis_points,
+            maximum_basis_points: claim.evidence_basis_points,
+        });
+    }
+    if damages > claim.maximum_damages {
+        return Err(CommandError::LegalDamagesExceedClaim {
+            damages,
+            maximum_damages: claim.maximum_damages,
+        });
+    }
     let hearing_day = checked_future_day(state.clock.day(), 60)?;
     spend_player_treasury(state, LEGAL_CASE_FILING_COST)?;
     let id = state.next_ids.try_legal_case()?;
@@ -1896,6 +2146,7 @@ fn apply_legal_case(
             plaintiff_dynasty_id: state.player_dynasty_id,
             defendant_dynasty_id,
             kind,
+            claim_source: Some(claim.claim_source),
             evidence_basis_points,
             public_attention_basis_points: 1_500,
             filed_day: state.clock.day(),
@@ -1914,7 +2165,10 @@ fn apply_legal_case(
         state,
         OutboxKind::Legal,
         format!("Legal case {id} filed"),
-        format!("A {kind:?} case was filed against dynasty {defendant_dynasty_id}."),
+        format!(
+            "A {kind:?} case was filed against dynasty {defendant_dynasty_id}: {}.",
+            claim.description
+        ),
     )?;
     Ok(CommandOutcome {
         summary: format!("Filed legal case {id}."),

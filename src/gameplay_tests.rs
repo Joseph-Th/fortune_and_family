@@ -988,6 +988,43 @@ mod candidates {
     }
 
     #[test]
+    fn defaulted_debt_does_not_count_as_committed_office_service() {
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival lender");
+        let loan_id = issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(8_000),
+                weekly_payment: Money::from_copper(500),
+                interest_basis_points: 500,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture loan must be issuable");
+        let loan = state
+            .loans
+            .get_mut(&loan_id)
+            .expect("fixture loan must exist");
+        loan.status = LoanStatus::Defaulted;
+        loan.missed_payments = 3;
+
+        assert_eq!(
+            player_monthly_committed_duty_cost(&state),
+            player_current_office_duty_cost(&state),
+            "defaulted loans no longer participate in scheduled repayment and must not inflate the office-retreat reserve"
+        );
+    }
+
+    #[test]
     fn office_retreat_uses_the_same_forward_reserve_as_other_office_decisions() {
         let mut state = make_test_campaign();
         grant_player_office_for_test(&mut state);
@@ -1379,6 +1416,47 @@ mod candidates {
                 .iter()
                 .any(|candidate| candidate.kind == GameplayCommandKind::SellProperty),
             "the early recovery opportunity must produce an executable property-sale candidate"
+        );
+    }
+
+    #[test]
+    fn defaulted_debt_does_not_trigger_property_liquidation_for_future_service() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival lender");
+        let loan_id = issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(8_000),
+                weekly_payment: Money::from_copper(500),
+                interest_basis_points: 500,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture loan must be issuable");
+        let loan = state
+            .loans
+            .get_mut(&loan_id)
+            .expect("fixture loan must exist");
+        loan.status = LoanStatus::Defaulted;
+        loan.missed_payments = 3;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(2_500);
+
+        assert!(
+            !player_needs_property_liquidation(&state),
+            "defaulted debt must not cause asset sales solely to reserve cash for payments that are no longer scheduled"
         );
     }
 
@@ -3129,7 +3207,7 @@ mod candidates {
     }
 
     #[test]
-    fn opportunist_uses_surplus_capital_for_speculative_credit_without_existing_distress() {
+    fn opportunist_does_not_offer_credit_without_a_real_financing_pressure() {
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
         state
@@ -3165,10 +3243,12 @@ mod candidates {
             GameplayPersona::Opportunist,
             &mut opportunist_candidates,
         );
-        assert!(opportunist_candidates.iter().any(|candidate| {
-            candidate.kind == GameplayCommandKind::ExtendCredit
-                && candidate.description.contains("high-yield short-term loan")
-        }));
+        assert!(
+            opportunist_candidates
+                .iter()
+                .all(|candidate| candidate.kind != GameplayCommandKind::ExtendCredit),
+            "surplus player cash must not manufacture a safe high-yield loan when the counterparty has no financing need"
+        );
 
         let mut steward_candidates = Vec::new();
         add_lend_candidate(&state, GameplayPersona::Steward, &mut steward_candidates);
@@ -3176,7 +3256,7 @@ mod candidates {
             steward_candidates
                 .iter()
                 .all(|candidate| candidate.kind != GameplayCommandKind::ExtendCredit),
-            "speculative lending without external pressure should remain specific to the stress persona"
+            "conservative personas must also require an actual counterparty financing pressure"
         );
     }
 
@@ -3200,6 +3280,12 @@ mod candidates {
             .expect("player dynasty must exist")
             .resources
             .treasury = Money::from_copper(100_000);
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(20_000);
         apply_player_command(
             registry,
             &mut state,
@@ -3766,18 +3852,33 @@ mod metrics {
     #[test]
     fn snapshots_detect_legal_hearing_progress_with_unchanged_case_counts() {
         let mut state = make_test_campaign();
-        let legal_case = state
-            .legal_cases
-            .values_mut()
+        let mut dynasty_ids = state.dynasties.keys().copied();
+        let plaintiff_dynasty_id = dynasty_ids.next().expect("campaign must contain a dynasty");
+        let defendant_dynasty_id = dynasty_ids
             .next()
-            .expect("campaign must contain a legal case");
-        legal_case.status = LegalCaseStatus::Filed;
+            .expect("campaign must contain a second dynasty");
+        let legal_case_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            legal_case_id,
+            crate::core::LegalCase {
+                id: legal_case_id,
+                plaintiff_dynasty_id,
+                defendant_dynasty_id,
+                kind: LegalCaseKind::Fraud,
+                claim_source: None,
+                evidence_basis_points: 6_500,
+                public_attention_basis_points: 2_000,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: Money::from_copper(2_500),
+                status: LegalCaseStatus::Filed,
+            },
+        );
         let earlier = GameplaySnapshot::capture(&state);
         state
             .legal_cases
-            .values_mut()
-            .next()
-            .expect("campaign must contain a legal case")
+            .get_mut(&legal_case_id)
+            .expect("legal case must exist")
             .status = LegalCaseStatus::Hearing;
         let later = GameplaySnapshot::capture(&state);
 
@@ -4592,7 +4693,7 @@ mod findings {
                     .commands
                     .get_mut(&GameplayCommandKind::ExtendCredit)
                     .expect("credit statistics must exist")
-                    .executed = 0;
+                    .executed = 2;
                 campaign
                     .commands
                     .get_mut(&GameplayCommandKind::FileLegalCase)
@@ -4608,7 +4709,7 @@ mod findings {
 
         let finding = finding_with_title(
             &findings,
-            "Risk-seeking audit never reaches player credit enforcement",
+            "Player credit distress never reaches enforcement",
         );
         assert!(
             finding
@@ -4633,7 +4734,43 @@ mod findings {
         let findings = derive_findings(&report.aggregate, &report.campaigns);
         assert_finding_absent(
             &findings,
-            "Risk-seeking audit never reaches player credit enforcement",
+            "Player credit distress never reaches enforcement",
+        );
+    }
+
+    #[test]
+    fn mature_lending_without_borrower_business_effects_is_reported() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.campaigns = 1;
+        report.aggregate.simulated_days = 3_600;
+        report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::ExtendCredit)
+            .expect("credit statistics must exist")
+            .executed = 20;
+        report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign")
+            .simulated_days = 3_600;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Player lending is detached from productive financing",
+        );
+
+        report.aggregate.interactions.push(GameplayInteractionEdge {
+            command: GameplayCommandKind::ExtendCredit,
+            domain: GameplayDomain::Business,
+            observations: 20,
+        });
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        assert_finding_absent(
+            &findings,
+            "Player lending is detached from productive financing",
         );
     }
 
@@ -6663,15 +6800,13 @@ fn make_player_contract_breached(state: &mut AppState) -> DynastyId {
             }
         })
         .expect("campaign must contain a player contract with another dynasty");
-    state
+    let contract = state
         .contracts
         .get_mut(&contract_id)
-        .expect("selected contract must exist")
-        .status = ContractStatus::Breached;
-    state
-        .contracts
-        .get_mut(&contract_id)
-        .expect("selected contract must exist")
-        .breaching_dynasty_id = Some(defendant_id);
+        .expect("selected contract must exist");
+    contract.status = ContractStatus::Breached;
+    contract.breaching_dynasty_id = Some(defendant_id);
+    contract.breach_victim_dynasty_id = Some(player_id);
+    contract.unpaid_breach_penalty = contract.penalty;
     defendant_id
 }

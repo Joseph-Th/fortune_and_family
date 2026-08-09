@@ -2,8 +2,9 @@
 
 use crate::core::{
     AppState, BusinessStatus, CampaignPhase, CivicDebtStatus, ContractStatus, CrisisKind,
-    CrisisStatus, InformationConfidence, InformationTarget, LawKind, LegalCaseStatus, LoanStatus,
-    MarketCause, ObjectiveKind, ObjectiveStatus, OutboxKind, PublicWorkKind, PublicWorkStatus,
+    CrisisStatus, InformationConfidence, InformationTarget, LawKind, LegalCaseStatus,
+    LegalClaimSource, LoanStatus, MarketCause, ObjectiveKind, ObjectiveStatus, OutboxKind,
+    PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CivicDebtId, ContractId, CrisisId, DistrictId, DynastyId, InstitutionId, LawId,
@@ -285,6 +286,9 @@ pub struct ContractProjection {
     pub missed_deliveries: u16,
     pub breaching_dynasty_id: Option<DynastyId>,
     pub breaching_dynasty: Option<String>,
+    pub breach_victim_dynasty_id: Option<DynastyId>,
+    pub breach_victim_dynasty: Option<String>,
+    pub unpaid_breach_penalty: Money,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -378,6 +382,7 @@ pub struct LegalCaseProjection {
     pub plaintiff: String,
     pub defendant: String,
     pub kind: String,
+    pub claim_source: Option<LegalClaimSource>,
     pub evidence_basis_points: u16,
     pub hearing_day: i64,
     pub damages: Money,
@@ -817,6 +822,16 @@ fn build_contract_projections(registry: &Registry, state: &AppState) -> Vec<Cont
                     .name()
                     .to_owned()
             }),
+            breach_victim_dynasty_id: contract.breach_victim_dynasty_id,
+            breach_victim_dynasty: contract.breach_victim_dynasty_id.map(|dynasty_id| {
+                state
+                    .dynasties
+                    .get(&dynasty_id)
+                    .expect("contract breach victim dynasty must exist")
+                    .name()
+                    .to_owned()
+            }),
+            unpaid_breach_penalty: contract.unpaid_breach_penalty,
         })
         .collect()
 }
@@ -1022,6 +1037,7 @@ fn build_legal_case_projections(state: &AppState) -> Vec<LegalCaseProjection> {
                 .name()
                 .to_owned(),
             kind: format!("{:?}", case.kind),
+            claim_source: case.claim_source,
             evidence_basis_points: case.evidence_basis_points,
             hearing_day: case.hearing_day,
             damages: case.damages,

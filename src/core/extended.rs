@@ -33,6 +33,8 @@ pub struct SupplyContract {
     pub(crate) fulfilled_deliveries_by_dynasty: BTreeMap<DynastyId, u16>,
     pub(crate) missed_deliveries: u16,
     pub(crate) breaching_dynasty_id: Option<DynastyId>,
+    pub(crate) breach_victim_dynasty_id: Option<DynastyId>,
+    pub(crate) unpaid_breach_penalty: Money,
     pub(crate) status: ContractStatus,
 }
 
@@ -602,6 +604,12 @@ pub enum LegalCaseKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegalClaimSource {
+    Loan { loan_id: LoanId },
+    Contract { contract_id: ContractId },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegalCaseStatus {
     Filed,
     Hearing,
@@ -616,6 +624,7 @@ pub struct LegalCase {
     pub(crate) plaintiff_dynasty_id: DynastyId,
     pub(crate) defendant_dynasty_id: DynastyId,
     pub(crate) kind: LegalCaseKind,
+    pub(crate) claim_source: Option<LegalClaimSource>,
     pub(crate) evidence_basis_points: u16,
     pub(crate) public_attention_basis_points: u16,
     pub(crate) filed_day: i64,

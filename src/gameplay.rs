@@ -36,10 +36,10 @@ use crate::systems::{
     has_established_player_office_power, institution_capability_score,
     institution_membership_count, institution_support_day, institution_support_next_day,
     office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
-    projected_dynasty_monthly_office_duty,
+    private_loan_borrower_financing_pressure, projected_dynasty_monthly_office_duty,
     projected_dynasty_monthly_office_duty_with_additional_offices, quote_business_acquisition,
-    quote_information_leverage, quote_property_liquidation, required_office_power_for_law,
-    validate_invariants,
+    quote_information_leverage, quote_player_legal_claim, quote_property_liquidation,
+    required_office_power_for_law, validate_invariants,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,7 +97,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 42;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 43;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -137,10 +137,8 @@ const HEIR_CONFIRMATION_HEALTH_THRESHOLD: u16 = 5_000;
 const COMMERCIAL_STANDING_REPUTATION_REQUIREMENT: u16 = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
 const NOTIFICATION_BATCH_THRESHOLD: usize = 8;
 const AGENT_LOAN_AMORTIZATION_WEEKS: i64 = 104;
-const AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS: i64 = 26;
-const AGENT_OPPORTUNIST_LOAN_INTEREST_BASIS_POINTS: u16 = 1_800;
-const AGENT_OPPORTUNIST_SPECULATIVE_LENDING_TREASURY: Money = Money::from_copper(75_000);
-const AGENT_EXTERNAL_CREDIT_TREASURY_PRESSURE: Money = Money::from_copper(25_000);
+const AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS: i64 = 13;
+const AGENT_OPPORTUNIST_LOAN_INTEREST_BASIS_POINTS: u16 = 2_500;
 const AGENT_OFFICE_DUTY_RESERVE_MONTHS: i64 = 12;
 const AGENT_OFFICE_LIQUIDITY_BUFFER: Money = Money::from_copper(5_000);
 const AGENT_FAMILY_COUNCIL_DUTY_RESERVE_MONTHS: i64 = 6;
@@ -5370,16 +5368,7 @@ fn player_needs_property_liquidation(state: &AppState) -> bool {
     let two_month_loan_service = state
         .loans
         .values()
-        .filter(|loan| {
-            loan.borrower_dynasty_id == player_id
-                && matches!(
-                    loan.status,
-                    LoanStatus::Current
-                        | LoanStatus::Delinquent
-                        | LoanStatus::Restructured
-                        | LoanStatus::Defaulted
-                )
-        })
+        .filter(|loan| loan.borrower_dynasty_id == player_id && loan.status.is_repayment_active())
         .fold(Money::ZERO, |total, loan| {
             total.saturating_add(loan.weekly_payment.saturating_mul(8))
         });
@@ -5616,10 +5605,7 @@ fn active_player_lending(state: &AppState) -> usize {
         .count()
 }
 
-fn eligible_lending_borrower(
-    state: &AppState,
-    persona: GameplayPersona,
-) -> Option<&crate::core::Dynasty> {
+fn eligible_lending_borrower(state: &AppState) -> Option<&crate::core::Dynasty> {
     let eligible: Vec<_> = state
         .dynasties
         .values()
@@ -5628,7 +5614,7 @@ fn eligible_lending_borrower(
             !same_pair_credit_blocks_new_loan(state, state.player_dynasty_id, dynasty.id())
         })
         .collect();
-    let pressured = eligible
+    eligible
         .iter()
         .copied()
         .filter(|dynasty| lending_pressure(state, dynasty.id()) > 0)
@@ -5638,39 +5624,11 @@ fn eligible_lending_borrower(
                 dynasty.treasury(),
                 dynasty.id(),
             )
-        });
-    if pressured.is_some() {
-        return pressured;
-    }
-    let player_treasury = state
-        .dynasties
-        .get(&state.player_dynasty_id)
-        .expect("player dynasty must exist")
-        .treasury();
-    if persona != GameplayPersona::Opportunist
-        || player_treasury < AGENT_OPPORTUNIST_SPECULATIVE_LENDING_TREASURY
-    {
-        return None;
-    }
-    eligible
-        .into_iter()
-        .min_by_key(|dynasty| (dynasty.treasury(), dynasty.id()))
+        })
 }
 
 fn lending_pressure(state: &AppState, dynasty_id: DynastyId) -> u8 {
-    let distressed_credit = state.loans.values().any(|loan| {
-        loan.borrower_dynasty_id == dynasty_id
-            && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
-    });
-    if distressed_credit {
-        return 2;
-    }
-    u8::from(
-        state
-            .dynasties
-            .get(&dynasty_id)
-            .is_some_and(|dynasty| dynasty.treasury() < AGENT_EXTERNAL_CREDIT_TREASURY_PRESSURE),
-    )
+    private_loan_borrower_financing_pressure(state, dynasty_id)
 }
 
 fn eligible_lending_restructuring_borrower(state: &AppState) -> Option<&crate::core::Dynasty> {
@@ -5702,7 +5660,7 @@ fn has_extend_credit_opportunity(state: &AppState, persona: GameplayPersona) -> 
     can_restructure
         || (player.treasury() >= lending_reserve
             && active_player_lending(state) < lending_limit
-            && eligible_lending_borrower(state, persona).is_some())
+            && eligible_lending_borrower(state).is_some())
 }
 
 fn add_lend_candidate(state: &AppState, persona: GameplayPersona, candidates: &mut Vec<Candidate>) {
@@ -5721,7 +5679,7 @@ fn add_lend_candidate(state: &AppState, persona: GameplayPersona, candidates: &m
         if player.treasury() < lending_reserve || active_player_lending(state) >= lending_limit {
             return;
         }
-        let Some(borrower) = eligible_lending_borrower(state, persona) else {
+        let Some(borrower) = eligible_lending_borrower(state) else {
             return;
         };
         borrower
@@ -6736,19 +6694,17 @@ fn generate_legal_candidates(
         GameplayPersona::Entrepreneur => 180,
         GameplayPersona::Steward => 80,
     };
-    for (defendant, kind) in state
+    for claim in state
         .dynasties
         .values()
         .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
-        .filter_map(|defendant| {
-            legal_grievance_kind(state, defendant.id()).map(|kind| (defendant, kind))
-        })
+        .filter_map(|defendant| next_player_legal_claim(state, defendant.id()))
         .take(3)
     {
         if state.legal_cases.values().any(|case| {
             case.plaintiff_dynasty_id == state.player_dynasty_id
-                && case.defendant_dynasty_id == defendant.id()
-                && case.kind == kind
+                && case.defendant_dynasty_id == claim.defendant_dynasty_id
+                && case.kind == claim.kind
                 && matches!(
                     case.status,
                     LegalCaseStatus::Filed | LegalCaseStatus::Hearing
@@ -6760,53 +6716,31 @@ fn generate_legal_candidates(
             candidates,
             GameplayCommandKind::FileLegalCase,
             PlayerCommand::FileLegalCase {
-                defendant_dynasty_id: defendant.id(),
-                kind,
-                evidence_basis_points: 7_200,
-                damages: Money::from_copper(3_000),
+                defendant_dynasty_id: claim.defendant_dynasty_id,
+                kind: claim.kind,
+                evidence_basis_points: claim.evidence_basis_points,
+                damages: claim.maximum_damages,
             },
-            format!("file {kind:?} case against dynasty {}", defendant.id()),
+            format!(
+                "file {:?} case against dynasty {}: {}",
+                claim.kind, claim.defendant_dynasty_id, claim.description
+            ),
             bonus,
         );
     }
 }
 
 fn legal_grievance_kind(state: &AppState, defendant_id: DynastyId) -> Option<LegalCaseKind> {
-    let player_id = state.player_dynasty_id;
-    let already_litigated = |kind| {
-        state.legal_cases.values().any(|legal_case| {
-            legal_case.plaintiff_dynasty_id == player_id
-                && legal_case.defendant_dynasty_id == defendant_id
-                && legal_case.kind == kind
-        })
-    };
-    if !already_litigated(LegalCaseKind::Debt)
-        && state.loans.values().any(|loan| {
-            loan.lender_dynasty_id == player_id
-                && loan.borrower_dynasty_id == defendant_id
-                && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
-        })
-    {
-        return Some(LegalCaseKind::Debt);
-    }
-    let player_businesses: BTreeSet<_> = state
-        .businesses
-        .ids_for_owner(player_id)
+    next_player_legal_claim(state, defendant_id).map(|claim| claim.kind)
+}
+
+fn next_player_legal_claim(
+    state: &AppState,
+    defendant_id: DynastyId,
+) -> Option<crate::systems::LegalClaimQuote> {
+    [LegalCaseKind::Debt, LegalCaseKind::ContractBreach]
         .into_iter()
-        .flatten()
-        .copied()
-        .collect();
-    if !already_litigated(LegalCaseKind::ContractBreach)
-        && state.contracts.values().any(|contract| {
-            contract.status == ContractStatus::Breached
-                && contract.breaching_dynasty_id == Some(defendant_id)
-                && (player_businesses.contains(&contract.buyer_business_id)
-                    || player_businesses.contains(&contract.seller_business_id))
-        })
-    {
-        return Some(LegalCaseKind::ContractBreach);
-    }
-    None
+        .find_map(|kind| quote_player_legal_claim(state, defendant_id, kind).ok())
 }
 
 fn generate_family_candidates(
@@ -7589,14 +7523,7 @@ fn player_monthly_committed_duty_cost(state: &AppState) -> Money {
         .loans
         .values()
         .filter(|loan| {
-            loan.borrower_dynasty_id == state.player_dynasty_id
-                && matches!(
-                    loan.status,
-                    LoanStatus::Current
-                        | LoanStatus::Delinquent
-                        | LoanStatus::Restructured
-                        | LoanStatus::Defaulted
-                )
+            loan.borrower_dynasty_id == state.player_dynasty_id && loan.status.is_repayment_active()
         })
         .fold(player_current_office_duty_cost(state), |total, loan| {
             total.saturating_add(loan.weekly_payment.saturating_mul(4))
@@ -8641,6 +8568,13 @@ const SUPPORT_MISSING: &str = "institution support not established";
 const REPORT_UNCOMMISSIONED: &str = "intelligence report not commissioned";
 const REPORT_NO_LEVERAGE: &str = "intelligence report has no leverage";
 const LOAN_COLLATERAL_LARGE: &str = "loan counterparty collateral too large";
+const LOAN_NO_FINANCING_NEED: &str = "loan counterparty has no financing need";
+const CONTRACT_PENALTY: &str = "contract counterparty penalty";
+const NO_BIZ: &str = "business unavailable";
+const BAD_BIZ: &str = "invalid business command";
+const NO_CIVIC_DEBT: &str = "civic debt unavailable";
+const NO_TARGET: &str = "missing command target";
+const BAD_WORK: &str = "invalid public work";
 
 const fn command_error_category(error: &CommandError) -> &'static str {
     match error {
@@ -8648,8 +8582,7 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::Timeline(_) => "timeline range exhausted",
         CommandError::Strategic(source) => strategic_error_category(source),
         CommandError::Simulation(source) => simulation_error_category(source),
-        CommandError::MissingBusiness { .. } => "missing business",
-        CommandError::BusinessNotOwned { .. } => "business not owned",
+        CommandError::MissingBusiness { .. } | CommandError::BusinessNotOwned { .. } => NO_BIZ,
         CommandError::PlayerNotParty => "player not party",
         CommandError::LoanCounterpartyLenderReserve { .. } => "loan counterparty lender reserve",
         CommandError::LoanCounterpartyInterestTooLow { .. } => "loan counterparty interest low",
@@ -8657,40 +8590,39 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::LoanCounterpartyPaymentTooLow { .. } => "loan counterparty payment low",
         CommandError::LoanCounterpartyPaymentTooHigh { .. } => "loan counterparty payment high",
         CommandError::LoanCounterpartyCollateralTooLarge { .. } => LOAN_COLLATERAL_LARGE,
+        CommandError::LoanCounterpartyNoFinancingNeed { .. } => LOAN_NO_FINANCING_NEED,
         CommandError::ContractCounterpartyPriceTooLow { .. } => "contract counterparty price low",
         CommandError::ContractCounterpartyPriceTooHigh { .. } => "contract counterparty price high",
-        CommandError::ContractCounterpartyPenaltyOutOfRange { .. } => {
-            "contract counterparty penalty"
-        }
+        CommandError::ContractCounterpartyPenaltyOutOfRange { .. } => CONTRACT_PENALTY,
         CommandError::ContractCounterpartyCapacity { .. } => "contract counterparty capacity",
         CommandError::PropertyCounterpartyBuyerReserve { .. } => "property buyer reserve",
-        CommandError::InvalidBusinessPolicy => "invalid business policy",
+        CommandError::InvalidBusinessPolicy | CommandError::InvalidBusinessInvestment => BAD_BIZ,
         CommandError::UnchangedBusinessPolicy { .. } => "unchanged business policy",
         CommandError::BusinessPolicyCooldown { .. } => "business policy cooldown",
-        CommandError::InvalidBusinessInvestment => "invalid business investment",
         CommandError::InvalidLawValue { .. } => "invalid law value",
         CommandError::UnchangedLaw { .. } => "unchanged law",
-        CommandError::MissingCivicTreasury => "missing civic treasury",
-        CommandError::NoCivicDebtCreditor { .. } => "no civic debt creditor",
+        CommandError::MissingCivicTreasury | CommandError::NoCivicDebtCreditor { .. } => {
+            NO_CIVIC_DEBT
+        }
         CommandError::CivicTreasuryOverflow { .. } => "civic treasury overflow",
         CommandError::LawSponsorshipRequiresOffice => "law sponsorship requires office",
         CommandError::LawSponsorshipRequiresPower { .. } => "law sponsorship requires office power",
         CommandError::LawSponsorshipPowerNotEstablished { .. } => LAW_POWER_PENDING,
         CommandError::LawCooldown { .. } => "law cooldown",
-        CommandError::MissingDistrict { .. } => "missing district",
-        CommandError::MissingDynasty { .. } => "missing dynasty",
+        CommandError::MissingDistrict { .. } | CommandError::MissingDynasty { .. } => NO_TARGET,
         CommandError::InsufficientPlayerFunds { .. } => "insufficient player funds",
         CommandError::InsufficientPlayerLegitimacy { .. } => "insufficient player legitimacy",
         CommandError::InsufficientBusinessFunds { .. } => "insufficient business funds",
-        CommandError::InvalidPublicWorkBudget => "invalid public-work budget",
+        CommandError::InvalidPublicWorkBudget | CommandError::PublicWorkCapacity { .. } => BAD_WORK,
         CommandError::PublicWorkSponsorshipRequiresOffice => WORK_REQUIRES_OFFICE,
         CommandError::PublicWorkSponsorshipRequiresPower => WORK_REQUIRES_POWER,
         CommandError::PublicWorkPowerNotEstablished { .. } => WORK_POWER_PENDING,
         CommandError::DuplicateActivePublicWork { .. } => "duplicate active public work",
         CommandError::PublicWorkCooldown { .. } => "public-work cooldown",
-        CommandError::PublicWorkCapacity { .. } => "public-work capacity",
-        CommandError::SameLegalParty => "same legal party",
-        CommandError::InvalidLegalTerms => "invalid legal terms",
+        CommandError::SameLegalParty | CommandError::InvalidLegalTerms => "invalid legal terms",
+        CommandError::LegalClaimNotGrounded { .. }
+        | CommandError::LegalEvidenceExceedsClaim { .. }
+        | CommandError::LegalDamagesExceedClaim { .. } => "invalid legal claim",
         CommandError::DuplicateActiveLegalCase { .. } => "duplicate active legal case",
         CommandError::LegalCaseCooldown { .. } => "legal-case cooldown",
         CommandError::MissingFamilyCouncil { .. } => "missing family council",
@@ -10040,6 +9972,7 @@ fn add_long_horizon_risk_findings(
     if average_campaign_days(aggregate) < 3_600 || campaigns.is_empty() {
         return;
     }
+    add_credit_productive_link_finding(aggregate, findings);
     add_risk_seeking_credit_coverage_finding(campaigns, findings);
     let credit_actions = aggregate
         .commands
@@ -10049,7 +9982,13 @@ fn add_long_horizon_risk_findings(
         campaign.maximum_player_delinquent_lending > 0
             || campaign.maximum_player_defaulted_lending > 0
     });
-    if credit_actions >= 50 && !player_lending_distress {
+    let stress_sample_campaigns = campaigns
+        .iter()
+        .filter(|campaign| {
+            campaign.persona == GameplayPersona::Opportunist && campaign.simulated_days >= 3_600
+        })
+        .count();
+    if stress_sample_campaigns < 3 && credit_actions >= 20 && !player_lending_distress {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Long-horizon player lending never encounters credit distress".to_owned(),
@@ -10086,6 +10025,37 @@ fn add_long_horizon_risk_findings(
     }
 }
 
+fn add_credit_productive_link_finding(
+    aggregate: &GameplayAggregate,
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let credit_actions = aggregate
+        .commands
+        .get(&GameplayCommandKind::ExtendCredit)
+        .map_or(0, |stats| stats.executed);
+    if credit_actions < 10 {
+        return;
+    }
+    let business_links = aggregate
+        .interactions
+        .iter()
+        .find(|edge| {
+            edge.command == GameplayCommandKind::ExtendCredit
+                && edge.domain == GameplayDomain::Business
+        })
+        .map_or(0, |edge| edge.observations);
+    if business_links.saturating_mul(2) >= credit_actions {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Player lending is detached from productive financing".to_owned(),
+        evidence: format!(
+            "Agents extended player credit {credit_actions} times, but only {business_links} action-attributable observations changed a borrower business. Credit should usually finance a real commercial pressure rather than behave like an idle treasury transfer whose principal can fund its own repayment."
+        ),
+    });
+}
+
 fn add_risk_seeking_credit_coverage_finding(
     campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
@@ -10119,17 +10089,39 @@ fn add_risk_seeking_credit_coverage_finding(
                 || campaign.maximum_player_defaulted_lending > 0
         })
         .count();
-    if debt_enforcement_actions > 0 {
+    let minimum_credit_sample = usize_to_u32(opportunist_campaigns.len()).saturating_mul(2);
+    if credit_actions < minimum_credit_sample {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Info,
+            title: "Risk-seeking player-credit sample remains thin".to_owned(),
+            evidence: format!(
+                "Across {} long-horizon opportunist campaigns, agents extended external credit {credit_actions} time(s). At least {minimum_credit_sample} player loans are required before the harness treats an absence of delinquency or default as evidence that the credit system may be too safe.",
+                opportunist_campaigns.len(),
+            ),
+        });
         return;
     }
-    findings.push(GameplayFinding {
-        severity: GameplayFindingSeverity::Warning,
-        title: "Risk-seeking audit never reaches player credit enforcement".to_owned(),
-        evidence: format!(
-            "Across {} long-horizon opportunist campaigns, agents extended external credit {credit_actions} time(s), {distressed_campaigns} campaign(s) recorded delinquency or default on player-issued loans, and agents filed {debt_enforcement_actions} player debt-enforcement case(s). Contract-breach litigation and unrelated private-loan distress do not count as proof that player credit enforcement was tested.",
-            opportunist_campaigns.len(),
-        ),
-    });
+    if distressed_campaigns == 0 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Risk-seeking player lending never becomes distressed".to_owned(),
+            evidence: format!(
+                "Across {} long-horizon opportunist campaigns, agents extended external credit {credit_actions} time(s), but no campaign recorded delinquency or default on a player-issued loan. The sample is large enough that persistent perfect repayment indicates the stress strategy may still be too safe.",
+                opportunist_campaigns.len(),
+            ),
+        });
+        return;
+    }
+    if debt_enforcement_actions == 0 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Player credit distress never reaches enforcement".to_owned(),
+            evidence: format!(
+                "Across {} long-horizon opportunist campaigns, agents extended external credit {credit_actions} time(s), {distressed_campaigns} campaign(s) recorded delinquency or default on player-issued loans, but agents filed no player debt-enforcement case. Contract-breach litigation and unrelated private-loan distress do not count as proof that the player can act on failed credit.",
+                opportunist_campaigns.len(),
+            ),
+        });
+    }
 }
 
 fn add_long_substantive_gap_finding(

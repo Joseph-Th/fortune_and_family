@@ -11,9 +11,9 @@ Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code own
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 15 |
-| Supported save migrations | Versions 0 through 14 |
-| Gameplay report schema | 42 |
+| Save schema | 16 |
+| Supported save migrations | Versions 0 through 15 |
+| Gameplay report schema | 43 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |
@@ -46,7 +46,7 @@ The Rivergate campaign supports multi-generation deterministic continuation.
 | Labor | Employment agreements, wages, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. |
 | Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with earned patronage-based membership, budgets, legitimacy, powers, terms, and deterministic selection. |
 | Political office | Commercial eligibility, paid institutional patronage, a 180-day support-establishment period, nomination with a 120-day campaign resolution, office-specific competence, a 120-day power-establishment period within a 360-day term, recurring duties with escalating multi-office portfolio overhead, coalition backlash from concentrated office control, administrative load, voluntary withdrawal with political recovery before re-entry, forfeiture, and re-election limits. |
-| Civic systems | Laws, differentiated public works, district conditions, legal cases, crisis response, and municipal debt. Completed infrastructure persists through district recomputation, while food access, employment, sanitation, safety, and rent pressure all feed district unrest and therefore public response. |
+| Civic systems | Laws, differentiated public works, district conditions, claim-sourced legal cases, crisis response, and municipal debt. Player litigation is grounded in an exact distressed loan or an attributable breached contract with an unpaid terminal penalty. Debt judgments reduce the source loan, while contract judgments reduce only the unpaid breach balance, preventing duplicate recovery. Completed infrastructure persists through district recomputation, while food access, employment, sanitation, safety, and rent pressure all feed district unrest and therefore public response. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, summary, creation, expiry, passive reports, and paid player-directed market, district, and counterparty intelligence. |
 | AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; sustained containment can worsen the commercial terms the player receives from that house. |

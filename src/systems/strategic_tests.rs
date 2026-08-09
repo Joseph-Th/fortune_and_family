@@ -2450,6 +2450,78 @@ mod contracts {
     }
 
     #[test]
+    fn terminal_breach_tracks_only_the_unpaid_part_of_its_final_penalty() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (buyer_id, seller_id, good_id, quantity, buyer_owner_id, seller_owner_id) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.unit_price = Money::from_copper(10_000);
+            contract.penalty = Money::from_copper(500);
+            contract.missed_deliveries = 2;
+            contract.next_due_day = state.clock.day();
+            let buyer_id = contract.buyer_business_id;
+            let seller_id = contract.seller_business_id;
+            (
+                buyer_id,
+                seller_id,
+                contract.good_id,
+                contract.quantity_per_week,
+                state
+                    .businesses
+                    .get(buyer_id)
+                    .expect("buyer must exist")
+                    .owner_dynasty_id(),
+                state
+                    .businesses
+                    .get(seller_id)
+                    .expect("seller must exist")
+                    .owner_dynasty_id(),
+            )
+        };
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .add_inventory(good_id, quantity);
+        state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist")
+            .finance
+            .cash = Money::from_copper(200);
+        let seller_cash_before = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .cash();
+
+        settle_contracts(&mut state).expect("terminal contract failure must settle");
+
+        let contract = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must remain as history");
+        assert_eq!(contract.status, ContractStatus::Breached);
+        assert_eq!(contract.breaching_dynasty_id, Some(buyer_owner_id));
+        assert_eq!(contract.breach_victim_dynasty_id, Some(seller_owner_id));
+        assert_eq!(contract.unpaid_breach_penalty, Money::from_copper(300));
+        assert_eq!(
+            state
+                .businesses
+                .get(seller_id)
+                .expect("seller must exist")
+                .cash(),
+            seller_cash_before
+                .checked_add(Money::from_copper(200))
+                .expect("fixture seller cash must fit"),
+            "the legal claim balance must exclude the part of the final penalty already paid through contract settlement"
+        );
+    }
+
+    #[test]
     fn dual_nonperformance_ignores_receiver_capacity_when_no_transfer_is_due() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
@@ -2808,6 +2880,16 @@ mod contracts {
             .get(seller_id)
             .expect("seller must exist")
             .owner_dynasty_id();
+        let buyer_id = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist")
+            .buyer_business_id;
+        let buyer_dynasty_id = state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .owner_dynasty_id();
 
         settle_contracts(&mut state).expect("contract settlement must succeed");
 
@@ -2828,6 +2910,15 @@ mod contracts {
                 .breaching_dynasty_id,
             Some(seller_dynasty_id),
             "the dynasty that could not deliver must be attributed as the breaching party"
+        );
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .breach_victim_dynasty_id,
+            Some(buyer_dynasty_id),
+            "the performing counterparty must be preserved as the historical breach victim"
         );
     }
 
@@ -5050,22 +5141,62 @@ mod laws {
 mod legal_cases {
     use super::*;
 
+    struct TestLegalCase {
+        plaintiff_dynasty_id: DynastyId,
+        defendant_dynasty_id: DynastyId,
+        kind: crate::core::LegalCaseKind,
+        claim_source: Option<LegalClaimSource>,
+        evidence_basis_points: u16,
+        public_attention_basis_points: u16,
+        damages: Money,
+        hearing_day: i64,
+        status: LegalCaseStatus,
+    }
+
+    fn insert_test_case(state: &mut AppState, case: &TestLegalCase) -> crate::ids::LegalCaseId {
+        let id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            id,
+            crate::core::LegalCase {
+                id,
+                plaintiff_dynasty_id: case.plaintiff_dynasty_id,
+                defendant_dynasty_id: case.defendant_dynasty_id,
+                kind: case.kind,
+                claim_source: case.claim_source,
+                evidence_basis_points: case.evidence_basis_points,
+                public_attention_basis_points: case.public_attention_basis_points,
+                filed_day: state.clock.day(),
+                hearing_day: case.hearing_day,
+                damages: case.damages,
+                status: case.status,
+            },
+        );
+        id
+    }
+
     #[test]
     fn filed_case_enters_hearing_before_judgment() {
         let mut state = make_test_campaign();
-        let legal_case_id = *state
-            .legal_cases
-            .keys()
+        let mut dynasty_ids = state.dynasties.keys().copied();
+        let plaintiff_id = dynasty_ids.next().expect("campaign must contain a dynasty");
+        let defendant_id = dynasty_ids
             .next()
-            .expect("campaign must contain a legal case");
-        {
-            let legal_case = state
-                .legal_cases
-                .get_mut(&legal_case_id)
-                .expect("legal case must exist");
-            legal_case.status = LegalCaseStatus::Filed;
-            legal_case.hearing_day = state.clock.day().saturating_add(30);
-        }
+            .expect("campaign must contain a second dynasty");
+        let hearing_day = state.clock.day().saturating_add(30);
+        let legal_case_id = insert_test_case(
+            &mut state,
+            &TestLegalCase {
+                plaintiff_dynasty_id: plaintiff_id,
+                defendant_dynasty_id: defendant_id,
+                kind: crate::core::LegalCaseKind::Fraud,
+                claim_source: None,
+                evidence_basis_points: 6_500,
+                public_attention_basis_points: 2_000,
+                damages: Money::from_copper(2_500),
+                hearing_day,
+                status: LegalCaseStatus::Filed,
+            },
+        );
         let outbox_before = state.outbox.len();
 
         advance_legal_case_hearings(&mut state).expect("legal-case hearing update must succeed");
@@ -5126,6 +5257,209 @@ mod legal_cases {
             &before,
             &state,
             "damages overflow must be rejected before either dynasty treasury changes",
+        );
+    }
+
+    #[test]
+    fn debt_judgment_reduces_exact_source_balance_and_prevents_double_collection() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let existing_loan_id = state
+            .loans
+            .values()
+            .find(|loan| loan.lender_dynasty_id == player_id)
+            .map(|loan| loan.id);
+        let loan_id = if let Some(loan_id) = existing_loan_id {
+            loan_id
+        } else {
+            let borrower_id = state
+                .dynasties
+                .keys()
+                .copied()
+                .find(|dynasty_id| *dynasty_id != player_id)
+                .expect("campaign must contain a rival borrower");
+            crate::systems::issue_loan(
+                &mut state,
+                LoanTerms {
+                    lender_dynasty_id: player_id,
+                    borrower_dynasty_id: borrower_id,
+                    principal: Money::from_copper(5_000),
+                    weekly_payment: Money::from_copper(300),
+                    interest_basis_points: 1_000,
+                    collateral_property_id: None,
+                },
+            )
+            .expect("fixture player loan must be issuable")
+        };
+        let (borrower_id, balance) = {
+            let loan = state
+                .loans
+                .get_mut(&loan_id)
+                .expect("source loan must exist");
+            loan.status = LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+            (loan.borrower_dynasty_id, loan.balance)
+        };
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower dynasty must exist")
+            .resources
+            .treasury = balance;
+        let hearing_day = state.clock.day();
+        let case_id = insert_test_case(
+            &mut state,
+            &TestLegalCase {
+                plaintiff_dynasty_id: player_id,
+                defendant_dynasty_id: borrower_id,
+                kind: crate::core::LegalCaseKind::Debt,
+                claim_source: Some(LegalClaimSource::Loan { loan_id }),
+                evidence_basis_points: 10_000,
+                public_attention_basis_points: 10_000,
+                damages: balance,
+                hearing_day,
+                status: LegalCaseStatus::Hearing,
+            },
+        );
+
+        resolve_legal_cases(&mut state).expect("grounded debt judgment must resolve");
+
+        let loan = state.loans.get(&loan_id).expect("source loan must remain");
+        assert_eq!(loan.balance, Money::ZERO);
+        assert_eq!(loan.status, LoanStatus::Repaid);
+        assert_eq!(loan.missed_payments, 0);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            balance
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&borrower_id)
+                .expect("borrower dynasty must exist")
+                .treasury(),
+            Money::ZERO
+        );
+        assert_eq!(
+            state
+                .legal_cases
+                .get(&case_id)
+                .expect("legal case must remain")
+                .status,
+            LegalCaseStatus::DecidedForPlaintiff
+        );
+        let after_first_resolution = state.clone();
+
+        resolve_legal_cases(&mut state).expect("decided case must not resolve twice");
+
+        assert_eq!(state, after_first_resolution);
+    }
+
+    #[test]
+    fn contract_judgment_reduces_only_the_unpaid_breach_penalty() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (plaintiff_id, defendant_id) = {
+            let contract = state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist");
+            let plaintiff_id = state
+                .businesses
+                .get(contract.seller_business_id)
+                .expect("seller must exist")
+                .owner_dynasty_id();
+            let defendant_id = state
+                .businesses
+                .get(contract.buyer_business_id)
+                .expect("buyer must exist")
+                .owner_dynasty_id();
+            (plaintiff_id, defendant_id)
+        };
+        {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.status = ContractStatus::Breached;
+            contract.breaching_dynasty_id = Some(defendant_id);
+            contract.breach_victim_dynasty_id = Some(plaintiff_id);
+            contract.penalty = Money::from_copper(500);
+            contract.unpaid_breach_penalty = Money::from_copper(300);
+        }
+        state
+            .dynasties
+            .get_mut(&plaintiff_id)
+            .expect("plaintiff must exist")
+            .resources
+            .treasury = Money::ZERO;
+        state
+            .dynasties
+            .get_mut(&defendant_id)
+            .expect("defendant must exist")
+            .resources
+            .treasury = Money::from_copper(500);
+        let hearing_day = state.clock.day();
+        let case_id = insert_test_case(
+            &mut state,
+            &TestLegalCase {
+                plaintiff_dynasty_id: plaintiff_id,
+                defendant_dynasty_id: defendant_id,
+                kind: crate::core::LegalCaseKind::ContractBreach,
+                claim_source: Some(LegalClaimSource::Contract { contract_id }),
+                evidence_basis_points: 10_000,
+                public_attention_basis_points: 10_000,
+                damages: Money::from_copper(500),
+                hearing_day,
+                status: LegalCaseStatus::Hearing,
+            },
+        );
+
+        resolve_legal_cases(&mut state).expect("grounded contract judgment must resolve");
+
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("source contract must remain")
+                .unpaid_breach_penalty,
+            Money::ZERO,
+            "the judgment must extinguish only the unpaid source obligation"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&plaintiff_id)
+                .expect("plaintiff must exist")
+                .treasury(),
+            Money::from_copper(300)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&defendant_id)
+                .expect("defendant must exist")
+                .treasury(),
+            Money::from_copper(200),
+            "court recovery must be capped by the tracked unpaid breach penalty, not the historical contract penalty"
+        );
+        assert_eq!(
+            state
+                .legal_cases
+                .get(&case_id)
+                .expect("legal case must remain")
+                .status,
+            LegalCaseStatus::DecidedForPlaintiff
         );
     }
 }
@@ -5193,6 +5527,61 @@ mod crises {
                 .food_satisfaction_basis_points,
             unaffected_before,
             "a district epidemic must not directly reduce welfare across the entire city"
+        );
+    }
+
+    #[test]
+    fn epidemic_onset_imposes_a_local_welfare_shock_before_response() {
+        let mut state = make_test_campaign();
+        let affected_district = state
+            .households
+            .iter()
+            .next()
+            .expect("campaign must contain households")
+            .district_id();
+        let affected_household_id = state
+            .households
+            .iter()
+            .find(|household| household.district_id() == affected_district)
+            .expect("affected district must contain a household")
+            .id();
+        let unaffected_household_id = state
+            .households
+            .iter()
+            .find(|household| household.district_id() != affected_district)
+            .expect("campaign must contain another populated district")
+            .id();
+        let affected_before = state
+            .households
+            .get(affected_household_id)
+            .expect("affected household must exist")
+            .food_satisfaction_basis_points;
+        let unaffected_before = state
+            .households
+            .get(unaffected_household_id)
+            .expect("unaffected household must exist")
+            .food_satisfaction_basis_points;
+        let onset_loss = 5_000 / EPIDEMIC_ONSET_WELFARE_DIVISOR;
+
+        apply_epidemic_household_pressure(&mut state, Some(affected_district), onset_loss);
+
+        assert_eq!(
+            state
+                .households
+                .get(affected_household_id)
+                .expect("affected household must exist")
+                .food_satisfaction_basis_points,
+            affected_before.saturating_sub(onset_loss),
+            "recognizing an established epidemic must carry material household harm even when the player responds immediately"
+        );
+        assert_eq!(
+            state
+                .households
+                .get(unaffected_household_id)
+                .expect("unaffected household must exist")
+                .food_satisfaction_basis_points,
+            unaffected_before,
+            "epidemic onset must remain localized to the affected district"
         );
     }
 
@@ -6181,6 +6570,117 @@ mod ai {
                 .expect("borrower must exist")
                 .treasury(),
             borrower_before.saturating_sub(Money::from_copper(500))
+        );
+    }
+
+    #[test]
+    fn debt_objective_cures_defaulted_balance_instead_of_declaring_success() {
+        let mut state = make_test_campaign();
+        let loan_id = current_loan_id(&state);
+        let borrower_id = state
+            .loans
+            .get(&loan_id)
+            .expect("loan must exist")
+            .borrower_dynasty_id;
+        for loan in state
+            .loans
+            .values_mut()
+            .filter(|loan| loan.borrower_dynasty_id == borrower_id)
+        {
+            if loan.id == loan_id {
+                loan.balance = Money::from_copper(500);
+                loan.status = LoanStatus::Defaulted;
+                loan.missed_payments = 3;
+                if let Some(property_id) = loan.collateral_property_id {
+                    state
+                        .properties
+                        .get_mut(&property_id)
+                        .expect("collateral property must exist")
+                        .collateral_loan_id = None;
+                }
+            } else {
+                loan.balance = Money::ZERO;
+                loan.status = LoanStatus::Repaid;
+                loan.missed_payments = 0;
+                if let Some(property_id) = loan.collateral_property_id {
+                    state
+                        .properties
+                        .get_mut(&property_id)
+                        .expect("collateral property must exist")
+                        .collateral_loan_id = None;
+                }
+            }
+        }
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::from_copper(1_000);
+
+        assert_eq!(
+            advance_ai_debt_objective(&mut state, borrower_id)
+                .expect("AI debt objective must service defaulted debt"),
+            ObjectiveProgress::Achieved
+        );
+        assert_eq!(
+            state.loans.get(&loan_id).expect("loan must exist").status,
+            LoanStatus::Repaid,
+            "a defaulted balance remains an outstanding liability until it is actually repaid"
+        );
+    }
+
+    #[test]
+    fn debt_objective_rejects_lender_treasury_overflow_without_partial_payment() {
+        let mut state = make_test_campaign();
+        let loan_id = current_loan_id(&state);
+        let (lender_id, borrower_id) = {
+            let loan = state.loans.get(&loan_id).expect("loan must exist");
+            (loan.lender_dynasty_id, loan.borrower_dynasty_id)
+        };
+        for loan in state
+            .loans
+            .values_mut()
+            .filter(|loan| loan.borrower_dynasty_id == borrower_id)
+        {
+            if loan.id == loan_id {
+                loan.balance = Money::from_copper(500);
+                loan.status = LoanStatus::Current;
+                loan.missed_payments = 0;
+            } else {
+                loan.balance = Money::ZERO;
+                loan.status = LoanStatus::Repaid;
+                loan.missed_payments = 0;
+            }
+        }
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::from_copper(1_000);
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::from_copper(i64::MAX);
+        let before = state.clone();
+
+        let result = advance_ai_debt_objective(&mut state, borrower_id);
+
+        assert_eq!(
+            result,
+            Err(SimulationError::DynastyTreasuryOverflow {
+                dynasty_id: lender_id,
+                current: Money::from_copper(i64::MAX),
+                incoming: Money::from_copper(500),
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a voluntary debt payment must preflight the recipient before debiting the borrower",
         );
     }
 

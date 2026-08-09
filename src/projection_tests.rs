@@ -1,7 +1,10 @@
 //! Projection completeness and HTML escaping tests for presentation adapters.
 
 use super::*;
-use crate::core::{CivicDebt, EnactedLaw, NewGameConfig};
+use crate::core::{
+    CivicDebt, EnactedLaw, LegalCase, LegalCaseKind, LegalCaseStatus, LegalClaimSource,
+    NewGameConfig,
+};
 use crate::test_support::{
     make_test_campaign, make_test_campaign_with, rivergate_registry_for_test,
 };
@@ -208,6 +211,47 @@ mod coverage {
         assert_eq!(summary.dynasty_name, projection.player.name);
         assert_eq!(summary.dynasty_treasury, projection.player.treasury);
         assert_eq!(summary.businesses, projection.player.businesses);
+    }
+
+    #[test]
+    fn legal_projection_exposes_source_obligation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let loan = state
+            .loans
+            .values()
+            .next()
+            .expect("campaign must contain a loan")
+            .clone();
+        let case_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            case_id,
+            LegalCase {
+                id: case_id,
+                plaintiff_dynasty_id: loan.lender_dynasty_id,
+                defendant_dynasty_id: loan.borrower_dynasty_id,
+                kind: LegalCaseKind::Debt,
+                claim_source: Some(LegalClaimSource::Loan { loan_id: loan.id }),
+                evidence_basis_points: 7_500,
+                public_attention_basis_points: 1_500,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: loan.balance,
+                status: LegalCaseStatus::Filed,
+            },
+        );
+
+        let projection = build_campaign_projection(registry, &state);
+        let legal_case = projection
+            .legal_cases
+            .iter()
+            .find(|legal_case| legal_case.id == case_id)
+            .expect("projection must include grounded legal case");
+
+        assert_eq!(
+            legal_case.claim_source,
+            Some(LegalClaimSource::Loan { loan_id: loan.id })
+        );
     }
 
     #[test]
@@ -467,12 +511,30 @@ mod coverage {
             .expect("seller dynasty must exist")
             .name()
             .to_owned();
+        let buyer_business_id = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist")
+            .buyer_business_id;
+        let buyer_dynasty_id = state
+            .businesses
+            .get(buyer_business_id)
+            .expect("buyer business must exist")
+            .owner_dynasty_id();
+        let buyer_name = state
+            .dynasties
+            .get(&buyer_dynasty_id)
+            .expect("buyer dynasty must exist")
+            .name()
+            .to_owned();
         let contract = state
             .contracts
             .get_mut(&contract_id)
             .expect("contract must exist");
         contract.status = ContractStatus::Breached;
         contract.breaching_dynasty_id = Some(seller_dynasty_id);
+        contract.breach_victim_dynasty_id = Some(buyer_dynasty_id);
+        contract.unpaid_breach_penalty = Money::from_copper(125);
 
         let projection = build_campaign_projection(registry, &state);
         let contract = projection
@@ -486,6 +548,12 @@ mod coverage {
             contract.breaching_dynasty.as_deref(),
             Some(seller_name.as_str())
         );
+        assert_eq!(contract.breach_victim_dynasty_id, Some(buyer_dynasty_id));
+        assert_eq!(
+            contract.breach_victim_dynasty.as_deref(),
+            Some(buyer_name.as_str())
+        );
+        assert_eq!(contract.unpaid_breach_penalty, Money::from_copper(125));
     }
 
     #[test]

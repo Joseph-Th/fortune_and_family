@@ -148,7 +148,7 @@ Concentrating several offices in one dynasty should also create political exposu
 
 ### Law, courts, and enforcement
 
-Law shapes contracts, property, debt, trade, labor, inheritance, and public authority. Cases require parties, claims, evidence, procedure, judgment, and consequences.
+Law shapes contracts, property, debt, trade, labor, inheritance, and public authority. Cases require parties, claims, evidence, procedure, judgment, and consequences. A player-filed case must identify the concrete obligation or event that created the claim; evidence and recoverable damages are bounded by that source, and a judgment must settle the source obligation rather than create a parallel recovery path. Contract-breach damages represent only the terminal contractual penalty that remained unpaid after normal settlement, so litigation cannot collect a penalty the performing party already received.
 
 ### Districts and public opinion
 

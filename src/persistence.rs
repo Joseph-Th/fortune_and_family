@@ -1,6 +1,9 @@
 //! JSON persistence adapter with explicit schema migration and contextual errors.
 
-use crate::core::{AppState, AuditKind, CURRENT_SCHEMA_VERSION, FamilyLinkKind, InformationTarget};
+use crate::core::{
+    AppState, AuditKind, CURRENT_SCHEMA_VERSION, FamilyLinkKind, InformationTarget, LegalCaseKind,
+    LegalClaimSource,
+};
 use crate::ids::{BusinessId, HouseholdId};
 use crate::money::{Money, Quantity, checked_cost_for};
 use serde_json::Value;
@@ -455,6 +458,8 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         if contract.quantity_per_week <= Quantity::ZERO
             || contract.unit_price <= Money::ZERO
             || contract.penalty < Money::ZERO
+            || contract.unpaid_breach_penalty < Money::ZERO
+            || contract.unpaid_breach_penalty > contract.penalty
             || checked_cost_for(contract.quantity_per_week, contract.unit_price).is_none()
         {
             return Err(format!(
@@ -952,10 +957,23 @@ fn validate_contract_records(
         let seller_recipe = registry
             .get_recipe(seller.recipe_id())
             .expect("validated business recipe must exist");
-        let valid_breach_attribution = contract.breaching_dynasty_id.is_none_or(|dynasty_id| {
-            contract.status == crate::core::ContractStatus::Breached
-                && state.dynasties.contains_key(&dynasty_id)
-        });
+        let valid_breach_attribution = match (
+            contract.breaching_dynasty_id,
+            contract.breach_victim_dynasty_id,
+        ) {
+            (None, None) => true,
+            (Some(breacher), None) => {
+                contract.status == crate::core::ContractStatus::Breached
+                    && state.dynasties.contains_key(&breacher)
+            }
+            (Some(breacher), Some(victim)) => {
+                contract.status == crate::core::ContractStatus::Breached
+                    && breacher != victim
+                    && state.dynasties.contains_key(&breacher)
+                    && state.dynasties.contains_key(&victim)
+            }
+            (None, Some(_)) => false,
+        };
         let valid_delivery_attribution = contract_delivery_attribution_is_valid(state, contract);
         if seller_recipe.output_good_id() != contract.good_id
             || !buyer_recipe
@@ -966,6 +984,10 @@ fn validate_contract_records(
                 && buyer.owner_dynasty_id() == seller.owner_dynasty_id())
             || (contract.status == crate::core::ContractStatus::Active
                 && contract.next_due_day > contract.end_day)
+            || (contract.unpaid_breach_penalty > Money::ZERO
+                && (contract.status != crate::core::ContractStatus::Breached
+                    || contract.breaching_dynasty_id.is_none()
+                    || contract.breach_victim_dynasty_id.is_none()))
             || !valid_breach_attribution
             || !valid_delivery_attribution
         {
@@ -1655,6 +1677,7 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
         {
             return Err(format!("legal case {case_id} has an invalid reference"));
         }
+        validate_legal_claim_source(state, *case_id, legal_case)?;
         if matches!(
             legal_case.status,
             crate::core::LegalCaseStatus::Filed | crate::core::LegalCaseStatus::Hearing
@@ -1690,6 +1713,47 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
                 .has_consistent_severity(crisis.severity_basis_points)
         {
             return Err(format!("crisis {crisis_id} has an invalid reference"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_legal_claim_source(
+    state: &AppState,
+    case_id: crate::ids::LegalCaseId,
+    legal_case: &crate::core::LegalCase,
+) -> Result<(), String> {
+    let Some(claim_source) = legal_case.claim_source else {
+        return Ok(());
+    };
+    match claim_source {
+        LegalClaimSource::Loan { loan_id } => {
+            let loan = state
+                .loans
+                .get(&loan_id)
+                .ok_or_else(|| format!("legal case {case_id} references missing loan {loan_id}"))?;
+            if legal_case.kind != LegalCaseKind::Debt
+                || loan.lender_dynasty_id != legal_case.plaintiff_dynasty_id
+                || loan.borrower_dynasty_id != legal_case.defendant_dynasty_id
+            {
+                return Err(format!(
+                    "legal case {case_id} has a debt claim source that does not match its loan and parties"
+                ));
+            }
+        }
+        LegalClaimSource::Contract { contract_id } => {
+            let contract = state.contracts.get(&contract_id).ok_or_else(|| {
+                format!("legal case {case_id} references missing contract {contract_id}")
+            })?;
+            if legal_case.kind != LegalCaseKind::ContractBreach
+                || contract.status != crate::core::ContractStatus::Breached
+                || contract.breaching_dynasty_id != Some(legal_case.defendant_dynasty_id)
+                || contract.breach_victim_dynasty_id != Some(legal_case.plaintiff_dynasty_id)
+            {
+                return Err(format!(
+                    "legal case {case_id} has a contract-breach claim source that does not match its contract and parties"
+                ));
+            }
         }
     }
     Ok(())
@@ -1817,6 +1881,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             12 => migrate_v12_to_v13(value)?,
             13 => migrate_v13_to_v14(value)?,
             14 => migrate_v14_to_v15(value)?,
+            15 => migrate_v15_to_v16(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -1906,9 +1971,10 @@ fn migrate_v1_to_v2(mut value: Value) -> Result<Value, PersistenceError> {
         "crisis",
         "outbox",
     ] {
-        next_ids
-            .entry(field.to_owned())
-            .or_insert_with(|| Value::from(0));
+        // Schema v1 did not own any of these strategic ID namespaces. Ignore
+        // unexpected values supplied under future field names instead of
+        // carrying untrusted allocator state into legacy hydration.
+        next_ids.insert(field.to_owned(), Value::from(0));
     }
     Ok(value)
 }
@@ -2433,6 +2499,50 @@ fn migrate_v14_to_v15(mut value: Value) -> Result<Value, PersistenceError> {
         );
     }
     object.insert("schema_version".to_owned(), Value::from(15));
+    Ok(value)
+}
+
+fn migrate_v15_to_v16(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 15,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let legal_cases = object
+        .get_mut("legal_cases")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 15,
+            reason: "save legal_cases must be an object".to_owned(),
+        })?;
+    for legal_case in legal_cases.values_mut() {
+        let legal_case = legal_case
+            .as_object_mut()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 15,
+                reason: "save legal case must be an object".to_owned(),
+            })?;
+        legal_case.insert("claim_source".to_owned(), Value::Null);
+    }
+    let contracts = object
+        .get_mut("contracts")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 15,
+            reason: "save contracts must be an object".to_owned(),
+        })?;
+    for contract in contracts.values_mut() {
+        let contract = contract
+            .as_object_mut()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 15,
+                reason: "save contract must be an object".to_owned(),
+            })?;
+        contract.insert("breach_victim_dynasty_id".to_owned(), Value::Null);
+        contract.insert("unpaid_breach_penalty".to_owned(), Value::from(0));
+    }
+    object.insert("schema_version".to_owned(), Value::from(16));
     Ok(value)
 }
 

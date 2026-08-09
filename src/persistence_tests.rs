@@ -3,7 +3,8 @@
 use super::*;
 use crate::core::{
     AuditKind, AuditRecord, CivicDebt, CivicDebtStatus, Crisis, CrisisKind, CrisisStatus,
-    EnactedLaw, FamilyLinkKind, LawKind, OfficeDirectiveState, OfficePower,
+    EnactedLaw, FamilyLinkKind, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus,
+    LegalClaimSource, OfficeDirectiveState, OfficePower,
 };
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
 use crate::money::{Money, Quantity};
@@ -192,6 +193,45 @@ mod round_trip {
     }
 
     #[test]
+    fn preserves_grounded_legal_claim_source() {
+        let mut state = make_test_campaign();
+        let loan = state
+            .loans
+            .values()
+            .next()
+            .expect("campaign must contain a loan")
+            .clone();
+        let case_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            case_id,
+            LegalCase {
+                id: case_id,
+                plaintiff_dynasty_id: loan.lender_dynasty_id,
+                defendant_dynasty_id: loan.borrower_dynasty_id,
+                kind: LegalCaseKind::Debt,
+                claim_source: Some(LegalClaimSource::Loan { loan_id: loan.id }),
+                evidence_basis_points: 7_500,
+                public_attention_basis_points: 1_500,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: loan.balance,
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("grounded-legal-claim.json");
+
+        save_state(&path, &state).expect("grounded legal claim state must save");
+        let loaded = load_state(&path).expect("grounded legal claim state must load");
+
+        assert_state_eq(
+            &state,
+            &loaded,
+            "save/load must preserve the exact obligation underlying a legal claim",
+        );
+    }
+
+    #[test]
     fn preserves_adopted_wards_and_family_education() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -357,6 +397,44 @@ mod migrations {
             migrated["audit_log"].is_array(),
             "version-zero migration must add the audit log collection"
         );
+    }
+
+    #[test]
+    fn v1_resets_strategic_allocators_that_did_not_exist_in_that_schema() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(1);
+        let next_ids = value["next_ids"]
+            .as_object_mut()
+            .expect("next IDs must be an object");
+        let introduced_fields = [
+            "contract",
+            "property",
+            "loan",
+            "employment",
+            "family_link",
+            "law",
+            "information_report",
+            "objective",
+            "public_work",
+            "legal_case",
+            "external_route",
+            "crisis",
+            "outbox",
+        ];
+        for field in introduced_fields {
+            next_ids.insert(field.to_owned(), Value::from(u32::MAX - 1));
+        }
+
+        let migrated = migrate_v1_to_v2(value).expect("version one must migrate");
+
+        for field in introduced_fields {
+            assert_eq!(
+                migrated["next_ids"][field],
+                Value::from(0),
+                "schema-one saves must not inject allocator state for future namespace {field}"
+            );
+        }
     }
 
     #[test]
@@ -1007,6 +1085,93 @@ mod migrations {
         );
         assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
         validate_state(&loaded).expect("version-fourteen campaign must remain valid");
+    }
+
+    #[test]
+    fn v15_adds_optional_legal_claim_source() {
+        let mut state = make_test_campaign();
+        let mut dynasty_ids = state.dynasties.keys().copied();
+        let plaintiff_dynasty_id = dynasty_ids.next().expect("campaign must contain a dynasty");
+        let defendant_dynasty_id = dynasty_ids
+            .next()
+            .expect("campaign must contain a second dynasty");
+        let case_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            case_id,
+            LegalCase {
+                id: case_id,
+                plaintiff_dynasty_id,
+                defendant_dynasty_id,
+                kind: LegalCaseKind::Fraud,
+                claim_source: None,
+                evidence_basis_points: 6_500,
+                public_attention_basis_points: 2_000,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: Money::from_copper(2_500),
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(15);
+        for legal_case in value["legal_cases"]
+            .as_object_mut()
+            .expect("legal cases must be an object")
+            .values_mut()
+        {
+            legal_case
+                .as_object_mut()
+                .expect("legal case must be an object")
+                .remove("claim_source");
+        }
+        for contract in value["contracts"]
+            .as_object_mut()
+            .expect("contracts must be an object")
+            .values_mut()
+        {
+            let contract = contract
+                .as_object_mut()
+                .expect("contract must be an object");
+            contract.remove("breach_victim_dynasty_id");
+            contract.remove("unpaid_breach_penalty");
+        }
+
+        let migrated = migrate_v15_to_v16(value).expect("version fifteen must migrate");
+
+        assert_eq!(migrated["schema_version"], Value::from(16));
+        assert_eq!(
+            migrated["legal_cases"][case_id.value().to_string()]["claim_source"],
+            Value::Null,
+            "legacy cases must remain valid but explicitly record that no source obligation was persisted"
+        );
+        assert!(
+            migrated["contracts"]
+                .as_object()
+                .expect("migrated contracts must be an object")
+                .values()
+                .all(|contract| contract["breach_victim_dynasty_id"] == Value::Null),
+            "legacy contracts must explicitly record that no historical breach victim was persisted"
+        );
+        assert!(
+            migrated["contracts"]
+                .as_object()
+                .expect("migrated contracts must be an object")
+                .values()
+                .all(|contract| contract["unpaid_breach_penalty"] == 0),
+            "legacy contracts must not invent an unpaid breach obligation that was never persisted"
+        );
+        let loaded: AppState =
+            serde_json::from_value(migrated).expect("migrated state must deserialize");
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            loaded
+                .legal_cases
+                .get(&case_id)
+                .expect("migrated legal case must exist")
+                .claim_source,
+            None
+        );
+        validate_state(&loaded).expect("version-fifteen campaign must remain valid");
     }
 
     #[test]
@@ -2840,12 +3005,27 @@ mod validation {
     #[test]
     fn rejects_duplicate_unresolved_legal_cases() {
         let mut state = make_test_campaign();
-        let mut duplicate = state
-            .legal_cases
-            .values()
+        let mut dynasty_ids = state.dynasties.keys().copied();
+        let plaintiff_dynasty_id = dynasty_ids.next().expect("campaign must contain a dynasty");
+        let defendant_dynasty_id = dynasty_ids
             .next()
-            .expect("campaign must contain a legal case")
-            .clone();
+            .expect("campaign must contain a second dynasty");
+        let first_id = state.next_ids.legal_case();
+        let first = LegalCase {
+            id: first_id,
+            plaintiff_dynasty_id,
+            defendant_dynasty_id,
+            kind: LegalCaseKind::Fraud,
+            claim_source: None,
+            evidence_basis_points: 6_500,
+            public_attention_basis_points: 2_000,
+            filed_day: state.clock.day(),
+            hearing_day: state.clock.day().saturating_add(60),
+            damages: Money::from_copper(2_500),
+            status: LegalCaseStatus::Filed,
+        };
+        state.legal_cases.insert(first_id, first.clone());
+        let mut duplicate = first;
         let duplicate_id = state.next_ids.legal_case();
         duplicate.id = duplicate_id;
         state.legal_cases.insert(duplicate_id, duplicate);
@@ -2856,6 +3036,45 @@ mod validation {
             load_state(&path),
             StateValidationKind::StrategicRecords,
             "duplicates an unresolved case",
+        );
+    }
+
+    #[test]
+    fn rejects_legal_case_with_missing_claim_source_record() {
+        let mut state = make_test_campaign();
+        let loan = state
+            .loans
+            .values()
+            .next()
+            .expect("campaign must contain a loan")
+            .clone();
+        let case_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            case_id,
+            LegalCase {
+                id: case_id,
+                plaintiff_dynasty_id: loan.lender_dynasty_id,
+                defendant_dynasty_id: loan.borrower_dynasty_id,
+                kind: LegalCaseKind::Debt,
+                claim_source: Some(LegalClaimSource::Loan { loan_id: loan.id }),
+                evidence_basis_points: 7_500,
+                public_attention_basis_points: 1_500,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: loan.balance,
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["legal_cases"][case_id.value().to_string()]["claim_source"] = serde_json::json!({
+            "Loan": { "loan_id": u32::MAX }
+        });
+        let (_directory, path) = write_test_json_fixture("missing-legal-claim-source.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "references missing loan",
         );
     }
 

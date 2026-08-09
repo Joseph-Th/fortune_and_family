@@ -11,7 +11,7 @@ use crate::core::{
     CrisisStatus, DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw,
     ExternalRoute, FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance,
     InformationConfidence, InformationReport, InformationTarget, InstitutionRuntime, LawKind,
-    LegalCase, LegalCaseKind, LegalCaseStatus, Loan, LoanStatus, ObjectiveKind, ObjectiveStatus,
+    LegalCaseStatus, LegalClaimSource, Loan, LoanStatus, ObjectiveKind, ObjectiveStatus,
     OfficePower, OutboxKind, OutboxMessage, Property, PropertyKind, PublicWork, PublicWorkKind,
     PublicWorkStatus, RelationshipState, SupplyContract,
 };
@@ -41,6 +41,8 @@ pub(crate) const PROPERTY_LIQUIDATION_BASIS_POINTS: i64 = 5_000;
 const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000);
 const UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS: u16 = 240;
 const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
+const EPIDEMIC_ONSET_WELFARE_DIVISOR: u16 = 7;
+const EPIDEMIC_DAILY_WELFARE_DIVISOR: u16 = 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StrategicError {
@@ -369,6 +371,14 @@ impl ContractSettlementState {
             (true, true) | (false, false) => None,
         }
     }
+
+    const fn breach_victim_dynasty_id(self) -> Option<DynastyId> {
+        match (self.buyer_is_at_fault(), self.seller_is_at_fault()) {
+            (true, false) => Some(self.seller.owner_id),
+            (false, true) => Some(self.buyer.owner_id),
+            (true, true) | (false, false) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -460,6 +470,8 @@ fn commit_supply_contract(
             fulfilled_deliveries_by_dynasty: BTreeMap::default(),
             missed_deliveries: 0,
             breaching_dynasty_id: None,
+            breach_victim_dynasty_id: None,
+            unpaid_breach_penalty: Money::ZERO,
             status: ContractStatus::Active,
         },
     );
@@ -2048,7 +2060,6 @@ pub(crate) fn initialize_strategic_state(registry: &Registry, state: &mut AppSta
     initialize_loans(state);
     initialize_objectives(state);
     initialize_public_works(registry, state);
-    initialize_legal_cases(state);
     initialize_information(state);
 }
 
@@ -2499,32 +2510,6 @@ fn initialize_public_works(registry: &Registry, state: &mut AppState) {
     );
 }
 
-fn initialize_legal_cases(state: &mut AppState) {
-    let dynasty_ids: Vec<_> = state.dynasties.keys().copied().collect();
-    let Some(plaintiff_dynasty_id) = dynasty_ids.first().copied() else {
-        return;
-    };
-    let Some(defendant_dynasty_id) = dynasty_ids.get(1).copied() else {
-        return;
-    };
-    let id = state.next_ids.legal_case();
-    state.legal_cases.insert(
-        id,
-        LegalCase {
-            id,
-            plaintiff_dynasty_id,
-            defendant_dynasty_id,
-            kind: LegalCaseKind::Debt,
-            evidence_basis_points: 6_500,
-            public_attention_basis_points: 2_000,
-            filed_day: 0,
-            hearing_day: 90,
-            damages: Money::from_copper(2_500),
-            status: LegalCaseStatus::Filed,
-        },
-    );
-}
-
 fn initialize_information(state: &mut AppState) {
     let id = state.next_ids.information_report();
     state.information_reports.insert(
@@ -2668,14 +2653,11 @@ fn apply_crisis_daily_effects(
                 }
             }
             CrisisKind::Epidemic => {
-                let daily_welfare_loss = (severity / 60).max(1);
-                for household in state.households.iter_mut().filter(|household| {
-                    district_id.is_none_or(|district_id| household.district_id() == district_id)
-                }) {
-                    household.food_satisfaction_basis_points = household
-                        .food_satisfaction_basis_points
-                        .saturating_sub(daily_welfare_loss);
-                }
+                apply_epidemic_household_pressure(
+                    state,
+                    district_id,
+                    (severity / EPIDEMIC_DAILY_WELFARE_DIVISOR).max(1),
+                );
             }
             CrisisKind::TradeDisruption => {
                 for route in state.external_routes.values_mut() {
@@ -2795,11 +2777,7 @@ fn settle_contracts(state: &mut AppState) -> Result<(), SimulationError> {
 }
 
 fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), SimulationError> {
-    let final_delivery = due.due_day >= due.end_day
-        || due
-            .end_day
-            .checked_sub(due.due_day)
-            .is_some_and(|remaining_days| remaining_days < 7);
+    let final_delivery = is_final_contract_delivery(due);
     let payment = cost_for(due.quantity, due.unit_price);
     let (seller_active, seller_owner_id, seller_can_deliver) = {
         let seller = state
@@ -2891,10 +2869,19 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
         )?;
         settle_fulfilled_contract(state, due, payment, settlement, next_due_day)?;
     } else {
-        settle_failed_contract(state, due, settlement, next_due_day)?;
+        let terminal_breach = final_delivery || terminates_for_misses;
+        settle_failed_contract(state, due, settlement, next_due_day, terminal_breach)?;
     }
     finalize_expired_contract(state, due, settlement, fulfilled, final_delivery)?;
     Ok(())
+}
+
+fn is_final_contract_delivery(due: DueContract) -> bool {
+    due.due_day >= due.end_day
+        || due
+            .end_day
+            .checked_sub(due.due_day)
+            .is_some_and(|remaining_days| remaining_days < 7)
 }
 
 fn terminate_inactive_contract(
@@ -2914,6 +2901,16 @@ fn terminate_inactive_contract(
         (false, true) => Some(buyer_owner_id),
         (true, false) => Some(seller_owner_id),
         (false, false) | (true, true) => None,
+    };
+    contract.breach_victim_dynasty_id = match (buyer_active, seller_active) {
+        (false, true) => Some(seller_owner_id),
+        (true, false) => Some(buyer_owner_id),
+        (false, false) | (true, true) => None,
+    };
+    contract.unpaid_breach_penalty = if contract.breach_victim_dynasty_id.is_some() {
+        contract.penalty
+    } else {
+        Money::ZERO
     };
     contract.status = ContractStatus::Breached;
     if buyer_owner_id != seller_owner_id {
@@ -2979,6 +2976,11 @@ fn finalize_expired_contract(
         None
     } else {
         settlement.breaching_dynasty_id()
+    };
+    contract.breach_victim_dynasty_id = if fulfilled {
+        None
+    } else {
+        settlement.breach_victim_dynasty_id()
     };
     if settlement.buyer.owner_id != settlement.seller.owner_id {
         let memory = if fulfilled {
@@ -3070,6 +3072,7 @@ fn settle_failed_contract(
     due: DueContract,
     settlement: ContractSettlementState,
     next_due_day: Option<i64>,
+    terminal_breach: bool,
 ) -> Result<(), SimulationError> {
     let penalty_parties = match (
         settlement.seller_is_at_fault(),
@@ -3079,14 +3082,20 @@ fn settle_failed_contract(
         (true, false) => Some((due.seller_id, due.buyer_id)),
         (false, false) | (true, true) => None,
     };
-    if let Some((payer_id, recipient_id)) = penalty_parties {
+    let unpaid_terminal_penalty = if let Some((payer_id, recipient_id)) = penalty_parties {
         let available = state
             .businesses
             .get(payer_id)
             .expect("contract penalty payer must exist")
             .cash();
-        transfer_contract_money(state, payer_id, recipient_id, due.penalty.min(available))?;
-    }
+        let transferred =
+            transfer_contract_money(state, payer_id, recipient_id, due.penalty.min(available))?;
+        due.penalty
+            .checked_sub(transferred)
+            .expect("bounded contract penalty transfer cannot exceed the contractual penalty")
+    } else {
+        Money::ZERO
+    };
     let breached = {
         let contract = state
             .contracts
@@ -3099,6 +3108,10 @@ fn settle_failed_contract(
         if contract.missed_deliveries >= 3 {
             contract.status = ContractStatus::Breached;
             contract.breaching_dynasty_id = settlement.breaching_dynasty_id();
+            contract.breach_victim_dynasty_id = settlement.breach_victim_dynasty_id();
+        }
+        if terminal_breach && settlement.has_attributable_nonperformance() {
+            contract.unpaid_breach_penalty = unpaid_terminal_penalty;
         }
         contract.status == ContractStatus::Breached
     };
@@ -3793,23 +3806,33 @@ fn apply_loan_payment(
         borrower_treasury >= payment,
         "validated loan payment exceeds borrower treasury"
     );
+    let lender_treasury = state
+        .dynasties
+        .get(&lender_id)
+        .expect("loan lender must exist")
+        .treasury();
+    let lender_treasury_after =
+        lender_treasury
+            .checked_add(payment)
+            .ok_or(SimulationError::DynastyTreasuryOverflow {
+                dynasty_id: lender_id,
+                current: lender_treasury,
+                incoming: payment,
+            })?;
+    let borrower_treasury_after = borrower_treasury
+        .checked_sub(payment)
+        .expect("validated loan payment must not exceed borrower treasury");
     state
         .dynasties
         .get_mut(&borrower_id)
         .expect("loan borrower must exist")
         .resources
-        .treasury = borrower_treasury
-        .checked_sub(payment)
-        .expect("validated loan payment must not exceed borrower treasury");
+        .treasury = borrower_treasury_after;
     let lender = state
         .dynasties
         .get_mut(&lender_id)
         .expect("loan lender must exist");
-    lender.resources.treasury = lender
-        .resources
-        .treasury
-        .checked_add(payment)
-        .expect("prevalidated loan payment must fit lender treasury");
+    lender.resources.treasury = lender_treasury_after;
     let repaid = {
         let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
         loan.balance = loan
@@ -6246,7 +6269,7 @@ fn advance_ai_debt_objective(
     let loan_id = state
         .loans
         .values()
-        .find(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status.is_repayment_active())
+        .find(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status != LoanStatus::Repaid)
         .map(|loan| loan.id);
     let Some(loan_id) = loan_id else {
         return Ok(ObjectiveProgress::Achieved);
@@ -6439,13 +6462,15 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
                 case.id,
                 case.plaintiff_dynasty_id,
                 case.defendant_dynasty_id,
+                case.kind,
+                case.claim_source,
                 case.evidence_basis_points,
                 case.public_attention_basis_points,
                 case.damages,
             )
         })
         .collect();
-    for (id, plaintiff_id, defendant_id, evidence, attention, damages) in due {
+    for (id, plaintiff_id, defendant_id, kind, claim_source, evidence, attention, damages) in due {
         let plaintiff_legitimacy = state
             .dynasties
             .get(&plaintiff_id)
@@ -6467,9 +6492,14 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
             .saturating_mul(2)
             .saturating_add(u32::from(defendant_legitimacy));
         let plaintiff_wins = plaintiff_score >= defendant_score;
-        if plaintiff_wins {
-            settle_legal_damages(state, plaintiff_id, defendant_id, damages)?;
-        }
+        let paid = if plaintiff_wins {
+            let recoverable = recoverable_legal_damages(state, claim_source, damages);
+            let paid = settle_legal_damages(state, plaintiff_id, defendant_id, recoverable)?;
+            apply_legal_recovery_to_claim(state, claim_source, plaintiff_id, defendant_id, paid);
+            paid
+        } else {
+            Money::ZERO
+        };
         state
             .legal_cases
             .get_mut(&id)
@@ -6490,12 +6520,13 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
             OutboxKind::Legal,
             format!("Legal case {id} decided"),
             format!(
-                "The court decided for dynasty {}.",
+                "The court decided the {kind:?} claim for dynasty {}; {} was recovered from the defendant.",
                 if plaintiff_wins {
                     plaintiff_id
                 } else {
                     defendant_id
-                }
+                },
+                paid
             ),
         )?;
     }
@@ -6507,7 +6538,7 @@ fn settle_legal_damages(
     plaintiff_id: DynastyId,
     defendant_id: DynastyId,
     damages: Money,
-) -> Result<(), SimulationError> {
+) -> Result<Money, SimulationError> {
     let defendant_cash = state
         .dynasties
         .get(&defendant_id)
@@ -6543,7 +6574,87 @@ fn settle_legal_damages(
         .treasury
         .checked_add(paid)
         .expect("prevalidated damages must fit plaintiff treasury");
-    Ok(())
+    Ok(paid)
+}
+
+fn recoverable_legal_damages(
+    state: &AppState,
+    claim_source: Option<LegalClaimSource>,
+    requested: Money,
+) -> Money {
+    match claim_source {
+        Some(LegalClaimSource::Loan { loan_id }) => state
+            .loans
+            .get(&loan_id)
+            .map_or(Money::ZERO, |loan| requested.min(loan.balance)),
+        Some(LegalClaimSource::Contract { contract_id }) => state
+            .contracts
+            .get(&contract_id)
+            .map_or(Money::ZERO, |contract| {
+                requested.min(contract.unpaid_breach_penalty)
+            }),
+        None => requested,
+    }
+}
+
+fn apply_legal_recovery_to_claim(
+    state: &mut AppState,
+    claim_source: Option<LegalClaimSource>,
+    plaintiff_id: DynastyId,
+    defendant_id: DynastyId,
+    paid: Money,
+) {
+    if paid <= Money::ZERO {
+        return;
+    }
+    match claim_source {
+        Some(LegalClaimSource::Loan { loan_id }) => {
+            let (collateral_property_id, repaid) = {
+                let Some(loan) = state.loans.get_mut(&loan_id) else {
+                    return;
+                };
+                if loan.lender_dynasty_id != plaintiff_id
+                    || loan.borrower_dynasty_id != defendant_id
+                {
+                    return;
+                }
+                let applied = paid.min(loan.balance);
+                loan.balance = loan
+                    .balance
+                    .checked_sub(applied)
+                    .expect("court recovery must not exceed the adjudicated loan balance");
+                let repaid = loan.balance == Money::ZERO;
+                if repaid {
+                    loan.status = LoanStatus::Repaid;
+                    loan.missed_payments = 0;
+                }
+                (loan.collateral_property_id, repaid)
+            };
+            if repaid
+                && let Some(property_id) = collateral_property_id
+                && let Some(property) = state.properties.get_mut(&property_id)
+                && property.collateral_loan_id == Some(loan_id)
+            {
+                property.collateral_loan_id = None;
+            }
+        }
+        Some(LegalClaimSource::Contract { contract_id }) => {
+            let Some(contract) = state.contracts.get_mut(&contract_id) else {
+                return;
+            };
+            if contract.breaching_dynasty_id != Some(defendant_id)
+                || contract.breach_victim_dynasty_id != Some(plaintiff_id)
+            {
+                return;
+            }
+            let applied = paid.min(contract.unpaid_breach_penalty);
+            contract.unpaid_breach_penalty = contract
+                .unpaid_breach_penalty
+                .checked_sub(applied)
+                .expect("court recovery must not exceed the unpaid breach penalty");
+        }
+        None => {}
+    }
 }
 
 fn update_external_route_risk(state: &mut AppState) {
@@ -6781,15 +6892,35 @@ fn detect_epidemic(state: &mut AppState) -> Result<(), SimulationError> {
     let deficiency = 10_000_u16.saturating_sub(sanitation);
     let chance = deficiency.saturating_div(4).saturating_add(250).min(10_000);
     if state.rng.is_chance_success(chance) {
+        let severity = 3_000_u16.saturating_add(deficiency / 5).min(9_000);
         insert_crisis(
             state,
             CrisisKind::Epidemic,
             Some(district_id),
-            3_000_u16.saturating_add(deficiency / 5).min(9_000),
+            severity,
             "Poor sanitation allowed an epidemic to take hold.",
         )?;
+        apply_epidemic_household_pressure(
+            state,
+            Some(district_id),
+            (severity / EPIDEMIC_ONSET_WELFARE_DIVISOR).max(1),
+        );
     }
     Ok(())
+}
+
+fn apply_epidemic_household_pressure(
+    state: &mut AppState,
+    district_id: Option<DistrictId>,
+    welfare_loss: u16,
+) {
+    for household in state.households.iter_mut().filter(|household| {
+        district_id.is_none_or(|district_id| household.district_id() == district_id)
+    }) {
+        household.food_satisfaction_basis_points = household
+            .food_satisfaction_basis_points
+            .saturating_sub(welfare_loss);
+    }
 }
 
 fn detect_trade_disruption(state: &mut AppState) -> Result<(), SimulationError> {

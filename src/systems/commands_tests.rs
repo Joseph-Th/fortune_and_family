@@ -812,6 +812,129 @@ mod validation {
     }
 
     #[test]
+    fn non_player_borrower_rejects_unsolicited_credit_without_financing_pressure() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let borrower_dynasty_id = non_player_credit_counterparty(&state, true);
+        state
+            .dynasties
+            .get_mut(&borrower_dynasty_id)
+            .expect("selected borrower must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let terms = LoanTerms {
+            lender_dynasty_id: state.player_dynasty_id,
+            borrower_dynasty_id,
+            principal: Money::from_copper(1_000),
+            weekly_payment: Money::from_copper(50),
+            interest_basis_points: 900,
+            collateral_property_id: None,
+        };
+        let before = state.clone();
+
+        let result = apply_player_command(registry, &mut state, PlayerCommand::IssueLoan { terms });
+
+        assert_eq!(
+            result,
+            Err(CommandError::LoanCounterpartyNoFinancingNeed {
+                borrower_dynasty_id,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a solvent non-player house must not accept debt solely because the player offers profitable terms",
+        );
+    }
+
+    #[test]
+    fn non_player_borrower_deploys_new_credit_into_distressed_business() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let borrower_dynasty_id = non_player_credit_counterparty(&state, true);
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() == borrower_dynasty_id)
+            .expect("selected borrower must own a business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.finance.cash = Money::ZERO;
+        }
+        state
+            .dynasties
+            .get_mut(&borrower_dynasty_id)
+            .expect("selected borrower must exist")
+            .resources
+            .treasury = Money::from_copper(20_000);
+        let target_cash = business_recapitalization_target(
+            registry,
+            &state,
+            state
+                .businesses
+                .get(business_id)
+                .expect("selected business must exist"),
+        );
+        let principal = Money::from_copper(5_000).min(target_cash);
+        assert!(principal > Money::ZERO);
+        let borrower_treasury_before = state
+            .dynasties
+            .get(&borrower_dynasty_id)
+            .expect("selected borrower must exist")
+            .treasury();
+        let player_id = state.player_dynasty_id;
+        let expected_deployment = target_cash.min(
+            borrower_treasury_before
+                .checked_add(principal)
+                .expect("fixture borrower treasury must fit after borrowing")
+                .saturating_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE),
+        );
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::IssueLoan {
+                terms: LoanTerms {
+                    lender_dynasty_id: player_id,
+                    borrower_dynasty_id,
+                    principal,
+                    weekly_payment: ceil_positive_money_div(principal, 26),
+                    interest_basis_points: 900,
+                    collateral_property_id: None,
+                },
+            },
+        )
+        .expect("credit for an identified business shortfall must be accepted");
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("selected business must exist")
+                .cash(),
+            expected_deployment,
+            "new credit should unlock a borrower co-investment while preserving its protected household reserve"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&borrower_dynasty_id)
+                .expect("selected borrower must exist")
+                .treasury(),
+            borrower_treasury_before
+                .checked_add(principal)
+                .and_then(|treasury| treasury.checked_sub(expected_deployment))
+                .expect("fixture borrower treasury must fit after co-investment"),
+            "the borrower should commit its own discretionary capital alongside the loan instead of keeping a fully cash-backed obligation"
+        );
+    }
+
+    #[test]
     fn non_player_lender_keeps_a_household_credit_reserve() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -5277,25 +5400,86 @@ mod notifications {
 mod legal_cases {
     use super::*;
 
+    fn delinquent_player_loan(state: &mut AppState) -> (DynastyId, crate::ids::LoanId) {
+        let player_id = state.player_dynasty_id;
+        let borrower_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| {
+                *dynasty_id != player_id
+                    && !state.loans.values().any(|loan| {
+                        loan.lender_dynasty_id == player_id
+                            && loan.borrower_dynasty_id == *dynasty_id
+                            && loan.status != LoanStatus::Repaid
+                    })
+            })
+            .expect("campaign must contain a rival available for player lending");
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let loan_id = crate::systems::issue_loan(
+            state,
+            LoanTerms {
+                lender_dynasty_id: player_id,
+                borrower_dynasty_id: borrower_id,
+                principal: Money::from_copper(5_000),
+                weekly_payment: Money::from_copper(300),
+                interest_basis_points: 1_000,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture player loan must be issuable");
+        let loan = state
+            .loans
+            .get_mut(&loan_id)
+            .expect("fixture loan must exist");
+        loan.status = LoanStatus::Delinquent;
+        loan.missed_payments = 1;
+        (borrower_id, loan_id)
+    }
+
     #[test]
     fn rejects_rapid_repeat_filing_without_charging_cost() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
-        let prior = state
-            .legal_cases
-            .values()
-            .find(|legal_case| legal_case.plaintiff_dynasty_id == state.player_dynasty_id)
-            .expect("campaign must contain a player-filed opening case");
+        let prior_defendant = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a nonplayer dynasty");
+        let prior_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            prior_id,
+            LegalCase {
+                id: prior_id,
+                plaintiff_dynasty_id: state.player_dynasty_id,
+                defendant_dynasty_id: prior_defendant,
+                kind: LegalCaseKind::Fraud,
+                claim_source: None,
+                evidence_basis_points: 6_000,
+                public_attention_basis_points: 1_500,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: Money::from_copper(2_000),
+                status: LegalCaseStatus::Filed,
+            },
+        );
         let defendant_dynasty_id = state
             .dynasties
             .keys()
             .copied()
             .find(|dynasty_id| {
-                *dynasty_id != state.player_dynasty_id && *dynasty_id != prior.defendant_dynasty_id
+                *dynasty_id != state.player_dynasty_id && *dynasty_id != prior_defendant
             })
             .expect("campaign must contain another nonplayer dynasty");
-        let next_filing_day = prior
-            .filed_day
+        let next_filing_day = state
+            .clock
+            .day()
             .saturating_add(LEGAL_CASE_FILING_INTERVAL_DAYS);
         let before = state.clone();
 
@@ -5340,6 +5524,7 @@ mod legal_cases {
                 plaintiff_dynasty_id: state.player_dynasty_id,
                 defendant_dynasty_id,
                 kind,
+                claim_source: None,
                 evidence_basis_points: 6_000,
                 public_attention_basis_points: 1_500,
                 filed_day: state.clock.day(),
@@ -5372,6 +5557,147 @@ mod legal_cases {
             &before,
             &state,
             "duplicate unresolved cases must fail before charging the filing cost",
+        );
+    }
+
+    #[test]
+    fn rejects_unsubstantiated_legal_claim_without_charging_cost() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let defendant_dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a nonplayer dynasty");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FileLegalCase {
+                defendant_dynasty_id,
+                kind: LegalCaseKind::Fraud,
+                evidence_basis_points: 7_000,
+                damages: Money::from_copper(2_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::LegalClaimNotGrounded {
+                defendant_dynasty_id,
+                kind: LegalCaseKind::Fraud,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "player commands must not manufacture unsupported legal claims",
+        );
+    }
+
+    #[test]
+    fn debt_case_is_grounded_in_exact_delinquent_loan() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (borrower_id, loan_id) = delinquent_player_loan(&mut state);
+        let quote = quote_player_legal_claim(&state, borrower_id, LegalCaseKind::Debt)
+            .expect("delinquent player credit must support a debt claim");
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FileLegalCase {
+                defendant_dynasty_id: borrower_id,
+                kind: LegalCaseKind::Debt,
+                evidence_basis_points: quote.evidence_basis_points,
+                damages: quote.maximum_damages,
+            },
+        )
+        .expect("grounded debt claim must be fileable");
+
+        let legal_case = state
+            .legal_cases
+            .values()
+            .find(|legal_case| legal_case.plaintiff_dynasty_id == state.player_dynasty_id)
+            .expect("filed player case must exist");
+        assert_eq!(
+            legal_case.claim_source,
+            Some(LegalClaimSource::Loan { loan_id })
+        );
+        assert_eq!(legal_case.damages, quote.maximum_damages);
+    }
+
+    #[test]
+    fn rejects_legal_evidence_above_grounded_claim_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (borrower_id, _) = delinquent_player_loan(&mut state);
+        let quote = quote_player_legal_claim(&state, borrower_id, LegalCaseKind::Debt)
+            .expect("delinquent player credit must support a debt claim");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FileLegalCase {
+                defendant_dynasty_id: borrower_id,
+                kind: LegalCaseKind::Debt,
+                evidence_basis_points: quote.evidence_basis_points.saturating_add(1),
+                damages: quote.maximum_damages,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::LegalEvidenceExceedsClaim {
+                evidence_basis_points: quote.evidence_basis_points + 1,
+                maximum_basis_points: quote.evidence_basis_points,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "unsupported legal evidence must fail before filing cost or relationship mutation",
+        );
+    }
+
+    #[test]
+    fn rejects_legal_damages_above_grounded_claim_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (borrower_id, _) = delinquent_player_loan(&mut state);
+        let quote = quote_player_legal_claim(&state, borrower_id, LegalCaseKind::Debt)
+            .expect("delinquent player credit must support a debt claim");
+        let requested_damages = quote
+            .maximum_damages
+            .checked_add(Money::from_copper(1))
+            .expect("fixture damages must fit money");
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FileLegalCase {
+                defendant_dynasty_id: borrower_id,
+                kind: LegalCaseKind::Debt,
+                evidence_basis_points: quote.evidence_basis_points,
+                damages: requested_damages,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::LegalDamagesExceedClaim {
+                damages: requested_damages,
+                maximum_damages: quote.maximum_damages,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "unsupported damages must fail before filing cost or relationship mutation",
         );
     }
 }

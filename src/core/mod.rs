@@ -9,9 +9,9 @@ pub use extended::{
     DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw, ExternalRoute,
     FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance, InformationConfidence,
     InformationReport, InformationTarget, InstitutionRuntime, LawKind, LegalCase, LegalCaseKind,
-    LegalCaseStatus, Loan, LoanStatus, ObjectiveKind, ObjectiveStatus, OfficeDirectiveState,
-    OfficePower, OutboxKind, OutboxMessage, Property, PropertyKind, PublicWork, PublicWorkKind,
-    PublicWorkStatus, RelationshipState, SupplyContract,
+    LegalCaseStatus, LegalClaimSource, Loan, LoanStatus, ObjectiveKind, ObjectiveStatus,
+    OfficeDirectiveState, OfficePower, OutboxKind, OutboxMessage, Property, PropertyKind,
+    PublicWork, PublicWorkKind, PublicWorkStatus, RelationshipState, SupplyContract,
 };
 
 pub(crate) use extended::MIN_PARENT_CHILD_AGE_GAP_DAYS;

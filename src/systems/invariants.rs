@@ -2,7 +2,8 @@
 
 use crate::core::{
     AppState, AuditKind, Business, CharacterStatus, CivicDebtStatus, ContractStatus, DynastyPair,
-    EmploymentStatus, FamilyLinkKind, LegalCaseStatus, LoanStatus, PublicWorkStatus,
+    EmploymentStatus, FamilyLinkKind, LegalCaseKind, LegalCaseStatus, LegalClaimSource, LoanStatus,
+    PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, DistrictId, DynastyId, GoodId, HouseholdId, InstitutionId, RecipeId,
@@ -597,11 +598,12 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             "Lifecycle Validity: active contract due date exceeds its term"
         );
         debug_assert!(
-            contract.breaching_dynasty_id.is_none_or(|dynasty_id| {
-                contract.status == ContractStatus::Breached
-                    && state.dynasties.contains_key(&dynasty_id)
-            }),
-            "Lifecycle Validity: contract breach attribution is inconsistent with its parties"
+            contract_breach_attribution_is_valid(state, contract),
+            "Lifecycle Validity: contract breach attribution is inconsistent"
+        );
+        debug_assert!(
+            contract_breach_penalty_is_valid(contract),
+            "Lifecycle Validity: unpaid contract breach penalty is inconsistent"
         );
         let attributed_deliveries = contract
             .fulfilled_deliveries_by_dynasty
@@ -767,6 +769,37 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
             }
         }
     }
+}
+
+fn contract_breach_attribution_is_valid(
+    state: &AppState,
+    contract: &crate::core::SupplyContract,
+) -> bool {
+    match (
+        contract.breaching_dynasty_id,
+        contract.breach_victim_dynasty_id,
+    ) {
+        (None, None) => true,
+        (Some(breacher), None) => {
+            contract.status == ContractStatus::Breached && state.dynasties.contains_key(&breacher)
+        }
+        (Some(breacher), Some(victim)) => {
+            contract.status == ContractStatus::Breached
+                && breacher != victim
+                && state.dynasties.contains_key(&breacher)
+                && state.dynasties.contains_key(&victim)
+        }
+        (None, Some(_)) => false,
+    }
+}
+
+fn contract_breach_penalty_is_valid(contract: &crate::core::SupplyContract) -> bool {
+    !contract.unpaid_breach_penalty.is_negative()
+        && contract.unpaid_breach_penalty <= contract.penalty
+        && (contract.unpaid_breach_penalty == crate::money::Money::ZERO
+            || (contract.status == ContractStatus::Breached
+                && contract.breaching_dynasty_id.is_some()
+                && contract.breach_victim_dynasty_id.is_some()))
 }
 
 fn validate_loans(state: &AppState) {
@@ -1460,6 +1493,34 @@ fn validate_legal_cases(state: &AppState) {
             !case.damages.is_negative(),
             "Lifecycle Validity: legal case damages are negative"
         );
+        if let Some(claim_source) = case.claim_source {
+            match claim_source {
+                LegalClaimSource::Loan { loan_id } => {
+                    let loan = state.loans.get(&loan_id);
+                    debug_assert!(
+                        loan.is_some_and(|loan| {
+                            case.kind == LegalCaseKind::Debt
+                                && loan.lender_dynasty_id == case.plaintiff_dynasty_id
+                                && loan.borrower_dynasty_id == case.defendant_dynasty_id
+                        }),
+                        "Record Reference Validity: debt-case claim source does not match its loan and parties"
+                    );
+                }
+                LegalClaimSource::Contract { contract_id } => {
+                    let contract = state.contracts.get(&contract_id);
+                    debug_assert!(
+                        contract.is_some_and(|contract| {
+                            case.kind == LegalCaseKind::ContractBreach
+                                && contract.status == ContractStatus::Breached
+                                && contract.breaching_dynasty_id == Some(case.defendant_dynasty_id)
+                                && contract.breach_victim_dynasty_id
+                                    == Some(case.plaintiff_dynasty_id)
+                        }),
+                        "Record Reference Validity: contract-breach claim source does not match its contract and parties"
+                    );
+                }
+            }
+        }
         if matches!(
             case.status,
             LegalCaseStatus::DecidedForPlaintiff | LegalCaseStatus::DecidedForDefendant
