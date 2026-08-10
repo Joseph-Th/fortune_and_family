@@ -87,6 +87,14 @@ cargo run --locked -- execute saves/valeri.json \
   --command '{"SetHouseGovernance":{"governance":"FamilyPartnership"}}'
 ```
 
+Render and review sprites:
+
+```bash
+cargo run --locked -- art --output target/sprite-review.html --seeds 2 --scale 6
+```
+
+The review page is self-contained: it plays every clip, magnifies every frame, shows palettes, offers silhouette and pixel-grid toggles, and lists automated findings. Add `--json` for the machine-readable report and `--fail-on-critical` to gate on it.
+
 Run `cargo run --locked -- --help` or a subcommand with `--help` for the authoritative CLI syntax. Starting backgrounds are `baker`, `cloth-trader`, and `blacksmith`.
 
 ## Core model
@@ -120,6 +128,18 @@ src/
   persistence.rs      Save/load, migrations, and release validation
   projection.rs       Read-only projections and HTML rendering
   gameplay.rs         Deterministic gameplay harness
+  art/
+    color.rs          Color model, shading ramps, and palettes
+    math.rs           Fixed-point angles and trigonometry
+    canvas.rs         Indexed pixel buffers
+    surface.rs        Material, light, and depth buffers
+    shape.rs          Shaded rasterization primitives
+    rig.rs            Skeletons, poses, and the humanoid rig
+    anim.rs           Keyframed animation clips
+    sprite.rs         Character specifications and sheet composition
+    png.rs            Indexed PNG encoding
+    lint.rs           Automated sprite review checks
+    harness.rs        Visual review harness and HTML contact sheet
   main.rs             CLI adapter
   *_tests.rs          Large sibling test suites
   test_support.rs     Shared deterministic fixtures and diagnostics
@@ -144,6 +164,7 @@ The supported library facade is exported from `src/lib.rs`.
 | Build read models | `build_state_summary`, `build_campaign_projection` |
 | Render dashboard | `render_campaign_html` |
 | Run gameplay analysis | `run_gameplay_harness`, `render_gameplay_report` |
+| Render and review sprites | `build_art_review`, `render_art_review_html`, `build_art_review_report` |
 | Check runtime invariants | `validate_invariants` |
 
 `PlayerCommand` in `src/systems/commands.rs` is the authoritative player-command schema.

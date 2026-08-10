@@ -11,6 +11,7 @@
 //! assert_eq!(state.clock().day(), 1);
 //! ```
 
+pub mod art;
 pub mod core;
 pub mod gameplay;
 pub mod ids;
@@ -21,6 +22,11 @@ pub mod registry;
 pub mod rng;
 pub mod systems;
 
+pub use art::{
+    ART_REVIEW_SCHEMA_VERSION, ArtReview, ArtReviewConfig, ArtReviewError, ArtReviewReport,
+    ArtSeverity, CharacterRole, CharacterSpec, build_art_review, build_art_review_report,
+    render_art_review_html,
+};
 pub use core::{AppState, NewGameConfig};
 pub use gameplay::{
     GAMEPLAY_REPORT_SCHEMA_VERSION, GameplayAggregate, GameplayCampaignReport,

@@ -852,6 +852,43 @@ mod public_works {
     }
 
     #[test]
+    fn district_employment_retains_the_unmodeled_background_economy() {
+        let mut state = make_test_campaign();
+        state.employment.clear();
+        state.public_works.clear();
+
+        update_district_conditions(&mut state);
+
+        assert!(state.districts.values().all(|district| {
+            district.employment_basis_points == DISTRICT_BACKGROUND_EMPLOYMENT_BASIS_POINTS
+        }));
+    }
+
+    #[test]
+    fn initialized_district_employment_matches_the_monthly_model() {
+        let mut state = make_test_campaign();
+        let before: BTreeMap<_, _> = state
+            .districts
+            .iter()
+            .map(|(id, district)| (*id, district.employment_basis_points))
+            .collect();
+
+        update_district_conditions(&mut state);
+
+        for (district_id, employment) in before {
+            assert_eq!(
+                state
+                    .districts
+                    .get(&district_id)
+                    .expect("district must remain present")
+                    .employment_basis_points,
+                employment,
+                "monthly recomputation must not introduce a start-of-campaign employment cliff"
+            );
+        }
+    }
+
+    #[test]
     fn district_unrest_responds_to_material_living_conditions() {
         let baseline = DistrictRuntime {
             district_id: DistrictId::new(1),

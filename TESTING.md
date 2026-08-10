@@ -44,7 +44,13 @@ Current soak coverage exercises core invariants and strategic multi-generation b
 
 ### CLI smoke tests
 
-Use for the external command-line contract. `scripts/verify_cli.sh` covers campaign creation, simulation, command execution, summary, projection, dashboard rendering, validation, gameplay output, quality-gate failure, and rejected input.
+Use for the external command-line contract. `scripts/verify_cli.sh` covers campaign creation, simulation, command execution, summary, projection, dashboard rendering, validation, gameplay output, sprite review rendering and reporting, quality-gate failure, and rejected input.
+
+### Visual art review
+
+Use `cargo run --locked -- art` for sprite work. Rendering is deterministic, so every stage is testable in the fast tier: ramps, primitives, rig resolution, clip sampling, encoding, and the automated review checks. The generated HTML sheet answers questions the checks cannot: weight, readability, and whether a pose reads at one-to-one scale.
+
+Art tests must cover determinism for any new specification, primitive, rig, or clip, and any new defect class must gain a check in `src/art/lint.rs` rather than a comment.
 
 ### Gameplay analysis
 
@@ -66,6 +72,7 @@ Large suites live beside production modules and are loaded by path:
 | Persistence and migrations | `src/persistence_tests.rs` |
 | Projections and HTML | `src/projection_tests.rs` |
 | Gameplay harness | `src/gameplay_tests.rs` |
+| Procedural art and sprite review | `src/art/*` module tests |
 | Shared fixtures and diagnostics | `src/test_support.rs` |
 
 Use stable nested modules so filters remain useful. Add a test to the narrowest domain that owns the behavior.

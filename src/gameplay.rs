@@ -13,15 +13,15 @@ use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
     COMMISSIONED_INFORMATION_SOURCE, CommandError, CrisisResponse,
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, EducationFocus, FAMILY_COUNCIL_MEETING_COST,
-    FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, FAMILY_EDUCATION_INTERVAL_DAYS,
-    HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
-    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST,
-    INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST, INSTITUTION_SUPPORT_COST,
-    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
-    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, InformationFocus, LABOR_REPLACEMENT_COST,
-    LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST,
-    LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
-    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
+    FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, HEIR_DESIGNATION_INTERVAL_DAYS,
+    HEIR_DESIGNATION_LEGITIMACY_COST, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
+    INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
+    INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
+    InformationFocus, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
+    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
+    LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
+    MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
     OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
     OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, OFFICE_POWER_ESTABLISHMENT_DAYS,
@@ -33,7 +33,7 @@ use crate::systems::{
     apply_player_command, available_household_workers, available_supply_contract_capacity,
     build_new_game, business_recapitalization_target, contract_counterparty_price_bounds,
     contract_relationship_pressure_basis_points, crisis_response_contains_crisis,
-    has_established_player_office_power, institution_capability_score,
+    family_education_next_day, has_established_player_office_power, institution_capability_score,
     institution_membership_count, institution_support_day, institution_support_next_day,
     office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
     private_loan_borrower_financing_pressure, projected_dynasty_monthly_office_duty,
@@ -97,7 +97,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 43;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 45;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -1869,7 +1869,7 @@ impl GameplayPhase {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameplayPhaseStats {
     pub decision_cycles: u32,
     pub substantive_actions: u32,
@@ -1888,6 +1888,7 @@ pub struct GameplayPhaseStats {
     pub cycles_with_distinct_projected_option_consequences: u32,
     pub total_viable_choices: u32,
     pub total_viable_command_kinds: u32,
+    pub executed_commands: BTreeMap<GameplayCommandKind, u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2007,6 +2008,7 @@ pub struct GameplayHarnessReport {
     pub schema_version: u16,
     pub config: GameplayHarnessConfig,
     pub aggregate: GameplayAggregate,
+    pub persona_aggregates: BTreeMap<GameplayPersona, GameplayAggregate>,
     pub campaigns: Vec<GameplayCampaignReport>,
     pub findings: Vec<GameplayFinding>,
     pub limitations: Vec<String>,
@@ -2532,6 +2534,9 @@ impl CampaignAccumulator {
             .saturating_add(usize_to_u32(choices.substantive_viable_count));
         if action.is_some_and(|kind| kind != GameplayCommandKind::AcknowledgeNotification) {
             stats.substantive_actions = stats.substantive_actions.saturating_add(1);
+            let kind = action.expect("substantive action must have a command kind");
+            let count = stats.executed_commands.entry(kind).or_default();
+            *count = count.saturating_add(1);
             if action.is_some_and(|kind| {
                 matches!(
                     kind,
@@ -2699,11 +2704,13 @@ pub fn run_gameplay_harness(
         }
     }
     let aggregate = aggregate_campaigns(&campaigns);
+    let persona_aggregates = aggregate_campaigns_by_persona(&campaigns);
     let findings = derive_findings(&aggregate, &campaigns);
     Ok(GameplayHarnessReport {
         schema_version: GAMEPLAY_REPORT_SCHEMA_VERSION,
         config,
         aggregate,
+        persona_aggregates,
         campaigns,
         findings,
         limitations: gameplay_harness_limitations(),
@@ -7653,15 +7660,7 @@ fn generate_family_education_candidates(
             .reputation_quality_basis_points
             .max(player.resources.reputation_reliability_basis_points)
             >= INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT
-        && player_contract_deliveries(state) >= INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT
-        && state
-            .audit_log
-            .iter()
-            .rev()
-            .find(|record| record.kind() == AuditKind::FamilyEducation)
-            .is_none_or(|record| {
-                state.clock.day() >= record.day().saturating_add(FAMILY_EDUCATION_INTERVAL_DAYS)
-            });
+        && player_contract_deliveries(state) >= INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT;
     if !education_available {
         return;
     }
@@ -7690,14 +7689,22 @@ fn generate_family_education_candidates(
             &controlled_powers,
             player_has_institutional_foothold,
             MIN_TARGETED_PREPARATION_DELIVERIES,
-        );
+        )
+        .filter(|(character, _, _)| {
+            family_education_next_day(state, character.id())
+                .is_none_or(|day| state.clock.day() >= day)
+        });
         let student = targeted_student
             .map(|(character, _, _)| character)
             .or_else(|| {
                 active_characters
                     .iter()
                     .copied()
-                    .filter(|character| character_focus_value(character, focus) < 100)
+                    .filter(|character| {
+                        character_focus_value(character, focus) < 100
+                            && family_education_next_day(state, character.id())
+                                .is_none_or(|day| state.clock.day() >= day)
+                    })
                     .min_by_key(|character| {
                         (character_focus_value(character, focus), character.id())
                     })
@@ -8951,6 +8958,12 @@ fn resilience_score(
         0
     };
     let crisis = if end.escalated_crises == 0 { 100 } else { 35 };
+    let civic = average_scores(&[
+        (end.average_district_employment / 100).min(100),
+        (end.average_district_sanitation / 100).min(100),
+        (end.average_district_safety / 100).min(100),
+        100_u16.saturating_sub(end.average_district_unrest / 100),
+    ]);
     let trajectory = average_scores(&[
         accumulator.minimum_food_satisfaction / 100,
         accumulator.minimum_district_food_satisfaction / 100,
@@ -8969,6 +8982,7 @@ fn resilience_score(
         food.min(100),
         treasury,
         crisis,
+        civic,
         trajectory,
     ])
 }
@@ -9158,6 +9172,23 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
     }
 }
 
+fn aggregate_campaigns_by_persona(
+    campaigns: &[GameplayCampaignReport],
+) -> BTreeMap<GameplayPersona, GameplayAggregate> {
+    GameplayPersona::all()
+        .into_iter()
+        .filter_map(|persona| {
+            let persona_campaigns: Vec<_> = campaigns
+                .iter()
+                .filter(|campaign| campaign.persona == persona)
+                .cloned()
+                .collect();
+            (!persona_campaigns.is_empty())
+                .then(|| (persona, aggregate_campaigns(&persona_campaigns)))
+        })
+        .collect()
+}
+
 fn merge_phase_stats(
     campaign: &GameplayCampaignReport,
     phase_stats: &mut BTreeMap<GameplayPhase, GameplayPhaseStats>,
@@ -9213,6 +9244,10 @@ fn merge_phase_stats(
         target.total_viable_command_kinds = target
             .total_viable_command_kinds
             .saturating_add(source.total_viable_command_kinds);
+        for (kind, count) in &source.executed_commands {
+            let total = target.executed_commands.entry(*kind).or_default();
+            *total = total.saturating_add(*count);
+        }
     }
 }
 
@@ -9331,6 +9366,7 @@ fn derive_findings(
     add_property_concentration_finding(aggregate, campaigns, &mut findings);
     add_strategic_cadence_finding(aggregate, campaigns, &mut findings);
     add_phase_quality_findings(aggregate, campaigns, &mut findings);
+    add_phase_action_mix_findings(aggregate, &mut findings);
     add_core_fantasy_findings(aggregate, campaigns, &mut findings);
     add_variance_finding(campaigns, &mut findings);
     if findings.is_empty() {
@@ -9519,7 +9555,7 @@ struct PhaseQualityMeasures {
 }
 
 impl PhaseQualityMeasures {
-    fn from_stats(stats: GameplayPhaseStats) -> Self {
+    fn from_stats(stats: &GameplayPhaseStats) -> Self {
         let decision_cycles = u64::from(stats.decision_cycles);
         let opportunity_cycles =
             u64::from(stats.decision_cycles.saturating_sub(stats.quiet_cycles));
@@ -9633,6 +9669,54 @@ fn add_phase_quality_findings(
     );
 }
 
+fn add_phase_action_mix_findings(
+    aggregate: &GameplayAggregate,
+    findings: &mut Vec<GameplayFinding>,
+) {
+    for phase in [
+        GameplayPhase::Establishment,
+        GameplayPhase::InstitutionalAscent,
+        GameplayPhase::DynasticGovernance,
+        GameplayPhase::SuccessionLegacy,
+    ] {
+        let Some(stats) = aggregate.phase_stats.get(&phase) else {
+            continue;
+        };
+        if stats.substantive_actions < 25 {
+            continue;
+        }
+        let Some((kind, executed)) = stats
+            .executed_commands
+            .iter()
+            .max_by_key(|(kind, count)| (**count, std::cmp::Reverse(**kind)))
+        else {
+            continue;
+        };
+        let share = scaled_ratio_u64(
+            u64::from(*executed),
+            u64::from(stats.substantive_actions),
+            100,
+        );
+        if share < 25 {
+            continue;
+        }
+        findings.push(GameplayFinding {
+            severity: if share >= 35 {
+                GameplayFindingSeverity::Warning
+            } else {
+                GameplayFindingSeverity::Info
+            },
+            title: format!("{} action mix is concentrated", phase.label()),
+            evidence: format!(
+                "{} accounted for {executed} of {} substantive {} actions ({share}%). Phase-level command usage is retained in the report so repeated optimization work cannot hide behind otherwise healthy choice and feedback scores.",
+                kind.label(),
+                stats.substantive_actions,
+                phase.label()
+            ),
+        });
+    }
+}
+
 fn add_phase_quality_finding(
     aggregate: &GameplayAggregate,
     campaigns: &[GameplayCampaignReport],
@@ -9645,19 +9729,19 @@ fn add_phase_quality_finding(
     let stats = aggregate
         .phase_stats
         .get(&phase)
-        .copied()
+        .cloned()
         .unwrap_or_default();
     if stats.decision_cycles < 20 {
         return;
     }
-    let measures = PhaseQualityMeasures::from_stats(stats);
+    let measures = PhaseQualityMeasures::from_stats(&stats);
     let action_share = measures.action_share;
     let quiet_share = measures.quiet_share;
     let static_quiet_share = measures.static_quiet_share;
     let multi_family_share = measures.multi_family_share;
     let average_choices_tenths = measures.average_choices_tenths;
     let average_families_tenths = measures.average_families_tenths;
-    let missed_thresholds = phase_quality_missed_thresholds(stats, measures, thresholds);
+    let missed_thresholds = phase_quality_missed_thresholds(&stats, measures, thresholds);
     if missed_thresholds.is_empty() {
         return;
     }
@@ -9682,7 +9766,7 @@ fn add_phase_quality_finding(
 }
 
 fn phase_quality_missed_thresholds(
-    stats: GameplayPhaseStats,
+    stats: &GameplayPhaseStats,
     measures: PhaseQualityMeasures,
     thresholds: PhaseQualityThresholds,
 ) -> Vec<String> {
@@ -10667,7 +10751,7 @@ fn add_phase_institutional_campaign_concentration_finding(
     let stats = aggregate
         .phase_stats
         .get(&GameplayPhase::InstitutionalAscent)
-        .copied()
+        .cloned()
         .unwrap_or_default();
     if stats.substantive_actions < 20 || stats.institutional_campaign_actions < 20 {
         return;
@@ -10984,6 +11068,7 @@ fn add_system_health_findings(
     add_food_health_findings(campaigns, findings);
     add_economic_health_findings(campaigns, findings);
     add_business_condition_finding(campaigns, findings);
+    add_civic_health_findings(campaigns, findings);
     add_public_work_health_finding(aggregate, campaigns, findings);
     add_public_work_portfolio_variety_finding(campaigns, findings);
     add_political_health_finding(aggregate, campaigns, findings);
@@ -11138,6 +11223,75 @@ fn add_business_condition_finding(
             campaigns.len()
         ),
     });
+}
+
+fn add_civic_health_findings(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let mature: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| campaign.simulated_days >= 1_080)
+        .collect();
+    if mature.is_empty() {
+        return;
+    }
+
+    let employment_collapse = mature
+        .iter()
+        .filter(|campaign| {
+            campaign.start.average_district_employment >= 6_000
+                && campaign
+                    .end
+                    .average_district_employment
+                    .saturating_add(1_500)
+                    < campaign.start.average_district_employment
+        })
+        .count();
+    if scaled_ratio_usize(employment_collapse, mature.len(), 100) >= 25 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "District employment collapses from the campaign baseline".to_owned(),
+            evidence: format!(
+                "{employment_collapse} of {} mature campaigns lost more than 1,500 bp of average district employment from start to finish. District employment is part of civic stability and should not collapse merely because the simulation begins recomputing a previously implicit background economy.",
+                mature.len()
+            ),
+        });
+    }
+
+    let structurally_weak = mature
+        .iter()
+        .filter(|campaign| campaign.end.average_district_employment < 4_500)
+        .count();
+    if scaled_ratio_usize(structurally_weak, mature.len(), 100) >= 25 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "District employment remains structurally weak".to_owned(),
+            evidence: format!(
+                "{structurally_weak} of {} mature campaigns ended below 4,500 bp average district employment. Low employment feeds unrest and should remain a material civic problem rather than an unscored background statistic.",
+                mature.len()
+            ),
+        });
+    }
+
+    let broad_civic_distress = mature
+        .iter()
+        .filter(|campaign| {
+            campaign.end.average_district_sanitation < 4_500
+                || campaign.end.average_district_safety < 4_500
+                || campaign.end.average_district_unrest > 5_000
+        })
+        .count();
+    if scaled_ratio_usize(broad_civic_distress, mature.len(), 100) >= 25 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Material district conditions remain broadly distressed".to_owned(),
+            evidence: format!(
+                "{broad_civic_distress} of {} mature campaigns ended with citywide sanitation or safety below 4,500 bp, or unrest above 5,000 bp. Civic power should be judged against the material city it leaves behind.",
+                mature.len()
+            ),
+        });
+    }
 }
 
 fn add_public_work_health_finding(
@@ -12313,6 +12467,7 @@ fn add_variance_finding(campaigns: &[GameplayCampaignReport], findings: &mut Vec
 pub fn render_gameplay_report(report: &GameplayHarnessReport) -> String {
     let mut output = String::new();
     render_report_header(report, &mut output);
+    render_persona_summary(report, &mut output);
     render_phase_summary(report, &mut output);
     render_health_summary(report, &mut output);
     render_command_table(report, &mut output);
@@ -12325,6 +12480,57 @@ pub fn render_gameplay_report(report: &GameplayHarnessReport) -> String {
     render_campaign_summaries(report, &mut output);
     render_trace_samples(report, &mut output);
     output
+}
+
+fn render_persona_summary(report: &GameplayHarnessReport, output: &mut String) {
+    if report.persona_aggregates.is_empty() {
+        return;
+    }
+    let _ = writeln!(output, "Persona comparison");
+    for persona in GameplayPersona::all() {
+        let Some(aggregate) = report.persona_aggregates.get(&persona) else {
+            continue;
+        };
+        let opportunity_cycles = aggregate
+            .decision_cycles
+            .saturating_sub(aggregate.quiet_cycles);
+        let average_families_tenths = aggregate
+            .viable_command_kinds
+            .saturating_mul(10)
+            .checked_div(opportunity_cycles)
+            .unwrap_or(0);
+        let mut top_commands: Vec<_> = aggregate
+            .commands
+            .iter()
+            .filter(|(kind, stats)| {
+                **kind != GameplayCommandKind::AcknowledgeNotification && stats.executed > 0
+            })
+            .map(|(kind, stats)| (*kind, stats.executed))
+            .collect();
+        top_commands.sort_by_key(|(kind, executed)| (std::cmp::Reverse(*executed), *kind));
+        let command_summary = top_commands
+            .into_iter()
+            .take(3)
+            .map(|(kind, executed)| format!("{} {executed}", kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            output,
+            "  {:<12} campaigns {:>2} | score {:>3} | substantive {:>4} | quiet {:>4} | families {} / actionable cycle | top: {}",
+            persona.label(),
+            aggregate.campaigns,
+            aggregate.scores.overall,
+            aggregate.substantive_actions,
+            aggregate.quiet_cycles,
+            format_tenths(average_families_tenths),
+            if command_summary.is_empty() {
+                "none"
+            } else {
+                &command_summary
+            }
+        );
+    }
+    let _ = writeln!(output);
 }
 
 fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
@@ -12340,7 +12546,7 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             .aggregate
             .phase_stats
             .get(&phase)
-            .copied()
+            .cloned()
             .unwrap_or_default();
         let action_share = scaled_ratio_u64(
             u64::from(stats.substantive_actions),
@@ -12383,12 +12589,28 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             u64::from(opportunity_cycles),
             10,
         );
+        let dominant_action = stats
+            .executed_commands
+            .iter()
+            .max_by_key(|(kind, count)| (**count, std::cmp::Reverse(**kind)))
+            .map_or_else(
+                || "none".to_owned(),
+                |(kind, executed)| {
+                    let share = scaled_ratio_u64(
+                        u64::from(*executed),
+                        u64::from(stats.substantive_actions),
+                        100,
+                    );
+                    format!("{} {share}%", kind.label())
+                },
+            );
         let _ = writeln!(
             output,
-            "  {:<22} cycles {:>5} | action {:>3}% | campaign admin {:>3}% | multi {:>3}% | close {:>3}% | distinct now {:>3}% / next {:>3}% | choices {}.{} / families {}.{} | quiet {:>5} (ambient {:>5}, longest {:>2}) | blocked {:>5}",
+            "  {:<22} cycles {:>5} | action {:>3}% | top {:<24} | campaign admin {:>3}% | multi {:>3}% | close {:>3}% | distinct now {:>3}% / next {:>3}% | choices {}.{} / families {}.{} | quiet {:>5} (ambient {:>5}, longest {:>2}) | blocked {:>5}",
             phase.label(),
             stats.decision_cycles,
             action_share,
+            dominant_action,
             campaign_admin_share,
             multi_family_share,
             close_choice_share,

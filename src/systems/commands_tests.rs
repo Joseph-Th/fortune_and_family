@@ -4473,6 +4473,109 @@ mod politics {
         );
         validate_invariants(registry, &state);
     }
+
+    #[test]
+    fn family_education_allows_parallel_training_across_house_members() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let head_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let heir_id = state
+            .dynasties
+            .get(&player_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an heir");
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(40_000);
+        let focus = [
+            EducationFocus::Administration,
+            EducationFocus::Commerce,
+            EducationFocus::Social,
+            EducationFocus::Craft,
+        ]
+        .into_iter()
+        .find(|focus| {
+            [head_id, heir_id].into_iter().all(|character_id| {
+                state.characters.get(character_id).is_some_and(|character| {
+                    education_focus_value(&character.capabilities, *focus) < 100
+                })
+            })
+        })
+        .expect("fixture must leave one trainable focus for both family members");
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EducateFamilyMember {
+                character_id: head_id,
+                focus,
+            },
+        )
+        .expect("first family education must succeed");
+
+        let before = state.clone();
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EducateFamilyMember {
+                character_id: heir_id,
+                focus,
+            },
+        );
+        assert_eq!(
+            result,
+            Err(CommandError::FamilyEducationCooldown {
+                next_education_day: FAMILY_EDUCATION_DYNASTY_INTERVAL_DAYS,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "the dynasty-level education cadence must remain atomic",
+        );
+
+        advance_days(
+            registry,
+            &mut state,
+            u32::try_from(FAMILY_EDUCATION_DYNASTY_INTERVAL_DAYS)
+                .expect("dynasty education interval must fit simulation API"),
+        )
+        .expect("campaign must advance through the dynasty education cadence");
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EducateFamilyMember {
+                character_id: heir_id,
+                focus,
+            },
+        )
+        .expect("a different family member may train after the dynasty cadence");
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EducateFamilyMember {
+                character_id: head_id,
+                focus,
+            },
+        );
+        assert_eq!(
+            result,
+            Err(CommandError::FamilyEducationCooldown {
+                next_education_day: FAMILY_EDUCATION_INTERVAL_DAYS,
+            }),
+            "the original student must still obey the annual personal cooldown"
+        );
+        validate_invariants(registry, &state);
+    }
 }
 
 mod crises {

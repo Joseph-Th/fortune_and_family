@@ -43,6 +43,9 @@ const UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS: u16 = 240;
 const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
 const EPIDEMIC_ONSET_WELFARE_DIVISOR: u16 = 7;
 const EPIDEMIC_DAILY_WELFARE_DIVISOR: u16 = 60;
+const DISTRICT_BACKGROUND_EMPLOYMENT_BASIS_POINTS: u16 = 4_500;
+const DISTRICT_FORMAL_EMPLOYMENT_BASIS_POINTS_PER_WORKER: u32 = 100;
+const DISTRICT_MAX_FORMAL_EMPLOYMENT_BONUS_BASIS_POINTS: u32 = 4_500;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StrategicError {
@@ -2052,6 +2055,7 @@ pub(crate) fn initialize_strategic_state(registry: &Registry, state: &mut AppSta
     initialize_institutions(registry, state);
     initialize_properties(registry, state);
     initialize_employment(state);
+    initialize_district_employment(state);
     initialize_family_governance(state);
     initialize_relationships(state);
     initialize_laws(state);
@@ -2070,7 +2074,7 @@ fn initialize_districts(registry: &Registry, state: &mut AppState) {
             DistrictRuntime {
                 district_id: district.id(),
                 rent_index_basis_points: 10_000,
-                employment_basis_points: 7_200,
+                employment_basis_points: DISTRICT_BACKGROUND_EMPLOYMENT_BASIS_POINTS,
                 sanitation_basis_points: if district.key() == "southern_reach" {
                     4_200
                 } else {
@@ -2089,6 +2093,18 @@ fn initialize_districts(registry: &Registry, state: &mut AppState) {
                 dynasty_support: Vec::new(),
             },
         );
+    }
+}
+
+fn initialize_district_employment(state: &mut AppState) {
+    let district_ids: Vec<_> = state.districts.keys().copied().collect();
+    for district_id in district_ids {
+        let employment = district_employment_basis_points(state, district_id);
+        state
+            .districts
+            .get_mut(&district_id)
+            .expect("district runtime must exist")
+            .employment_basis_points = employment;
     }
 }
 
@@ -5713,31 +5729,12 @@ fn update_district_conditions(state: &mut AppState) {
             households.iter().copied(),
         )
         .unwrap_or(5_000);
-        let active_jobs = super::saturating_worker_count(
-            state
-                .employment
-                .values()
-                .filter(|employment| {
-                    employment.status == EmploymentStatus::Active
-                        && state
-                            .businesses
-                            .get(employment.business_id)
-                            .is_some_and(|business| business.district_id() == district_id)
-                })
-                .map(|employment| u32::from(employment.workers)),
-        );
-        let infrastructure_employment_bonus =
-            completed_public_work_employment_bonus_basis_points(state, district_id);
+        let employment = district_employment_basis_points(state, district_id);
         let district = state
             .districts
             .get_mut(&district_id)
             .expect("district runtime must exist");
-        let employment_from_jobs = u16::try_from((active_jobs.saturating_mul(100)).min(10_000))
-            .unwrap_or(10_000)
-            .max(2_000);
-        district.employment_basis_points = employment_from_jobs
-            .saturating_add(infrastructure_employment_bonus)
-            .min(10_000);
+        district.employment_basis_points = employment;
         district.unrest_basis_points = district_unrest_next_basis_points(district, satisfaction);
         let desirability = u32::from(district.safety_basis_points)
             .saturating_add(u32::from(district.sanitation_basis_points));
@@ -5748,6 +5745,34 @@ fn update_district_conditions(state: &mut AppState) {
         )
         .expect("bounded district rent index must fit u16");
     }
+}
+
+fn district_employment_basis_points(state: &AppState, district_id: DistrictId) -> u16 {
+    let active_jobs = super::saturating_worker_count(
+        state
+            .employment
+            .values()
+            .filter(|employment| {
+                employment.status == EmploymentStatus::Active
+                    && state
+                        .businesses
+                        .get(employment.business_id)
+                        .is_some_and(|business| business.district_id() == district_id)
+            })
+            .map(|employment| u32::from(employment.workers)),
+    );
+    let formal_employment_bonus = active_jobs
+        .saturating_mul(DISTRICT_FORMAL_EMPLOYMENT_BASIS_POINTS_PER_WORKER)
+        .min(DISTRICT_MAX_FORMAL_EMPLOYMENT_BONUS_BASIS_POINTS);
+    let formal_employment_bonus =
+        u16::try_from(formal_employment_bonus).expect("bounded employment bonus must fit u16");
+    DISTRICT_BACKGROUND_EMPLOYMENT_BASIS_POINTS
+        .saturating_add(formal_employment_bonus)
+        .saturating_add(completed_public_work_employment_bonus_basis_points(
+            state,
+            district_id,
+        ))
+        .min(10_000)
 }
 
 fn district_unrest_next_basis_points(district: &DistrictRuntime, food_satisfaction: u16) -> u16 {

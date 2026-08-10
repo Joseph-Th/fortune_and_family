@@ -25,6 +25,7 @@ Primary entry points:
 | Persistence | `src/persistence.rs` |
 | Read models and HTML | `src/projection.rs` |
 | Gameplay analysis | `src/gameplay.rs` |
+| Procedural art and sprite review | `build_art_review` in `src/art/harness.rs` |
 
 ## Core rules
 
@@ -132,6 +133,14 @@ Core systems perform no implicit IO. Persistence, CLI, projection, rendering, an
 4. Add migration input, exact post-migration assertions, and current-schema round-trip coverage.
 5. Preserve release-mode validation and atomic same-directory replacement.
 6. Update `STATUS.md`.
+
+### Change procedural art
+
+1. Keep the art layer a boundary: no campaign state, no domain rules, no floating point.
+2. Write form through materials, light, and depth; do not write palette indices from primitives.
+3. Add or extend automated checks in `src/art/lint.rs` when a defect class becomes reviewable.
+4. Add determinism coverage for any new specification, primitive, rig, or clip.
+5. Increment `ART_REVIEW_SCHEMA_VERSION` when the serialized review report changes, and update `STATUS.md`.
 
 ### Extend projections or gameplay reports
 

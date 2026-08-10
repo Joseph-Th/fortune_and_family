@@ -325,6 +325,11 @@ mod harness {
         assert_eq!(report.schema_version, GAMEPLAY_REPORT_SCHEMA_VERSION);
         assert_eq!(report.aggregate.campaigns, 1);
         assert_eq!(report.aggregate.simulated_days, 180);
+        assert_eq!(
+            report.persona_aggregates.get(&GameplayPersona::Steward),
+            Some(&report.aggregate),
+            "a single-persona run should expose the same metrics through its persona aggregate"
+        );
         assert!(report.aggregate.successful_actions > 0);
         assert!(report.aggregate.candidate_probes > report.aggregate.successful_actions);
         assert!(
@@ -560,6 +565,7 @@ mod harness {
 
         for heading in [
             "scores:",
+            "Persona comparison",
             "Experience health",
             "ending civic conditions:",
             "player-issued",
@@ -4282,7 +4288,7 @@ mod metrics {
         advance_days(
             registry,
             &mut state,
-            u32::try_from(FAMILY_EDUCATION_INTERVAL_DAYS)
+            u32::try_from(crate::systems::FAMILY_EDUCATION_INTERVAL_DAYS)
                 .expect("family education interval must fit simulation API"),
         )
         .expect("campaign must advance through the education interval");
@@ -4581,6 +4587,37 @@ mod findings {
             "Different civic strategies converge on similar material city conditions",
         );
         assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn mature_reports_surface_structural_district_employment_collapse() {
+        let mut report = cached_focused_report(360);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = (1_u64..=4)
+            .map(|seed| {
+                let mut campaign = baseline.clone();
+                campaign.seed = seed;
+                campaign.simulated_days = 1_080;
+                campaign.start.average_district_employment = 7_200;
+                campaign.end.average_district_employment = 3_000;
+                campaign
+            })
+            .collect();
+        report.aggregate.campaigns = 4;
+        report.aggregate.simulated_days = 4_320;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(
+            &findings,
+            "District employment collapses from the campaign baseline",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        finding_with_title(&findings, "District employment remains structurally weak");
     }
 
     #[test]
@@ -4990,6 +5027,7 @@ mod findings {
                 cycles_with_distinct_projected_option_consequences: 0,
                 total_viable_choices: 80,
                 total_viable_command_kinds: 80,
+                executed_commands: BTreeMap::new(),
             },
         );
         report.aggregate.phase_stats.insert(
@@ -5012,6 +5050,7 @@ mod findings {
                 cycles_with_distinct_projected_option_consequences: 0,
                 total_viable_choices: 110,
                 total_viable_command_kinds: 110,
+                executed_commands: BTreeMap::new(),
             },
         );
 
@@ -5047,6 +5086,7 @@ mod findings {
                 cycles_with_distinct_projected_option_consequences: 72,
                 total_viable_choices: 324,
                 total_viable_command_kinds: 150,
+                executed_commands: BTreeMap::new(),
             },
         );
 
@@ -5081,6 +5121,7 @@ mod findings {
                 cycles_with_distinct_projected_option_consequences: 72,
                 total_viable_choices: 360,
                 total_viable_command_kinds: 110,
+                executed_commands: BTreeMap::new(),
             },
         );
 
@@ -5122,6 +5163,7 @@ mod findings {
                 cycles_with_distinct_projected_option_consequences: 70,
                 total_viable_choices: 300,
                 total_viable_command_kinds: 160,
+                executed_commands: BTreeMap::new(),
             },
         );
         report
@@ -5252,6 +5294,7 @@ mod findings {
                 cycles_with_distinct_projected_option_consequences: 40,
                 total_viable_choices: 120,
                 total_viable_command_kinds: 70,
+                executed_commands: BTreeMap::new(),
             },
         );
 
@@ -5260,6 +5303,40 @@ mod findings {
         finding_with_title(
             &findings,
             "Institutional ascent becomes campaign administration",
+        );
+    }
+
+    #[test]
+    fn findings_surface_phase_command_dominance() {
+        let mut report = cached_focused_report(30);
+        let stats = report
+            .aggregate
+            .phase_stats
+            .get_mut(&GameplayPhase::DynasticGovernance)
+            .expect("governance phase statistics must exist");
+        stats.decision_cycles = 60;
+        stats.substantive_actions = 40;
+        stats.quiet_cycles = 20;
+        stats.quiet_cycles_with_ambient_change = 20;
+        stats.total_viable_choices = 120;
+        stats.total_viable_command_kinds = 70;
+        stats.executed_commands.clear();
+        stats
+            .executed_commands
+            .insert(GameplayCommandKind::EducateFamilyMember, 16);
+        stats
+            .executed_commands
+            .insert(GameplayCommandKind::StartPublicWork, 8);
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding =
+            finding_with_title(&findings, "dynastic-governance action mix is concentrated");
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        assert!(
+            finding
+                .evidence
+                .contains("family-education accounted for 16 of 40")
         );
     }
 

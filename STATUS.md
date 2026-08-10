@@ -13,7 +13,8 @@ Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code own
 | Minimum Rust version | 1.97 |
 | Save schema | 16 |
 | Supported save migrations | Versions 0 through 15 |
-| Gameplay report schema | 43 |
+| Gameplay report schema | 45 |
+| Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
 | Economic representation | Fixed-point `Money` and `Quantity` |
@@ -28,6 +29,7 @@ The repository provides:
 - Read-only JSON projections
 - A self-contained HTML dashboard
 - A deterministic gameplay-analysis harness
+- A deterministic procedural sprite renderer and visual review harness
 
 The Rivergate campaign supports multi-generation deterministic continuation.
 

@@ -48,6 +48,17 @@ Dependency direction is one way:
 | `src/persistence.rs` | Versioned save/load, migrations, and release-mode validation. |
 | `src/projection.rs` | Read-only projections and self-contained HTML rendering. |
 | `src/gameplay.rs` | Player agents, counterfactual analysis, scores, findings, and traces. |
+| `src/art/color.rs` | Integer color model, hue-shifted shading ramps, and indexed palettes. |
+| `src/art/math.rs` | Fixed-point angles, trigonometry, and vector helpers. |
+| `src/art/canvas.rs` | Indexed pixel buffers and compositing. |
+| `src/art/surface.rs` | Material, light, and depth buffers and their resolution to indices. |
+| `src/art/shape.rs` | Shaded rasterization primitives, the light model, and contour passes. |
+| `src/art/rig.rs` | Skeletons, poses, and the humanoid rig. |
+| `src/art/anim.rs` | Keyframed clips and pose sampling. |
+| `src/art/sprite.rs` | Character specifications, posed drawing, and sheet composition. |
+| `src/art/png.rs` | Dependency-free indexed PNG and base64 encoding. |
+| `src/art/lint.rs` | Automated sprite review checks. |
+| `src/art/harness.rs` | Batch sprite review, findings report, and the HTML contact sheet. |
 | `src/main.rs` | CLI parsing and adapter behavior. |
 | `src/*_tests.rs` | Large sibling test suites. |
 | `src/test_support.rs` | Shared deterministic fixtures and diagnostics. |
@@ -170,6 +181,21 @@ The harness generates state-derived `PlayerCommand` candidates, validates them t
 
 The harness does not mutate records directly during play. See `GAMEPLAY_HARNESS.md`.
 
+### Art layer
+
+The art layer is a boundary adapter that reads specifications and produces images. It owns no campaign state and encodes no domain rules.
+
+```text
+CharacterSpec -> palette and materials -> skeleton and sampled pose -> shaded surface
+  -> indexed canvas -> sprite sheet -> automated review -> HTML review page
+```
+
+Primitives never write palette indices. They write a material identifier, a per-mille light value, a depth value, and a dither flag into a `Surface`. The flag lets flat panels opt out of dithering that only curved forms need. Resolution maps light onto each material's ramp, applies ordered dithering between steps, and replaces silhouette pixels with the material's own darkest step. Form and color therefore stay independent, so a pose can be relit, recolored, or restyled without redrawing it.
+
+All art arithmetic is integer. Angles are binary radians, joint positions resolve in sixteenth-pixel units, and shading uses fixed-point normals, so a specification renders identically on every platform and in both build profiles.
+
+Owners: `src/art/*`. The harness entry point is `build_art_review`; the page renderer is `render_art_review_html`.
+
 ## Determinism contract
 
 Given the same registry, state, seed, command sequence, and day count, execution must produce identical state.
@@ -228,6 +254,9 @@ Important invariant groups:
 | Change save format | `src/persistence.rs` | Schema, migration, validation, round-trip tests, status update. |
 | Extend gameplay evaluation | `src/gameplay.rs` | Harness schema, tests, and documentation. |
 | Add CLI syntax | `src/main.rs` | CLI smoke and README update. |
+| Add a drawing primitive or material | `src/art/shape.rs`, `src/art/surface.rs` | Shading tests, determinism tests. |
+| Add a sprite subject or clip | `src/art/sprite.rs`, `src/art/anim.rs` | Review checks, harness coverage, status update. |
+| Add an art review check | `src/art/lint.rs` | Harness report, HTML sheet, and tests. |
 
 ## Public API
 

@@ -120,7 +120,7 @@ Major setbacks should be recoverable through restructuring, asset sale, recapita
 
 ### Dynasty and family
 
-Family structure determines succession, parallel capacity, office eligibility, management coverage, and long-term continuity. Education, governance, wards, marriage, loyalty, claims, and deliberate heir designation should create strategic differences rather than static bonuses. When cohesion deteriorates, the player can convene a costly family council to settle obligations and rebuild unity and loyalty, with an annual limit so reconciliation remains a response to pressure rather than routine maintenance.
+Family structure determines succession, parallel capacity, office eligibility, management coverage, and long-term continuity. Education, governance, wards, marriage, loyalty, claims, and deliberate heir designation should create strategic differences rather than static bonuses. Advanced education remains a once-per-year commitment for each person, while the house can sponsor a different member every six months. A broad dynasty can still prepare specialists in parallel, but education should remain an occasional strategic commitment rather than scheduled quarterly optimization. When cohesion deteriorates, the player can convene a costly family council to settle obligations and rebuild unity and loyalty, with an annual limit so reconciliation remains a response to pressure rather than routine maintenance.
 
 ### Households and labor
 
@@ -152,7 +152,7 @@ Law shapes contracts, property, debt, trade, labor, inheritance, and public auth
 
 ### Districts and public opinion
 
-District conditions reflect employment, rent, food access, safety, sanitation, infrastructure, institutional presence, and ownership. Public response should follow material outcomes and remembered actions.
+District conditions reflect employment, rent, food access, safety, sanitation, infrastructure, institutional presence, and ownership. Explicit employment agreements represent the businesses simulated in detail, not the whole labor market, so district employment retains a background economy and then responds to modeled jobs and durable infrastructure. Public response should follow material outcomes and remembered actions.
 
 ### Information and relationships
 

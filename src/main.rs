@@ -2,11 +2,13 @@
 
 use civic_dynasty::core::StartingBackground;
 use civic_dynasty::{
-    CommandError, GameplayFindingSeverity, GameplayHarnessConfig, GameplayHarnessError,
-    GameplayPersona, NewGameConfig, NewGameError, PersistenceError, PlayerCommand, Registry,
-    SimulationError, advance_days, apply_player_command, build_campaign_projection, build_new_game,
-    build_rivergate_registry, build_state_summary, load_state, render_campaign_html,
-    render_gameplay_report, run_gameplay_harness, save_state, validate_invariants,
+    ArtReviewConfig, ArtReviewError, ArtSeverity, CharacterRole, CommandError,
+    GameplayFindingSeverity, GameplayHarnessConfig, GameplayHarnessError, GameplayPersona,
+    NewGameConfig, NewGameError, PersistenceError, PlayerCommand, Registry, SimulationError,
+    advance_days, apply_player_command, build_art_review, build_art_review_report,
+    build_campaign_projection, build_new_game, build_rivergate_registry, build_state_summary,
+    load_state, render_art_review_html, render_campaign_html, render_gameplay_report,
+    run_gameplay_harness, save_state, validate_invariants,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
@@ -72,6 +74,55 @@ enum Command {
     Validate { input: PathBuf },
     /// Run deterministic player agents and report gameplay reachability and system reactions.
     Playtest(PlaytestArgs),
+    /// Render procedural sprites and write a self-contained visual review sheet.
+    Art(ArtArgs),
+}
+
+#[derive(Debug, Args)]
+struct ArtArgs {
+    /// Write the review sheet here.
+    #[arg(long, default_value = "sprite-review.html")]
+    output: PathBuf,
+    /// First character seed.
+    #[arg(long, default_value_t = 1)]
+    start_seed: u64,
+    /// Characters generated per role.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..))]
+    seeds: u32,
+    /// Sprite height in pixels.
+    #[arg(long, default_value_t = 48, value_parser = clap::value_parser!(i32).range(16..=256))]
+    height: i32,
+    /// Magnification used by the review views.
+    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..=16))]
+    scale: u32,
+    /// Roles to render; repeat to select several. Omit to render all.
+    #[arg(long, value_enum)]
+    role: Vec<CharacterRoleArg>,
+    /// Emit the versioned structured JSON report instead of the HTML sheet.
+    #[arg(long)]
+    json: bool,
+    /// Return failure after writing the output when any critical finding exists.
+    #[arg(long)]
+    fail_on_critical: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CharacterRoleArg {
+    Baker,
+    Merchant,
+    Laborer,
+    Official,
+}
+
+impl From<CharacterRoleArg> for CharacterRole {
+    fn from(value: CharacterRoleArg) -> Self {
+        match value {
+            CharacterRoleArg::Baker => Self::Baker,
+            CharacterRoleArg::Merchant => Self::Merchant,
+            CharacterRoleArg::Laborer => Self::Laborer,
+            CharacterRoleArg::Official => Self::Official,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -118,6 +169,8 @@ enum CliError {
     Persistence(#[from] PersistenceError),
     #[error(transparent)]
     Simulation(#[from] SimulationError),
+    #[error(transparent)]
+    ArtReview(#[from] ArtReviewError),
     #[error("failed to serialize summary: {source}")]
     SummarySerialization {
         #[source]
@@ -128,6 +181,19 @@ enum CliError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("failed to serialize art review report: {source}")]
+    ArtReportSerialization {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to write art review {path}: {source}")]
+    ArtReviewWrite {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("art review gate failed: {reason}")]
+    ArtQualityGate { reason: String },
     #[error("failed to render campaign dashboard: {source}")]
     DashboardSerialization {
         #[source]
@@ -273,6 +339,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             );
         }
         Command::Playtest(args) => run_playtest(&registry, args)?,
+        Command::Art(args) => run_art(args)?,
     }
     Ok(())
 }
@@ -391,6 +458,48 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
         if critical > 0 {
             return Err(CliError::GameplayQualityGate {
                 reason: format!("report contains {critical} critical findings"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn run_art(args: ArtArgs) -> Result<(), CliError> {
+    let roles = if args.role.is_empty() {
+        CharacterRole::ALL.to_vec()
+    } else {
+        args.role.into_iter().map(Into::into).collect()
+    };
+    let review = build_art_review(ArtReviewConfig {
+        roles,
+        start_seed: args.start_seed,
+        seeds: args.seeds,
+        height: args.height,
+        scale: args.scale,
+    })?;
+    let rendered = if args.json {
+        serde_json::to_string_pretty(&build_art_review_report(&review))
+            .map_err(|source| CliError::ArtReportSerialization { source })?
+    } else {
+        render_art_review_html(&review)
+    };
+    ensure_output_parent(&args.output)?;
+    std::fs::write(&args.output, rendered).map_err(|source| CliError::ArtReviewWrite {
+        path: args.output.clone(),
+        source,
+    })?;
+    println!(
+        "Wrote {} ({} subjects, {} critical, {} warning or worse)",
+        args.output.display(),
+        review.subject_count(),
+        review.count_at_least(ArtSeverity::Critical),
+        review.count_at_least(ArtSeverity::Warning)
+    );
+    if args.fail_on_critical {
+        let critical = review.count_at_least(ArtSeverity::Critical);
+        if critical > 0 {
+            return Err(CliError::ArtQualityGate {
+                reason: format!("review contains {critical} critical findings"),
             });
         }
     }

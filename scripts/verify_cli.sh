@@ -39,6 +39,8 @@ campaign="$work_dir/campaign.json"
 summary="$work_dir/summary.json"
 projection="$work_dir/projection.json"
 dashboard="$work_dir/exports/dashboard/campaign.html"
+art_sheet="$work_dir/sprite-review.html"
+art_report="$work_dir/sprite-review.json"
 playtest="$work_dir/exports/playtest/playtest.json"
 
 if python3 --version > /dev/null 2>&1; then
@@ -66,6 +68,22 @@ run_to_file 'campaign projection' "$projection" "$binary" inspect "$campaign"
 run_to_file 'dashboard rendering' "$work_dir/dashboard.txt" \
   "$binary" dashboard "$campaign" --output "$dashboard"
 run_to_file 'save validation' "$work_dir/validate.txt" "$binary" validate "$campaign"
+run_to_file 'sprite review sheet' "$work_dir/art.txt" "$binary" art \
+  --output "$art_sheet" \
+  --role baker \
+  --seeds 1 \
+  --scale 4 \
+  --fail-on-critical
+run_to_file 'sprite review report' "$work_dir/art-json.txt" "$binary" art \
+  --output "$art_report" \
+  --role merchant \
+  --seeds 1 \
+  --json
+invalid_art="$work_dir/invalid-art.html"
+if "$binary" art --output "$invalid_art" --seeds 0 > "$work_dir/invalid-art.txt" 2>&1; then
+  fail 'sprite review accepted an invalid zero seed count'
+fi
+test ! -e "$invalid_art" || fail 'invalid sprite review created an output file'
 "$binary" playtest \
   --days 30 \
   --persona steward \
@@ -77,20 +95,25 @@ run_to_file 'save validation' "$work_dir/validate.txt" "$binary" validate "$camp
 
 require_nonempty_file "$campaign" 'campaign save'
 require_nonempty_file "$dashboard" 'HTML dashboard'
+require_nonempty_file "$art_sheet" 'sprite review sheet'
+require_nonempty_file "$art_report" 'sprite review report'
+grep -Fiq '<!doctype html>' "$art_sheet" || fail 'sprite review sheet is not a complete HTML document'
+grep -Fq 'data:image/png;base64,' "$art_sheet" || fail 'sprite review sheet does not embed sprite images'
 require_nonempty_file "$playtest" 'gameplay harness JSON report'
 require_literal 'Changed house governance' "$work_dir/execute.txt" 'command result'
 require_literal 'Validated ' "$work_dir/validate.txt" 'validation result'
 grep -Fiq '<!doctype html>' "$dashboard" || fail 'dashboard is not a complete HTML document'
 
-"$python_command" - "$summary" "$projection" "$playtest" <<'PY'
+"$python_command" - "$summary" "$projection" "$playtest" "$art_report" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-summary_path, projection_path, playtest_path = map(Path, sys.argv[1:])
+summary_path, projection_path, playtest_path, art_path = map(Path, sys.argv[1:])
 summary = json.loads(summary_path.read_text(encoding="utf-8"))
 projection = json.loads(projection_path.read_text(encoding="utf-8"))
 playtest = json.loads(playtest_path.read_text(encoding="utf-8"))
+art = json.loads(art_path.read_text(encoding="utf-8"))
 
 required_summary = {
     "scenario_name",
@@ -128,7 +151,14 @@ if not projection["districts"] or not projection["businesses"] or not projection
     raise SystemExit("projection must contain district, business, and market views")
 if projection["scenario"]["elapsed_days"] != 60:
     raise SystemExit("projection did not preserve both simulation advances")
-required_playtest = {"schema_version", "config", "aggregate", "campaigns", "findings"}
+required_playtest = {
+    "schema_version",
+    "config",
+    "aggregate",
+    "persona_aggregates",
+    "campaigns",
+    "findings",
+}
 missing_playtest = sorted(required_playtest - playtest.keys())
 if missing_playtest:
     raise SystemExit(
@@ -140,8 +170,18 @@ if playtest["aggregate"]["simulated_days"] != 30:
     raise SystemExit("focused playtest must simulate 30 days")
 if playtest["aggregate"]["successful_actions"] <= 0:
     raise SystemExit("focused playtest must execute player actions")
+if len(playtest["persona_aggregates"]) != 1:
+    raise SystemExit("focused playtest must expose one persona aggregate")
 if not playtest["campaigns"][0]["trace"]:
     raise SystemExit("focused playtest must contain a reproducible trace")
+if art["schema_version"] < 1:
+    raise SystemExit("art review report must carry a schema version")
+if len(art["subjects"]) != 1:
+    raise SystemExit("focused art review must render exactly one subject")
+if art["subjects"][0]["clips"] != ["idle", "walk", "work", "carry"]:
+    raise SystemExit("art review must cover every standard clip")
+if art["critical_findings"] != 0:
+    raise SystemExit("art review must not report critical findings")
 PY
 
 if "$binary" playtest \

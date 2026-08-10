@@ -230,6 +230,7 @@ pub(crate) const WARD_ADOPTION_REPUTATION_REQUIREMENT: u16 = 5_200;
 pub(crate) const WARD_ADOPTION_DELIVERY_REQUIREMENT: u32 = 52;
 pub(crate) const MAX_ACTIVE_WARDS: usize = 4;
 pub(crate) const FAMILY_EDUCATION_INTERVAL_DAYS: i64 = 360;
+pub(crate) const FAMILY_EDUCATION_DYNASTY_INTERVAL_DAYS: i64 = 180;
 pub(crate) const FAMILY_EDUCATION_COST: Money = Money::from_copper(2_000);
 pub(crate) const INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const INFORMATION_COMMISSION_COST: Money = Money::from_copper(600);
@@ -2723,18 +2724,10 @@ fn apply_family_education(
             focus,
         });
     }
-    if let Some(last_education_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::FamilyEducation)
-        .map(AuditRecord::day)
+    if let Some(next_education_day) = family_education_next_day(state, character_id)
+        && state.clock.day() < next_education_day
     {
-        let next_education_day =
-            checked_future_day(last_education_day, FAMILY_EDUCATION_INTERVAL_DAYS)?;
-        if state.clock.day() < next_education_day {
-            return Err(CommandError::FamilyEducationCooldown { next_education_day });
-        }
+        return Err(CommandError::FamilyEducationCooldown { next_education_day });
     }
     spend_player_treasury(state, FAMILY_EDUCATION_COST)?;
     let character = state
@@ -2753,11 +2746,7 @@ fn apply_family_education(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::FamilyEducation,
-        subject: format!(
-            "dynasty:{}:character:{character_id}",
-            state.player_dynasty_id
-        )
-        .into(),
+        subject: family_education_subject(state.player_dynasty_id, character_id).into(),
         detail: format!("focus={focus:?};cost={}", FAMILY_EDUCATION_COST.copper()),
     });
     super::strategic::try_push_outbox(
@@ -2769,6 +2758,30 @@ fn apply_family_education(
     Ok(CommandOutcome {
         summary: format!("Educated character {character_id} in {focus:?}."),
     })
+}
+
+fn family_education_subject(dynasty_id: DynastyId, character_id: CharacterId) -> String {
+    format!("dynasty:{dynasty_id}:character:{character_id}")
+}
+
+pub(crate) fn family_education_next_day(
+    state: &AppState,
+    character_id: CharacterId,
+) -> Option<i64> {
+    let dynasty_next = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::FamilyEducation)
+        .map(|record| future_day_or_terminal(record.day(), FAMILY_EDUCATION_DYNASTY_INTERVAL_DAYS));
+    let subject = family_education_subject(state.player_dynasty_id, character_id);
+    let character_next = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::FamilyEducation && record.subject() == subject)
+        .map(|record| future_day_or_terminal(record.day(), FAMILY_EDUCATION_INTERVAL_DAYS));
+    dynasty_next.into_iter().chain(character_next).max()
 }
 
 const fn education_focus_value(capabilities: &CharacterCapabilities, focus: EducationFocus) -> u16 {
