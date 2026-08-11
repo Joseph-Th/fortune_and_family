@@ -1247,6 +1247,30 @@ mod migrations {
     }
 
     #[test]
+    fn v17_preserves_existing_history_when_endowment_audit_kind_is_introduced() {
+        let mut state = make_test_campaign();
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::CashTransfer,
+            subject: format!("dynasty:{}", state.player_dynasty_id).into(),
+            detail: "legacy treasury history".to_owned(),
+        });
+        let expected = state.clone();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(17);
+        let (_directory, path) = write_test_json_fixture("v17-endowment-kind.json", &value);
+
+        let loaded = load_state(&path).expect("version-seventeen campaign must migrate");
+
+        assert_state_eq(
+            &expected,
+            &loaded,
+            "adding an audit kind must not rewrite existing version-seventeen history",
+        );
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
     fn v16_credits_prior_collateral_seizure_against_defaulted_balance() {
         let mut state = make_test_campaign();
         let loan_id = state
@@ -1428,6 +1452,28 @@ mod validation {
             StateValidationKind::PrimaryRecords,
             "stale or incompatible campaign phase",
         );
+    }
+
+    #[test]
+    fn rejects_current_save_with_unearned_advanced_campaign_phase() {
+        for phase in [CampaignPhase::Ascendancy, CampaignPhase::Dominion] {
+            let mut state = make_test_campaign();
+            state
+                .dynasties
+                .get_mut(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .runtime
+                .phase = phase;
+            let value = serde_json::to_value(state).expect("state must serialize");
+            let filename = format!("unearned-{phase:?}-campaign-phase.json");
+            let (_directory, path) = write_test_json_fixture(&filename, &value);
+
+            assert_invalid_state(
+                load_state(&path),
+                StateValidationKind::PrimaryRecords,
+                "stale or incompatible campaign phase",
+            );
+        }
     }
 
     #[test]
@@ -3243,6 +3289,111 @@ mod validation {
     }
 
     #[test]
+    fn rejects_relitigation_of_the_same_grounded_claim_source() {
+        let mut state = make_test_campaign();
+        let loan = state
+            .loans
+            .values()
+            .next()
+            .expect("campaign must contain a loan")
+            .clone();
+        let first_id = state.next_ids.legal_case();
+        let first = LegalCase {
+            id: first_id,
+            plaintiff_dynasty_id: loan.lender_dynasty_id,
+            defendant_dynasty_id: loan.borrower_dynasty_id,
+            kind: LegalCaseKind::Debt,
+            claim_source: Some(LegalClaimSource::Loan { loan_id: loan.id }),
+            evidence_basis_points: 7_500,
+            public_attention_basis_points: 1_500,
+            filed_day: state.clock.day(),
+            hearing_day: state.clock.day(),
+            damages: loan.balance,
+            status: LegalCaseStatus::DecidedForDefendant,
+        };
+        state.legal_cases.insert(first_id, first.clone());
+        let duplicate_id = state.next_ids.legal_case();
+        let mut duplicate = first;
+        duplicate.id = duplicate_id;
+        state.legal_cases.insert(duplicate_id, duplicate);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("duplicate-grounded-claim-source.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "reuses a grounded claim source",
+        );
+    }
+
+    #[test]
+    fn rejects_relitigation_of_the_same_grounded_contract_claim() {
+        let mut state = make_test_campaign();
+        let contract_id = *state
+            .contracts
+            .keys()
+            .next()
+            .expect("campaign must contain a supply contract");
+        let (plaintiff_dynasty_id, defendant_dynasty_id) = {
+            let contract = state
+                .contracts
+                .get(&contract_id)
+                .expect("selected contract must exist");
+            let plaintiff_dynasty_id = state
+                .businesses
+                .get(contract.seller_business_id)
+                .expect("contract seller must exist")
+                .owner_dynasty_id();
+            let defendant_dynasty_id = state
+                .businesses
+                .get(contract.buyer_business_id)
+                .expect("contract buyer must exist")
+                .owner_dynasty_id();
+            (plaintiff_dynasty_id, defendant_dynasty_id)
+        };
+        let unpaid_penalty = Money::from_copper(100);
+        {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("selected contract must exist");
+            contract.status = crate::core::ContractStatus::Breached;
+            contract.breaching_dynasty_id = Some(defendant_dynasty_id);
+            contract.breach_victim_dynasty_id = Some(plaintiff_dynasty_id);
+            contract.unpaid_breach_penalty = unpaid_penalty;
+        }
+        let first_id = state.next_ids.legal_case();
+        let first = LegalCase {
+            id: first_id,
+            plaintiff_dynasty_id,
+            defendant_dynasty_id,
+            kind: LegalCaseKind::ContractBreach,
+            claim_source: Some(LegalClaimSource::Contract { contract_id }),
+            evidence_basis_points: 8_500,
+            public_attention_basis_points: 1_500,
+            filed_day: state.clock.day(),
+            hearing_day: state.clock.day(),
+            damages: unpaid_penalty,
+            status: LegalCaseStatus::DecidedForDefendant,
+        };
+        state.legal_cases.insert(first_id, first.clone());
+        let duplicate_id = state.next_ids.legal_case();
+        let mut duplicate = first;
+        duplicate.id = duplicate_id;
+        state.legal_cases.insert(duplicate_id, duplicate);
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("duplicate-grounded-contract-claim.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "reuses a grounded claim source",
+        );
+    }
+
+    #[test]
     fn rejects_legal_case_with_missing_claim_source_record() {
         let mut state = make_test_campaign();
         let loan = state
@@ -3297,6 +3448,45 @@ mod validation {
             load_state(&path),
             StateValidationKind::StrategicRecords,
             "audit log is not chronologically valid",
+        );
+    }
+
+    #[test]
+    fn rejects_office_directive_audit_with_invalid_institution_subject() {
+        let mut state = make_test_campaign();
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeDirective,
+            subject: "invalid-office-directive".into(),
+            detail: "fabricated directive history".to_owned(),
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("invalid-office-directive-audit.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "OfficeDirective audit record has an invalid institution subject",
+        );
+    }
+
+    #[test]
+    fn rejects_endowment_audit_with_invalid_institution_subject() {
+        let mut state = make_test_campaign();
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionEndowment,
+            subject: "invalid-institution-endowment".into(),
+            detail: "fabricated endowment history".to_owned(),
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("invalid-endowment-audit.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "InstitutionEndowment audit record has an invalid institution subject",
         );
     }
 

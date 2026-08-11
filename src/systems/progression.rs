@@ -61,10 +61,15 @@ fn dynasty_city_shaping_history(state: &AppState, dynasty_id: DynastyId) -> bool
             .values()
             .any(|work| work.sponsor_dynasty_id == Some(dynasty_id))
         || (dynasty_id == state.player_dynasty_id
-            && state
-                .audit_log
-                .iter()
-                .any(|record| record.kind() == AuditKind::OfficeDirective))
+            && state.audit_log.iter().any(|record| {
+                record.kind() == AuditKind::OfficeDirective
+                    && record
+                        .audit_subject()
+                        .institution_id()
+                        .is_some_and(|institution_id| {
+                            state.institutions.contains_key(&institution_id)
+                        })
+            }))
 }
 
 fn reconstructed_campaign_phase(state: &AppState, dynasty_id: DynastyId) -> CampaignPhase {
@@ -99,15 +104,38 @@ fn reconstructed_campaign_phase(state: &AppState, dynasty_id: DynastyId) -> Camp
     }
 }
 
-pub(crate) fn campaign_phase_is_consistent(state: &AppState, dynasty_id: DynastyId) -> bool {
+fn campaign_phase_has_required_durable_evidence(state: &AppState, dynasty_id: DynastyId) -> bool {
     let Some(dynasty) = state.dynasties.get(&dynasty_id) else {
         return false;
     };
     if dynasty.runtime.generation > 1 {
         return dynasty.runtime.phase == CampaignPhase::Legacy;
     }
-    if dynasty.runtime.phase == CampaignPhase::Legacy {
+    match dynasty.runtime.phase {
+        CampaignPhase::Foundation | CampaignPhase::Establishment => true,
+        CampaignPhase::Ascendancy => {
+            contract_deliveries_for_dynasty(state, dynasty_id)
+                >= OFFICE_NOMINATION_DELIVERY_REQUIREMENT
+                || audit_kind_references_dynasty_character(
+                    state,
+                    dynasty_id,
+                    AuditKind::OfficeNomination,
+                )
+        }
+        CampaignPhase::Dominion => dynasty_city_shaping_history(state, dynasty_id),
+        CampaignPhase::Legacy => false,
+    }
+}
+
+pub(crate) fn campaign_phase_is_consistent(state: &AppState, dynasty_id: DynastyId) -> bool {
+    let Some(dynasty) = state.dynasties.get(&dynasty_id) else {
         return false;
+    };
+    if !campaign_phase_has_required_durable_evidence(state, dynasty_id) {
+        return false;
+    }
+    if dynasty.runtime.generation > 1 {
+        return true;
     }
     dynasty.runtime.phase == runtime_campaign_phase(state, dynasty_id)
 }
@@ -119,11 +147,11 @@ pub(crate) fn campaign_phase_is_persistently_consistent(
     let Some(dynasty) = state.dynasties.get(&dynasty_id) else {
         return false;
     };
-    if dynasty.runtime.generation > 1 {
-        return dynasty.runtime.phase == CampaignPhase::Legacy;
-    }
-    if dynasty.runtime.phase == CampaignPhase::Legacy {
+    if !campaign_phase_has_required_durable_evidence(state, dynasty_id) {
         return false;
+    }
+    if dynasty.runtime.generation > 1 {
+        return true;
     }
     campaign_phase_rank(dynasty.runtime.phase)
         >= campaign_phase_rank(reconstructed_campaign_phase(state, dynasty_id))
@@ -315,6 +343,78 @@ mod tests {
                 .phase(),
             CampaignPhase::Foundation
         );
+    }
+
+    #[test]
+    fn advanced_phases_require_their_durable_milestone_evidence() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .runtime
+            .phase = CampaignPhase::Ascendancy;
+
+        assert!(!campaign_phase_is_consistent(&state, player_id));
+        assert!(!campaign_phase_is_persistently_consistent(
+            &state, player_id
+        ));
+
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .runtime
+            .phase = CampaignPhase::Dominion;
+
+        assert!(!campaign_phase_is_consistent(&state, player_id));
+        assert!(!campaign_phase_is_persistently_consistent(
+            &state, player_id
+        ));
+
+        state.audit_log.push(crate::core::AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeDirective,
+            subject: "invalid-office-directive".into(),
+            detail: "fabricated directive history".to_owned(),
+        });
+
+        assert!(!campaign_phase_is_consistent(&state, player_id));
+        assert!(!campaign_phase_is_persistently_consistent(
+            &state, player_id
+        ));
+    }
+
+    #[test]
+    fn establishment_remains_valid_after_reputation_standing_later_falls() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .reputation_reliability_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        refresh_campaign_phases(&mut state);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .phase(),
+            CampaignPhase::Establishment
+        );
+
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .reputation_reliability_basis_points = 0;
+
+        assert!(campaign_phase_is_consistent(&state, player_id));
+        assert!(campaign_phase_is_persistently_consistent(&state, player_id));
     }
 
     #[test]

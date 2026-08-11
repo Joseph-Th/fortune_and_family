@@ -1471,6 +1471,8 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
 
 fn validate_legal_cases(state: &AppState) {
     let mut active_cases = BTreeSet::new();
+    let mut litigated_loans = BTreeSet::new();
+    let mut litigated_contracts = BTreeSet::new();
     for (case_id, case) in &state.legal_cases {
         debug_assert_eq!(
             *case_id, case.id,
@@ -1500,6 +1502,15 @@ fn validate_legal_cases(state: &AppState) {
             "Lifecycle Validity: legal case damages are negative"
         );
         if let Some(claim_source) = case.claim_source {
+            debug_assert!(
+                match claim_source {
+                    LegalClaimSource::Loan { loan_id } => litigated_loans.insert(loan_id),
+                    LegalClaimSource::Contract { contract_id } => {
+                        litigated_contracts.insert(contract_id)
+                    }
+                },
+                "Ownership Exclusivity: grounded legal claim source is reused by multiple cases"
+            );
             match claim_source {
                 LegalClaimSource::Loan { loan_id } => {
                     let loan = state.loans.get(&loan_id);
@@ -1665,6 +1676,15 @@ fn validate_history(state: &AppState) {
             !record.subject().trim().is_empty() && !record.detail().trim().is_empty(),
             "No Lost Runtime State: audit record lacks diagnostic content"
         );
+        if record.kind() == AuditKind::OfficeDirective {
+            debug_assert!(
+                record
+                    .audit_subject()
+                    .institution_id()
+                    .is_some_and(|institution_id| state.institutions.contains_key(&institution_id)),
+                "Record Reference Validity: office directive audit record has invalid institution subject"
+            );
+        }
         prior_audit_day = record.day();
     }
 }

@@ -1107,7 +1107,7 @@ pub fn render_campaign_html(
 <header><h1>{scenario}</h1><p>Year {year}, day {day} · simulation day {elapsed} · {phase}</p></header>
 <main>
 <div class="grid">
-<section><small>Player dynasty</small><h2>House {player}</h2><div class="metric">{treasury}</div><p>Administrative load {load}/{capacity}, including {office_load} from offices</p><p>{contributions} in civic duties · {unmet_duties} unmet duties</p></section>
+<section><small>Player dynasty</small><h2>House {player}</h2><div class="metric">{treasury}</div><p>Administrative load {load}/{capacity}, including {office_load} from offices</p><p>{contributions} in civic contributions · {unmet_duties} unmet office duties</p></section>
 <section><small>Commercial position</small><div class="metric">{businesses} businesses</div><p>{properties} properties · {loans} current borrowing relationships</p></section>
 <section><small>Municipal finance</small><div class="metric">{civic_debt_balance}</div><p>{civic_debts} outstanding civic obligations</p></section>
 <section><small>Civic condition</small><div class="metric">{food:.1}% food satisfaction</div><p>{crises} active crises</p></section>

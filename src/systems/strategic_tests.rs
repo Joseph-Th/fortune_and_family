@@ -768,6 +768,43 @@ mod public_works {
     }
 
     #[test]
+    fn public_work_progress_creates_industrial_tool_demand() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("registry must define tools");
+        let quote_before = state
+            .market
+            .quotes
+            .get(&tools_id)
+            .expect("tools quote must exist")
+            .clone();
+        let clearing_before = state.market.clearing_account;
+
+        progress_public_works(registry, &mut state).expect("public-work progression must succeed");
+
+        let quote_after = state
+            .market
+            .quotes
+            .get(&tools_id)
+            .expect("tools quote must remain present");
+        assert!(
+            quote_after.stock < quote_before.stock,
+            "funded construction must consume tools from the shared market"
+        );
+        assert!(
+            quote_after.demand_today > quote_before.demand_today,
+            "public construction must register tool demand alongside household and business demand"
+        );
+        assert!(
+            state.market.clearing_account > clearing_before,
+            "the material share of public-work spending must flow into the market clearing account"
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn planned_public_work_enters_the_normal_progression_lifecycle() {
         let registry = test_registry();
         let mut state = make_test_campaign();

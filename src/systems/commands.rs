@@ -139,6 +139,10 @@ pub enum PlayerCommand {
         institution_id: InstitutionId,
         character_id: CharacterId,
     },
+    EndowInstitution {
+        institution_id: InstitutionId,
+        amount: Money,
+    },
     NominateForOffice {
         institution_id: InstitutionId,
         character_id: CharacterId,
@@ -220,6 +224,12 @@ pub(crate) const INSTITUTION_WITHDRAWAL_RECOVERY_DAYS: i64 = OFFICE_NOMINATION_R
 pub(crate) const INSTITUTION_SUPPORT_COST: Money = Money::from_copper(1_200);
 pub(crate) const INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT: u16 = 5_500;
 pub(crate) const INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT: u32 = 52;
+pub(crate) const INSTITUTION_ENDOWMENT_INTERVAL_DAYS: i64 = 360;
+pub(crate) const INSTITUTION_ENDOWMENT_MIN: Money = Money::from_copper(5_000);
+pub(crate) const INSTITUTION_ENDOWMENT_MAX: Money = Money::from_copper(50_000);
+const INSTITUTION_SUPPORT_CAPABILITY_TARGET_SCORE: u32 = 10_000;
+const INSTITUTION_SUPPORT_CAPABILITY_DELIVERY_STEP: u32 = 200;
+const INSTITUTION_SUPPORT_MAX_PREPARATION_DELIVERIES: u32 = 13;
 pub(crate) const MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER: usize = 2;
 pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_RECOVERY_DAYS: i64 = 720;
@@ -563,6 +573,20 @@ pub enum CommandError {
         "the dynasty cannot cultivate support in another institution before day {next_support_day}"
     )]
     InstitutionSupportCooldown { next_support_day: i64 },
+    #[error(
+        "institutional endowment must be between {minimum} and {maximum}; requested {requested}"
+    )]
+    InstitutionEndowmentOutOfRange {
+        minimum: Money,
+        maximum: Money,
+        requested: Money,
+    },
+    #[error("the dynasty has no established membership in institution {institution_id}")]
+    InstitutionEndowmentRequiresMembership { institution_id: InstitutionId },
+    #[error(
+        "the dynasty cannot make another institutional endowment before day {next_endowment_day}"
+    )]
+    InstitutionEndowmentCooldown { next_endowment_day: i64 },
     #[error("institution {institution_id} budget {current} cannot receive patronage {incoming}")]
     InstitutionBudgetOverflow {
         institution_id: InstitutionId,
@@ -775,7 +799,11 @@ fn dispatch_player_command(
         PlayerCommand::CultivateInstitutionSupport {
             institution_id,
             character_id,
-        } => apply_institution_support(state, institution_id, character_id),
+        } => apply_institution_support(registry, state, institution_id, character_id),
+        PlayerCommand::EndowInstitution {
+            institution_id,
+            amount,
+        } => apply_institution_endowment(state, institution_id, amount),
         PlayerCommand::NominateForOffice {
             institution_id,
             character_id,
@@ -2954,6 +2982,7 @@ fn apply_education_focus(capabilities: &mut CharacterCapabilities, focus: Educat
 }
 
 fn apply_institution_support(
+    registry: &Registry,
     state: &mut AppState,
     institution_id: InstitutionId,
     character_id: CharacterId,
@@ -2967,11 +2996,11 @@ fn apply_institution_support(
     {
         return Err(CommandError::InvalidNominee { character_id });
     }
-    validate_institution_support_standing(state)?;
     let institution = state
         .institutions
         .get(&institution_id)
         .ok_or(CommandError::MissingInstitution { institution_id })?;
+    validate_institution_support_standing(registry, state, institution_id, character_id)?;
     let subject = institution_support_subject(institution_id, character_id);
     if institution.members.contains(&character_id) {
         return Err(CommandError::InstitutionSupportAlreadyEstablished {
@@ -3094,7 +3123,216 @@ fn finish_institution_patronage(
     })
 }
 
-fn validate_institution_support_standing(state: &AppState) -> Result<(), CommandError> {
+#[derive(Clone, Debug)]
+struct ValidatedInstitutionEndowment {
+    player_id: DynastyId,
+    institution_id: InstitutionId,
+    amount: Money,
+    treasury_after: Money,
+    contributions_after: Money,
+    budget_after: Money,
+    legitimacy_gain: u16,
+    relationship_scale: i16,
+    member_dynasties: BTreeSet<DynastyId>,
+}
+
+fn apply_institution_endowment(
+    state: &mut AppState,
+    institution_id: InstitutionId,
+    amount: Money,
+) -> Result<CommandOutcome, CommandError> {
+    let validated = validate_institution_endowment(state, institution_id, amount)?;
+    let mut next_state = state.clone();
+    commit_institution_endowment(&mut next_state, &validated)?;
+    *state = next_state;
+    Ok(CommandOutcome {
+        summary: format!("Endowed institution {institution_id} with {amount}."),
+    })
+}
+
+fn validate_institution_endowment(
+    state: &AppState,
+    institution_id: InstitutionId,
+    amount: Money,
+) -> Result<ValidatedInstitutionEndowment, CommandError> {
+    if amount < INSTITUTION_ENDOWMENT_MIN || amount > INSTITUTION_ENDOWMENT_MAX {
+        return Err(CommandError::InstitutionEndowmentOutOfRange {
+            minimum: INSTITUTION_ENDOWMENT_MIN,
+            maximum: INSTITUTION_ENDOWMENT_MAX,
+            requested: amount,
+        });
+    }
+    let institution = state
+        .institutions
+        .get(&institution_id)
+        .ok_or(CommandError::MissingInstitution { institution_id })?;
+    if !has_established_player_institution_membership(state, institution_id) {
+        return Err(CommandError::InstitutionEndowmentRequiresMembership { institution_id });
+    }
+    if let Some(next_endowment_day) = institution_endowment_next_day(state)
+        && state.clock.day() < next_endowment_day
+    {
+        return Err(CommandError::InstitutionEndowmentCooldown { next_endowment_day });
+    }
+    let player_id = state.player_dynasty_id;
+    let player = state
+        .dynasties
+        .get(&player_id)
+        .expect("player dynasty must exist");
+    if player.treasury() < amount {
+        return Err(CommandError::InsufficientPlayerFunds {
+            available: player.treasury(),
+            required: amount,
+        });
+    }
+    let treasury_after = player
+        .treasury()
+        .checked_sub(amount)
+        .expect("validated endowment must fit player treasury");
+    let contributions_after = player.civic_contributions().checked_add(amount).ok_or(
+        super::SimulationError::DynastyCivicContributionsOverflow {
+            dynasty_id: player_id,
+            current: player.civic_contributions(),
+            incoming: amount,
+        },
+    )?;
+    let budget_after =
+        institution
+            .budget
+            .checked_add(amount)
+            .ok_or(CommandError::InstitutionBudgetOverflow {
+                institution_id,
+                current: institution.budget,
+                incoming: amount,
+            })?;
+    let member_dynasties: BTreeSet<_> = institution
+        .members
+        .iter()
+        .filter_map(|character_id| state.characters.get(*character_id))
+        .map(Character::dynasty_id)
+        .filter(|dynasty_id| *dynasty_id != player_id)
+        .collect();
+    let legitimacy_gain = u16::try_from((amount.copper() / 200).clamp(25, 250))
+        .expect("bounded endowment legitimacy gain must fit u16");
+    let relationship_scale =
+        i16::try_from((amount.copper() / INSTITUTION_ENDOWMENT_MIN.copper()).clamp(1, 10))
+            .expect("bounded endowment relationship scale must fit i16");
+    Ok(ValidatedInstitutionEndowment {
+        player_id,
+        institution_id,
+        amount,
+        treasury_after,
+        contributions_after,
+        budget_after,
+        legitimacy_gain,
+        relationship_scale,
+        member_dynasties,
+    })
+}
+
+fn commit_institution_endowment(
+    state: &mut AppState,
+    endowment: &ValidatedInstitutionEndowment,
+) -> Result<(), CommandError> {
+    let player = state
+        .dynasties
+        .get_mut(&endowment.player_id)
+        .expect("validated player dynasty must exist");
+    player.resources.treasury = endowment.treasury_after;
+    player.resources.civic_contributions = endowment.contributions_after;
+    let institution = state
+        .institutions
+        .get_mut(&endowment.institution_id)
+        .expect("validated institution must exist");
+    institution.budget = endowment.budget_after;
+    institution.legitimacy_basis_points = institution
+        .legitimacy_basis_points
+        .saturating_add(endowment.legitimacy_gain)
+        .min(10_000);
+    for member_dynasty_id in &endowment.member_dynasties {
+        super::strategic::adjust_dynasty_relationship(
+            state,
+            endowment.player_id,
+            *member_dynasty_id,
+            super::strategic::RelationshipDelta::new(
+                endowment.relationship_scale.saturating_mul(8),
+                endowment.relationship_scale.saturating_mul(15),
+                0,
+                -endowment.relationship_scale.saturating_mul(5),
+                i32::from((endowment.relationship_scale.saturating_add(1)) / 2),
+            ),
+        );
+        super::strategic::remember_dynasty_interaction(
+            state,
+            endowment.player_id,
+            *member_dynasty_id,
+            &format!(
+                "the player dynasty endowed institution {} with {}, strengthening its standing among the membership",
+                endowment.institution_id, endowment.amount
+            ),
+        );
+    }
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::InstitutionEndowment,
+        subject: format!("institution:{}", endowment.institution_id).into(),
+        detail: format!(
+            "dynasty={};amount={};institution_legitimacy_gain={}",
+            endowment.player_id,
+            endowment.amount.copper(),
+            endowment.legitimacy_gain
+        ),
+    });
+    super::strategic::try_push_outbox(
+        state,
+        OutboxKind::Politics,
+        format!("Institution {} endowed", endowment.institution_id),
+        format!(
+            "The dynasty endowed institution {} with {}, strengthening its budget, civic legitimacy, and standing among member houses.",
+            endowment.institution_id, endowment.amount
+        ),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn has_established_player_institution_membership(
+    state: &AppState,
+    institution_id: InstitutionId,
+) -> bool {
+    let Some(institution) = state.institutions.get(&institution_id) else {
+        return false;
+    };
+    institution.members.iter().copied().any(|character_id| {
+        let active_player_member = state.characters.get(character_id).is_some_and(|character| {
+            character.dynasty_id() == state.player_dynasty_id
+                && character.status() == CharacterStatus::Active
+        });
+        active_player_member
+            && (institution.office_holder_id == Some(character_id)
+                || institution_support_day(state, institution_id, character_id).is_some_and(
+                    |support_day| {
+                        state.clock.day()
+                            >= support_day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)
+                    },
+                ))
+    })
+}
+
+pub(crate) fn institution_endowment_next_day(state: &AppState) -> Option<i64> {
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::InstitutionEndowment)
+        .map(|record| future_day_or_terminal(record.day(), INSTITUTION_ENDOWMENT_INTERVAL_DAYS))
+}
+
+fn validate_institution_support_standing(
+    registry: &Registry,
+    state: &AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> Result<(), CommandError> {
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
@@ -3109,15 +3347,40 @@ fn validate_institution_support_standing(state: &AppState) -> Result<(), Command
         });
     }
     let delivered = player_contract_deliveries(state);
-    if delivered < INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT {
+    let required =
+        institution_support_delivery_requirement(registry, state, institution_id, character_id);
+    if delivered < required {
         return Err(
             CommandError::InsufficientInstitutionSupportCommercialRecord {
                 delivered,
-                required: INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+                required,
             },
         );
     }
     Ok(())
+}
+
+pub(crate) fn institution_support_delivery_requirement(
+    registry: &Registry,
+    state: &AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> u32 {
+    let character = state
+        .characters
+        .get(character_id)
+        .expect("institution support character must exist");
+    let institution_kind = registry
+        .get_institution(institution_id)
+        .expect("institution support target must exist in the registry")
+        .kind();
+    let capability_score =
+        super::strategic::institution_capability_score(character, institution_kind);
+    let deficit = INSTITUTION_SUPPORT_CAPABILITY_TARGET_SCORE.saturating_sub(capability_score);
+    let extra_deliveries = deficit.saturating_add(INSTITUTION_SUPPORT_CAPABILITY_DELIVERY_STEP - 1)
+        / INSTITUTION_SUPPORT_CAPABILITY_DELIVERY_STEP;
+    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT
+        .saturating_add(extra_deliveries.min(INSTITUTION_SUPPORT_MAX_PREPARATION_DELIVERIES))
 }
 
 fn apply_office_nomination(

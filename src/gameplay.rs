@@ -16,12 +16,12 @@ use crate::systems::{
     FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, HEIR_DESIGNATION_INTERVAL_DAYS,
     HEIR_DESIGNATION_LEGITIMACY_COST, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
     INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
-    INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
-    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
-    InformationFocus, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
-    LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
-    MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
+    INSTITUTION_ENDOWMENT_MAX, INSTITUTION_ENDOWMENT_MIN, INSTITUTION_SUPPORT_COST,
+    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
+    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, InformationFocus, LABOR_REPLACEMENT_COST,
+    LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST,
+    LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
     OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
     OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, OFFICE_POWER_ESTABLISHMENT_DAYS,
@@ -34,9 +34,11 @@ use crate::systems::{
     build_new_game, business_owner_distribution_reserve, business_recapitalization_target,
     contract_counterparty_price_bounds, contract_relationship_pressure_basis_points,
     crisis_response_contains_crisis, family_education_next_day,
-    has_established_player_office_power, institution_capability_score,
-    institution_membership_count, institution_support_day, institution_support_next_day,
-    office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
+    has_established_player_institution_membership, has_established_player_office_power,
+    institution_capability_score, institution_endowment_next_day, institution_membership_count,
+    institution_support_day, institution_support_delivery_requirement,
+    institution_support_next_day, office_nomination_delivery_requirement,
+    office_nomination_next_day, player_contract_deliveries,
     private_loan_borrower_financing_pressure, projected_dynasty_monthly_office_duty,
     projected_dynasty_monthly_office_duty_with_additional_offices, quote_business_acquisition,
     quote_information_leverage, quote_player_legal_claim, quote_property_liquidation,
@@ -47,7 +49,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use thiserror::Error;
 
-const ALL_COMMAND_KINDS: [GameplayCommandKind; 27] = [
+const ALL_COMMAND_KINDS: [GameplayCommandKind; 28] = [
     GameplayCommandKind::TransferBusinessCash,
     GameplayCommandKind::AcquireBusiness,
     GameplayCommandKind::InvestInBusiness,
@@ -67,6 +69,7 @@ const ALL_COMMAND_KINDS: [GameplayCommandKind; 27] = [
     GameplayCommandKind::AdoptWard,
     GameplayCommandKind::EducateFamilyMember,
     GameplayCommandKind::CultivateInstitutionSupport,
+    GameplayCommandKind::EndowInstitution,
     GameplayCommandKind::NominateForOffice,
     GameplayCommandKind::ExerciseOfficePower,
     GameplayCommandKind::WithdrawFromInstitution,
@@ -98,7 +101,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 47;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 48;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -154,6 +157,10 @@ const AGENT_OWNER_DISTRIBUTION_INTERVAL_DAYS: i64 = 90;
 const AGENT_POLITICAL_RECOVERY_SUPPORT_BONUS: i64 = 1_500;
 const AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS: i64 = 360;
 const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_000);
+const AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER: Money = Money::from_copper(80_000);
+const AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION: Money = Money::from_copper(12_000);
+const AGENT_ENDOWMENT_LIQUIDITY_FLOOR: Money = Money::from_copper(80_000);
+const AGENT_ENDOWMENT_OFFICE_BUFFER: Money = Money::from_copper(50_000);
 const AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 720;
 const AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS: u16 = 1_500;
 const AGENT_INFORMATION_POLITICAL_VULNERABILITY_LEGITIMACY: u16 = 2_500;
@@ -304,6 +311,7 @@ pub enum GameplayCommandKind {
     AdoptWard,
     EducateFamilyMember,
     CultivateInstitutionSupport,
+    EndowInstitution,
     NominateForOffice,
     ExerciseOfficePower,
     WithdrawFromInstitution,
@@ -337,6 +345,7 @@ impl GameplayCommandKind {
             Self::AdoptWard => "adopt-ward",
             Self::EducateFamilyMember => "family-education",
             Self::CultivateInstitutionSupport => "institution-support",
+            Self::EndowInstitution => "institution-endowment",
             Self::NominateForOffice => "office-nomination",
             Self::ExerciseOfficePower => "office-power",
             Self::WithdrawFromInstitution => "institution-withdrawal",
@@ -361,6 +370,7 @@ impl GameplayCommandKind {
             | Self::AdoptWard
             | Self::EducateFamilyMember
             | Self::CultivateInstitutionSupport
+            | Self::EndowInstitution
             | Self::NominateForOffice
             | Self::ExerciseOfficePower
             | Self::LeverageInformation
@@ -395,6 +405,7 @@ impl GameplayCommandKind {
                 | Self::SetHouseGovernance
                 | Self::ConveneFamilyCouncil
                 | Self::EnactLaw
+                | Self::EndowInstitution
                 | Self::StartPublicWork
                 | Self::ExerciseOfficePower
                 | Self::WithdrawFromInstitution
@@ -2208,6 +2219,7 @@ fn classify_player_command(
         PlayerCommand::CultivateInstitutionSupport { .. } => {
             Some(GameplayCommandKind::CultivateInstitutionSupport)
         }
+        PlayerCommand::EndowInstitution { .. } => Some(GameplayCommandKind::EndowInstitution),
         PlayerCommand::NominateForOffice { .. } => Some(GameplayCommandKind::NominateForOffice),
         PlayerCommand::ExerciseOfficePower { .. } => Some(GameplayCommandKind::ExerciseOfficePower),
         PlayerCommand::WithdrawFromInstitution { .. } => {
@@ -2558,6 +2570,7 @@ impl CampaignAccumulator {
             | PlayerCommand::DesignateHeir { .. }
             | PlayerCommand::AdoptWard { .. }
             | PlayerCommand::EducateFamilyMember { .. }
+            | PlayerCommand::EndowInstitution { .. }
             | PlayerCommand::ExerciseOfficePower { .. }
             | PlayerCommand::WithdrawFromInstitution { .. }
             | PlayerCommand::RespondToCrisis { .. }
@@ -3411,6 +3424,7 @@ fn consequence_horizon_days(
         Some(GameplayCommandKind::NominateForOffice) => 120,
         Some(
             GameplayCommandKind::CultivateInstitutionSupport
+            | GameplayCommandKind::EndowInstitution
             | GameplayCommandKind::FileLegalCase
             | GameplayCommandKind::EnactLaw
             | GameplayCommandKind::ExerciseOfficePower
@@ -3522,12 +3536,19 @@ fn record_activation_opportunities(
     let transfer_cash_opportunity = has_transfer_cash_opportunity(registry, state, persona);
     let mut family_candidates = Vec::new();
     generate_family_candidates(registry, state, persona, &mut family_candidates);
-    let governance_opportunity = family_candidates
-        .iter()
-        .any(|candidate| candidate.kind == GameplayCommandKind::SetHouseGovernance);
-    let family_council_opportunity = family_candidates
-        .iter()
-        .any(|candidate| candidate.kind == GameplayCommandKind::ConveneFamilyCouncil);
+    for kind in [
+        GameplayCommandKind::SetHouseGovernance,
+        GameplayCommandKind::ConveneFamilyCouncil,
+        GameplayCommandKind::EndowInstitution,
+    ] {
+        record_activation_opportunity(
+            accumulator,
+            kind,
+            family_candidates
+                .iter()
+                .any(|candidate| candidate.kind == kind),
+        );
+    }
     let mut civic_candidates = Vec::new();
     generate_law_candidates(registry, state, persona, &mut civic_candidates);
     generate_public_work_candidates(registry, state, persona, &mut civic_candidates);
@@ -3565,14 +3586,6 @@ fn record_activation_opportunities(
         (
             GameplayCommandKind::TransferBusinessCash,
             transfer_cash_opportunity,
-        ),
-        (
-            GameplayCommandKind::SetHouseGovernance,
-            governance_opportunity,
-        ),
-        (
-            GameplayCommandKind::ConveneFamilyCouncil,
-            family_council_opportunity,
         ),
         (GameplayCommandKind::EnactLaw, law_opportunity),
         (
@@ -4113,6 +4126,7 @@ fn candidate_preserves_office_duty_reserve(
         | PlayerCommand::AdoptWard { .. }
         | PlayerCommand::EducateFamilyMember { .. }
         | PlayerCommand::CultivateInstitutionSupport { .. }
+        | PlayerCommand::EndowInstitution { .. }
         | PlayerCommand::ExerciseOfficePower { .. }
         | PlayerCommand::WithdrawFromInstitution { .. }
         | PlayerCommand::RespondToCrisis { .. }
@@ -4197,6 +4211,7 @@ fn candidate_is_emergency_spending(state: &AppState, candidate: &Candidate) -> b
         | PlayerCommand::AdoptWard { .. }
         | PlayerCommand::EducateFamilyMember { .. }
         | PlayerCommand::CultivateInstitutionSupport { .. }
+        | PlayerCommand::EndowInstitution { .. }
         | PlayerCommand::NominateForOffice { .. }
         | PlayerCommand::ExerciseOfficePower { .. }
         | PlayerCommand::WithdrawFromInstitution { .. }
@@ -4303,7 +4318,8 @@ fn candidate_player_treasury_cost(
                 quote.purchase_price.saturating_add(*recapitalization)
             }),
         PlayerCommand::InvestInBusiness { amount, .. }
-        | PlayerCommand::FundPublicWork { amount, .. } => *amount,
+        | PlayerCommand::FundPublicWork { amount, .. }
+        | PlayerCommand::EndowInstitution { amount, .. } => *amount,
         PlayerCommand::IssueLoan { terms }
             if terms.lender_dynasty_id == state.player_dynasty_id =>
         {
@@ -6493,32 +6509,65 @@ fn generate_public_work_funding_candidates(
         GameplayPersona::Entrepreneur => 1_700,
         GameplayPersona::Opportunist => 1_200,
     };
+    let office_reserve = player_office_duty_reserve(state, 0);
+    let discretionary_surplus = treasury
+        .saturating_sub(office_reserve)
+        .saturating_sub(AGENT_OFFICE_LIQUIDITY_BUFFER);
+    let wealthy_acceleration = treasury >= AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER
+        && discretionary_surplus > Money::ZERO;
     let mut works = state
         .public_works
         .values()
         .filter(|work| {
             work.sponsor_dynasty_id == Some(state.player_dynasty_id)
-                && work.status == PublicWorkStatus::Suspended
+                && work.status.is_unfinished()
+                && (work.status == PublicWorkStatus::Suspended || wealthy_acceleration)
         })
         .collect::<Vec<_>>();
     works.sort_by_key(|work| (std::cmp::Reverse(work.progress_basis_points), work.id));
     for work in works.into_iter().take(2) {
         let remaining = work.budget.saturating_sub(work.spent);
-        if remaining <= Money::ZERO || remaining > treasury {
+        if remaining <= Money::ZERO {
             continue;
         }
+        let amount = if work.status == PublicWorkStatus::Suspended {
+            remaining.min(treasury)
+        } else {
+            remaining
+                .min(discretionary_surplus)
+                .min(AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION)
+        };
+        if amount <= Money::ZERO {
+            continue;
+        }
+        let completes = amount >= remaining;
+        let intent = if work.status == PublicWorkStatus::Suspended && completes {
+            "finish stalled"
+        } else if work.status == PublicWorkStatus::Suspended {
+            "rescue stalled"
+        } else if completes {
+            "finish"
+        } else {
+            "accelerate"
+        };
         push_candidate(
             candidates,
             GameplayCommandKind::StartPublicWork,
             PlayerCommand::FundPublicWork {
                 public_work_id: work.id,
-                amount: remaining,
+                amount,
             },
             format!(
-                "fund {remaining} to finish stalled {:?} public work {}",
-                work.kind, work.id
+                "fund {amount} to {intent} {:?} public work {}",
+                work.kind, work.id,
             ),
-            base_bonus.saturating_add(i64::from(work.progress_basis_points) / 2),
+            base_bonus
+                .saturating_add(i64::from(work.progress_basis_points) / 2)
+                .saturating_add(if work.status == PublicWorkStatus::Suspended {
+                    1_000
+                } else {
+                    350
+                }),
         );
     }
 }
@@ -7130,7 +7179,71 @@ fn generate_family_candidates(
     generate_family_education_candidates(registry, state, persona, candidates);
     generate_institution_withdrawal_candidates(state, persona, candidates);
     generate_office_power_directive_candidates(registry, state, persona, candidates);
+    generate_institution_endowment_candidates(registry, state, persona, candidates);
     generate_institution_ascent_candidates(registry, state, persona, candidates);
+}
+
+fn generate_institution_endowment_candidates(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) {
+    if institution_endowment_next_day(state).is_some_and(|day| state.clock.day() < day) {
+        return;
+    }
+    let treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    let office_reserve = player_office_duty_reserve(state, 0);
+    let protected_floor = AGENT_ENDOWMENT_LIQUIDITY_FLOOR
+        .max(office_reserve.saturating_add(AGENT_ENDOWMENT_OFFICE_BUFFER));
+    let surplus = treasury.saturating_sub(protected_floor);
+    if surplus < INSTITUTION_ENDOWMENT_MIN {
+        return;
+    }
+    let amount = surplus.min(INSTITUTION_ENDOWMENT_MAX);
+    let base_bonus: i64 = match persona {
+        GameplayPersona::PowerBroker => 750,
+        GameplayPersona::Steward => 450,
+        GameplayPersona::Opportunist => 350,
+        GameplayPersona::Entrepreneur => 250,
+    };
+    for institution in state.institutions.values().filter(|institution| {
+        has_established_player_institution_membership(state, institution.institution_id)
+    }) {
+        let legitimacy_need =
+            i64::from(10_000_u16.saturating_sub(institution.legitimacy_basis_points) / 10);
+        let office_bonus = institution.office_holder_id.map_or(0, |holder_id| {
+            state.characters.get(holder_id).map_or(0, |holder| {
+                if holder.dynasty_id() == state.player_dynasty_id {
+                    350
+                } else {
+                    0
+                }
+            })
+        });
+        let strategic_fit =
+            institution_ascent_power_bonus(registry, state, institution, persona) / 3;
+        push_candidate(
+            candidates,
+            GameplayCommandKind::EndowInstitution,
+            PlayerCommand::EndowInstitution {
+                institution_id: institution.institution_id,
+                amount,
+            },
+            format!(
+                "endow institution {} with {amount} to strengthen its capacity and member-house coalition",
+                institution.institution_id
+            ),
+            base_bonus
+                .saturating_add(legitimacy_need)
+                .saturating_add(office_bonus)
+                .saturating_add(strategic_fit),
+        );
+    }
 }
 
 fn generate_family_council_candidate(
@@ -7689,6 +7802,7 @@ fn generate_institution_ascent_candidates(
             .expect("runtime institution must have a registry definition")
             .kind();
         let strongest_character = strongest_institution_support_candidate(
+            registry,
             state,
             institution,
             &characters,
@@ -7735,6 +7849,7 @@ fn generate_institution_ascent_candidates(
 }
 
 fn strongest_institution_support_candidate<'a>(
+    registry: &Registry,
     state: &AppState,
     institution: &crate::core::InstitutionRuntime,
     characters: &[&'a crate::core::Character],
@@ -7750,9 +7865,13 @@ fn strongest_institution_support_candidate<'a>(
         .iter()
         .copied()
         .filter(|character| {
-            is_institution_support_available(state, character.id())
-                && institution_membership_count(state, character.id())
-                    < MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER
+            is_institution_support_available(
+                registry,
+                state,
+                institution.institution_id,
+                character.id(),
+            ) && institution_membership_count(state, character.id())
+                < MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER
                 && institution_support_day(state, institution.institution_id, character.id())
                     .is_none()
         })
@@ -8470,17 +8589,24 @@ fn is_office_nomination_available(
         .is_none_or(|next_day| state.clock.day() >= next_day)
 }
 
-fn is_institution_support_available(state: &AppState, character_id: CharacterId) -> bool {
+fn is_institution_support_available(
+    registry: &Registry,
+    state: &AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> bool {
     let Some(player) = state.dynasties.get(&state.player_dynasty_id) else {
         return false;
     };
+    let required_deliveries =
+        institution_support_delivery_requirement(registry, state, institution_id, character_id);
     if player.treasury() < INSTITUTION_SUPPORT_COST
         || player
             .resources
             .reputation_quality_basis_points
             .max(player.resources.reputation_reliability_basis_points)
             < INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT
-        || player_contract_deliveries(state) < INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT
+        || player_contract_deliveries(state) < required_deliveries
     {
         return false;
     }
@@ -8584,6 +8710,7 @@ fn recovery_priority_adjustment(state: &AppState, kind: GameplayCommandKind) -> 
         | GameplayCommandKind::CommissionInformation
         | GameplayCommandKind::LeverageInformation
         | GameplayCommandKind::CultivateInstitutionSupport
+        | GameplayCommandKind::EndowInstitution
         | GameplayCommandKind::NominateForOffice
         | GameplayCommandKind::EnactLaw
         | GameplayCommandKind::StartPublicWork
@@ -8607,7 +8734,7 @@ fn steward_weight(kind: GameplayCommandKind) -> i64 {
         GameplayCommandKind::ConveneFamilyCouncil => 850,
         GameplayCommandKind::DesignateHeir | GameplayCommandKind::EducateFamilyMember => 650,
         GameplayCommandKind::SetBusinessPolicy | GameplayCommandKind::StartPublicWork => 600,
-        GameplayCommandKind::AdoptWard => 520,
+        GameplayCommandKind::AdoptWard | GameplayCommandKind::EndowInstitution => 520,
         GameplayCommandKind::CommissionInformation => 480,
         GameplayCommandKind::LeverageInformation => 700,
         GameplayCommandKind::CultivateInstitutionSupport | GameplayCommandKind::SecureSupply => 420,
@@ -8643,7 +8770,9 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::CommissionInformation
             | GameplayCommandKind::DesignateHeir => 700,
             GameplayCommandKind::EducateFamilyMember => 600,
-            GameplayCommandKind::ConveneFamilyCouncil => 320,
+            GameplayCommandKind::ConveneFamilyCouncil | GameplayCommandKind::EndowInstitution => {
+                320
+            }
             GameplayCommandKind::ExtendCredit => 420,
             GameplayCommandKind::AdoptWard => 360,
             GameplayCommandKind::CultivateInstitutionSupport => 300,
@@ -8661,6 +8790,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
         GameplayPersona::PowerBroker => match kind {
             GameplayCommandKind::EnactLaw
             | GameplayCommandKind::CultivateInstitutionSupport
+            | GameplayCommandKind::EndowInstitution
             | GameplayCommandKind::NominateForOffice
             | GameplayCommandKind::ExerciseOfficePower
             | GameplayCommandKind::StartPublicWork
@@ -8700,7 +8830,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::DesignateHeir => 620,
             GameplayCommandKind::CultivateInstitutionSupport
             | GameplayCommandKind::WithdrawFromInstitution => 650,
-            GameplayCommandKind::AdoptWard => 500,
+            GameplayCommandKind::EndowInstitution | GameplayCommandKind::AdoptWard => 500,
             GameplayCommandKind::EducateFamilyMember => 420,
             GameplayCommandKind::ConveneFamilyCouncil => 350,
             GameplayCommandKind::TransferBusinessCash
@@ -8755,6 +8885,7 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         | GameplayCommandKind::AdoptWard
         | GameplayCommandKind::EducateFamilyMember
         | GameplayCommandKind::CultivateInstitutionSupport
+        | GameplayCommandKind::EndowInstitution
         | GameplayCommandKind::CommissionInformation
         | GameplayCommandKind::ExerciseOfficePower
         | GameplayCommandKind::NominateForOffice => 0,
@@ -9019,13 +9150,15 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::Simulation(source) => simulation_error_category(source),
         CommandError::MissingBusiness { .. } | CommandError::BusinessNotOwned { .. } => NO_BIZ,
         CommandError::PlayerNotParty => "player not party",
-        CommandError::LoanCounterpartyLenderReserve { .. } => "loan counterparty lender reserve",
-        CommandError::LoanCounterpartyInterestTooLow { .. } => "loan counterparty interest low",
-        CommandError::LoanCounterpartyInterestTooHigh { .. } => "loan counterparty interest high",
-        CommandError::LoanCounterpartyPaymentTooLow { .. } => "loan counterparty payment low",
-        CommandError::LoanCounterpartyPaymentTooHigh { .. } => "loan counterparty payment high",
-        CommandError::LoanCounterpartyCollateralTooLarge { .. } => LOAN_COLLATERAL_LARGE,
-        CommandError::LoanCounterpartyNoFinancingNeed { .. } => LOAN_NO_FINANCING_NEED,
+        CommandError::LoanCounterpartyLenderReserve { .. }
+        | CommandError::LoanCounterpartyInterestTooLow { .. }
+        | CommandError::LoanCounterpartyInterestTooHigh { .. }
+        | CommandError::LoanCounterpartyPaymentTooLow { .. }
+        | CommandError::LoanCounterpartyPaymentTooHigh { .. }
+        | CommandError::LoanCounterpartyCollateralTooLarge { .. }
+        | CommandError::LoanCounterpartyNoFinancingNeed { .. } => {
+            loan_command_error_category(error)
+        }
         CommandError::ContractCounterpartyPriceTooLow { .. } => "contract counterparty price low",
         CommandError::ContractCounterpartyPriceTooHigh { .. } => "contract counterparty price high",
         CommandError::ContractCounterpartyPenaltyOutOfRange { .. } => CONTRACT_PENALTY,
@@ -9083,17 +9216,28 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::OfficePowerUnavailable { .. } => "office power unavailable",
         CommandError::OfficePowerDirectiveNotEstablished { .. } => OFFICE_DIRECTIVE_PENDING,
         CommandError::OfficePowerDirectiveCooldown { .. } => "office power directive cooldown",
-        CommandError::InsufficientInstitutionSupportReputation { .. } => SUPPORT_REPUTATION_SHORT,
-        CommandError::InsufficientInstitutionSupportCommercialRecord { .. } => SUPPORT_RECORD_SHORT,
-        CommandError::InstitutionSupportAlreadyEstablished { .. } => SUPPORT_EXISTS,
-        CommandError::InstitutionMembershipCapacity { .. } => "institution membership capacity",
-        CommandError::InstitutionSupportCooldown { .. } => "institution support cooldown",
-        CommandError::InstitutionBudgetOverflow { .. } => "institution budget overflow",
-        CommandError::MissingInstitutionSupport { .. } => "missing institution support",
-        CommandError::InstitutionSupportNotEstablished { .. } => SUPPORT_MISSING,
+        CommandError::InsufficientInstitutionSupportReputation { .. }
+        | CommandError::InsufficientInstitutionSupportCommercialRecord { .. }
+        | CommandError::InstitutionSupportAlreadyEstablished { .. }
+        | CommandError::InstitutionMembershipCapacity { .. }
+        | CommandError::InstitutionSupportCooldown { .. }
+        | CommandError::InstitutionEndowmentOutOfRange { .. }
+        | CommandError::InstitutionEndowmentRequiresMembership { .. }
+        | CommandError::InstitutionEndowmentCooldown { .. }
+        | CommandError::InstitutionBudgetOverflow { .. }
+        | CommandError::MissingInstitutionSupport { .. }
+        | CommandError::InstitutionSupportNotEstablished { .. } => {
+            institution_error_category(error)
+        }
         CommandError::InvalidNominee { .. } => "invalid nominee",
         CommandError::NomineeAlreadyHoldsOffice { .. } => "nominee already holds office",
         CommandError::InvalidInstitutionWithdrawal { .. } => "invalid institution withdrawal",
+        _ => secondary_command_error_category(error),
+    }
+}
+
+const fn secondary_command_error_category(error: &CommandError) -> &'static str {
+    match error {
         CommandError::MissingCrisis { .. } => "missing crisis",
         CommandError::InactiveCrisis { .. } => "inactive crisis",
         CommandError::CrisisAlreadyAddressed { .. } => "crisis already addressed",
@@ -9111,6 +9255,39 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::InformationReportExpired { .. } => "intelligence report expired",
         CommandError::InformationReportHasNoLeverage { .. } => REPORT_NO_LEVERAGE,
         CommandError::MissingNotification { .. } => "missing notification",
+        _ => "command unavailable",
+    }
+}
+
+const fn institution_error_category(error: &CommandError) -> &'static str {
+    match error {
+        CommandError::InsufficientInstitutionSupportReputation { .. } => SUPPORT_REPUTATION_SHORT,
+        CommandError::InsufficientInstitutionSupportCommercialRecord { .. } => SUPPORT_RECORD_SHORT,
+        CommandError::InstitutionSupportAlreadyEstablished { .. } => SUPPORT_EXISTS,
+        CommandError::InstitutionMembershipCapacity { .. } => "institution membership capacity",
+        CommandError::InstitutionSupportCooldown { .. } => "institution support cooldown",
+        CommandError::InstitutionEndowmentOutOfRange { .. } => "institution endowment out of range",
+        CommandError::InstitutionEndowmentRequiresMembership { .. } => {
+            "institution endowment requires membership"
+        }
+        CommandError::InstitutionEndowmentCooldown { .. } => "institution endowment cooldown",
+        CommandError::InstitutionBudgetOverflow { .. } => "institution budget overflow",
+        CommandError::MissingInstitutionSupport { .. } => "missing institution support",
+        CommandError::InstitutionSupportNotEstablished { .. } => SUPPORT_MISSING,
+        _ => "institution command unavailable",
+    }
+}
+
+const fn loan_command_error_category(error: &CommandError) -> &'static str {
+    match error {
+        CommandError::LoanCounterpartyLenderReserve { .. } => "loan counterparty lender reserve",
+        CommandError::LoanCounterpartyInterestTooLow { .. } => "loan counterparty interest low",
+        CommandError::LoanCounterpartyInterestTooHigh { .. } => "loan counterparty interest high",
+        CommandError::LoanCounterpartyPaymentTooLow { .. } => "loan counterparty payment low",
+        CommandError::LoanCounterpartyPaymentTooHigh { .. } => "loan counterparty payment high",
+        CommandError::LoanCounterpartyCollateralTooLarge { .. } => LOAN_COLLATERAL_LARGE,
+        CommandError::LoanCounterpartyNoFinancingNeed { .. } => LOAN_NO_FINANCING_NEED,
+        _ => "loan command unavailable",
     }
 }
 
@@ -9830,6 +10007,8 @@ fn derive_findings(
     add_welfare_dynamism_finding(aggregate, campaigns, &mut findings);
     add_long_horizon_risk_findings(aggregate, campaigns, &mut findings);
     add_player_borrowing_distress_finding(campaigns, &mut findings);
+    add_mature_capital_pressure_finding(campaigns, &mut findings);
+    add_starting_trade_economic_balance_finding(campaigns, &mut findings);
     add_rival_commercial_pressure_finding(aggregate, campaigns, &mut findings);
     add_succession_cohesion_finding(campaigns, &mut findings);
     add_succession_political_recovery_finding(campaigns, &mut findings);
@@ -9902,6 +10081,110 @@ fn add_player_borrowing_distress_finding(
             worst.end.player_defaulted_borrowing,
             worst.end.player_treasury,
             worst.end.player_properties,
+        ),
+    });
+}
+
+fn add_mature_capital_pressure_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let mature: Vec<_> = campaigns
+        .iter()
+        .filter(|campaign| campaign.simulated_days >= 3_600)
+        .collect();
+    if mature.len() < 4 {
+        return;
+    }
+    let financially_unpressured: Vec<_> = mature
+        .iter()
+        .copied()
+        .filter(|campaign| {
+            let growth_floor = campaign.start.player_treasury.saturating_mul(5);
+            campaign.end.player_treasury >= growth_floor.max(Money::from_copper(200_000))
+                && campaign.maximum_player_delinquent_borrowing == 0
+                && campaign.maximum_player_defaulted_borrowing == 0
+        })
+        .collect();
+    if scaled_ratio_usize(financially_unpressured.len(), mature.len(), 100) < 50 {
+        return;
+    }
+    let liquidators = financially_unpressured
+        .iter()
+        .filter(|campaign| {
+            campaign
+                .commands
+                .get(&GameplayCommandKind::SellProperty)
+                .is_some_and(|stats| stats.executed > 0)
+        })
+        .count();
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Mature liquidity can outgrow meaningful financial pressure".to_owned(),
+        evidence: format!(
+            "{} of {} mature campaigns ended with at least five times their starting treasury and at least 2,000 cr in liquid dynasty cash without ever entering player-borrowing delinquency or default; only {liquidators} of those campaigns needed to liquidate property. This is an anti-snowball warning: successful houses may be accumulating cash faster than business investment, credit, civic commitments, family strategy, and political obligations can absorb it.",
+            financially_unpressured.len(),
+            mature.len(),
+        ),
+    });
+}
+
+fn add_starting_trade_economic_balance_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let mut averages = Vec::new();
+    for background in [
+        StartingBackground::Baker,
+        StartingBackground::ClothTrader,
+        StartingBackground::Blacksmith,
+    ] {
+        let mature: Vec<_> = campaigns
+            .iter()
+            .filter(|campaign| {
+                campaign.background == background && campaign.simulated_days >= 3_600
+            })
+            .collect();
+        if mature.len() < 4 {
+            continue;
+        }
+        let total = mature.iter().fold(0_i128, |sum, campaign| {
+            sum.saturating_add(i128::from(campaign.end.player_treasury.copper()))
+        });
+        averages.push((
+            background,
+            total / i128::try_from(mature.len()).expect("campaign count must fit i128"),
+        ));
+    }
+    if averages.len() < 2 {
+        return;
+    }
+    let Some((strongest_background, strongest_average)) =
+        averages.iter().max_by_key(|(_, average)| *average).copied()
+    else {
+        return;
+    };
+    let Some((weakest_background, weakest_average)) =
+        averages.iter().min_by_key(|(_, average)| *average).copied()
+    else {
+        return;
+    };
+    if strongest_average < weakest_average.saturating_mul(2)
+        || strongest_average.saturating_sub(weakest_average) < 100_000
+    {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Starting trade behaves like a hidden mature-economy advantage".to_owned(),
+        evidence: format!(
+            "Mature {strongest_background:?} campaigns ended with average dynasty treasury {} versus {} for {weakest_background:?}, more than a twofold gap. Starting trades are intended to create different pressures and opportunities, not a hidden difficulty mode, so persistent endpoint liquidity this far apart indicates background economics need review.",
+            Money::from_copper(
+                i64::try_from(strongest_average).expect("average treasury must fit money range")
+            ),
+            Money::from_copper(
+                i64::try_from(weakest_average).expect("average treasury must fit money range")
+            ),
         ),
     });
 }

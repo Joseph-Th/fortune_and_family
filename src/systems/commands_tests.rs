@@ -2595,7 +2595,9 @@ mod politics {
         (state, character_id, institution_id, member_count)
     }
 
-    fn make_patronage_fixture() -> (
+    fn make_patronage_fixture(
+        registry: &Registry,
+    ) -> (
         AppState,
         DynastyId,
         CharacterId,
@@ -2621,6 +2623,12 @@ mod politics {
             .expect("player dynasty must exist")
             .resources
             .reputation_reliability_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        let support_requirement = institution_support_delivery_requirement(
+            registry,
+            &state,
+            institution_id,
+            character_id,
+        );
         let player_businesses: BTreeSet<_> = state
             .businesses
             .iter()
@@ -2635,7 +2643,7 @@ mod politics {
                     || player_businesses.contains(&contract.seller_business_id)
             })
             .expect("campaign must contain a player contract");
-        let deliveries = u16::try_from(INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT)
+        let deliveries = u16::try_from(support_requirement)
             .expect("delivery requirement must fit contract counters");
         contract.fulfilled_deliveries = deliveries;
         contract
@@ -2659,6 +2667,46 @@ mod politics {
             treasury_before,
             budget_before,
         )
+    }
+
+    fn make_established_endowment_fixture(
+        registry: &Registry,
+    ) -> (AppState, DynastyId, InstitutionId, DynastyId) {
+        let (mut state, player_id, character_id, institution_id, _, _) =
+            make_patronage_fixture(registry);
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("qualified patronage must succeed");
+        advance_days(
+            registry,
+            &mut state,
+            u32::try_from(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)
+                .expect("support establishment period must fit u32"),
+        )
+        .expect("campaign must reach established support");
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let member_dynasty_id = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist")
+            .members
+            .iter()
+            .filter_map(|member_id| state.characters.get(*member_id))
+            .map(Character::dynasty_id)
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("institution must contain a rival member house");
+        (state, player_id, institution_id, member_dynasty_id)
     }
 
     fn grant_nomination_delivery_record(
@@ -2753,10 +2801,69 @@ mod politics {
     }
 
     #[test]
+    fn candidate_capability_reduces_extra_patronage_preparation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let character_id = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        {
+            let capabilities = &mut state
+                .characters
+                .get_mut(character_id)
+                .expect("player character must exist")
+                .capabilities;
+            capabilities.administration = 0;
+            capabilities.commerce = 0;
+            capabilities.social = 0;
+            capabilities.craft = 0;
+        }
+        let unprepared = institution_support_delivery_requirement(
+            registry,
+            &state,
+            institution_id,
+            character_id,
+        );
+        {
+            let capabilities = &mut state
+                .characters
+                .get_mut(character_id)
+                .expect("player character must exist")
+                .capabilities;
+            capabilities.administration = 100;
+            capabilities.commerce = 100;
+            capabilities.social = 100;
+            capabilities.craft = 100;
+        }
+        let prepared = institution_support_delivery_requirement(
+            registry,
+            &state,
+            institution_id,
+            character_id,
+        );
+
+        assert_eq!(prepared, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT);
+        assert_eq!(
+            unprepared,
+            INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT
+                + INSTITUTION_SUPPORT_MAX_PREPARATION_DELIVERIES
+        );
+        assert!(prepared < unprepared);
+    }
+
+    #[test]
     fn patronage_creates_support_that_must_mature_before_nomination() {
         let registry = rivergate_registry_for_test();
         let (mut state, player_id, character_id, institution_id, treasury_before, budget_before) =
-            make_patronage_fixture();
+            make_patronage_fixture(registry);
+        let support_delivery_requirement = player_contract_deliveries(&state);
 
         apply_player_command(
             registry,
@@ -2804,7 +2911,7 @@ mod politics {
         assert_eq!(
             incomplete_record_nomination,
             Err(CommandError::InsufficientOfficeCommercialRecord {
-                delivered: INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+                delivered: support_delivery_requirement,
                 required: nomination_delivery_requirement,
             })
         );
@@ -2855,6 +2962,133 @@ mod politics {
             },
         )
         .expect("established support must permit nomination");
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn institution_endowment_waits_for_established_membership() {
+        let registry = rivergate_registry_for_test();
+        let (mut state, player_id, character_id, institution_id, _, _) =
+            make_patronage_fixture(registry);
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("qualified patronage must succeed");
+        let before_early_endowment = state.clone();
+        let early_error = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EndowInstitution {
+                institution_id,
+                amount: INSTITUTION_ENDOWMENT_MIN,
+            },
+        )
+        .expect_err("raw patronage membership must mature before endowment");
+        assert_eq!(
+            early_error,
+            CommandError::InstitutionEndowmentRequiresMembership { institution_id }
+        );
+        assert_state_unchanged(
+            &before_early_endowment,
+            &state,
+            "premature endowment must not turn fresh patronage into immediate political capital",
+        );
+        assert_eq!(state.player_dynasty_id, player_id);
+    }
+
+    #[test]
+    fn institution_endowment_builds_coalition_capital_and_has_dynasty_wide_cooldown() {
+        let registry = rivergate_registry_for_test();
+        let (mut state, player_id, institution_id, member_dynasty_id) =
+            make_established_endowment_fixture(registry);
+        let pair = DynastyPair::new(player_id, member_dynasty_id);
+        let relationship_before = state
+            .relationships
+            .get(&pair)
+            .expect("member-house relationship must exist")
+            .clone();
+        let institution_before = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist")
+            .clone();
+        let contributions_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .civic_contributions();
+        let amount = Money::from_copper(10_000);
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EndowInstitution {
+                institution_id,
+                amount,
+            },
+        )
+        .expect("established member must be able to endow its institution");
+
+        let player = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist");
+        assert_eq!(player.treasury(), Money::from_copper(90_000));
+        assert_eq!(
+            player.civic_contributions(),
+            contributions_before.saturating_add(amount)
+        );
+        let institution = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist");
+        assert_eq!(
+            institution.budget,
+            institution_before.budget.saturating_add(amount)
+        );
+        assert!(institution.legitimacy_basis_points > institution_before.legitimacy_basis_points);
+        let relationship = state
+            .relationships
+            .get(&pair)
+            .expect("member-house relationship must remain present");
+        assert!(relationship.trust_basis_points > relationship_before.trust_basis_points);
+        assert!(relationship.respect_basis_points > relationship_before.respect_basis_points);
+        assert!(
+            relationship.resentment_basis_points <= relationship_before.resentment_basis_points
+        );
+        assert!(state.audit_log.iter().any(|record| {
+            record.kind() == AuditKind::InstitutionEndowment
+                && record.subject() == format!("institution:{institution_id}")
+        }));
+
+        let before_second = state.clone();
+        let next_endowment_day = state
+            .clock
+            .day()
+            .saturating_add(INSTITUTION_ENDOWMENT_INTERVAL_DAYS);
+        let cooldown_error = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::EndowInstitution {
+                institution_id,
+                amount: INSTITUTION_ENDOWMENT_MIN,
+            },
+        )
+        .expect_err("the dynasty must choose only one major endowment per year");
+        assert_eq!(
+            cooldown_error,
+            CommandError::InstitutionEndowmentCooldown { next_endowment_day }
+        );
+        assert_state_unchanged(
+            &before_second,
+            &state,
+            "endowment cooldown rejection must be atomic",
+        );
         validate_invariants(registry, &state);
     }
 
@@ -2935,7 +3169,8 @@ mod politics {
     #[test]
     fn withdrawn_institution_support_can_be_rebuilt_after_the_cooldown() {
         let registry = rivergate_registry_for_test();
-        let (mut state, player_id, character_id, institution_id, _, _) = make_patronage_fixture();
+        let (mut state, player_id, character_id, institution_id, _, _) =
+            make_patronage_fixture(registry);
         apply_player_command(
             registry,
             &mut state,
@@ -6481,7 +6716,7 @@ mod serialization {
     use super::*;
     use std::collections::BTreeSet;
 
-    const COMMAND_KINDS: [&str; 27] = [
+    const COMMAND_KINDS: [&str; 28] = [
         "acquire-business",
         "acknowledge-notification",
         "adopt-ward",
@@ -6493,6 +6728,7 @@ mod serialization {
         "sell-property",
         "create-supply-contract",
         "educate-family-member",
+        "endow-institution",
         "enact-law",
         "exercise-office-power",
         "file-legal-case",
@@ -6532,6 +6768,7 @@ mod serialization {
             PlayerCommand::AdoptWard { .. } => "adopt-ward",
             PlayerCommand::EducateFamilyMember { .. } => "educate-family-member",
             PlayerCommand::CultivateInstitutionSupport { .. } => "cultivate-institution-support",
+            PlayerCommand::EndowInstitution { .. } => "endow-institution",
             PlayerCommand::NominateForOffice { .. } => "nominate-for-office",
             PlayerCommand::ExerciseOfficePower { .. } => "exercise-office-power",
             PlayerCommand::WithdrawFromInstitution { .. } => "withdraw-from-institution",
@@ -6664,6 +6901,10 @@ mod serialization {
                 focus: EducationFocus::Commerce,
             },
             representative_institution_support_command(),
+            PlayerCommand::EndowInstitution {
+                institution_id: InstitutionId::new(1),
+                amount: Money::from_copper(5_000),
+            },
             PlayerCommand::NominateForOffice {
                 institution_id: InstitutionId::new(1),
                 character_id: CharacterId::new(2),

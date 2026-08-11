@@ -19,7 +19,9 @@ use crate::ids::{
     BusinessId, CharacterId, CivicDebtId, DistrictId, DynastyId, EmploymentId, GoodId, HouseholdId,
     IdentifierAllocationError, InstitutionId, PropertyId,
 };
-use crate::money::{Money, Quantity, checked_cost_for, cost_for, rounded_cost_copper_wide};
+use crate::money::{
+    Money, Quantity, affordable_quantity, checked_cost_for, cost_for, rounded_cost_copper_wide,
+};
 use crate::registry::{InstitutionKind, Registry};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,6 +48,7 @@ const EPIDEMIC_DAILY_WELFARE_DIVISOR: u16 = 60;
 const DISTRICT_BACKGROUND_EMPLOYMENT_BASIS_POINTS: u16 = 4_500;
 const DISTRICT_FORMAL_EMPLOYMENT_BASIS_POINTS_PER_WORKER: u32 = 100;
 const DISTRICT_MAX_FORMAL_EMPLOYMENT_BONUS_BASIS_POINTS: u32 = 4_500;
+const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = 2_500;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StrategicError {
@@ -4693,6 +4696,7 @@ fn completed_public_work_employment_bonus_basis_points(
 
 fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     let treasury_id = registry.get_institution_id("treasury");
+    let tools_id = registry.get_good_id("tools");
     let ids: Vec<_> = state
         .public_works
         .values()
@@ -4711,6 +4715,11 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<()
         let weekly_spend = treasury_id
             .and_then(|treasury_id| state.institutions.get(&treasury_id))
             .map_or(Money::ZERO, |treasury| requested.min(treasury.budget));
+        let tool_purchase = if let Some(tools_id) = tools_id {
+            plan_public_work_tool_purchase(state, tools_id, weekly_spend)?
+        } else {
+            None
+        };
         if weekly_spend > Money::ZERO
             && let Some(treasury_id) = treasury_id
         {
@@ -4722,6 +4731,9 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<()
                 .budget
                 .checked_sub(weekly_spend)
                 .expect("bounded public-work spending must not exceed treasury budget");
+        }
+        if let Some(tool_purchase) = tool_purchase {
+            apply_public_work_tool_purchase(state, tool_purchase);
         }
 
         let completion = {
@@ -4779,6 +4791,74 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<()
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PublicWorkToolPurchase {
+    tools_id: GoodId,
+    market_stock_after: Quantity,
+    market_demand_after: Quantity,
+    clearing_after: Money,
+}
+
+fn plan_public_work_tool_purchase(
+    state: &AppState,
+    tools_id: GoodId,
+    weekly_spend: Money,
+) -> Result<Option<PublicWorkToolPurchase>, SimulationError> {
+    if weekly_spend <= Money::ZERO {
+        return Ok(None);
+    }
+    let quote = state
+        .market
+        .quotes
+        .get(&tools_id)
+        .expect("registered public-work tools quote must exist");
+    let tool_budget =
+        weekly_spend.saturating_mul_ratio(PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS, 10_000);
+    let quantity = quote
+        .stock
+        .min(affordable_quantity(tool_budget, quote.price));
+    if quantity <= Quantity::ZERO {
+        return Ok(None);
+    }
+    let cost = cost_for(quantity, quote.price);
+    let market_stock_after = quote
+        .stock
+        .checked_sub(quantity)
+        .expect("planned public-work tool purchase must not exceed market stock");
+    let market_demand_after =
+        quote
+            .demand_today
+            .checked_add(quantity)
+            .ok_or(SimulationError::MarketDemandOverflow {
+                good_id: tools_id,
+                current: quote.demand_today,
+                incoming: quantity,
+            })?;
+    let clearing_after = state.market.clearing_account.checked_add(cost).ok_or(
+        SimulationError::MarketClearingAccountOverflow {
+            current: state.market.clearing_account,
+            change: cost,
+        },
+    )?;
+    Ok(Some(PublicWorkToolPurchase {
+        tools_id,
+        market_stock_after,
+        market_demand_after,
+        clearing_after,
+    }))
+}
+
+fn apply_public_work_tool_purchase(state: &mut AppState, purchase: PublicWorkToolPurchase) {
+    let quote = state
+        .market
+        .quotes
+        .get_mut(&purchase.tools_id)
+        .expect("planned public-work tools quote must exist");
+    quote.stock = purchase.market_stock_after;
+    quote.demand_today = purchase.market_demand_after;
+    state.market.clearing_account = purchase.clearing_after;
 }
 
 fn update_relationships_from_obligations(state: &mut AppState) {

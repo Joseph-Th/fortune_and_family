@@ -1406,6 +1406,55 @@ mod household_demand {
                 "households must create durable demand for good {good_id}"
             );
         }
+        let tool_demand = plan
+            .lines
+            .iter()
+            .filter(|line| line.good_id == tools_id)
+            .fold(Quantity::ZERO, |total, line| {
+                total.saturating_add(line.quantity)
+            });
+        assert!(
+            tool_demand >= Quantity::from_units(3),
+            "aggregate Rivergate households must create material recurring demand for durable tools: demand={tool_demand}"
+        );
+    }
+
+    #[test]
+    fn household_textile_demand_can_absorb_one_standard_weaver() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let cloth_id = registry
+            .get_good_id("cloth")
+            .expect("registry must define cloth");
+        let weaving = registry
+            .get_recipe(
+                registry
+                    .get_recipe_id("weaving")
+                    .expect("registry must define weaving"),
+            )
+            .expect("weaving recipe must exist");
+        let standard_daily_output = weaving.output_quantity().saturating_mul_ratio(2, 1);
+        for household in state.households.iter_mut() {
+            household.cash = Money::from_copper(100_000);
+        }
+        for quote in state.market.quotes.values_mut() {
+            quote.stock = Quantity::from_units(10_000);
+        }
+
+        let plan =
+            decide_household_consumption(registry, &state).expect("household demand must resolve");
+        let cloth_demand = plan
+            .lines
+            .iter()
+            .filter(|line| line.good_id == cloth_id)
+            .fold(Quantity::ZERO, |total, line| {
+                total.saturating_add(line.quantity)
+            });
+
+        assert!(
+            cloth_demand >= standard_daily_output,
+            "Rivergate household demand must be able to absorb one normal two-batch weaving shop before additional producers create competition: demand={cloth_demand}, output={standard_daily_output}"
+        );
     }
 }
 

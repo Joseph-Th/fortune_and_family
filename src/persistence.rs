@@ -1681,40 +1681,7 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
             crate::systems::MAX_ACTIVE_SPONSORED_PUBLIC_WORKS
         ));
     }
-    let mut active_cases = BTreeSet::new();
-    for (case_id, legal_case) in &state.legal_cases {
-        if legal_case.id != *case_id
-            || legal_case.plaintiff_dynasty_id == legal_case.defendant_dynasty_id
-            || !state
-                .dynasties
-                .contains_key(&legal_case.plaintiff_dynasty_id)
-            || !state
-                .dynasties
-                .contains_key(&legal_case.defendant_dynasty_id)
-            || legal_case.filed_day > state.clock.day()
-            || legal_case.hearing_day < legal_case.filed_day
-            || (matches!(
-                legal_case.status,
-                crate::core::LegalCaseStatus::DecidedForPlaintiff
-                    | crate::core::LegalCaseStatus::DecidedForDefendant
-            ) && legal_case.hearing_day > state.clock.day())
-        {
-            return Err(format!("legal case {case_id} has an invalid reference"));
-        }
-        validate_legal_claim_source(state, *case_id, legal_case)?;
-        if matches!(
-            legal_case.status,
-            crate::core::LegalCaseStatus::Filed | crate::core::LegalCaseStatus::Hearing
-        ) && !active_cases.insert((
-            legal_case.plaintiff_dynasty_id,
-            legal_case.defendant_dynasty_id,
-            legal_case.kind,
-        )) {
-            return Err(format!(
-                "legal case {case_id} duplicates an unresolved case between the same parties"
-            ));
-        }
-    }
+    validate_legal_case_records(state)?;
     for (route_id, route) in &state.external_routes {
         if route.id != *route_id
             || route.name.trim().is_empty()
@@ -1737,6 +1704,59 @@ fn validate_civic_event_records(state: &AppState) -> Result<(), String> {
                 .has_consistent_severity(crisis.severity_basis_points)
         {
             return Err(format!("crisis {crisis_id} has an invalid reference"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_legal_case_records(state: &AppState) -> Result<(), String> {
+    let mut active_cases = BTreeSet::new();
+    let mut litigated_loans = BTreeSet::new();
+    let mut litigated_contracts = BTreeSet::new();
+    for (case_id, legal_case) in &state.legal_cases {
+        if legal_case.id != *case_id
+            || legal_case.plaintiff_dynasty_id == legal_case.defendant_dynasty_id
+            || !state
+                .dynasties
+                .contains_key(&legal_case.plaintiff_dynasty_id)
+            || !state
+                .dynasties
+                .contains_key(&legal_case.defendant_dynasty_id)
+            || legal_case.filed_day > state.clock.day()
+            || legal_case.hearing_day < legal_case.filed_day
+            || (matches!(
+                legal_case.status,
+                crate::core::LegalCaseStatus::DecidedForPlaintiff
+                    | crate::core::LegalCaseStatus::DecidedForDefendant
+            ) && legal_case.hearing_day > state.clock.day())
+        {
+            return Err(format!("legal case {case_id} has an invalid reference"));
+        }
+        if let Some(claim_source) = legal_case.claim_source {
+            let first_use = match claim_source {
+                LegalClaimSource::Loan { loan_id } => litigated_loans.insert(loan_id),
+                LegalClaimSource::Contract { contract_id } => {
+                    litigated_contracts.insert(contract_id)
+                }
+            };
+            if !first_use {
+                return Err(format!(
+                    "legal case {case_id} reuses a grounded claim source that was already litigated"
+                ));
+            }
+        }
+        validate_legal_claim_source(state, *case_id, legal_case)?;
+        if matches!(
+            legal_case.status,
+            crate::core::LegalCaseStatus::Filed | crate::core::LegalCaseStatus::Hearing
+        ) && !active_cases.insert((
+            legal_case.plaintiff_dynasty_id,
+            legal_case.defendant_dynasty_id,
+            legal_case.kind,
+        )) {
+            return Err(format!(
+                "legal case {case_id} duplicates an unresolved case between the same parties"
+            ));
         }
     }
     Ok(())
@@ -1826,28 +1846,53 @@ fn validate_persisted_history(state: &AppState) -> Result<(), String> {
         if record.subject().trim().is_empty() || record.detail().trim().is_empty() {
             return Err("audit record lacks diagnostic content".to_owned());
         }
-        if matches!(
-            record.kind(),
-            AuditKind::InstitutionPatronage | AuditKind::OfficeNomination
-        ) {
-            let Some((institution_id, character_id)) =
-                record.audit_subject().institution_character_ids()
-            else {
-                return Err(format!(
-                    "{:?} audit record has an invalid institution/character subject",
-                    record.kind()
-                ));
-            };
-            if !state.institutions.contains_key(&institution_id)
-                || state.characters.get(character_id).is_none()
-            {
-                return Err(format!(
-                    "{:?} audit record references a missing institution or character",
-                    record.kind()
-                ));
-            }
-        }
+        validate_audit_record_references(state, record)?;
         prior_audit_day = record.day();
+    }
+    Ok(())
+}
+
+fn validate_audit_record_references(
+    state: &AppState,
+    record: &crate::core::AuditRecord,
+) -> Result<(), String> {
+    if matches!(
+        record.kind(),
+        AuditKind::InstitutionPatronage | AuditKind::OfficeNomination
+    ) {
+        let Some((institution_id, character_id)) =
+            record.audit_subject().institution_character_ids()
+        else {
+            return Err(format!(
+                "{:?} audit record has an invalid institution/character subject",
+                record.kind()
+            ));
+        };
+        if !state.institutions.contains_key(&institution_id)
+            || state.characters.get(character_id).is_none()
+        {
+            return Err(format!(
+                "{:?} audit record references a missing institution or character",
+                record.kind()
+            ));
+        }
+    }
+    if matches!(
+        record.kind(),
+        AuditKind::OfficeDirective | AuditKind::InstitutionEndowment
+    ) {
+        let Some(institution_id) = record.audit_subject().institution_id() else {
+            return Err(format!(
+                "{:?} audit record has an invalid institution subject",
+                record.kind()
+            ));
+        };
+        if !state.institutions.contains_key(&institution_id) {
+            return Err(format!(
+                "{:?} audit record references missing institution {institution_id}",
+                record.kind()
+            ));
+        }
     }
     Ok(())
 }
@@ -1907,6 +1952,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             14 => migrate_v14_to_v15(value)?,
             15 => migrate_v15_to_v16(value)?,
             16 => migrate_v16_to_v17(value)?,
+            17 => migrate_v17_to_v18(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -2591,6 +2637,17 @@ fn migrate_v16_to_v17(mut value: Value) -> Result<Value, PersistenceError> {
         version: 16,
         reason: format!("normalized version-seventeen state cannot be serialized: {source}"),
     })
+}
+
+fn migrate_v17_to_v18(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 17,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    object.insert("schema_version".to_owned(), Value::from(18));
+    Ok(value)
 }
 
 fn v14_active_office_directives(

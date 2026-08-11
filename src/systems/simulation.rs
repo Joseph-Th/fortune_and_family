@@ -1123,10 +1123,10 @@ fn plan_household_purchase(
 
 fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, Quantity) {
     let (charcoal, cloth, tools) = match social_class {
-        SocialClass::Laboring => (180, 100, 10),
-        SocialClass::Artisan => (240, 200, 60),
-        SocialClass::Merchant => (300, 300, 80),
-        SocialClass::Elite => (360, 400, 100),
+        SocialClass::Laboring => (180, 200, 30),
+        SocialClass::Artisan => (240, 400, 120),
+        SocialClass::Merchant => (300, 600, 180),
+        SocialClass::Elite => (360, 800, 240),
     };
     (
         Quantity::from_milliunits(charcoal),

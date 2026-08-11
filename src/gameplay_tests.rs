@@ -838,6 +838,212 @@ mod candidates {
     }
 
     #[test]
+    fn wealthy_established_dynasty_can_allocate_surplus_to_an_institution() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        grant_player_office_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(200_000);
+        let protected_floor = AGENT_ENDOWMENT_LIQUIDITY_FLOOR.max(
+            player_office_duty_reserve(&state, 0).saturating_add(AGENT_ENDOWMENT_OFFICE_BUFFER),
+        );
+        let mut candidates = Vec::new();
+
+        generate_family_candidates(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut candidates,
+        );
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::EndowInstitution)
+            .expect("wealthy established dynasty must receive an endowment choice");
+        let PlayerCommand::EndowInstitution { amount, .. } = candidate.command else {
+            panic!("endowment command kind must carry an endowment command");
+        };
+        assert!(amount >= INSTITUTION_ENDOWMENT_MIN);
+        assert!(amount <= INSTITUTION_ENDOWMENT_MAX);
+        assert!(Money::from_copper(200_000).saturating_sub(amount) >= protected_floor);
+    }
+
+    #[test]
+    fn active_office_campaign_does_not_bypass_mature_endowment_liquidity_floor() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let character_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        let required_deliveries = institution_support_delivery_requirement(
+            registry,
+            &state,
+            institution_id,
+            character_id,
+        );
+        {
+            let player = state
+                .dynasties
+                .get_mut(&player_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(100_000);
+            player.resources.reputation_reliability_basis_points =
+                INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT;
+        }
+        grant_player_contract_deliveries_for_test(&mut state, required_deliveries);
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("qualified patronage must succeed");
+        advance_days(
+            registry,
+            &mut state,
+            u32::try_from(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)
+                .expect("support establishment period must fit u32"),
+        )
+        .expect("campaign must reach established support");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeNomination,
+            subject: format!("institution:{institution_id}:character:{character_id}").into(),
+            detail: "campaign_cost=300".to_owned(),
+        });
+        let protected_floor = AGENT_ENDOWMENT_LIQUIDITY_FLOOR.max(
+            player_office_duty_reserve(&state, 0).saturating_add(AGENT_ENDOWMENT_OFFICE_BUFFER),
+        );
+        let treasury = protected_floor
+            .saturating_add(INSTITUTION_ENDOWMENT_MIN)
+            .saturating_sub(Money::from_copper(1));
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = treasury;
+        let mut candidates = Vec::new();
+
+        generate_family_candidates(registry, &state, GameplayPersona::Steward, &mut candidates);
+
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.kind != GameplayCommandKind::EndowInstitution),
+            "a live office campaign must not bypass the mature endowment liquidity floor: {candidates:#?}"
+        );
+    }
+
+    #[test]
+    fn unresolved_office_campaign_preserves_parallel_family_nomination_route() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let characters: Vec<_> = state
+            .characters
+            .ids_for_dynasty(player_id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .take(2)
+            .collect();
+        assert_eq!(
+            characters.len(),
+            2,
+            "campaign must contain two family members"
+        );
+        let institutions: Vec<_> = state.institutions.keys().copied().take(2).collect();
+        assert_eq!(
+            institutions.len(),
+            2,
+            "campaign must contain two institutions"
+        );
+        for (character_id, institution_id) in characters.iter().zip(institutions.iter()) {
+            state
+                .institutions
+                .get_mut(institution_id)
+                .expect("institution must exist")
+                .members
+                .insert(*character_id);
+            state.audit_log.push(AuditRecord {
+                day: state
+                    .clock
+                    .day()
+                    .saturating_sub(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS),
+                kind: AuditKind::InstitutionPatronage,
+                subject: format!("institution:{institution_id}:character:{character_id}").into(),
+                detail: "test support".to_owned(),
+            });
+        }
+        {
+            let player = state
+                .dynasties
+                .get_mut(&player_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(100_000);
+            player.resources.reputation_quality_basis_points =
+                OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+            player.resources.reputation_reliability_basis_points =
+                OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        }
+        let required_deliveries = characters
+            .iter()
+            .zip(institutions.iter())
+            .map(|(character_id, institution_id)| {
+                office_nomination_delivery_requirement(
+                    registry,
+                    &state,
+                    *institution_id,
+                    *character_id,
+                )
+            })
+            .max()
+            .expect("fixture must have nomination requirements");
+        grant_player_contract_deliveries_for_test(&mut state, required_deliveries);
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeNomination,
+            subject: format!(
+                "institution:{}:character:{}",
+                institutions[0], characters[0]
+            )
+            .into(),
+            detail: "campaign_cost=300".to_owned(),
+        });
+        let mut candidates = Vec::new();
+
+        generate_institution_ascent_candidates(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut candidates,
+        );
+
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::NominateForOffice),
+            "a larger trained family must retain the option to run a parallel office campaign: {candidates:#?}"
+        );
+    }
+
+    #[test]
     fn established_dynasty_does_not_offer_generic_family_skill_grinding() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -1296,10 +1502,6 @@ mod candidates {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         grant_player_office_for_test(&mut state);
-        grant_player_contract_deliveries_for_test(
-            &mut state,
-            INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
-        );
         let player_id = state.player_dynasty_id;
         let player = state
             .dynasties
@@ -1322,6 +1524,13 @@ mod candidates {
                 })
             })
             .expect("coverage fixture must contain a player officeholder");
+        let required_deliveries = institution_support_delivery_requirement(
+            registry,
+            &state,
+            institution_id,
+            character_id,
+        );
+        grant_player_contract_deliveries_for_test(&mut state, required_deliveries);
         let withdrawal_day = state.clock.day();
 
         apply_player_command(
@@ -3921,6 +4130,60 @@ mod metrics {
     }
 
     #[test]
+    fn wealthy_sponsor_can_accelerate_an_active_public_work() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let district_id = state
+            .districts
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain a district");
+        let public_work_id = state.next_ids.public_work();
+        state.public_works.insert(
+            public_work_id,
+            crate::core::PublicWork {
+                id: public_work_id,
+                district_id,
+                kind: PublicWorkKind::Market,
+                sponsor_dynasty_id: Some(player_id),
+                budget: Money::from_copper(12_000),
+                spent: Money::from_copper(1_200),
+                progress_basis_points: 1_000,
+                status: PublicWorkStatus::Building,
+            },
+        );
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let mut candidates = Vec::new();
+
+        generate_public_work_funding_candidates(
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.command,
+                    PlayerCommand::FundPublicWork {
+                        public_work_id: candidate_id,
+                        amount,
+                    } if candidate_id == public_work_id && amount == Money::from_copper(10_800)
+                )
+            })
+            .expect("a wealthy sponsor must be able to accelerate an active civic commitment");
+        assert_eq!(candidate.kind, GameplayCommandKind::StartPublicWork);
+        assert!(candidate.description.contains("finish Market"));
+    }
+
+    #[test]
     fn terminal_phase_transition_requests_one_decision_cycle() {
         let mut accumulator = CampaignAccumulator::new();
         accumulator.fantasy_arc.first_succession_day = Some(7_200);
@@ -5611,6 +5874,75 @@ mod findings {
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
         finding_with_title(&findings, "Owned wealth can become decision-poor");
+    }
+
+    #[test]
+    fn findings_surface_mature_liquidity_without_financial_pressure() {
+        let report = cached_focused_report(30);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        let campaigns: Vec<_> = (1_u64..=4)
+            .map(|seed| {
+                let mut campaign = template.clone();
+                campaign.seed = seed;
+                campaign.simulated_days = 3_600;
+                campaign.start.player_treasury = Money::from_copper(37_000);
+                campaign.end.player_treasury = Money::from_copper(250_000);
+                campaign.maximum_player_delinquent_borrowing = 0;
+                campaign.maximum_player_defaulted_borrowing = 0;
+                campaign
+                    .commands
+                    .get_mut(&GameplayCommandKind::SellProperty)
+                    .expect("every campaign tracks property liquidation")
+                    .executed = 0;
+                campaign
+            })
+            .collect();
+        let mut findings = Vec::new();
+
+        add_mature_capital_pressure_finding(&campaigns, &mut findings);
+
+        let finding = finding_with_title(
+            &findings,
+            "Mature liquidity can outgrow meaningful financial pressure",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn findings_surface_starting_trade_hidden_difficulty() {
+        let report = cached_focused_report(30);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        let mut campaigns = Vec::new();
+        for (background, treasury) in [
+            (StartingBackground::Baker, Money::from_copper(320_000)),
+            (StartingBackground::Blacksmith, Money::from_copper(120_000)),
+        ] {
+            for seed in 1_u64..=4 {
+                let mut campaign = template.clone();
+                campaign.seed = seed;
+                campaign.background = background;
+                campaign.simulated_days = 3_600;
+                campaign.end.player_treasury = treasury;
+                campaigns.push(campaign);
+            }
+        }
+        let mut findings = Vec::new();
+
+        add_starting_trade_economic_balance_finding(&campaigns, &mut findings);
+
+        let finding = finding_with_title(
+            &findings,
+            "Starting trade behaves like a hidden mature-economy advantage",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
     }
 
     #[test]

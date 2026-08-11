@@ -600,6 +600,7 @@ pub enum AuditKind {
     PublicWorkStarted,
     CrisisResponse,
     InstitutionPatronage,
+    InstitutionEndowment,
     InstitutionWithdrawal,
     OfficeNomination,
     OfficeDutyShortfall,
@@ -642,6 +643,20 @@ impl AuditSubject {
         character_id: CharacterId,
     ) -> bool {
         self.institution_character_ids() == Some((institution_id, character_id))
+    }
+
+    #[must_use]
+    pub fn institution_id(&self) -> Option<InstitutionId> {
+        let mut segments = self.0.split(':');
+        if segments.next() != Some("institution") {
+            return None;
+        }
+        let institution_id = segments
+            .next()?
+            .parse::<u32>()
+            .ok()
+            .map(InstitutionId::new)?;
+        segments.next().is_none().then_some(institution_id)
     }
 
     #[must_use]
@@ -762,5 +777,18 @@ mod audit_subject_tests {
             AuditSubject::from("other:3:character:10").institution_character_ids(),
             None
         );
+    }
+
+    #[test]
+    fn institution_matching_requires_the_complete_typed_shape() {
+        assert_eq!(
+            AuditSubject::from("institution:3").institution_id(),
+            Some(InstitutionId::new(3))
+        );
+        assert_eq!(
+            AuditSubject::from("institution:3:extra").institution_id(),
+            None
+        );
+        assert_eq!(AuditSubject::from("other:3").institution_id(), None);
     }
 }
