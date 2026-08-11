@@ -527,8 +527,11 @@ fn print_human_summary(registry: &Registry, state: &civic_dynasty::AppState) {
         summary.scenario_name, summary.year, summary.day_of_year, summary.elapsed_days
     );
     println!(
-        "House {} | {:?} | treasury {} | business cash {}",
-        summary.dynasty_name, summary.phase, summary.dynasty_treasury, summary.business_cash
+        "House {} | {} | treasury {} | business cash {}",
+        summary.dynasty_name,
+        summary.phase.label(),
+        summary.dynasty_treasury,
+        summary.business_cash
     );
     println!(
         "Businesses: {} total, {} active | household groups: {} | food satisfaction: {:.1}%",

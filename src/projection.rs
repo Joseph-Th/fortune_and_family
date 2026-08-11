@@ -1128,7 +1128,7 @@ pub fn render_campaign_html(
         year = projection.scenario.year,
         day = projection.scenario.day_of_year,
         elapsed = projection.scenario.elapsed_days,
-        phase = campaign_phase_label(projection.scenario.phase),
+        phase = projection.scenario.phase.label(),
         player = escape_html(&player.name),
         treasury = player.treasury,
         load = player.effective_administrative_load,
@@ -1355,16 +1355,6 @@ fn render_notifications(notifications: &[NotificationProjection]) -> String {
         .expect("writing HTML into a String cannot fail");
     }
     alerts
-}
-
-const fn campaign_phase_label(phase: CampaignPhase) -> &'static str {
-    match phase {
-        CampaignPhase::Foundation => "Foundation",
-        CampaignPhase::Establishment => "Establishment",
-        CampaignPhase::Ascendancy => "Ascendancy",
-        CampaignPhase::Dominion => "Dominion",
-        CampaignPhase::Legacy => "Legacy",
-    }
 }
 
 const fn business_status_label(status: BusinessStatus) -> &'static str {

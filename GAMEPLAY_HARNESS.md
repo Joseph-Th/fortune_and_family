@@ -106,11 +106,11 @@ The harness uses four deterministic priority models:
 | `power-broker` | Family capacity, house intelligence, taxation, laws, courts, public works, and governance. |
 | `opportunist` | Leverage, acquisition, high-yield short-term credit, counterparty intelligence, legal pressure, crisis exploitation, and replacement labor. |
 
-Personas are diagnostic policies, not optimal strategies. Their purpose is to expose whether the command surface supports distinct priorities and outcomes. A politically weakened `power-broker` may commission a house brief on an equally or more institutionally embedded rival even before the relationship becomes openly hostile; the normal two-year intelligence cadence and office-duty reserve still prevent this from becoming routine housekeeping.
+Personas are diagnostic policies, not optimal strategies. Their purpose is to expose whether the command surface supports distinct priorities and outcomes. A politically weakened `power-broker` may commission a house brief on an equally or more institutionally embedded rival even before the relationship becomes openly hostile; the normal two-year intelligence cadence and office-duty reserve still prevent this from becoming routine housekeeping. If an already embedded dynasty falls below the minimum legitimacy needed to exercise office power, affordable institutional patronage is also treated as an explicit recovery route even when the target does not add a persona-preferred office power. That recovery patronage receives enough temporary priority to beat voluntary office withdrawal when both are viable, while preserving the canonical contribution cost, establishment delay, and later office-selection rules.
 
 Public-work ranking also includes a modest portfolio-repeat penalty after the player has completed a project of the same kind. The first project still follows material district need and persona priorities, but close later alternatives can overtake a repeated School, Market, or other template. This is a harness-agent policy rather than a canonical gameplay rule: it prevents a deterministic persona preference from hiding whether the public-work system supports a varied civic portfolio as district conditions change.
 
-The opportunist deliberately accepts greater operating and credit exposure than the other personas. Its growth policy spends less on maintenance, and its new lending uses the shortest, highest-yield terms a non-player borrower will normally accept. Credit candidates require an actual counterparty financing pressure such as low household liquidity, a distressed business, or delinquent debt. Solvent houses no longer accept high-yield debt merely because the player has surplus cash. When a non-player borrower accepts credit while one of its businesses is distressed, the financing unlocks a recapitalization commitment from the borrower as well: treasury above the protected household reserve is deployed into the business up to its recovery shortfall. This keeps the stress strategy inside the canonical political economy: lending can rescue a counterparty, create dependency, strengthen a rival enterprise, and expose the lender to repayment risk without the harness manufacturing a distressed borrower. The deep audit separately checks whether player credit actually changes borrower businesses, whether the long-horizon stress sample is large enough to judge repayment risk, and whether observed delinquency/default reaches a player enforcement action. Snapshots and campaign maxima distinguish delinquency/default on loans issued by the player from distress on unrelated private loans, so NPC-to-player or NPC-to-NPC defaults cannot create false coverage.
+The opportunist deliberately accepts greater operating and credit exposure than the other personas. Its growth policy spends less on maintenance, and its new lending uses the shortest, highest-yield terms a non-player borrower will normally accept. Credit candidates require an actual counterparty financing pressure such as low household liquidity, a distressed business, or delinquent debt. Solvent houses no longer accept high-yield debt merely because the player has surplus cash. When a non-player borrower accepts credit while one of its businesses is distressed, the financing unlocks a recapitalization commitment from the borrower as well: treasury above the protected household reserve is deployed into the business up to its recovery shortfall. This keeps the stress strategy inside the canonical political economy: lending can rescue a counterparty, create dependency, strengthen a rival enterprise, and expose the lender to repayment risk without the harness manufacturing a distressed borrower. The deep audit separately checks whether player credit actually changes borrower businesses, whether the long-horizon stress sample is large enough to judge repayment risk, and whether observed delinquency/default reaches a player enforcement action. Snapshots and campaign maxima distinguish delinquency/default on loans issued by the player, loans borrowed by the player, and unrelated private loans, so lender risk, debtor distress, and NPC-only defaults cannot be confused with one another.
 
 Legal pressure is likewise grievance-driven rather than synthetic. The harness only proposes a player case when the command layer can quote a concrete distressed loan or an attributable breached contract with an unpaid terminal penalty, and it uses the evidence ceiling and recoverable damages derived from that exact source. New campaigns no longer begin with an arbitrary lawsuit. Debt judgments reduce the source loan balance; contract judgments reduce only the tracked unpaid breach penalty. Money already recovered through repayment or ordinary contract settlement therefore cannot be collected a second time through court. Legacy saves may retain older cases without a persisted claim source, but new player filings always identify the obligation being litigated.
 
@@ -167,16 +167,16 @@ The harness classifies each decision cycle by the furthest reached fantasy miles
 | Foundation | Campaign start. |
 | Establishment | Reputation standing is reached. Late establishment can include early patronage and coalition-building. |
 | Institutional ascent | Full commercial standing is reached through reputation plus 78 credited deliveries. |
-| Dynastic governance | The first city-shaping law or public work is sponsored. |
+| Dynastic governance | The first city-shaping law, public work, or active office directive is committed. |
 | Succession and legacy | The first succession completes and the inherited organization begins operating under the next generation. |
 
-Each phase records action share, quiet and blocked cycles, how many quiet cycles still contain autonomous world change, the longest consecutive quiet streak, viable option depth, viable command-family breadth, multi-family choice frequency, and closely ranked alternatives. It records consequence differentiation twice: once across command families and again across every concrete viable target or template inside those families. Concrete profiles expose the direction of important economic, civic, family, and risk measures plus an impact fingerprint derived from measured outcomes. Civic measurement includes average district employment, sanitation, safety, unrest, citywide plus worst-district food satisfaction, and a stable per-district endpoint profile. Cross-persona convergence compares the same districts directly instead of allowing a strong local project effect to disappear inside a citywide average. A separate strategic fingerprint preserves identity-sensitive state so two different properties, institutions, wards, laws, or districts remain inspectable even when their short-horizon measured effects are equivalent. Campaign reports also track maximum relationship-driven contract pressure and the minimum family unity observed after succession. Findings distinguish consequential time passage from genuinely static downtime and apply phase-specific limits to consecutive quiet streaks: establishment and institutional ascent are expected to remain comparatively tight, while mature governance may tolerate longer world-moving intervals without manufacturing busywork. In dynastic governance and succession/legacy, concrete target depth no longer substitutes for cross-system breadth: those phases must satisfy their command-family breadth threshold independently because mature play is specifically expected to make business, family, political, and civic commitments compete. Phase findings name the exact thresholds that failed and identify the seed, persona, and background that produced the longest drought, so an outlier can be reproduced instead of disappearing inside aggregate statistics. They warn when establishment or institutional ascent becomes mostly waiting, when political ascent collapses into repetitive campaign administration, when apparently broad choices have one obvious winner, equivalent immediate effects, or convergent short-term trajectories, when repeated property acquisition becomes a universal progression path across otherwise distinct personas, when mature civic builders converge on one public-work type, when rival hostility rarely changes commercial leverage, when mature governance is strategically narrow or develops an excessive uninterrupted drought, when succession rarely disrupts family cohesion, or when succession produces no meaningful post-transition strategy. Quiet observation while the world continues to change is reported but is not treated as dead time. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
+Each phase records action share, quiet and blocked cycles, how many quiet cycles still contain autonomous world change, the longest consecutive quiet streak, viable option depth, viable command-family breadth, multi-family choice frequency, and closely ranked alternatives. It records consequence differentiation twice: once across command families and again across every concrete viable target or template inside those families. Concrete profiles expose the direction of important economic, civic, family, and risk measures plus an impact fingerprint derived from measured outcomes. Civic measurement includes average district employment, sanitation, safety, unrest, citywide plus worst-district food satisfaction, and a stable per-district endpoint profile. Cross-persona convergence compares the same districts directly instead of allowing a strong local project effect to disappear inside a citywide average. A separate strategic fingerprint preserves identity-sensitive state so two different properties, institutions, wards, laws, or districts remain inspectable even when their short-horizon measured effects are equivalent. Campaign reports also track maximum relationship-driven contract pressure and the minimum family unity observed after succession. Findings distinguish consequential time passage from genuinely static downtime and apply phase-specific limits to consecutive quiet streaks: establishment and institutional ascent are expected to remain comparatively tight, while mature governance may tolerate longer world-moving intervals without manufacturing busywork. At the default 30-day decision cadence, dynastic governance permits up to eleven consecutive quiet observations because an intentional 360-day civic sponsorship interval can leave exactly eleven observation cycles between legal commitments; a twelfth quiet cycle exceeds that annual commitment window. In dynastic governance and succession/legacy, concrete target depth no longer substitutes for cross-system breadth: those phases must satisfy their command-family breadth threshold independently because mature play is specifically expected to make business, family, political, and civic commitments compete. Phase findings name the exact thresholds that failed and identify the seed, persona, and background that produced the longest drought, so an outlier can be reproduced instead of disappearing inside aggregate statistics. They warn when establishment or institutional ascent becomes mostly waiting, when political ascent collapses into repetitive campaign administration, when apparently broad choices have one obvious winner, equivalent immediate effects, or convergent short-term trajectories, when repeated property acquisition becomes a universal progression path across otherwise distinct personas, when mature civic builders converge on one public-work type, when rival hostility rarely changes commercial leverage, when mature governance is strategically narrow or develops an excessive uninterrupted drought, when succession rarely disrupts family cohesion, or when succession produces no meaningful post-transition strategy. Quiet observation while the world continues to change is reported but is not treated as dead time. A strong aggregate score must not hide a passive phase or a single severe campaign drought.
 
 ## Recovery routes
 
 The harness must be able to discover and evaluate canonical recovery actions, including:
 
-- Business recapitalization and internal cash transfer
+- Business recapitalization, internal business-to-business cash transfer, and protected owner distributions from surplus business cash back to dynasty treasury
 - New credit when available
 - Delayed restructuring of defaulted credit
 - Voluntary property liquidation, including emergency sales by healthy but cash-poor dynasties with several properties
@@ -184,7 +184,9 @@ The harness must be able to discover and evaluate canonical recovery actions, in
 - Distressed civic auction guarantees when private liquidity is insufficient
 - Voluntary institutional withdrawal when office duties threaten business or household liquidity
 
-A campaign with assets or institutional options should not be classified as unrecoverable merely because immediate cash is low. Trace context includes collateral and liquidity state so blocked recovery can be diagnosed.
+A campaign with assets, healthy operating businesses, or institutional options should not be classified as unrecoverable merely because immediate treasury cash is low. Owner-distribution candidates preserve the same operating floor used by automatic dividends and are rate-limited by the agents, so the harness can test a real capital-allocation tradeoff rather than manufacture liquidity. Trace context includes business cash, collateral, and treasury state so blocked recovery can be diagnosed.
+
+Mature civic play also needs a route in the opposite direction: once commercial success has created large private reserves, the harness can fund a player-sponsored public work that municipal finance has suspended. The funding candidate is grouped with public-work strategy rather than treated as generic spending. This tests whether the core fantasy can actually convert private commercial power into completed civic outcomes without loosening sponsorship cadence or inventing filler actions.
 
 ## Counterfactual attribution
 
@@ -214,9 +216,9 @@ Scores range from 0 to 100.
 |---|---|
 | Actionability | Whether substantive candidates pass canonical validation. |
 | Variety | Command-direction coverage, action distribution, command-family breadth, and projected consequence diversity among concrete viable alternatives. |
-| Interconnection | Distinct command-to-domain edges and consequence breadth. |
-| Feedback | Observable immediate and durable delayed results. |
-| Resilience | Business continuity, citywide and worst-district food access, liquidity, labor pressure, crisis load, and material district employment, sanitation, safety, and unrest. |
+| Interconnection | Distinct command-to-system edges and consequence breadth, excluding the `Feedback` observability domain so notifications do not inflate systemic coupling. |
+| Feedback | A weighted blend of observable player-facing feedback and delayed material consequences; immediate messaging alone cannot earn a perfect score. |
+| Resilience | Business continuity, citywide and worst-district food access, liquidity, player-borrowed credit distress, labor pressure, crisis load, and material district employment, sanitation, safety, and unrest. |
 | Overall | Weighted summary of the component scores. |
 
 Use component scores and findings for diagnosis. The overall score is a coarse gate, not a complete design verdict.
@@ -229,7 +231,7 @@ Findings use `Info`, `Warning`, or `Critical` severity. They cover conditions su
 - Repetitive command streaks and housekeeping displacement
 - Long periods without a substantive action, including severe outlier campaigns hidden by healthy aggregate averages
 - Quiet decision cycles that produce neither a player action nor meaningful autonomous world change
-- Asset-rich but cash-poor quiet streaks measured while the liquidity condition is actually present, not inferred from unrelated endpoint wealth
+- Owned-wealth but treasury-poor quiet streaks, including wealth trapped in operating businesses, measured while the liquidity condition is actually present rather than inferred from unrelated endpoint wealth
 - Economic states with no viable recovery route
 - Active but ineffective recovery churn that remains under severe financial pressure for at least one campaign-year through the endpoint
 - Persistent business, food, labor, credit, crisis, or notification failure
@@ -239,6 +241,9 @@ Findings use `Info`, `Warning`, or `Critical` severity. They cover conditions su
 - Distinct civic strategies whose laws, offices, projects, or governance differ but whose material city conditions still converge
 - Mature office directives that create immediate effects but no later trajectory change
 - Generation-length matrices that never expose private-credit or civic-debt distress
+- Player-borrowed delinquency or default, tracked separately from player-issued lending risk and unrelated private credit
+- Mature campaigns with defaulted private debt but no court activity, which indicates that economic distress is failing to reach institutional enforcement
+- Background-specific expansion routes that never generate a candidate even though the same route is reachable from another starting background, preventing aggregate command coverage from hiding a starting-economy ceiling
 - Public-work or office-duty overload
 - Misordered, compressed, synchronized, or unreachable campaign milestones
 - Weak strategic variety or persona convergence
@@ -253,6 +258,7 @@ Findings use `Info`, `Warning`, or `Critical` severity. They cover conditions su
 - Political growth without family capacity
 - Near-universal institutional representation that erodes specialization
 - Long campaigns that do not reach stable succession
+- Politically mature dynasties that lose institutional reach at succession and remain below the minimum legitimacy needed to exercise office power for at least two years without beginning patronage or a new office campaign
 
 Absence is interpreted against the configured horizon and prerequisite availability. Event-driven and office-power-dependent commands are not treated as broken before their trigger or mature authority exists. A viable command that appears in fewer than three decision cycles but loses to a stronger alternative is informational; repeated viable non-selection remains a warning. The report records actual law and public-work activation opportunities rather than inferring availability from campaign age alone.
 
@@ -265,7 +271,7 @@ Each retained step includes:
 - Considered, viable, and substantive candidate counts
 - Distinct viable command families
 - Ranked candidates and scores
-- Every successfully probed viable concrete alternative, its score and target description, immediate and projected domains, directional measured impacts, an impact fingerprint, and an identity-sensitive strategic fingerprint
+- Every successfully probed viable concrete alternative, its score and target description, immediate and projected domains, exact before/after values for measured material impacts, directional impact sets, an impact fingerprint, and an identity-sensitive strategic fingerprint
 - Score distance between the strongest two command families
 - Number of distinct immediate consequence profiles among viable command families
 - Number of distinct projected consequence profiles among viable command families
@@ -275,7 +281,7 @@ Each retained step includes:
 - Immediate, persistent, delayed, and ambient domains
 - World-feedback flags
 
-Context includes treasury, business cash and condition, deliveries, loan states, property and collateral, reputation, legitimacy, offices, total institutional memberships, distinct institutions represented, laws, public works, district employment, sanitation, safety and unrest, wards, family unity, generation, labor disputes, crises, and notifications.
+Context includes treasury, business cash and condition, deliveries, global loan states, player-issued credit distress, player-borrowed credit distress, property and collateral, reputation, legitimacy, offices, total institutional memberships, distinct institutions represented, laws, public works, district employment, sanitation, safety and unrest, wards, family unity, generation, labor disputes, crises, and notifications.
 
 The trace sampler retains representative opening, closing, and high-consequence decisions. `--trace-limit` affects diagnostics only.
 
@@ -291,6 +297,9 @@ The JSON report contains:
 - Per-phase actionability, longest quiet streak, viable option depth, command-family breadth among actionable cycles, patronage-and-nomination administration share, family-level and concrete-option close-choice frequency, and immediate plus one-interval projected consequence differentiation
 - Per-phase and aggregate separation of quiet cycles with ambient world change from genuinely static quiet cycles
 - Per-campaign start and end snapshots
+- Per-campaign first-succession transition snapshots for unity, legitimacy, offices, institution memberships, and represented institutions, so political embedding lost during succession cannot hide inside a family-cohesion number
+- Separate player-lender and player-borrower credit states and campaign peak distress, so a financially collapsing dynasty cannot hide inside citywide loan totals
+- Exact before/after values for the material measures retained in immediate and projected consequence profiles, so a small tradeoff and a ruinous one are no longer represented only by the same directional arrow
 - Material civic endpoint measures for average district employment, sanitation, safety, and unrest in addition to food access, plus the stable per-district condition profile used to detect localized divergence
 - Readable active-law and player-completed-public-work kind sets, so civic identity is inspectable without reverse-engineering checksums
 - Fantasy-arc milestone timing plus the first institutional support target, office-campaign target, and city-shaping command, so synchronized timing can be distinguished from synchronized strategy
@@ -312,7 +321,8 @@ Additional tests make stale coverage fail visibly:
 - Every generated candidate is checked against that classifier before probing. Incorrect labels, including supply-versus-sale and borrowing-versus-lending splits, abort the harness.
 - The serialized top-level `AppState` component manifest is compared with an explicit observed or intentionally unobserved list. Adding a new state subsystem requires a harness review. Persistent audit history is observed because cooldowns, office-duty forfeiture, and candidate availability depend on it.
 - Domain snapshots include deterministic structural checksums for businesses, households, markets, routes, contracts, finance, property, labor, relationships, characters, family state, institutions, laws, districts, public works, legal cases, crises, information, AI objectives, notifications, chronicle history, and audit history. Equal aggregate totals cannot conceal a material state transition. Audit-only changes are represented as a typed persistent-history signal rather than being mislabeled as player-facing feedback.
-- Focused tests cover changes that were previously easy to miss, including district sanitation, route disruption, legal hearing progression, and pledged collateral.
+- Focused tests cover changes that were previously easy to miss, including district sanitation, route disruption, legal hearing progression, pledged collateral, player-borrowed defaults, and the magnitude of measured consequences.
+- The generation-length design audit requires a first-succession transition for every persona, checks that each transition day matches the fantasy milestone, and fails if political succession strands institutional recovery.
 
 ## Integration checklist
 
@@ -345,5 +355,6 @@ The harness can evaluate deterministic state and command behavior. It cannot est
 - Whether a relationship-driven premium or succession shock feels fair, attributable, and emotionally salient rather than merely measurable
 - How every unchosen branch develops beyond the first decision interval and across its full delayed consequence horizon
 - Whether persistent state and chronicle changes feel like a coherent remembered family legacy
+- Whether a persona-filtered candidate shortlist reflects the full set of strategies a human player would discover; the harness reports policy-visible breadth, so cross-persona matrices are required before treating a narrow shortlist as a hard game-system ceiling
 
 Use human playtesting for those questions.

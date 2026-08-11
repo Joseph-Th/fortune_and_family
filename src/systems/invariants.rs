@@ -232,6 +232,11 @@ fn validate_dynasties(state: &AppState) {
             dynasty.runtime.generation > 0 && dynasty.runtime.generation < u16::MAX,
             "Lifecycle Validity: dynasty generation must be positive and retain succession headroom"
         );
+        debug_assert!(
+            super::campaign_phase_is_consistent(state, dynasty.id()),
+            "Derived Data Consistency: dynasty {} campaign phase is stale or incompatible with progression",
+            dynasty.id()
+        );
     }
 }
 
@@ -490,7 +495,7 @@ fn validate_institutions(registry: &Registry, state: &AppState, ids: &RegistryId
         );
         debug_assert!(
             institution.active_directive.is_none_or(|directive| {
-                directive.expires_day >= 0
+                directive.expires_day >= state.clock.day()
                     && directive.expires_day < i64::MAX
                     && institution.powers.contains(&directive.power)
             }),
@@ -1292,6 +1297,7 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
         debug_assert!(
             is_schedulable_day(report.expires_day)
                 && report.created_day <= state.clock.day()
+                && report.expires_day >= state.clock.day()
                 && report.expires_day >= report.created_day,
             "Lifecycle Validity: information report dates are invalid"
         );

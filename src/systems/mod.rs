@@ -3,6 +3,8 @@
 mod bootstrap;
 mod commands;
 mod invariants;
+mod legal;
+mod progression;
 mod simulation;
 mod strategic;
 mod transactions;
@@ -131,7 +133,6 @@ pub(crate) use commands::{
     INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
     INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
     LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS,
-    LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LegalClaimQuote,
     MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
     OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
@@ -148,7 +149,7 @@ pub(crate) use commands::{
 };
 pub use commands::{
     CommandError, CommandOutcome, CrisisResponse, EducationFocus, InformationFocus, LaborResponse,
-    PlayerCommand, apply_player_command,
+    PlayerCommand, PublicWorkFundingError, apply_player_command,
 };
 #[cfg(test)]
 pub(crate) use commands::{
@@ -156,8 +157,18 @@ pub(crate) use commands::{
     INSTITUTION_WITHDRAWAL_RECOVERY_DAYS,
 };
 pub use invariants::validate_invariants;
+pub(crate) use legal::{
+    LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LegalClaimQuote,
+    quote_grounded_legal_claim,
+};
+pub(crate) use progression::{
+    campaign_phase_is_consistent, campaign_phase_is_persistently_consistent,
+    contract_deliveries_for_dynasty, rebuild_campaign_phases, refresh_campaign_phases,
+};
 pub use simulation::advance_days;
 pub(crate) use strategic::MAX_RELATIONSHIP_MEMORIES;
+#[cfg(test)]
+pub(crate) use strategic::PROPERTY_LIQUIDATION_BASIS_POINTS;
 pub use strategic::{
     BusinessAcquisitionQuote, LoanTerms, PropertyLiquidationQuote, StrategicError,
     SupplyContractTerms, ValidatedLoan, ValidatedSupplyContract, acquire_business,
@@ -166,11 +177,13 @@ pub use strategic::{
 };
 pub(crate) use strategic::{
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, STANDARD_CONTRACT_BATCHES_PER_WEEK,
-    available_supply_contract_capacity, business_recapitalization_target,
-    capitalize_owned_business, crisis_response_contains_crisis, dynasty_office_administrative_load,
-    effective_property_weekly_rent, initialize_strategic_state, institution_capability_score,
-    projected_dynasty_monthly_office_duty,
+    available_supply_contract_capacity, business_owner_distribution_reserve,
+    business_recapitalization_target, capitalize_owned_business, crisis_response_contains_crisis,
+    distribute_owned_business_cash, dynasty_office_administrative_load,
+    effective_property_weekly_rent, expire_time_limited_state, initialize_strategic_state,
+    institution_capability_score, projected_dynasty_monthly_office_duty,
     projected_dynasty_monthly_office_duty_with_additional_offices,
+    rebuild_defaulted_collateral_recoveries,
 };
 pub use transactions::{
     SimulationError, TimelineError, ValidatedCashTransfer, transfer_business_cash,

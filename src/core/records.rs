@@ -63,6 +63,20 @@ pub enum CampaignPhase {
     Legacy,
 }
 
+impl CampaignPhase {
+    /// Returns the product-facing name for this stage of the dynasty campaign.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Foundation => "Foundation",
+            Self::Establishment => "Establishment",
+            Self::Ascendancy => "Institutional ascent",
+            Self::Dominion => "Dynastic governance",
+            Self::Legacy => "Succession and legacy",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CharacterStatus {
     Active,

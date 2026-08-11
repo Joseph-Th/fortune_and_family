@@ -6,10 +6,10 @@ use super::transactions::{
     next_family_charter_version,
 };
 use crate::core::{
-    AppState, AuditKind, AuditRecord, BusinessStatus, CampaignPhase, Character,
-    CharacterCapabilities, CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus,
-    ChronicleEntry, ChronicleKind, CrisisKind, EmploymentStatus, FamilyLink, FamilyLinkKind,
-    HouseGovernance, MarketCause, OutboxKind, SocialClass,
+    AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
+    CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry,
+    ChronicleKind, CrisisKind, EmploymentStatus, FamilyLink, FamilyLinkKind, HouseGovernance,
+    MarketCause, OutboxKind, SocialClass,
 };
 use crate::ids::{BusinessId, CharacterId, DynastyId, GoodId};
 use crate::money::{Money, Quantity, affordable_quantity, checked_cost_for, cost_for};
@@ -36,10 +36,13 @@ struct ProductionLine {
     output_good_id: GoodId,
     output_quantity: Quantity,
     operating_cost: Money,
+    tool_quantity: Quantity,
+    tool_cost: Money,
 }
 
 #[derive(Clone, Debug)]
 struct ProductionPlan {
+    tools_id: GoodId,
     lines: Vec<ProductionLine>,
 }
 
@@ -74,12 +77,15 @@ struct HouseholdConsumptionPlan {
 struct MaintenanceLine {
     business_id: BusinessId,
     cost: Money,
+    tool_quantity: Quantity,
+    tool_cost: Money,
     condition_delta: i16,
     quality_delta: i16,
 }
 
 #[derive(Clone, Debug)]
 struct MaintenancePlan {
+    tools_id: GoodId,
     lines: Vec<MaintenanceLine>,
 }
 
@@ -186,6 +192,7 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
     update_business_lifecycle(registry, state)?;
 
     state.clock.advance_one_day();
+    super::strategic::expire_time_limited_state(state);
     if state.clock.is_week_boundary() {
         settle_weekly_external_income(state)?;
         super::strategic::run_weekly_strategic_systems(registry, state)?;
@@ -197,6 +204,7 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
         process_year_boundary(registry, state)?;
         super::strategic::run_annual_strategic_systems(state)?;
     }
+    super::refresh_campaign_phases(state);
 
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
@@ -393,14 +401,36 @@ fn apply_business_purchases(
 }
 
 fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
-    ProductionPlan {
-        lines: state
-            .businesses
-            .iter()
-            .filter_map(|business| decide_business_production(registry, state, business))
-            .collect(),
+    let tools_id = registry
+        .get_good_id("tools")
+        .expect("Rivergate registry must define tools");
+    let tools_quote = state
+        .market
+        .quotes
+        .get(&tools_id)
+        .expect("Rivergate market must define tools");
+    let tools_price = tools_quote.price;
+    let mut remaining_tools_stock = tools_quote.stock;
+    let mut lines = Vec::new();
+    for business in state.businesses.iter() {
+        let Some(mut line) = decide_business_production(registry, state, business) else {
+            continue;
+        };
+        if line.output_good_id != tools_id && line.operating_cost > Money::ZERO {
+            let tool_budget = line
+                .operating_cost
+                .saturating_mul_ratio(PRODUCTION_TOOL_SHARE_BASIS_POINTS, 10_000);
+            line.tool_quantity =
+                remaining_tools_stock.min(affordable_quantity(tool_budget, tools_price));
+            line.tool_cost = cost_for(line.tool_quantity, tools_price);
+            remaining_tools_stock = remaining_tools_stock.saturating_sub(line.tool_quantity);
+        }
+        lines.push(line);
     }
+    ProductionPlan { tools_id, lines }
 }
+
+const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = 8_000;
 
 fn decide_business_production(
     registry: &Registry,
@@ -456,6 +486,8 @@ fn decide_business_production(
         operating_cost: recipe
             .daily_operating_cost()
             .saturating_mul(i64::from(batches)),
+        tool_quantity: Quantity::ZERO,
+        tool_cost: Money::ZERO,
     })
 }
 
@@ -599,17 +631,23 @@ const fn governance_administrative_multiplier(governance: HouseGovernance) -> u3
 }
 
 fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), SimulationError> {
+    let ProductionPlan { tools_id, lines } = plan;
     let mut total_output_milliunits = 0_i128;
     let mut total_operating_cost_copper = 0_i128;
+    let mut total_tool_quantity_milliunits = 0_i128;
+    let mut total_tool_spending_copper = 0_i128;
 
-    for line in plan.lines {
+    for line in lines {
         let ProductionLine {
             business_id,
             inputs,
             output_good_id,
             output_quantity,
             operating_cost,
+            tool_quantity,
+            tool_cost,
         } = line;
+        let market_update = planned_tool_market_update(state, tools_id, tool_quantity, tool_cost)?;
         let business = state
             .businesses
             .get_mut(business_id)
@@ -655,6 +693,18 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), Si
         business.finance.cash = resulting_cash;
         business.finance.lifetime_costs = resulting_lifetime_costs;
         business.finance.version = next_finance_version;
+        if let Some((resulting_stock, resulting_demand, resulting_clearing)) = market_update {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&tools_id)
+                .expect("planned production tools quote must exist");
+            quote.stock = resulting_stock;
+            quote.demand_today = resulting_demand;
+            state.market.clearing_account = resulting_clearing;
+        }
+        total_tool_quantity_milliunits += i128::from(tool_quantity.milliunits());
+        total_tool_spending_copper += i128::from(tool_cost.copper());
         total_output_milliunits += i128::from(output_quantity.milliunits());
         total_operating_cost_copper += i128::from(operating_cost.copper());
     }
@@ -665,11 +715,52 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), Si
             kind: AuditKind::Production,
             subject: "businesses".into(),
             detail: format!(
-                "output={total_output_milliunits}; operating_cost={total_operating_cost_copper}"
+                "output={total_output_milliunits}; operating_cost={total_operating_cost_copper}; tools={total_tool_quantity_milliunits}; tool_spending={total_tool_spending_copper}"
             ),
         });
     }
     Ok(())
+}
+
+fn planned_tool_market_update(
+    state: &AppState,
+    tools_id: GoodId,
+    quantity: Quantity,
+    cost: Money,
+) -> Result<Option<(Quantity, Quantity, Money)>, SimulationError> {
+    if quantity <= Quantity::ZERO {
+        return Ok(None);
+    }
+    let quote = state
+        .market
+        .quotes
+        .get(&tools_id)
+        .expect("planned tools quote must exist");
+    let resulting_stock = quote
+        .stock
+        .checked_sub(quantity)
+        .expect("planned tool use must fit market stock");
+    let resulting_demand =
+        quote
+            .demand_today
+            .checked_add(quantity)
+            .ok_or(SimulationError::MarketDemandOverflow {
+                good_id: tools_id,
+                current: quote.demand_today,
+                incoming: quantity,
+            })?;
+    let clearing_before = state.market.clearing_account;
+    let resulting_clearing = clearing_before.checked_add(cost).ok_or(
+        SimulationError::MarketClearingAccountOverflow {
+            current: clearing_before,
+            change: cost,
+        },
+    )?;
+    Ok(Some((
+        resulting_stock,
+        resulting_demand,
+        resulting_clearing,
+    )))
 }
 
 fn decide_business_sales(
@@ -1131,7 +1222,19 @@ fn apply_household_consumption(
     Ok(())
 }
 
+const MAINTENANCE_TOOL_SHARE_BASIS_POINTS: i64 = 10_000;
+
 fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenancePlan {
+    let tools_id = registry
+        .get_good_id("tools")
+        .expect("Rivergate registry must define tools");
+    let tools_quote = state
+        .market
+        .quotes
+        .get(&tools_id)
+        .expect("Rivergate market must define tools");
+    let tools_price = tools_quote.price;
+    let mut remaining_tools_stock = tools_quote.stock;
     let snapshots: Vec<_> = state
         .businesses
         .iter()
@@ -1174,6 +1277,15 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
         let effect_points = maintenance_effect(maintenance_basis_points, condition_basis_points);
         let can_maintain =
             desired_cost > Money::ZERO && cash.saturating_sub(minimum_cash_reserve) >= desired_cost;
+        let tool_budget = if can_maintain && recipe.output_good_id() != tools_id {
+            desired_cost.saturating_mul_ratio(MAINTENANCE_TOOL_SHARE_BASIS_POINTS, 10_000)
+        } else {
+            Money::ZERO
+        };
+        let tool_quantity =
+            remaining_tools_stock.min(affordable_quantity(tool_budget, tools_price));
+        let tool_cost = cost_for(tool_quantity, tools_price);
+        remaining_tools_stock = remaining_tools_stock.saturating_sub(tool_quantity);
         let random_wear = i16::try_from(state.rng.range_u32(4)).expect("wear fits i16");
         let neglect_penalty = if can_maintain { 0 } else { 5 };
         let accident_penalty = if condition_basis_points < 4_000 && state.rng.is_chance_success(40)
@@ -1206,12 +1318,14 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
             } else {
                 Money::ZERO
             },
+            tool_quantity,
+            tool_cost,
             condition_delta: improvement - 2 - random_wear - neglect_penalty - accident_penalty,
             quality_delta: quality_improvement - quality_decline,
         });
     }
 
-    MaintenancePlan { lines }
+    MaintenancePlan { tools_id, lines }
 }
 
 fn maintenance_cost(daily_operating_cost: Money, maintenance_basis_points: u16) -> Money {
@@ -1231,19 +1345,26 @@ fn maintenance_effect(maintenance_basis_points: u16, condition_basis_points: u16
 }
 
 fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), SimulationError> {
+    let MaintenancePlan { tools_id, lines } = plan;
     let mut total_cost_copper = 0_i128;
-    for line in plan.lines {
+    let mut total_tool_cost_copper = 0_i128;
+    let mut total_tool_quantity_milliunits = 0_i128;
+    for line in lines {
         let MaintenanceLine {
             business_id,
             cost,
+            tool_quantity,
+            tool_cost,
             condition_delta,
             quality_delta,
         } = line;
+        let market_update = planned_tool_market_update(state, tools_id, tool_quantity, tool_cost)?;
         let business = state
             .businesses
             .get_mut(business_id)
             .expect("planned maintenance business must exist");
         if cost > Money::ZERO {
+            debug_assert!(tool_cost <= cost);
             let resulting_cash = business
                 .finance
                 .cash
@@ -1272,14 +1393,28 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
             .clamp(0, 10_000);
         business.operations.quality_basis_points =
             u16::try_from(quality).expect("clamped quality must fit u16");
+        if let Some((resulting_stock, resulting_demand, resulting_clearing)) = market_update {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&tools_id)
+                .expect("planned maintenance tools quote must exist");
+            quote.stock = resulting_stock;
+            quote.demand_today = resulting_demand;
+            state.market.clearing_account = resulting_clearing;
+        }
         total_cost_copper += i128::from(cost.copper());
+        total_tool_cost_copper += i128::from(tool_cost.copper());
+        total_tool_quantity_milliunits += i128::from(tool_quantity.milliunits());
     }
     if total_cost_copper != 0 {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::Maintenance,
             subject: "businesses".into(),
-            detail: format!("cost={total_cost_copper}"),
+            detail: format!(
+                "cost={total_cost_copper}; tools={total_tool_quantity_milliunits}; tool_spending={total_tool_cost_copper}"
+            ),
         });
     }
     Ok(())
@@ -1644,7 +1779,7 @@ fn process_year_boundary(registry: &Registry, state: &mut AppState) -> Result<()
         summary: format!("Rivergate entered the year {year}."),
     });
 
-    update_campaign_phases(state);
+    update_succession_risks(state);
     update_character_health(state)?;
     let succession_plan = decide_successions(state)?;
     apply_successions(state, succession_plan)?;
@@ -1794,15 +1929,7 @@ fn resolve_annual_health(current: u16, age_years: i64, epidemic_severity: u16) -
         .expect("clamped health must fit u16")
 }
 
-fn update_campaign_phases(state: &mut AppState) {
-    let elapsed_years = state.clock.day() / 360;
-    let phase = match elapsed_years {
-        0..=4 => CampaignPhase::Foundation,
-        5..=14 => CampaignPhase::Establishment,
-        15..=29 => CampaignPhase::Ascendancy,
-        30..=49 => CampaignPhase::Dominion,
-        _ => CampaignPhase::Legacy,
-    };
+fn update_succession_risks(state: &mut AppState) {
     let governance: BTreeMap<_, _> = state
         .family_councils
         .iter()
@@ -1820,7 +1947,6 @@ fn update_campaign_phases(state: &mut AppState) {
         })
         .collect();
     for dynasty in state.dynasties.values_mut() {
-        dynasty.runtime.phase = phase;
         let office_load = office_loads.get(&dynasty.id()).copied().unwrap_or(0);
         let overextension = dynasty
             .administrative_load()
@@ -2282,6 +2408,7 @@ fn apply_successions(
         dynasty.relationships.head_id = incoming_head_id;
         dynasty.relationships.heir_id = Some(new_heir_id);
         dynasty.runtime.generation = next_generation;
+        dynasty.runtime.phase = crate::core::CampaignPhase::Legacy;
         dynasty.resources.legitimacy_basis_points = dynasty
             .resources
             .legitimacy_basis_points

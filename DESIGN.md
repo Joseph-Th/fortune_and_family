@@ -130,6 +130,12 @@ Households consume goods, supply labor, pay rent, experience welfare changes, an
 
 Businesses have ownership, management, policy, inventory, cash, capacity, condition, quality, and lifecycle. Growth requires capital and competent administration. Failure and recovery must remain part of the same system.
 
+Business cash and dynasty treasury are distinct pools, but ownership must still create deliberate capital-allocation choices. An active business owner may distribute cash back to the dynasty only above a protected operating floor equal to its configured minimum reserve plus 21 days of operating cost. Manual distributions and automatic dividends use the same floor. This lets a commercially successful house fund family, property, and political commitments without treating business cash as permanently trapped, while preventing the player from stripping the working capital the enterprise needs to remain credible.
+
+Industrial goods need productive demand inside that same economy. Replacement tools are purchased from the market as a real component of maintenance and production overhead that businesses already pay, rather than as an additional hidden charge. This connects artisan output to citywide business activity and turns part of previously abstract operating expenditure into an inter-business market flow.
+
+Starting trades may create different cash-flow profiles, but no background is intended to be a hidden difficulty mode. A productive artisan should be able to build commercial standing from city demand without requiring serial borrowing and asset liquidation merely to remain viable. Background identity should change which pressures and opportunities the player reads, not whether the economic-to-institutional fantasy is structurally reachable.
+
 ### Markets, contracts, and credit
 
 Prices should emerge from supply, demand, scarcity, policy, and disruption. Contracts create durable counterparties and obligations. Credit creates leverage, dependency, collateral risk, restructuring, and default consequences.
@@ -142,13 +148,17 @@ Property connects wealth to districts, rent, tenancy, occupancy, collateral, pub
 
 Institutions have earned membership, offices, budgets, legitimacy, powers, and selection rules. Established reputation plus a developing commercial record opens patronage; patronage creates membership and coalition support while the dynasty continues proving itself. Sustained commercial standing and mature support then open candidacy. Political power must control concrete outcomes such as laws, debt, public works, courts, licensing, trade, or enforcement. Incumbents can spend legitimacy on time-bounded directives that intensify an office power and produce explicit civic benefits or backlash.
 
+Commercial success must remain convertible into civic execution after political authority has been earned. A dynasty that sponsored an unfinished public work may contribute its own treasury directly to that commitment, including rescuing a project suspended by an empty municipal treasury. The contribution counts as civic patronage and uses the same material completion effects as municipal spending. This route should be expensive enough to create a real capital-allocation choice rather than making civic finance irrelevant.
+
 Officeholding is not a permanent upgrade. It consumes administrative capacity, creates recurring duties, and can be lost through failure.
 
 Concentrating several offices in one dynasty should also create political exposure even when that dynasty is wealthy. Member houses become more fearful and resentful as one family consolidates authority, which should weaken future coalition support and feed back into commercial relationships rather than allowing cash alone to neutralize the cost of political expansion.
 
 ### Law, courts, and enforcement
 
-Law shapes contracts, property, debt, trade, labor, inheritance, and public authority. Cases require parties, claims, evidence, procedure, judgment, and consequences. A player-filed case must identify the concrete obligation or event that created the claim; evidence and recoverable damages are bounded by that source, and a judgment must settle the source obligation rather than create a parallel recovery path. Contract-breach damages represent only the terminal contractual penalty that remained unpaid after normal settlement, so litigation cannot collect a penalty the performing party already received.
+Law shapes contracts, property, debt, trade, labor, inheritance, and public authority. Cases require parties, claims, evidence, procedure, judgment, and consequences. A player-filed case must identify the concrete obligation or event that created the claim; evidence and recoverable damages are bounded by that source, and a judgment must settle the source obligation rather than create a parallel recovery path. Immediate cash recovery is limited by defendant liquidity; any grounded amount that cannot be collected at judgment is written off with the settled source instead of surviving as an unenforceable duplicate claim. Contract-breach damages represent only the terminal contractual penalty that remained unpaid after normal settlement, so litigation cannot collect a penalty the performing party already received.
+
+Courts are part of the living economy rather than a player-only action menu. Rival lenders and contract victims should pursue grounded claims under the same filing-cost, timing, evidence, and source-obligation rules when material defaults or unpaid breaches occur. A debt or contract failure that never creates enforceable institutional pressure leaves the legal system detached from the economy.
 
 ### Districts and public opinion
 

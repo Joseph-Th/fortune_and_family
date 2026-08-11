@@ -196,6 +196,10 @@ pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> 
         restore_legacy_officeholders(&mut state, officeholders);
     }
     normalize_family_link_lifecycle(&mut state);
+    if source_schema_version < 2 {
+        crate::systems::expire_time_limited_state(&mut state);
+        crate::systems::rebuild_campaign_phases(&mut state);
+    }
     validate_state(&state).map_err(|error| PersistenceError::InvalidState {
         path: path.to_path_buf(),
         kind: error.kind,
@@ -282,6 +286,8 @@ fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
             format!("unsupported scenario key {:?}", state.scenario_key),
         ));
     }
+    validate_simulation_clock(state)
+        .map_err(|reason| StateValidationError::new(StateValidationKind::NumericRanges, reason))?;
     let registry = crate::registry::build_rivergate_registry();
     validate_definition_references(&registry, state).map_err(|reason| {
         StateValidationError::new(StateValidationKind::DefinitionReferences, reason)
@@ -293,9 +299,22 @@ fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     })?;
     validate_numeric_ranges(state)
         .map_err(|reason| StateValidationError::new(StateValidationKind::NumericRanges, reason))?;
+    validate_campaign_phase_consistency(state)
+        .map_err(|reason| StateValidationError::new(StateValidationKind::PrimaryRecords, reason))?;
     state.validate_next_ids().map_err(|reason| {
         StateValidationError::new(StateValidationKind::IdentifierAllocation, reason)
     })
+}
+
+fn validate_campaign_phase_consistency(state: &AppState) -> Result<(), String> {
+    for dynasty_id in state.dynasties.keys().copied() {
+        if !crate::systems::campaign_phase_is_persistently_consistent(state, dynasty_id) {
+            return Err(format!(
+                "dynasty {dynasty_id} has a stale or incompatible campaign phase"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_numeric_ranges(state: &AppState) -> Result<(), String> {
@@ -304,17 +323,21 @@ fn validate_numeric_ranges(state: &AppState) -> Result<(), String> {
     validate_civic_numeric_ranges(state)
 }
 
-const fn is_schedulable_day(day: i64) -> bool {
-    day != i64::MAX
-}
-
-fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
+fn validate_simulation_clock(state: &AppState) -> Result<(), String> {
     if state.clock.day() < 0 || state.clock.day() == i64::MAX {
         return Err(format!(
             "simulation clock has invalid or exhausted elapsed day {}",
             state.clock.day()
         ));
     }
+    Ok(())
+}
+
+const fn is_schedulable_day(day: i64) -> bool {
+    day != i64::MAX
+}
+
+fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
     for dynasty in state.dynasties.values() {
         if dynasty.treasury() < Money::ZERO
             || dynasty.civic_contributions() < Money::ZERO
@@ -480,7 +503,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
             || institution.next_selection_day < institution.term_started_day
             || !is_schedulable_day(institution.next_selection_day)
             || institution.active_directive.is_some_and(|directive| {
-                directive.expires_day < 0
+                directive.expires_day < state.clock.day()
                     || directive.expires_day == i64::MAX
                     || !institution.powers.contains(&directive.power)
             })
@@ -1551,6 +1574,7 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
             || !state.dynasties.contains_key(&report.owner_dynasty_id)
             || !is_schedulable_day(report.expires_day)
             || report.created_day > state.clock.day()
+            || report.expires_day < state.clock.day()
             || report.expires_day < report.created_day
             || report.subject.trim().is_empty()
             || report.source.trim().is_empty()
@@ -1882,6 +1906,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             13 => migrate_v13_to_v14(value)?,
             14 => migrate_v14_to_v15(value)?,
             15 => migrate_v15_to_v16(value)?,
+            16 => migrate_v16_to_v17(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -2544,6 +2569,28 @@ fn migrate_v15_to_v16(mut value: Value) -> Result<Value, PersistenceError> {
     }
     object.insert("schema_version".to_owned(), Value::from(16));
     Ok(value)
+}
+
+fn migrate_v16_to_v17(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 16,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    object.insert("schema_version".to_owned(), Value::from(17));
+    let mut state: AppState =
+        serde_json::from_value(value).map_err(|source| PersistenceError::Migration {
+            version: 16,
+            reason: format!("version-sixteen state cannot be normalized: {source}"),
+        })?;
+    crate::systems::expire_time_limited_state(&mut state);
+    crate::systems::rebuild_campaign_phases(&mut state);
+    crate::systems::rebuild_defaulted_collateral_recoveries(&mut state);
+    serde_json::to_value(state).map_err(|source| PersistenceError::Migration {
+        version: 16,
+        reason: format!("normalized version-seventeen state cannot be serialized: {source}"),
+    })
 }
 
 fn v14_active_office_directives(

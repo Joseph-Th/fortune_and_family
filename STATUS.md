@@ -11,9 +11,9 @@ Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code own
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 16 |
-| Supported save migrations | Versions 0 through 15 |
-| Gameplay report schema | 45 |
+| Save schema | 17 |
+| Supported save migrations | Versions 0 through 16 |
+| Gameplay report schema | 47 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -39,8 +39,8 @@ The Rivergate campaign supports multi-generation deterministic continuation.
 |---|---|
 | World | One detailed city with six districts, regional routes, seasonal pressure, and external disruption. |
 | Population | Major dynasties, notable characters, grouped households, family links, health, loyalty, wards, education, councils, heirs, and succession. |
-| Businesses | Ownership, management, policy, inventory, cash, production, quality, condition, distress, insolvency, closure, recovery, acquisition, and recapitalization. |
-| Markets | Scarce procurement, production, sales, household consumption, spoilage, maintenance, price formation, controls, and regional supply. |
+| Businesses | Ownership, management, policy, inventory, cash, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, and owner distributions protected by the same operating floor as automatic dividends. |
+| Markets | Scarce procurement, production, sales, household and industrial consumption, spoilage, maintenance, price formation, controls, and regional supply. Replacement tools are purchased from the market out of existing production and maintenance overhead, giving toolmaking a citywide productive demand loop without double-charging operating businesses. |
 | Contracts | Scheduled supply, payment, penalties, fulfillment, durable dynasty attribution, breach, and termination. |
 | Private finance | Loans, interest, repayment, delinquency, default, collateral, seizure, restructuring, and repayment history. |
 | Municipal finance | Authorizing laws, dynasty creditors, treasury proceeds, scheduled service, delinquency, default, and civic consequences. |
@@ -48,21 +48,21 @@ The Rivergate campaign supports multi-generation deterministic continuation.
 | Labor | Employment agreements, wages, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. |
 | Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with earned patronage-based membership, budgets, legitimacy, powers, terms, and deterministic selection. |
 | Political office | Commercial eligibility, paid institutional patronage, a 180-day support-establishment period, nomination with a 120-day campaign resolution, office-specific competence, a 120-day power-establishment period within a 360-day term, recurring duties with escalating multi-office portfolio overhead, coalition backlash from concentrated office control, administrative load, voluntary withdrawal with political recovery before re-entry, forfeiture, and re-election limits. |
-| Civic systems | Laws, differentiated public works, district conditions, claim-sourced legal cases, crisis response, and municipal debt. Player litigation is grounded in an exact distressed loan or an attributable breached contract with an unpaid terminal penalty. Debt judgments reduce the source loan, while contract judgments reduce only the unpaid breach balance, preventing duplicate recovery. Completed infrastructure persists through district recomputation, while food access, employment, sanitation, safety, and rent pressure all feed district unrest and therefore public response. |
+| Civic systems | Laws, differentiated public works, district conditions, claim-sourced legal cases, crisis response, and municipal debt. A sponsoring dynasty can directly fund its own unfinished public works, allowing accumulated private wealth to rescue stalled civic commitments while recording the contribution as civic patronage. Player and rival litigation are grounded in exact distressed loans or attributable breached contracts with unpaid terminal penalties; non-player creditors can autonomously file the same grounded claims and notify the player when the dynasty is sued. Winning grounded judgments settle the source loan or unpaid breach balance; immediate recovery is limited by defendant cash and any uncollectible remainder is written off instead of surviving as a second collectible path. Completed infrastructure persists through district recomputation, while food access, employment, sanitation, safety, and rent pressure all feed district unrest and therefore public response. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, summary, creation, expiry, passive reports, and paid player-directed market, district, and counterparty intelligence. |
 | AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; sustained containment can worsen the commercial terms the player receives from that house. |
 | Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, monthly escalation while unaddressed, one-time exploitation followed by optional containment, response-driven recovery, effects, and resolution. |
-| Observability | Summary, projection, HTML dashboard, outbox, chronicle, audit history, validation, and gameplay reports. |
+| Observability | Summary, projection, HTML dashboard, outbox, chronicle, audit history, validation, progression-aligned campaign phases, and gameplay reports with separate player borrowing/lending distress, exact before/after values for measured command consequences, and first-succession transition profiles for family unity, legitimacy, offices, memberships, and represented institutions. |
 
 ## Player commands
 
 `PlayerCommand` in `src/systems/commands.rs` is authoritative. The current command surface includes:
 
-- Business cash transfer, acquisition, investment, and operating policy
+- Business-to-business cash transfer, protected owner distributions to dynasty treasury, acquisition, investment, and operating policy
 - Supply contracts and private loans
 - Property purchase and sale
-- Laws, public works, and legal cases
+- Laws, public-work sponsorship and direct funding, and legal cases
 - House governance, ward adoption, and family education
 - Institutional patronage, office nomination, and institutional withdrawal
 - Crisis and labor-dispute responses
@@ -107,6 +107,8 @@ A serialized contract change requires a schema increment and one migration from 
 - Stable ordering and typed-ID tie-breaking
 - Fixed-point economic arithmetic with wide ratio intermediates
 - Synchronized records, indexes, ownership, occupancy, and collateral
+- Campaign phases advance from durable commercial, institutional, civic, and succession milestones rather than elapsed calendar age
+- Time-limited reports and office directives expire on the first daily boundary after their inclusive expiry day
 - Explicit daily, weekly, monthly, and annual execution order
 - Debug invariant checks during simulation
 - Release-mode validation at persistence boundaries

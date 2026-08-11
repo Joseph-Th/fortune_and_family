@@ -2,16 +2,17 @@
 
 use super::*;
 use crate::core::{
-    AuditKind, AuditRecord, CivicDebt, CivicDebtStatus, Crisis, CrisisKind, CrisisStatus,
-    EnactedLaw, FamilyLinkKind, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus,
+    AuditKind, AuditRecord, CampaignPhase, CivicDebt, CivicDebtStatus, Crisis, CrisisKind,
+    CrisisStatus, EnactedLaw, FamilyLinkKind, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus,
     LegalClaimSource, OfficeDirectiveState, OfficePower,
 };
 use crate::ids::{BusinessId, CharacterId, DynastyId, InstitutionId};
 use crate::money::{Money, Quantity};
 use crate::registry::Registry;
 use crate::systems::{
-    EducationFocus, OFFICE_NOMINATION_DELIVERY_REQUIREMENT, PlayerCommand, acquire_business,
-    advance_days, apply_player_command, quote_business_acquisition,
+    EducationFocus, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, PlayerCommand, acquire_business, advance_days,
+    apply_player_command, quote_business_acquisition,
 };
 use crate::test_support::{
     assert_state_eq, make_test_campaign, rivergate_registry_for_test, write_test_json_fixture,
@@ -154,6 +155,7 @@ mod round_trip {
                 status: CivicDebtStatus::Current,
             },
         );
+        crate::systems::rebuild_campaign_phases(&mut state);
         let directory = tempfile::tempdir().expect("temporary directory must be created");
         let path = directory.path().join("civic-debt-campaign.json");
 
@@ -1162,7 +1164,6 @@ mod migrations {
         );
         let loaded: AppState =
             serde_json::from_value(migrated).expect("migrated state must deserialize");
-        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
         assert_eq!(
             loaded
                 .legal_cases
@@ -1171,7 +1172,148 @@ mod migrations {
                 .claim_source,
             None
         );
-        validate_state(&loaded).expect("version-fifteen campaign must remain valid");
+        assert_eq!(
+            loaded.schema_version(),
+            16,
+            "the focused migration must stop at its declared target schema"
+        );
+    }
+
+    #[test]
+    fn v16_normalizes_progression_and_expired_time_limited_state() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .runtime
+            .phase = CampaignPhase::Dominion;
+        state
+            .information_reports
+            .values_mut()
+            .next()
+            .expect("campaign must contain an information report")
+            .expires_day = 90;
+        let institution_id = state
+            .institutions
+            .iter()
+            .find(|(_, institution)| !institution.powers.is_empty())
+            .map(|(institution_id, _)| *institution_id)
+            .expect("campaign must contain an institution with office powers");
+        let power = state
+            .institutions
+            .get(&institution_id)
+            .and_then(|institution| institution.powers.iter().next().copied())
+            .expect("institution must expose an office power");
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("institution must exist")
+            .active_directive = Some(OfficeDirectiveState {
+            power,
+            expires_day: 90,
+        });
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(16);
+        value["clock"]["day"] = Value::from(100);
+        let (_directory, path) = write_test_json_fixture("v16-normalization.json", &value);
+
+        let loaded = load_state(&path).expect("version-sixteen campaign must migrate");
+
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            loaded
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .phase(),
+            CampaignPhase::Foundation,
+            "calendar-age phase state must be rebuilt from durable campaign progression"
+        );
+        assert!(
+            loaded.information_reports.is_empty(),
+            "expired reports must not survive migration into the stricter lifecycle"
+        );
+        assert!(
+            loaded
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .active_directive
+                .is_none(),
+            "expired directives must not survive migration into the stricter lifecycle"
+        );
+    }
+
+    #[test]
+    fn v16_credits_prior_collateral_seizure_against_defaulted_balance() {
+        let mut state = make_test_campaign();
+        let loan_id = state
+            .loans
+            .values()
+            .find(|loan| loan.collateral_property_id.is_some())
+            .map(|loan| loan.id)
+            .expect("campaign must contain a collateralized loan");
+        let (property_id, lender_id) = {
+            let loan = state.loans.get(&loan_id).expect("loan must exist");
+            (
+                loan.collateral_property_id
+                    .expect("selected loan must have collateral"),
+                loan.lender_dynasty_id,
+            )
+        };
+        let collateral_recovery = state
+            .properties
+            .get(&property_id)
+            .expect("collateral property must exist")
+            .value
+            .saturating_mul_ratio(crate::systems::PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000);
+        {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.balance = collateral_recovery
+                .checked_add(Money::from_copper(123))
+                .expect("fixture balance must fit");
+            loan.status = crate::core::LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+        }
+        let occupant_owner_id = state
+            .properties
+            .get(&property_id)
+            .and_then(|property| property.occupant_business_id)
+            .map(|business_id| {
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("collateral occupant business must exist")
+                    .owner_dynasty_id()
+            });
+        {
+            let property = state
+                .properties
+                .get_mut(&property_id)
+                .expect("collateral property must exist");
+            property.owner_dynasty_id = Some(lender_id);
+            property.tenant_dynasty_id = occupant_owner_id.filter(|id| *id != lender_id);
+            property.collateral_loan_id = None;
+        }
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(16);
+        let (_directory, path) = write_test_json_fixture("v16-collateral-recovery.json", &value);
+
+        let loaded = load_state(&path).expect("version-sixteen campaign must migrate");
+
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+        let loan = loaded
+            .loans
+            .get(&loan_id)
+            .expect("migrated loan must exist");
+        assert_eq!(loan.status, crate::core::LoanStatus::Defaulted);
+        assert_eq!(
+            loan.balance,
+            Money::from_copper(123),
+            "schema-sixteen collateral seizures must credit liquidation value against the outstanding balance"
+        );
     }
 
     #[test]
@@ -1266,6 +1408,67 @@ mod validation {
             load_state(&path),
             StateValidationKind::NumericRanges,
             "invalid resource value",
+        );
+    }
+
+    #[test]
+    fn rejects_current_save_with_stale_campaign_phase() {
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .reputation_reliability_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("stale-campaign-phase.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::PrimaryRecords,
+            "stale or incompatible campaign phase",
+        );
+    }
+
+    #[test]
+    fn rejects_current_save_with_expired_information() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["clock"]["day"] = Value::from(100);
+        let (_directory, path) = write_test_json_fixture("expired-information.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "information report",
+        );
+    }
+
+    #[test]
+    fn rejects_current_save_with_expired_office_directive() {
+        let mut state = make_test_campaign();
+        let institution = state
+            .institutions
+            .values_mut()
+            .find(|institution| !institution.powers.is_empty())
+            .expect("campaign must contain an institution with office powers");
+        let power = *institution
+            .powers
+            .iter()
+            .next()
+            .expect("institution must expose an office power");
+        institution.active_directive = Some(OfficeDirectiveState {
+            power,
+            expires_day: 0,
+        });
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["clock"]["day"] = Value::from(1);
+        let (_directory, path) = write_test_json_fixture("expired-office-directive.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "institution",
         );
     }
 

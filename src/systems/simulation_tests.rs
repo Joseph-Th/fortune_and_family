@@ -477,6 +477,8 @@ mod transfer_boundaries {
                     output_good_id: recipe.output_good_id(),
                     output_quantity,
                     operating_cost: Money::ZERO,
+                    tool_quantity: Quantity::ZERO,
+                    tool_cost: Money::ZERO,
                 }
             })
             .collect();
@@ -488,7 +490,11 @@ mod transfer_boundaries {
         let expected_output = i128::from(output_quantity.milliunits()) * 2;
         assert!(expected_output > i128::from(i64::MAX));
 
-        apply_production(&mut state, ProductionPlan { lines }).expect("production must succeed");
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("Rivergate registry must define tools");
+        apply_production(&mut state, ProductionPlan { tools_id, lines })
+            .expect("production must succeed");
 
         let audit = state
             .audit_log
@@ -497,13 +503,119 @@ mod transfer_boundaries {
         assert_eq!(audit.kind(), AuditKind::Production);
         assert_eq!(
             audit.detail(),
-            format!("output={expected_output}; operating_cost=0")
+            format!("output={expected_output}; operating_cost=0; tools=0; tool_spending=0")
         );
     }
 }
 
 mod starting_economies {
     use super::*;
+
+    #[test]
+    fn production_overhead_creates_tool_demand_without_extra_business_cost() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        reset_market_flows(&mut state);
+        let plan = decide_production(registry, &state);
+        let tools_id = plan.tools_id;
+        let planned_tool_quantity = plan.lines.iter().fold(Quantity::ZERO, |total, line| {
+            total.saturating_add(line.tool_quantity)
+        });
+        assert!(
+            planned_tool_quantity > Quantity::ZERO,
+            "production planning must decide replacement-tool demand before commit"
+        );
+        let cash_expectations = plan
+            .lines
+            .iter()
+            .map(|line| {
+                let before = state
+                    .businesses
+                    .get(line.business_id)
+                    .expect("planned business must exist")
+                    .cash();
+                (
+                    line.business_id,
+                    before
+                        .checked_sub(line.operating_cost)
+                        .expect("planned operating cost must fit business cash"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        apply_production(&mut state, plan).expect("production must commit");
+
+        assert_eq!(
+            state
+                .market
+                .get_quote(tools_id)
+                .expect("tools quote must exist")
+                .demand_today,
+            planned_tool_quantity,
+            "commit must apply exactly the tool demand decided by the production plan"
+        );
+        for (business_id, expected_cash) in cash_expectations {
+            assert_eq!(
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("planned business must remain")
+                    .cash(),
+                expected_cash,
+                "tool purchases must be funded from existing operating overhead, not charged again"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_spending_creates_industrial_tool_demand() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        reset_market_flows(&mut state);
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("Rivergate registry must define tools");
+        let stock_before = state
+            .market
+            .get_quote(tools_id)
+            .expect("tools quote must exist")
+            .stock;
+
+        let plan = decide_maintenance(registry, &mut state);
+        let planned_quantity = plan.lines.iter().fold(Quantity::ZERO, |total, line| {
+            total.saturating_add(line.tool_quantity)
+        });
+        assert!(
+            planned_quantity > Quantity::ZERO,
+            "operating businesses must create demand for replacement tools"
+        );
+        assert!(plan.lines.iter().all(|line| {
+            let business = state
+                .businesses
+                .get(line.business_id)
+                .expect("planned business must exist");
+            let makes_tools = registry
+                .get_recipe(business.recipe_id())
+                .expect("business recipe must exist")
+                .output_good_id()
+                == tools_id;
+            !makes_tools || line.tool_quantity.is_zero()
+        }));
+
+        apply_maintenance(&mut state, plan).expect("maintenance tool demand must commit");
+
+        let quote = state
+            .market
+            .get_quote(tools_id)
+            .expect("tools quote must exist");
+        assert_eq!(quote.demand_today, planned_quantity);
+        assert_eq!(
+            quote.stock,
+            stock_before
+                .checked_sub(planned_quantity)
+                .expect("planned industrial demand must fit tools stock")
+        );
+    }
 
     #[test]
     fn blacksmith_start_remains_operational_with_demand_scaled_contracts_and_payroll() {
@@ -518,6 +630,11 @@ mod starting_economies {
             },
         )
         .expect("blacksmith campaign must build");
+        let starting_treasury = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
 
         advance_days(registry, &mut state, 1_080).expect("campaign must simulate");
 
@@ -535,6 +652,67 @@ mod starting_economies {
         assert!(
             business.cash() > Money::ZERO,
             "the smithy must retain working cash after three years without player intervention"
+        );
+        assert!(
+            business.finance.lifetime_revenue > business.finance.lifetime_costs,
+            "industrial tool demand must make the starting smithy sustainably profitable: revenue={}, costs={}, cash={}, tool_inventory={}, iron_inventory={}, charcoal_inventory={}, tool_market_stock={}, iron_market_stock={}, charcoal_market_stock={}, tools={}, iron={}, charcoal={}",
+            business.finance.lifetime_revenue,
+            business.finance.lifetime_costs,
+            business.cash(),
+            business.inventory_quantity(registry.get_good_id("tools").expect("tools must exist")),
+            business.inventory_quantity(registry.get_good_id("iron").expect("iron must exist")),
+            business.inventory_quantity(
+                registry
+                    .get_good_id("charcoal")
+                    .expect("charcoal must exist")
+            ),
+            state
+                .market
+                .get_quote(registry.get_good_id("tools").expect("tools must exist"))
+                .expect("tools quote must exist")
+                .stock,
+            state
+                .market
+                .get_quote(registry.get_good_id("iron").expect("iron must exist"))
+                .expect("iron quote must exist")
+                .stock,
+            state
+                .market
+                .get_quote(
+                    registry
+                        .get_good_id("charcoal")
+                        .expect("charcoal must exist")
+                )
+                .expect("charcoal quote must exist")
+                .stock,
+            state
+                .market
+                .get_quote(registry.get_good_id("tools").expect("tools must exist"))
+                .expect("tools quote must exist")
+                .price(),
+            state
+                .market
+                .get_quote(registry.get_good_id("iron").expect("iron must exist"))
+                .expect("iron quote must exist")
+                .price(),
+            state
+                .market
+                .get_quote(
+                    registry
+                        .get_good_id("charcoal")
+                        .expect("charcoal must exist")
+                )
+                .expect("charcoal quote must exist")
+                .price(),
+        );
+        assert!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury()
+                > starting_treasury,
+            "a viable smithy must eventually distribute surplus to the dynasty"
         );
     }
 }
@@ -1333,8 +1511,8 @@ mod office_exposure {
             .expect("city council must exist")
             .office_holder_id = Some(holder_id);
 
-        update_campaign_phases(&mut baseline);
-        update_campaign_phases(&mut burdened);
+        update_succession_risks(&mut baseline);
+        update_succession_risks(&mut burdened);
 
         assert!(
             burdened
@@ -2735,6 +2913,64 @@ mod laws {
                 .price(),
             Money::from_copper(1),
             "the statutory ceiling must be the final daily price constraint"
+        );
+    }
+}
+
+mod time_limited_state {
+    use super::*;
+
+    #[test]
+    fn advancing_purges_records_after_their_expiry_day() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let report_id = state
+            .information_reports
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain an information report");
+        let current_day = state.clock.day();
+        state
+            .information_reports
+            .get_mut(&report_id)
+            .expect("information report must exist")
+            .expires_day = current_day;
+
+        let institution_id = state
+            .institutions
+            .iter()
+            .find(|(_, institution)| !institution.powers.is_empty())
+            .map(|(institution_id, _)| *institution_id)
+            .expect("campaign must contain an institution with office powers");
+        let power = state
+            .institutions
+            .get(&institution_id)
+            .and_then(|institution| institution.powers.iter().next().copied())
+            .expect("institution must expose an office power");
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("institution must exist")
+            .active_directive = Some(crate::core::OfficeDirectiveState {
+            power,
+            expires_day: current_day,
+        });
+
+        advance_days(registry, &mut state, 1).expect("simulation must advance");
+
+        assert!(
+            !state.information_reports.contains_key(&report_id),
+            "expired information must not survive the daily boundary"
+        );
+        assert!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .active_directive
+                .is_none(),
+            "expired directives must not remain as stale active state"
         );
     }
 }

@@ -11,9 +11,9 @@ use crate::core::{
     CrisisStatus, DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw,
     ExternalRoute, FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance,
     InformationConfidence, InformationReport, InformationTarget, InstitutionRuntime, LawKind,
-    LegalCaseStatus, LegalClaimSource, Loan, LoanStatus, ObjectiveKind, ObjectiveStatus,
-    OfficePower, OutboxKind, OutboxMessage, Property, PropertyKind, PublicWork, PublicWorkKind,
-    PublicWorkStatus, RelationshipState, SupplyContract,
+    LegalCase, LegalCaseKind, LegalCaseStatus, LegalClaimSource, Loan, LoanStatus, ObjectiveKind,
+    ObjectiveStatus, OfficePower, OutboxKind, OutboxMessage, Property, PropertyKind, PublicWork,
+    PublicWorkKind, PublicWorkStatus, RelationshipState, SupplyContract,
 };
 use crate::ids::{
     BusinessId, CharacterId, CivicDebtId, DistrictId, DynastyId, EmploymentId, GoodId, HouseholdId,
@@ -147,6 +147,15 @@ pub enum StrategicError {
     },
     #[error("business {business_id} finance version is exhausted")]
     BusinessFinanceVersionExhausted { business_id: BusinessId },
+    #[error(
+        "business {business_id} has only {available} distributable cash after preserving reserve {required_reserve}; requested {requested}"
+    )]
+    BusinessDistributionExceedsSurplus {
+        business_id: BusinessId,
+        available: Money,
+        required_reserve: Money,
+        requested: Money,
+    },
     #[error(
         "dynasty {dynasty_id} cannot remove administrative load {outgoing}; current load is {current}"
     )]
@@ -1407,6 +1416,106 @@ pub(crate) fn capitalize_owned_business(
     Ok(rehabilitation)
 }
 
+/// Moves surplus cash from an active business to its owning dynasty while preserving the same
+/// operating floor used by automatic dividends.
+///
+/// # Errors
+///
+/// Returns an error when the dynasty or business is missing, ownership does not match, the amount
+/// is non-positive, the business is not active, the requested distribution would breach its
+/// operating reserve, or the resulting treasury/version would exceed supported ranges. Failed
+/// distributions leave state unchanged.
+pub(crate) fn distribute_owned_business_cash(
+    registry: &Registry,
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+    business_id: BusinessId,
+    amount: Money,
+) -> Result<(), StrategicError> {
+    if amount <= Money::ZERO {
+        return Err(StrategicError::NonPositiveAmount);
+    }
+    let dynasty = state
+        .dynasties
+        .get(&dynasty_id)
+        .ok_or(StrategicError::MissingDynasty { dynasty_id })?;
+    let business = state
+        .businesses
+        .get(business_id)
+        .ok_or(StrategicError::MissingBusiness { business_id })?;
+    if business.owner_dynasty_id() != dynasty_id {
+        return Err(StrategicError::BusinessNotOwnedByDynasty {
+            business_id,
+            dynasty_id,
+        });
+    }
+    if business.status() != BusinessStatus::Active {
+        return Err(StrategicError::BusinessInactive { business_id });
+    }
+    let reserve = business_owner_distribution_reserve(registry, business);
+    let available = business.cash().saturating_sub(reserve).max(Money::ZERO);
+    if amount > available {
+        return Err(StrategicError::BusinessDistributionExceedsSurplus {
+            business_id,
+            available,
+            required_reserve: reserve,
+            requested: amount,
+        });
+    }
+    let treasury_after =
+        dynasty
+            .treasury()
+            .checked_add(amount)
+            .ok_or(StrategicError::DynastyTreasuryOverflow {
+                dynasty_id,
+                current: dynasty.treasury(),
+                incoming: amount,
+            })?;
+    let business_cash_after = business
+        .cash()
+        .checked_sub(amount)
+        .expect("validated business distribution must fit business cash");
+    let finance_version = checked_next_business_finance_version(business)
+        .ok_or(StrategicError::BusinessFinanceVersionExhausted { business_id })?;
+
+    state
+        .dynasties
+        .get_mut(&dynasty_id)
+        .expect("validated dynasty must exist")
+        .resources
+        .treasury = treasury_after;
+    let business = state
+        .businesses
+        .get_mut(business_id)
+        .expect("validated business must exist");
+    business.finance.cash = business_cash_after;
+    business.finance.version = finance_version;
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::BusinessDividend,
+        subject: format!("business:{business_id}").into(),
+        detail: format!(
+            "owner_distribution={};reserve={}",
+            amount.copper(),
+            reserve.copper()
+        ),
+    });
+    Ok(())
+}
+
+pub(crate) fn business_owner_distribution_reserve(
+    registry: &Registry,
+    business: &crate::core::Business,
+) -> Money {
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("business recipe must exist");
+    business
+        .policy
+        .minimum_cash_reserve
+        .saturating_add(recipe.daily_operating_cost().saturating_mul(21))
+}
+
 pub(crate) fn business_recapitalization_target(
     registry: &Registry,
     state: &AppState,
@@ -2561,6 +2670,21 @@ pub(crate) fn run_daily_strategic_systems(
     Ok(())
 }
 
+pub(crate) fn expire_time_limited_state(state: &mut AppState) {
+    let day = state.clock.day();
+    state
+        .information_reports
+        .retain(|_, report| report.expires_day >= day);
+    for institution in state.institutions.values_mut() {
+        if institution
+            .active_directive
+            .is_some_and(|directive| directive.expires_day < day)
+        {
+            institution.active_directive = None;
+        }
+    }
+}
+
 fn active_law_value(state: &AppState, kind: LawKind) -> Option<i64> {
     state
         .laws
@@ -3703,14 +3827,19 @@ fn settle_missed_loan_payment(
         loan.status == LoanStatus::Defaulted
     };
     if defaulted {
-        seize_defaulted_collateral(state, due);
+        let collateral_recovery = seize_defaulted_collateral(state, due);
+        let remaining_balance = state
+            .loans
+            .get(&due.id)
+            .expect("defaulted loan must exist")
+            .balance;
         try_push_outbox(
             state,
             OutboxKind::Finance,
             format!("Loan {} defaulted", due.id),
             format!(
-                "Dynasty {} defaulted on its obligation to dynasty {}.",
-                due.borrower_id, due.lender_id
+                "Dynasty {} defaulted on its obligation to dynasty {}. Collateral recovered {}; remaining balance {}.",
+                due.borrower_id, due.lender_id, collateral_recovery, remaining_balance
             ),
         )?;
     }
@@ -3744,7 +3873,7 @@ fn settle_missed_loan_payment(
     Ok(())
 }
 
-fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) {
+fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) -> Money {
     if let Some(property_id) = due.collateral_property_id {
         let (occupant_owner_id, existing_tenant_id) = {
             let property = state
@@ -3769,6 +3898,61 @@ fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) {
             .or(existing_tenant_id)
             .filter(|tenant_id| *tenant_id != due.lender_id);
         property.collateral_loan_id = None;
+        apply_defaulted_collateral_recovery(state, due.id)
+    } else {
+        Money::ZERO
+    }
+}
+
+fn apply_defaulted_collateral_recovery(state: &mut AppState, loan_id: crate::ids::LoanId) -> Money {
+    let recovery = {
+        let loan = state
+            .loans
+            .get(&loan_id)
+            .expect("defaulted loan must exist");
+        if loan.status != LoanStatus::Defaulted {
+            return Money::ZERO;
+        }
+        let Some(property_id) = loan.collateral_property_id else {
+            return Money::ZERO;
+        };
+        state
+            .properties
+            .get(&property_id)
+            .expect("defaulted loan collateral must exist")
+            .value
+            .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000)
+            .min(loan.balance)
+    };
+    if recovery <= Money::ZERO {
+        return Money::ZERO;
+    }
+    let loan = state
+        .loans
+        .get_mut(&loan_id)
+        .expect("defaulted loan must exist");
+    loan.balance = loan
+        .balance
+        .checked_sub(recovery)
+        .expect("collateral recovery must not exceed the defaulted balance");
+    if loan.balance == Money::ZERO {
+        loan.status = LoanStatus::Repaid;
+        loan.missed_payments = 0;
+    }
+    recovery
+}
+
+pub(crate) fn rebuild_defaulted_collateral_recoveries(state: &mut AppState) {
+    let loan_ids = state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.status == LoanStatus::Defaulted && loan.collateral_property_id.is_some()
+        })
+        .map(|loan| loan.id)
+        .collect::<Vec<_>>();
+    for loan_id in loan_ids {
+        apply_defaulted_collateral_recovery(state, loan_id);
     }
 }
 
@@ -3997,13 +4181,7 @@ fn distribute_business_dividends(
         {
             continue;
         }
-        let recipe = registry
-            .get_recipe(business.recipe_id())
-            .expect("business recipe must exist");
-        let operating_floor = business
-            .policy
-            .minimum_cash_reserve
-            .saturating_add(recipe.daily_operating_cost().saturating_mul(21));
+        let operating_floor = business_owner_distribution_reserve(registry, business);
         let excess = business.cash().saturating_sub(operating_floor);
         let owner_id = business.owner_dynasty_id();
         let owner_treasury = projected_owner_treasuries
@@ -4419,7 +4597,7 @@ fn ceil_div_nonnegative_i64(numerator: i64, denominator: i64) -> i64 {
     quotient.saturating_add(i64::from(numerator % denominator != 0))
 }
 
-fn apply_public_work_completion(
+pub(crate) fn apply_public_work_completion(
     state: &mut AppState,
     district_id: DistrictId,
     kind: PublicWorkKind,
@@ -4892,6 +5070,7 @@ pub(crate) fn run_monthly_strategic_systems(
     apply_active_office_directives(registry, state)?;
     advance_ai_objectives(registry, state)?;
     update_information_reports(registry, state)?;
+    file_grounded_ai_legal_cases(state)?;
     advance_legal_case_hearings(state)?;
     resolve_legal_cases(state)?;
     update_external_route_risk(state);
@@ -6443,6 +6622,138 @@ fn update_information_reports(
     Ok(())
 }
 
+fn file_grounded_ai_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
+    let day = state.clock.day();
+    let player_id = state.player_dynasty_id;
+    let plaintiff_ids: Vec<_> = state
+        .dynasties
+        .keys()
+        .copied()
+        .filter(|dynasty_id| *dynasty_id != player_id)
+        .collect();
+    for plaintiff_id in plaintiff_ids {
+        let can_fund_filing = state
+            .dynasties
+            .get(&plaintiff_id)
+            .is_some_and(|dynasty| dynasty.treasury() >= super::LEGAL_CASE_FILING_COST);
+        if !can_fund_filing || !legal_filing_interval_available(state, plaintiff_id, day) {
+            continue;
+        }
+        let Some(claim) = next_grounded_ai_legal_claim(state, plaintiff_id) else {
+            continue;
+        };
+        let hearing_day = checked_future_day(day, 60)?;
+        let legal_case_id = state.next_ids.try_legal_case()?;
+        let plaintiff_treasury = state
+            .dynasties
+            .get(&plaintiff_id)
+            .expect("legal plaintiff dynasty must exist")
+            .treasury();
+        state
+            .dynasties
+            .get_mut(&plaintiff_id)
+            .expect("legal plaintiff dynasty must exist")
+            .resources
+            .treasury = plaintiff_treasury
+            .checked_sub(super::LEGAL_CASE_FILING_COST)
+            .expect("prevalidated legal filing cost must fit plaintiff treasury");
+        state.legal_cases.insert(
+            legal_case_id,
+            LegalCase {
+                id: legal_case_id,
+                plaintiff_dynasty_id: plaintiff_id,
+                defendant_dynasty_id: claim.defendant_dynasty_id,
+                kind: claim.kind,
+                claim_source: Some(claim.claim_source),
+                evidence_basis_points: claim.evidence_basis_points,
+                public_attention_basis_points: 1_500,
+                filed_day: day,
+                hearing_day,
+                damages: claim.maximum_damages,
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        adjust_dynasty_relationship(
+            state,
+            plaintiff_id,
+            claim.defendant_dynasty_id,
+            RelationshipDelta::new(-100, -30, 0, 150, 0),
+        );
+        remember_dynasty_interaction(
+            state,
+            plaintiff_id,
+            claim.defendant_dynasty_id,
+            &format!(
+                "House {} filed a {:?} case against house {} over {}.",
+                plaintiff_id, claim.kind, claim.defendant_dynasty_id, claim.description
+            ),
+        );
+        if claim.defendant_dynasty_id == player_id {
+            try_push_outbox(
+                state,
+                OutboxKind::Legal,
+                format!("Legal case {legal_case_id} filed against the dynasty"),
+                format!(
+                    "Dynasty {plaintiff_id} filed a {:?} claim for up to {}. The hearing is scheduled for day {hearing_day}: {}.",
+                    claim.kind, claim.maximum_damages, claim.description
+                ),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn legal_filing_interval_available(state: &AppState, plaintiff_id: DynastyId, day: i64) -> bool {
+    state
+        .legal_cases
+        .values()
+        .filter(|legal_case| legal_case.plaintiff_dynasty_id == plaintiff_id)
+        .map(|legal_case| legal_case.filed_day)
+        .max()
+        .is_none_or(|last_filing_day| {
+            last_filing_day
+                .checked_add(super::LEGAL_CASE_FILING_INTERVAL_DAYS)
+                .is_some_and(|next_filing_day| day >= next_filing_day)
+        })
+}
+
+fn next_grounded_ai_legal_claim(
+    state: &AppState,
+    plaintiff_id: DynastyId,
+) -> Option<super::LegalClaimQuote> {
+    state
+        .dynasties
+        .keys()
+        .copied()
+        .filter(|defendant_id| *defendant_id != plaintiff_id)
+        .flat_map(|defendant_id| {
+            [LegalCaseKind::Debt, LegalCaseKind::ContractBreach]
+                .into_iter()
+                .filter_map(move |kind| {
+                    super::quote_grounded_legal_claim(state, plaintiff_id, defendant_id, kind)
+                })
+        })
+        .filter(|claim| {
+            !state.legal_cases.values().any(|legal_case| {
+                legal_case.plaintiff_dynasty_id == plaintiff_id
+                    && legal_case.defendant_dynasty_id == claim.defendant_dynasty_id
+                    && legal_case.kind == claim.kind
+                    && matches!(
+                        legal_case.status,
+                        LegalCaseStatus::Filed | LegalCaseStatus::Hearing
+                    )
+            })
+        })
+        .max_by_key(|claim| {
+            (
+                claim.evidence_basis_points,
+                claim.maximum_damages,
+                std::cmp::Reverse(claim.defendant_dynasty_id),
+                std::cmp::Reverse(claim.kind),
+            )
+        })
+}
+
 fn advance_legal_case_hearings(state: &mut AppState) -> Result<(), SimulationError> {
     let day = state.clock.day();
     let entering_hearing: Vec<_> = state
@@ -6453,20 +6764,28 @@ fn advance_legal_case_hearings(state: &mut AppState) -> Result<(), SimulationErr
                 && legal_case.hearing_day > day
                 && legal_case.hearing_day.saturating_sub(day) <= 30
         })
-        .map(|legal_case| legal_case.id)
+        .map(|legal_case| {
+            (
+                legal_case.id,
+                legal_case.plaintiff_dynasty_id == state.player_dynasty_id
+                    || legal_case.defendant_dynasty_id == state.player_dynasty_id,
+            )
+        })
         .collect();
-    for legal_case_id in entering_hearing {
+    for (legal_case_id, player_is_party) in entering_hearing {
         state
             .legal_cases
             .get_mut(&legal_case_id)
             .expect("legal case must exist")
             .status = LegalCaseStatus::Hearing;
-        try_push_outbox(
-            state,
-            OutboxKind::Legal,
-            format!("Legal case {legal_case_id} entered hearing"),
-            "The court began formal proceedings ahead of judgment.".to_owned(),
-        )?;
+        if player_is_party {
+            try_push_outbox(
+                state,
+                OutboxKind::Legal,
+                format!("Legal case {legal_case_id} entered hearing"),
+                "The court began formal proceedings ahead of judgment.".to_owned(),
+            )?;
+        }
     }
     Ok(())
 }
@@ -6517,13 +6836,13 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
             .saturating_mul(2)
             .saturating_add(u32::from(defendant_legitimacy));
         let plaintiff_wins = plaintiff_score >= defendant_score;
-        let paid = if plaintiff_wins {
-            let recoverable = recoverable_legal_damages(state, claim_source, damages);
-            let paid = settle_legal_damages(state, plaintiff_id, defendant_id, recoverable)?;
-            apply_legal_recovery_to_claim(state, claim_source, plaintiff_id, defendant_id, paid);
-            paid
+        let (awarded, paid) = if plaintiff_wins {
+            let awarded = recoverable_legal_damages(state, claim_source, damages);
+            let paid = settle_legal_damages(state, plaintiff_id, defendant_id, awarded)?;
+            settle_legal_claim_source(state, claim_source, plaintiff_id, defendant_id);
+            (awarded, paid)
         } else {
-            Money::ZERO
+            (Money::ZERO, Money::ZERO)
         };
         state
             .legal_cases
@@ -6540,20 +6859,27 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
             defendant_id,
             RelationshipDelta::new(-60, 20, 50, 120, 0),
         );
-        try_push_outbox(
-            state,
-            OutboxKind::Legal,
-            format!("Legal case {id} decided"),
-            format!(
-                "The court decided the {kind:?} claim for dynasty {}; {} was recovered from the defendant.",
+        if plaintiff_id == state.player_dynasty_id || defendant_id == state.player_dynasty_id {
+            try_push_outbox(
+                state,
+                OutboxKind::Legal,
+                format!("Legal case {id} decided"),
                 if plaintiff_wins {
-                    plaintiff_id
+                    let settlement_note = if claim_source.is_some() {
+                        " The grounded source obligation is settled by the judgment."
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "The court decided the {kind:?} claim for dynasty {plaintiff_id}, awarded {awarded}, and recovered {paid} immediately.{settlement_note}"
+                    )
                 } else {
-                    defendant_id
+                    format!(
+                        "The court decided the {kind:?} claim for dynasty {defendant_id}; no damages were awarded."
+                    )
                 },
-                paid
-            ),
-        )?;
+            )?;
+        }
     }
     Ok(())
 }
@@ -6622,19 +6948,15 @@ fn recoverable_legal_damages(
     }
 }
 
-fn apply_legal_recovery_to_claim(
+fn settle_legal_claim_source(
     state: &mut AppState,
     claim_source: Option<LegalClaimSource>,
     plaintiff_id: DynastyId,
     defendant_id: DynastyId,
-    paid: Money,
 ) {
-    if paid <= Money::ZERO {
-        return;
-    }
     match claim_source {
         Some(LegalClaimSource::Loan { loan_id }) => {
-            let (collateral_property_id, repaid) = {
+            let collateral_property_id = {
                 let Some(loan) = state.loans.get_mut(&loan_id) else {
                     return;
                 };
@@ -6643,20 +6965,12 @@ fn apply_legal_recovery_to_claim(
                 {
                     return;
                 }
-                let applied = paid.min(loan.balance);
-                loan.balance = loan
-                    .balance
-                    .checked_sub(applied)
-                    .expect("court recovery must not exceed the adjudicated loan balance");
-                let repaid = loan.balance == Money::ZERO;
-                if repaid {
-                    loan.status = LoanStatus::Repaid;
-                    loan.missed_payments = 0;
-                }
-                (loan.collateral_property_id, repaid)
+                loan.balance = Money::ZERO;
+                loan.status = LoanStatus::Repaid;
+                loan.missed_payments = 0;
+                loan.collateral_property_id
             };
-            if repaid
-                && let Some(property_id) = collateral_property_id
+            if let Some(property_id) = collateral_property_id
                 && let Some(property) = state.properties.get_mut(&property_id)
                 && property.collateral_loan_id == Some(loan_id)
             {
@@ -6672,11 +6986,7 @@ fn apply_legal_recovery_to_claim(
             {
                 return;
             }
-            let applied = paid.min(contract.unpaid_breach_penalty);
-            contract.unpaid_breach_penalty = contract
-                .unpaid_breach_penalty
-                .checked_sub(applied)
-                .expect("court recovery must not exceed the unpaid breach penalty");
+            contract.unpaid_breach_penalty = Money::ZERO;
         }
         None => {}
     }

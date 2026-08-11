@@ -11,7 +11,7 @@ Registry definitions + AppState
             |
             v
 canonical systems
-  bootstrap | commands | simulation | strategic | transactions
+  bootstrap | commands | legal | progression | simulation | strategic | transactions
             |
             +--> runtime invariants
             +--> audit, chronicle, and outbox records
@@ -41,6 +41,8 @@ Dependency direction is one way:
 | `src/rng.rs` | Serializable deterministic RNG. |
 | `src/systems/bootstrap.rs` | New campaign construction. |
 | `src/systems/commands.rs` | `PlayerCommand`, command validation, and dispatch. |
+| `src/systems/legal.rs` | Grounded debt and contract claims shared by player and rival litigation. |
+| `src/systems/progression.rs` | Monotonic dynasty campaign progression and migration reconstruction. |
 | `src/systems/simulation.rs` | Daily economic pipeline. |
 | `src/systems/strategic.rs` | Weekly, monthly, annual, and cross-domain systems. |
 | `src/systems/transactions.rs` | Reusable validated transaction primitives. |
@@ -121,6 +123,10 @@ PlayerCommand
 
 Owner: `src/systems/commands.rs` and the subsystem functions it invokes.
 
+Capital movement between a dynasty and its businesses is canonical system behavior, not adapter behavior. Recapitalization moves treasury into an owned business; protected owner distribution moves only cash above the business operating floor back to treasury. Both paths preflight finance versions and supported numeric ranges before mutation. Manual owner distributions reuse the same 21-day operating floor as automatic dividends so command and simulation behavior cannot disagree about what cash is safely distributable.
+
+Civic capital movement is also canonical command behavior. `FundPublicWork` can move treasury only into an unfinished public work already sponsored by the player dynasty. The command preflights treasury, civic-contribution, and remaining-budget bounds, records the private spending as civic contribution, and reuses `apply_public_work_completion` when it closes the budget. Municipal weekly spending and direct dynasty patronage therefore converge on the same completed-infrastructure effects instead of maintaining parallel civic outcome logic.
+
 Cross-record operations may use consumed validated tokens. A token must revalidate state at commit time because the state may have changed after initial validation. Business-finance tokens also capture the finance version of each affected business, so an intervening valid finance mutation invalidates the stale token even when balances would still permit the original operation.
 
 ### Time advancement
@@ -138,15 +144,19 @@ Cross-record operations may use consumed validated tokens. A token must revalida
 9. Apply price controls.
 10. Update business lifecycle state.
 11. Advance the clock.
-12. Run weekly systems on week boundaries.
-13. Run monthly systems every 30 days.
-14. Run annual and succession systems every 360 days.
-15. Append the day audit record.
-16. Validate debug invariants.
+12. Expire time-limited reports and office directives whose inclusive expiry day has passed.
+13. Run weekly systems on week boundaries.
+14. Run monthly systems every 30 days.
+15. Run annual and succession systems every 360 days.
+16. Refresh monotonic campaign progression from durable gameplay milestones.
+17. Append the day audit record.
+18. Validate debug invariants.
 
-Owners: `src/systems/simulation.rs` and `src/systems/strategic.rs`.
+Owners: `src/systems/simulation.rs`, `src/systems/strategic.rs`, and `src/systems/progression.rs`.
 
 Execution order is part of the simulation contract. Change it only with tests that establish the intended causal effect.
+
+Production and maintenance both decide replacement-tool demand before their apply phase. Tool quantities are bounded by the market stock visible when the plan is created, and the corresponding spending is carved out of the operating or maintenance cost the business was already going to pay. Non-tool production may route up to 80% of existing operating overhead through replacement tools, while maintenance may route its full maintenance budget through tools when stock permits. Apply therefore commits a precomputed inter-business market flow without adding a second business charge or inventing demand during mutation.
 
 ### Persistence
 
@@ -161,6 +171,7 @@ load_state
   -> parse schema version
   -> run explicit version-by-version migrations
   -> deserialize AppState
+  -> normalize legacy derived campaign phases and expired time-limited state when required
   -> verify derived ownership and indexes
   -> release-mode validation
 ```

@@ -21,6 +21,8 @@ Primary entry points:
 | New campaign | `build_new_game` in `src/systems/bootstrap.rs` |
 | Player command | `apply_player_command` in `src/systems/commands.rs` |
 | Time advancement | `advance_days` in `src/systems/simulation.rs` |
+| Grounded legal claims | `src/systems/legal.rs` |
+| Campaign progression | `src/systems/progression.rs` |
 | Scheduled systems | `src/systems/strategic.rs` |
 | Persistence | `src/persistence.rs` |
 | Read models and HTML | `src/projection.rs` |

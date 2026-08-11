@@ -595,6 +595,7 @@ mod harness {
 
 mod candidates {
     use super::*;
+    use crate::core::CharacterCapabilities;
 
     fn establish_player_contract_market(state: &mut AppState) -> crate::ids::GoodId {
         for _ in 0..180 {
@@ -837,8 +838,168 @@ mod candidates {
     }
 
     #[test]
+    fn established_dynasty_does_not_offer_generic_family_skill_grinding() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        {
+            let player = state
+                .dynasties
+                .get_mut(&player_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(20_000);
+            player.resources.reputation_reliability_basis_points =
+                INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT;
+            player.runtime.succession_risk_basis_points = 0;
+        }
+        grant_player_contract_deliveries_for_test(
+            &mut state,
+            INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+        );
+        let head_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        {
+            let head = state
+                .characters
+                .get_mut(head_id)
+                .expect("player head must exist");
+            head.capabilities = CharacterCapabilities {
+                administration: 100,
+                commerce: 100,
+                social: 100,
+                craft: 100,
+            };
+            head.identity.birth_day = state.clock.day().saturating_sub(30 * 360);
+        }
+        let institution_id = state
+            .institutions
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain an institution");
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("institution must exist")
+            .members
+            .insert(head_id);
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionPatronage,
+            subject: format!("institution:{institution_id}:character:{head_id}").into(),
+            detail: "test support".to_owned(),
+        });
+        let mut candidates = Vec::new();
+
+        generate_family_education_candidates(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut candidates,
+        );
+
+        assert!(
+            candidates.is_empty(),
+            "once the dynasty has an institutional foothold, education must prepare a concrete office or succession role rather than fill cooldowns: {candidates:#?}"
+        );
+    }
+
+    #[test]
+    fn succession_pressure_targets_heir_primary_capability() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let (head_id, heir_id) = {
+            let player = state
+                .dynasties
+                .get_mut(&player_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(20_000);
+            player.resources.reputation_reliability_basis_points =
+                INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT;
+            player.runtime.succession_risk_basis_points = 3_000;
+            (
+                player.head_id(),
+                player.heir_id().expect("player dynasty must have an heir"),
+            )
+        };
+        grant_player_contract_deliveries_for_test(
+            &mut state,
+            INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+        );
+        {
+            let head = state
+                .characters
+                .get_mut(head_id)
+                .expect("player head must exist");
+            head.capabilities = CharacterCapabilities {
+                administration: 100,
+                commerce: 100,
+                social: 100,
+                craft: 100,
+            };
+        }
+        {
+            let heir = state
+                .characters
+                .get_mut(heir_id)
+                .expect("player heir must exist");
+            heir.identity.birth_day = state.clock.day().saturating_sub(25 * 360);
+            heir.capabilities.administration = heir.capabilities.administration.min(80);
+        }
+        let institution_id = state
+            .institutions
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain an institution");
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("institution must exist")
+            .members
+            .insert(head_id);
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionPatronage,
+            subject: format!("institution:{institution_id}:character:{head_id}").into(),
+            detail: "test support".to_owned(),
+        });
+        let mut candidates = Vec::new();
+
+        generate_family_education_candidates(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut candidates,
+        );
+
+        let succession = candidates
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.command,
+                    PlayerCommand::EducateFamilyMember {
+                        character_id,
+                        focus: EducationFocus::Administration,
+                    } if character_id == heir_id
+                ) && candidate.description.contains("succession preparation")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "succession pressure must produce a concrete heir-preparation education candidate: {candidates:#?}"
+                )
+            });
+        apply_player_command(registry, &mut state, succession.command.clone())
+            .expect("succession-preparation education must be executable");
+    }
+
+    #[test]
     fn established_dynasty_targets_new_offices_that_fit_its_power_strategy() {
-        let state = make_test_campaign();
+        let mut state = make_test_campaign();
         let controlled_powers = BTreeSet::new();
         let aligned = state
             .institutions
@@ -884,6 +1045,27 @@ mod candidates {
                 GameplayPersona::Steward,
             ),
             "before winning an office the dynasty may use any viable institution as its first foothold"
+        );
+
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points = 0;
+        assert_eq!(
+            institution_support_recovery_bonus(&state, true),
+            AGENT_POLITICAL_RECOVERY_SUPPORT_BONUS
+        );
+        assert!(
+            institution_is_strategic_target(
+                &state,
+                unaligned,
+                &controlled_powers,
+                true,
+                GameplayPersona::Steward,
+            ),
+            "a politically stranded dynasty must consider new patronage as a legitimacy recovery route even when the institution does not add a preferred office power"
         );
     }
 
@@ -1944,6 +2126,84 @@ mod candidates {
         generate_cash_rebalance_candidate(registry, &state, &businesses, &mut candidates);
 
         single_candidate(&candidates, "cash rebalancing after cooldown");
+    }
+
+    #[test]
+    fn cash_poor_dynasty_can_distribute_only_safe_business_surplus() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let reserve = business_owner_distribution_reserve(
+            registry,
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        );
+        let safe_surplus = Money::from_copper(1_200);
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("owned business must exist");
+            business.operations.status = BusinessStatus::Active;
+            business.finance.cash = reserve.saturating_add(safe_surplus);
+        }
+        let businesses = vec![
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        ];
+        let mut candidates = Vec::new();
+
+        generate_owner_distribution_candidate(
+            registry,
+            &state,
+            GameplayPersona::Opportunist,
+            &businesses,
+            &mut candidates,
+        );
+
+        let candidate = single_candidate(&candidates, "owner distribution");
+        assert_eq!(candidate.kind, GameplayCommandKind::TransferBusinessCash);
+        let PlayerCommand::WithdrawBusinessCash {
+            business_id: candidate_business_id,
+            amount,
+        } = candidate.command
+        else {
+            panic!("cash-poor dynasty must receive an owner-distribution candidate");
+        };
+        assert_eq!(candidate_business_id, business_id);
+        assert_eq!(amount, safe_surplus);
+        assert!(amount >= AGENT_OWNER_DISTRIBUTION_TRIGGER);
+
+        let mut accumulator = CampaignAccumulator::new();
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::Opportunist,
+            &mut accumulator,
+        );
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::TransferBusinessCash)
+                .expect("cash-transfer stats must exist")
+                .activation_opportunities,
+            1,
+            "activation metrics must include safe owner distributions"
+        );
     }
 
     #[test]
@@ -3611,6 +3871,56 @@ mod metrics {
     }
 
     #[test]
+    fn stalled_sponsored_public_work_creates_a_private_funding_candidate() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let district_id = state
+            .districts
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain a district");
+        let public_work_id = state.next_ids.public_work();
+        state.public_works.insert(
+            public_work_id,
+            crate::core::PublicWork {
+                id: public_work_id,
+                district_id,
+                kind: PublicWorkKind::Drainage,
+                sponsor_dynasty_id: Some(player_id),
+                budget: Money::from_copper(10_000),
+                spent: Money::from_copper(7_500),
+                progress_basis_points: 7_500,
+                status: PublicWorkStatus::Suspended,
+            },
+        );
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(20_000);
+        let mut candidates = Vec::new();
+
+        generate_public_work_funding_candidates(&state, GameplayPersona::Steward, &mut candidates);
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.command,
+                    PlayerCommand::FundPublicWork {
+                        public_work_id: candidate_id,
+                        amount,
+                    } if candidate_id == public_work_id && amount == Money::from_copper(2_500)
+                )
+            })
+            .expect("a wealthy sponsor must be able to finish its stalled civic commitment");
+        assert_eq!(candidate.kind, GameplayCommandKind::StartPublicWork);
+        assert!(candidate.description.contains("finish stalled"));
+    }
+
+    #[test]
     fn terminal_phase_transition_requests_one_decision_cycle() {
         let mut accumulator = CampaignAccumulator::new();
         accumulator.fantasy_arc.first_succession_day = Some(7_200);
@@ -3718,6 +4028,87 @@ mod metrics {
     }
 
     #[test]
+    fn snapshots_attribute_player_borrowing_distress_separately() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| {
+                *dynasty_id != player_id
+                    && !same_pair_credit_blocks_new_loan(&state, *dynasty_id, player_id)
+            })
+            .expect("campaign must contain an unused player-borrowing counterparty");
+        let loan_id = issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(1_000),
+                weekly_payment: Money::from_copper(50),
+                interest_basis_points: 700,
+                collateral_property_id: None,
+            },
+        )
+        .expect("test player borrowing must be issuable");
+        state
+            .loans
+            .get_mut(&loan_id)
+            .expect("new player borrowing must exist")
+            .status = LoanStatus::Delinquent;
+        let unrelated_loan_id = state
+            .loans
+            .values()
+            .find(|loan| loan.id != loan_id && loan.borrower_dynasty_id != player_id)
+            .expect("campaign must contain an unrelated private loan")
+            .id;
+        state
+            .loans
+            .get_mut(&unrelated_loan_id)
+            .expect("unrelated loan must exist")
+            .status = LoanStatus::Defaulted;
+
+        let snapshot = GameplaySnapshot::capture(&state);
+
+        assert_eq!(snapshot.player_delinquent_borrowing, 1);
+        assert_eq!(snapshot.player_defaulted_borrowing, 0);
+        assert!(snapshot.delinquent_loans >= 1);
+        assert!(snapshot.defaulted_loans >= 1);
+    }
+
+    #[test]
+    fn consequence_profiles_preserve_exact_material_before_and_after_values() {
+        let state = make_test_campaign();
+        let earlier = GameplaySnapshot::capture(&state);
+        let mut later = earlier.clone();
+        later.player_treasury = earlier
+            .player_treasury
+            .checked_add(Money::from_copper(123))
+            .expect("fixture treasury change must fit");
+        later.player_defaulted_borrowing = 1;
+
+        let profile = GameplayConsequenceProfile::between(&earlier, &later);
+
+        assert_eq!(
+            profile.changes.get(&GameplayMeasure::PlayerTreasury),
+            Some(&GameplayMeasureChange {
+                before: earlier.player_treasury.copper(),
+                after: later.player_treasury.copper(),
+            })
+        );
+        assert_eq!(
+            profile
+                .changes
+                .get(&GameplayMeasure::PlayerDefaultedBorrowing),
+            Some(&GameplayMeasureChange {
+                before: 0,
+                after: 1,
+            })
+        );
+    }
+
+    #[test]
     fn snapshots_measure_material_district_conditions() {
         let mut state = make_test_campaign();
         let earlier = GameplaySnapshot::capture(&state);
@@ -3768,6 +4159,35 @@ mod metrics {
                 before.safety_basis_points.saturating_add(100)
             );
         }
+    }
+
+    #[test]
+    fn player_borrowing_default_is_reported_as_a_material_experience_problem() {
+        let mut report = cached_focused_report(360);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 720;
+        campaign.maximum_player_delinquent_borrowing = 1;
+        campaign.maximum_player_defaulted_borrowing = 1;
+        campaign.end.player_delinquent_borrowing = 0;
+        campaign.end.player_defaulted_borrowing = 1;
+        campaign.end.player_treasury = Money::ZERO;
+        campaign.end.player_properties = 0;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(
+            &findings,
+            "Player borrowing enters material credit distress",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        assert!(
+            finding
+                .evidence
+                .contains("ended with 0 delinquent, 1 defaulted")
+        );
     }
 
     #[test]
@@ -4427,11 +4847,21 @@ mod metrics {
 
         snapshot.day = 900;
         snapshot.player_disputed_employment = 1;
+        snapshot.family_unity = 8_000;
+        snapshot.legitimacy = 4_000;
+        snapshot.offices_held = 3;
+        snapshot.institution_memberships = 3;
+        snapshot.player_institutions_represented = 3;
         accumulator.observe_snapshot(&snapshot);
         accumulator.record_executed_command(GameplayCommandKind::DesignateHeir, 1_200);
 
         snapshot.day = 5_200;
         snapshot.generation = snapshot.generation.saturating_add(1);
+        snapshot.family_unity = 6_500;
+        snapshot.legitimacy = 3_000;
+        snapshot.offices_held = 1;
+        snapshot.institution_memberships = 1;
+        snapshot.player_institutions_represented = 1;
         accumulator.observe_snapshot(&snapshot);
 
         assert_eq!(
@@ -4451,11 +4881,190 @@ mod metrics {
                 first_succession_day: Some(5_200),
             }
         );
+        assert_eq!(
+            accumulator.succession_transition,
+            Some(GameplaySuccessionTransition {
+                day: 5_200,
+                family_unity_before: 8_000,
+                family_unity_after: 6_500,
+                legitimacy_before: 4_000,
+                legitimacy_after: 3_000,
+                offices_before: 3,
+                offices_after: 1,
+                institution_memberships_before: 3,
+                institution_memberships_after: 1,
+                represented_institutions_before: 3,
+                represented_institutions_after: 1,
+            })
+        );
     }
 }
 
 mod findings {
     use super::*;
+
+    #[test]
+    fn politically_stranded_succession_is_reported_until_rebuild_begins() {
+        let mut report = cached_focused_report(360);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 7_200;
+        campaign.end.day = 7_200;
+        campaign.end.legitimacy = 0;
+        campaign.end.offices_held = 1;
+        campaign.end.player_institutions_represented = 1;
+        campaign.succession_transition = Some(GameplaySuccessionTransition {
+            day: 5_400,
+            family_unity_before: 8_000,
+            family_unity_after: 6_500,
+            legitimacy_before: 2_000,
+            legitimacy_after: 600,
+            offices_before: 3,
+            offices_after: 1,
+            institution_memberships_before: 3,
+            institution_memberships_after: 1,
+            represented_institutions_before: 3,
+            represented_institutions_after: 1,
+        });
+        let phase = campaign
+            .phase_stats
+            .entry(GameplayPhase::SuccessionLegacy)
+            .or_default();
+        phase.executed_commands.clear();
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "Political succession can strand institutional recovery",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.end.legitimacy = 250;
+        campaign
+            .phase_stats
+            .entry(GameplayPhase::SuccessionLegacy)
+            .or_default()
+            .executed_commands
+            .insert(GameplayCommandKind::CultivateInstitutionSupport, 1);
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        assert_finding_absent(
+            &findings,
+            "Political succession can strand institutional recovery",
+        );
+    }
+
+    #[test]
+    fn background_specific_expansion_ceiling_is_reported() {
+        let mut report = cached_focused_report(30);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        let mut campaigns = Vec::new();
+        for (background, generated) in [
+            (StartingBackground::Blacksmith, 0),
+            (StartingBackground::Baker, 1),
+        ] {
+            for offset in 0..4_u64 {
+                let mut campaign = baseline.clone();
+                campaign.seed = offset + 1;
+                campaign.background = background;
+                campaign.simulated_days = 3_600;
+                campaign
+                    .commands
+                    .get_mut(&GameplayCommandKind::BuyProperty)
+                    .expect("property command stats must exist")
+                    .generated = generated;
+                campaigns.push(campaign);
+            }
+        }
+        report.campaigns = campaigns;
+        report.aggregate.campaigns = 8;
+        report.aggregate.simulated_days = 28_800;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Blacksmith background never exposes buy-property",
+        );
+    }
+
+    #[test]
+    fn mature_private_defaults_without_courts_are_reported() {
+        let mut report = cached_focused_report(30);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = [1_u64, 2]
+            .into_iter()
+            .map(|seed| {
+                let mut campaign = baseline.clone();
+                campaign.seed = seed;
+                campaign.simulated_days = 3_600;
+                campaign.maximum_defaulted_loans = 1;
+                campaign
+            })
+            .collect();
+        report.aggregate.campaigns = 2;
+        report.aggregate.simulated_days = 7_200;
+        report
+            .aggregate
+            .causal_domain_changes
+            .insert(GameplayDomain::Legal, 0);
+        report
+            .aggregate
+            .ambient_domain_changes
+            .insert(GameplayDomain::Legal, 0);
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        finding_with_title(
+            &findings,
+            "Defaulted private debt never reaches institutional enforcement",
+        );
+    }
+
+    #[test]
+    fn legal_activity_satisfies_private_debt_enforcement_ecosystem_check() {
+        let mut report = cached_focused_report(30);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = [1_u64, 2]
+            .into_iter()
+            .map(|seed| {
+                let mut campaign = baseline.clone();
+                campaign.seed = seed;
+                campaign.simulated_days = 3_600;
+                campaign.maximum_defaulted_loans = 1;
+                campaign
+            })
+            .collect();
+        report.aggregate.campaigns = 2;
+        report.aggregate.simulated_days = 7_200;
+        report
+            .aggregate
+            .ambient_domain_changes
+            .insert(GameplayDomain::Legal, 1);
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert!(findings.iter().all(|finding| {
+            finding.title != "Defaulted private debt never reaches institutional enforcement"
+        }));
+    }
 
     #[test]
     fn office_directives_without_later_effects_are_reported() {
@@ -4991,7 +5600,7 @@ mod findings {
     }
 
     #[test]
-    fn findings_surface_asset_rich_liquidity_droughts() {
+    fn findings_surface_owned_wealth_liquidity_droughts() {
         let mut report = cached_focused_report(30);
         let campaign = report
             .campaigns
@@ -5001,7 +5610,7 @@ mod findings {
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
-        finding_with_title(&findings, "Asset-rich dynasties can become decision-poor");
+        finding_with_title(&findings, "Owned wealth can become decision-poor");
     }
 
     #[test]
@@ -5141,7 +5750,7 @@ mod findings {
     }
 
     #[test]
-    fn governance_long_quiet_streak_is_visible_even_when_aggregate_breadth_is_healthy() {
+    fn governance_quiet_streak_warns_only_beyond_annual_commitment_cadence() {
         let mut report = cached_focused_report(30);
         report.aggregate.phase_stats.insert(
             GameplayPhase::DynasticGovernance,
@@ -5151,7 +5760,7 @@ mod findings {
                 institutional_campaign_actions: 0,
                 quiet_cycles: 30,
                 quiet_cycles_with_ambient_change: 30,
-                longest_quiet_streak_cycles: 11,
+                longest_quiet_streak_cycles: 12,
                 blocked_cycles: 0,
                 cycles_with_multiple_viable_command_kinds: 40,
                 cycles_with_close_viable_command_kinds: 20,
@@ -5173,7 +5782,7 @@ mod findings {
             .phase_stats
             .entry(GameplayPhase::DynasticGovernance)
             .or_default()
-            .longest_quiet_streak_cycles = 11;
+            .longest_quiet_streak_cycles = 12;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
@@ -5184,14 +5793,14 @@ mod findings {
         assert!(
             finding
                 .evidence
-                .contains("Thresholds missed: longest quiet streak 11 > 10 cycles"),
+                .contains("Thresholds missed: longest quiet streak 12 > 11 cycles"),
             "phase warning must identify the exact failed quality gate: {}",
             finding.evidence
         );
         assert!(
             finding
                 .evidence
-                .contains("Worst uninterrupted quiet streak: 11 cycles in seed"),
+                .contains("Worst uninterrupted quiet streak: 12 cycles in seed"),
             "phase warning must identify the campaign that produced the longest drought: {}",
             finding.evidence
         );
@@ -5201,7 +5810,15 @@ mod findings {
             .phase_stats
             .get_mut(&GameplayPhase::DynasticGovernance)
             .expect("governance phase statistics must exist")
-            .longest_quiet_streak_cycles = 10;
+            .longest_quiet_streak_cycles = 11;
+        report
+            .campaigns
+            .first_mut()
+            .expect("focused report must contain one campaign")
+            .phase_stats
+            .entry(GameplayPhase::DynasticGovernance)
+            .or_default()
+            .longest_quiet_streak_cycles = 11;
         let findings = derive_findings(&report.aggregate, &report.campaigns);
         assert_finding_absent(
             &findings,

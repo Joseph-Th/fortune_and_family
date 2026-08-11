@@ -5211,6 +5211,132 @@ mod legal_cases {
         id
     }
 
+    fn make_defaulted_loan(
+        state: &mut AppState,
+        lender_id: DynastyId,
+        borrower_id: DynastyId,
+    ) -> crate::ids::LoanId {
+        let existing_loan_id = state
+            .loans
+            .values()
+            .find(|loan| {
+                loan.lender_dynasty_id == lender_id
+                    && loan.borrower_dynasty_id == borrower_id
+                    && loan.status != LoanStatus::Repaid
+            })
+            .map(|loan| loan.id);
+        let loan_id = if let Some(loan_id) = existing_loan_id {
+            loan_id
+        } else {
+            issue_loan(
+                state,
+                LoanTerms {
+                    lender_dynasty_id: lender_id,
+                    borrower_dynasty_id: borrower_id,
+                    principal: Money::from_copper(5_000),
+                    weekly_payment: Money::from_copper(300),
+                    interest_basis_points: 1_000,
+                    collateral_property_id: None,
+                },
+            )
+            .expect("fixture loan must be issuable")
+        };
+        let loan = state
+            .loans
+            .get_mut(&loan_id)
+            .expect("fixture loan must exist");
+        loan.status = LoanStatus::Defaulted;
+        loan.missed_payments = 3;
+        loan_id
+    }
+
+    #[test]
+    fn rival_lenders_file_grounded_debt_cases() {
+        let mut state = make_test_campaign();
+        let mut rival_ids = state
+            .dynasties
+            .keys()
+            .copied()
+            .filter(|dynasty_id| *dynasty_id != state.player_dynasty_id);
+        let lender_id = rival_ids
+            .next()
+            .expect("campaign must contain a rival lender");
+        let borrower_id = rival_ids
+            .next()
+            .expect("campaign must contain a rival borrower");
+        let loan_id = make_defaulted_loan(&mut state, lender_id, borrower_id);
+        let lender_treasury_before = state
+            .dynasties
+            .get(&lender_id)
+            .expect("lender must exist")
+            .treasury();
+
+        file_grounded_ai_legal_cases(&mut state).expect("rival filing must succeed");
+
+        let legal_case = state
+            .legal_cases
+            .values()
+            .find(|legal_case| {
+                legal_case.plaintiff_dynasty_id == lender_id
+                    && legal_case.defendant_dynasty_id == borrower_id
+            })
+            .expect("grounded rival debt must create a legal case");
+        assert_eq!(legal_case.kind, crate::core::LegalCaseKind::Debt);
+        assert_eq!(
+            legal_case.claim_source,
+            Some(LegalClaimSource::Loan { loan_id })
+        );
+        assert_eq!(legal_case.status, LegalCaseStatus::Filed);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&lender_id)
+                .expect("lender must exist")
+                .treasury(),
+            lender_treasury_before
+                .checked_sub(crate::systems::LEGAL_CASE_FILING_COST)
+                .expect("fixture lender must afford filing")
+        );
+
+        let case_count = state.legal_cases.len();
+        file_grounded_ai_legal_cases(&mut state).expect("repeat legal review must succeed");
+        assert_eq!(
+            state.legal_cases.len(),
+            case_count,
+            "the same obligation must not produce duplicate litigation"
+        );
+    }
+
+    #[test]
+    fn rival_claim_against_player_creates_actionable_notice() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival lender");
+        let loan_id = make_defaulted_loan(&mut state, lender_id, player_id);
+        let outbox_before = state.outbox.len();
+
+        file_grounded_ai_legal_cases(&mut state).expect("rival filing must succeed");
+
+        assert!(state.legal_cases.values().any(|legal_case| {
+            legal_case.plaintiff_dynasty_id == lender_id
+                && legal_case.defendant_dynasty_id == player_id
+                && legal_case.claim_source == Some(LegalClaimSource::Loan { loan_id })
+        }));
+        assert_eq!(state.outbox.len(), outbox_before + 1);
+        let notice = state
+            .outbox
+            .last()
+            .expect("player-facing legal notice must exist");
+        assert_eq!(notice.kind, OutboxKind::Legal);
+        assert!(notice.subject.contains("filed against the dynasty"));
+        assert!(notice.body.contains("hearing is scheduled"));
+    }
+
     #[test]
     fn filed_case_enters_hearing_before_judgment() {
         let mut state = make_test_campaign();
@@ -5258,6 +5384,75 @@ mod legal_cases {
     }
 
     #[test]
+    fn rival_case_lifecycle_does_not_publish_player_notifications() {
+        let mut state = make_test_campaign();
+        let mut rival_ids = state
+            .dynasties
+            .keys()
+            .copied()
+            .filter(|dynasty_id| *dynasty_id != state.player_dynasty_id);
+        let plaintiff_id = rival_ids
+            .next()
+            .expect("campaign must contain a rival plaintiff");
+        let defendant_id = rival_ids
+            .next()
+            .expect("campaign must contain a rival defendant");
+        let hearing_day = state.clock.day().saturating_add(30);
+        let legal_case_id = insert_test_case(
+            &mut state,
+            &TestLegalCase {
+                plaintiff_dynasty_id: plaintiff_id,
+                defendant_dynasty_id: defendant_id,
+                kind: crate::core::LegalCaseKind::Fraud,
+                claim_source: None,
+                evidence_basis_points: 6_500,
+                public_attention_basis_points: 2_000,
+                damages: Money::from_copper(2_500),
+                hearing_day,
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        let outbox_before = state.outbox.len();
+
+        advance_legal_case_hearings(&mut state).expect("rival hearing must advance");
+
+        assert_eq!(
+            state
+                .legal_cases
+                .get(&legal_case_id)
+                .expect("rival case must exist")
+                .status,
+            LegalCaseStatus::Hearing
+        );
+        assert_eq!(
+            state.outbox.len(),
+            outbox_before,
+            "an uninvolved player must not receive a rival hearing notice"
+        );
+
+        state
+            .legal_cases
+            .get_mut(&legal_case_id)
+            .expect("rival case must exist")
+            .hearing_day = state.clock.day();
+        resolve_legal_cases(&mut state).expect("rival judgment must resolve");
+
+        assert!(matches!(
+            state
+                .legal_cases
+                .get(&legal_case_id)
+                .expect("rival case must exist")
+                .status,
+            LegalCaseStatus::DecidedForPlaintiff | LegalCaseStatus::DecidedForDefendant
+        ));
+        assert_eq!(
+            state.outbox.len(),
+            outbox_before,
+            "an uninvolved player must not receive a rival judgment notice"
+        );
+    }
+
+    #[test]
     fn legal_damages_reject_plaintiff_treasury_overflow_without_mutation() {
         let mut state = make_test_campaign();
         let mut dynasty_ids = state.dynasties.keys().copied();
@@ -5298,57 +5493,38 @@ mod legal_cases {
     }
 
     #[test]
-    fn debt_judgment_reduces_exact_source_balance_and_prevents_double_collection() {
+    fn debt_judgment_settles_source_even_when_immediate_recovery_is_partial() {
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
-        let existing_loan_id = state
+        let borrower_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival borrower");
+        let loan_id = make_defaulted_loan(&mut state, player_id, borrower_id);
+        let balance = state
             .loans
-            .values()
-            .find(|loan| loan.lender_dynasty_id == player_id)
-            .map(|loan| loan.id);
-        let loan_id = if let Some(loan_id) = existing_loan_id {
-            loan_id
-        } else {
-            let borrower_id = state
-                .dynasties
-                .keys()
-                .copied()
-                .find(|dynasty_id| *dynasty_id != player_id)
-                .expect("campaign must contain a rival borrower");
-            crate::systems::issue_loan(
-                &mut state,
-                LoanTerms {
-                    lender_dynasty_id: player_id,
-                    borrower_dynasty_id: borrower_id,
-                    principal: Money::from_copper(5_000),
-                    weekly_payment: Money::from_copper(300),
-                    interest_basis_points: 1_000,
-                    collateral_property_id: None,
-                },
-            )
-            .expect("fixture player loan must be issuable")
-        };
-        let (borrower_id, balance) = {
-            let loan = state
-                .loans
-                .get_mut(&loan_id)
-                .expect("source loan must exist");
-            loan.status = LoanStatus::Defaulted;
-            loan.missed_payments = 3;
-            (loan.borrower_dynasty_id, loan.balance)
-        };
+            .get(&loan_id)
+            .expect("source loan must exist")
+            .balance;
         state
             .dynasties
             .get_mut(&player_id)
             .expect("player dynasty must exist")
             .resources
             .treasury = Money::ZERO;
+        let immediately_collectible = Money::from_copper(100);
+        assert!(
+            balance > immediately_collectible,
+            "fixture debt must exceed the defendant's immediately collectible cash"
+        );
         state
             .dynasties
             .get_mut(&borrower_id)
             .expect("borrower dynasty must exist")
             .resources
-            .treasury = balance;
+            .treasury = immediately_collectible;
         let hearing_day = state.clock.day();
         let case_id = insert_test_case(
             &mut state,
@@ -5377,7 +5553,8 @@ mod legal_cases {
                 .get(&player_id)
                 .expect("player dynasty must exist")
                 .treasury(),
-            balance
+            immediately_collectible,
+            "cash recovery is limited by the defendant's current treasury"
         );
         assert_eq!(
             state
@@ -5403,7 +5580,7 @@ mod legal_cases {
     }
 
     #[test]
-    fn contract_judgment_reduces_only_the_unpaid_breach_penalty() {
+    fn contract_judgment_settles_unpaid_penalty_even_when_recovery_is_partial() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
         let (plaintiff_id, defendant_id) = {
@@ -5445,7 +5622,7 @@ mod legal_cases {
             .get_mut(&defendant_id)
             .expect("defendant must exist")
             .resources
-            .treasury = Money::from_copper(500);
+            .treasury = Money::from_copper(100);
         let hearing_day = state.clock.day();
         let case_id = insert_test_case(
             &mut state,
@@ -5479,7 +5656,8 @@ mod legal_cases {
                 .get(&plaintiff_id)
                 .expect("plaintiff must exist")
                 .treasury(),
-            Money::from_copper(300)
+            Money::from_copper(100),
+            "immediate court recovery must remain limited by defendant liquidity"
         );
         assert_eq!(
             state
@@ -5487,8 +5665,8 @@ mod legal_cases {
                 .get(&defendant_id)
                 .expect("defendant must exist")
                 .treasury(),
-            Money::from_copper(200),
-            "court recovery must be capped by the tracked unpaid breach penalty, not the historical contract penalty"
+            Money::ZERO,
+            "the judgment must not manufacture cash the defendant does not have"
         );
         assert_eq!(
             state
@@ -6529,9 +6707,12 @@ mod ai {
 
         settle_loans(&mut state).expect("loan settlement must succeed");
 
+        let loan = state.loans.get(&loan_id).expect("loan must exist");
+        assert_eq!(loan.status, LoanStatus::Repaid);
         assert_eq!(
-            state.loans.get(&loan_id).expect("loan must exist").status,
-            LoanStatus::Defaulted
+            loan.balance,
+            Money::ZERO,
+            "foreclosure proceeds must settle a fully secured balance"
         );
         let property = state
             .properties
@@ -6540,6 +6721,86 @@ mod ai {
         assert_eq!(property.owner_dynasty_id, Some(lender_id));
         assert_eq!(property.tenant_dynasty_id, Some(borrower_id));
         assert_eq!(property.collateral_loan_id, None);
+        validate_invariants(test_registry(), &state);
+    }
+
+    #[test]
+    fn collateral_seizure_leaves_only_the_unsecured_deficiency() {
+        let mut state = make_test_campaign();
+        let property = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id.is_some()
+                    && property.collateral_loan_id.is_none()
+                    && property.value > Money::ZERO
+            })
+            .expect("campaign must contain eligible collateral");
+        let property_id = property.id;
+        let borrower_id = property
+            .owner_dynasty_id
+            .expect("property must have an owner");
+        let collateral_recovery = property
+            .value
+            .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000);
+        let lender_id = state
+            .dynasties
+            .values()
+            .filter(|dynasty| dynasty.id() != borrower_id)
+            .filter(|dynasty| dynasty.treasury() >= Money::from_copper(1))
+            .find(|dynasty| {
+                !state.loans.values().any(|loan| {
+                    loan.lender_dynasty_id == dynasty.id()
+                        && loan.borrower_dynasty_id == borrower_id
+                        && loan.status.is_repayment_active()
+                })
+            })
+            .map(crate::core::Dynasty::id)
+            .expect("campaign must contain an eligible collateral lender");
+        let loan_id = issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: borrower_id,
+                principal: Money::from_copper(1),
+                weekly_payment: Money::from_copper(1),
+                interest_basis_points: 0,
+                collateral_property_id: Some(property_id),
+            },
+        )
+        .expect("fixture collateral loan must be issuable");
+        let expected_deficiency = Money::from_copper(100);
+        {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.balance = collateral_recovery
+                .checked_add(expected_deficiency)
+                .expect("fixture balance must fit");
+            loan.missed_payments = 2;
+            loan.next_due_day = state.clock.day();
+        }
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::ZERO;
+
+        settle_loans(&mut state).expect("collateral default must settle");
+
+        let loan = state.loans.get(&loan_id).expect("loan must exist");
+        assert_eq!(loan.status, LoanStatus::Defaulted);
+        assert_eq!(loan.balance, expected_deficiency);
+        let property = state
+            .properties
+            .get(&property_id)
+            .expect("collateral property must remain");
+        assert_eq!(property.owner_dynasty_id, Some(lender_id));
+        assert_eq!(property.collateral_loan_id, None);
+        assert!(state.outbox.iter().any(|message| {
+            message.kind == OutboxKind::Finance
+                && message.subject.contains("defaulted")
+                && message.body.contains(&expected_deficiency.to_string())
+        }));
         validate_invariants(test_registry(), &state);
     }
 

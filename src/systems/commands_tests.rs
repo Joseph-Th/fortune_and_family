@@ -512,6 +512,137 @@ mod validation {
     }
 
     #[test]
+    fn dynasty_can_finish_its_suspended_public_work_with_private_funding() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let district_id = registry
+            .districts()
+            .first()
+            .expect("registry must contain a district")
+            .id();
+        let public_work_id = state.next_ids.public_work();
+        let budget = Money::from_copper(10_000);
+        let spent = Money::from_copper(2_000);
+        let amount = Money::from_copper(8_000);
+        state.public_works.insert(
+            public_work_id,
+            PublicWork {
+                id: public_work_id,
+                district_id,
+                kind: PublicWorkKind::Drainage,
+                sponsor_dynasty_id: Some(player_id),
+                budget,
+                spent,
+                progress_basis_points: 2_000,
+                status: PublicWorkStatus::Suspended,
+            },
+        );
+        let treasury_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .treasury();
+        let contributions_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .civic_contributions();
+        let sanitation_before = state
+            .districts
+            .get(&district_id)
+            .expect("district must exist")
+            .sanitation_basis_points;
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FundPublicWork {
+                public_work_id,
+                amount,
+            },
+        )
+        .expect("private civic funding must finish a sponsored suspended work");
+
+        let work = state
+            .public_works
+            .get(&public_work_id)
+            .expect("funded public work must remain");
+        assert_eq!(work.spent, budget);
+        assert_eq!(work.progress_basis_points, 10_000);
+        assert_eq!(work.status, PublicWorkStatus::Completed);
+        let player = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist");
+        assert_eq!(player.treasury(), treasury_before.saturating_sub(amount));
+        assert_eq!(
+            player.civic_contributions(),
+            contributions_before.saturating_add(amount)
+        );
+        assert!(
+            state
+                .districts
+                .get(&district_id)
+                .expect("district must remain")
+                .sanitation_basis_points
+                > sanitation_before,
+            "finishing a drainage project must apply its material district effect immediately"
+        );
+    }
+
+    #[test]
+    fn public_work_private_funding_cannot_exceed_the_remaining_budget() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let public_work_id = state.next_ids.public_work();
+        let district_id = registry
+            .districts()
+            .first()
+            .expect("registry must contain a district")
+            .id();
+        state.public_works.insert(
+            public_work_id,
+            PublicWork {
+                id: public_work_id,
+                district_id,
+                kind: PublicWorkKind::Drainage,
+                sponsor_dynasty_id: Some(state.player_dynasty_id),
+                budget: Money::from_copper(10_000),
+                spent: Money::from_copper(9_000),
+                progress_basis_points: 9_000,
+                status: PublicWorkStatus::Suspended,
+            },
+        );
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FundPublicWork {
+                public_work_id,
+                amount: Money::from_copper(1_001),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::PublicWorkFunding(
+                PublicWorkFundingError::ExceedsRemaining {
+                    public_work_id,
+                    remaining: Money::from_copper(1_000),
+                    requested: Money::from_copper(1_001),
+                }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "overfunding must not partially mutate a public work or dynasty treasury",
+        );
+    }
+
+    #[test]
     fn rejects_unchanged_business_policy_without_version_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -747,6 +878,172 @@ mod validation {
         let message = state.outbox.last().expect("cash transfer must be reported");
         assert_eq!(message.kind(), OutboxKind::Finance);
         assert!(message.subject().contains("Portfolio cash moved"));
+    }
+
+    #[test]
+    fn owner_can_withdraw_only_surplus_business_cash() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let reserve = crate::systems::business_owner_distribution_reserve(
+            registry,
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        );
+        let amount = Money::from_copper(1_000);
+        let business_cash_before = reserve.saturating_add(Money::from_copper(3_000));
+        let finance_version_before = {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("owned business must exist");
+            business.operations.status = BusinessStatus::Active;
+            business.finance.cash = business_cash_before;
+            business.finance.version
+        };
+        let treasury_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
+        let outbox_before = state.outbox.len();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::WithdrawBusinessCash {
+                business_id,
+                amount,
+            },
+        )
+        .expect("surplus owner distribution must succeed");
+
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("owned business must remain");
+        assert_eq!(business.cash(), business_cash_before.saturating_sub(amount));
+        assert!(business.cash() >= reserve);
+        assert_eq!(business.finance.version, finance_version_before + 1);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            treasury_before.saturating_add(amount)
+        );
+        assert_eq!(state.outbox.len(), outbox_before + 1);
+        assert!(state.audit_log.iter().any(|record| {
+            record.kind() == AuditKind::BusinessDividend
+                && record.subject() == format!("business:{business_id}")
+                && record.detail().starts_with("owner_distribution=")
+        }));
+    }
+
+    #[test]
+    fn owner_distribution_cannot_breach_business_operating_reserve() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let reserve = crate::systems::business_owner_distribution_reserve(
+            registry,
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        );
+        let available = Money::from_copper(400);
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist")
+            .finance
+            .cash = reserve.saturating_add(available);
+        let requested = Money::from_copper(500);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::WithdrawBusinessCash {
+                business_id,
+                amount: requested,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Strategic(
+                StrategicError::BusinessDistributionExceedsSurplus {
+                    business_id,
+                    available,
+                    required_reserve: reserve,
+                    requested,
+                }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "failed owner distributions must not strip protected operating cash",
+        );
+    }
+
+    #[test]
+    fn owner_distribution_reports_zero_surplus_when_business_is_below_reserve() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let reserve = crate::systems::business_owner_distribution_reserve(
+            registry,
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        );
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist")
+            .finance
+            .cash = reserve.saturating_sub(Money::from_copper(1));
+        let requested = Money::from_copper(1);
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::WithdrawBusinessCash {
+                business_id,
+                amount: requested,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Strategic(
+                StrategicError::BusinessDistributionExceedsSurplus {
+                    business_id,
+                    available: Money::ZERO,
+                    required_reserve: reserve,
+                    requested,
+                }
+            ))
+        );
     }
 
     #[test]
@@ -5502,6 +5799,7 @@ mod notifications {
 
 mod legal_cases {
     use super::*;
+    use crate::core::LegalClaimSource;
 
     fn delinquent_player_loan(state: &mut AppState) -> (DynastyId, crate::ids::LoanId) {
         let player_id = state.player_dynasty_id;
@@ -6183,7 +6481,7 @@ mod serialization {
     use super::*;
     use std::collections::BTreeSet;
 
-    const COMMAND_KINDS: [&str; 25] = [
+    const COMMAND_KINDS: [&str; 27] = [
         "acquire-business",
         "acknowledge-notification",
         "adopt-ward",
@@ -6198,6 +6496,7 @@ mod serialization {
         "enact-law",
         "exercise-office-power",
         "file-legal-case",
+        "fund-public-work",
         "issue-loan",
         "invest-in-business",
         "leverage-information",
@@ -6208,12 +6507,14 @@ mod serialization {
         "set-house-governance",
         "start-public-work",
         "transfer-business-cash",
+        "withdraw-business-cash",
         "withdraw-from-institution",
     ];
 
     fn command_kind(command: &PlayerCommand) -> &'static str {
         match command {
             PlayerCommand::TransferBusinessCash { .. } => "transfer-business-cash",
+            PlayerCommand::WithdrawBusinessCash { .. } => "withdraw-business-cash",
             PlayerCommand::AcquireBusiness { .. } => "acquire-business",
             PlayerCommand::InvestInBusiness { .. } => "invest-in-business",
             PlayerCommand::SetBusinessPolicy { .. } => "set-business-policy",
@@ -6223,6 +6524,7 @@ mod serialization {
             PlayerCommand::SellProperty { .. } => "sell-property",
             PlayerCommand::EnactLaw { .. } => "enact-law",
             PlayerCommand::StartPublicWork { .. } => "start-public-work",
+            PlayerCommand::FundPublicWork { .. } => "fund-public-work",
             PlayerCommand::FileLegalCase { .. } => "file-legal-case",
             PlayerCommand::SetHouseGovernance { .. } => "set-house-governance",
             PlayerCommand::ConveneFamilyCouncil => "convene-family-council",
@@ -6274,6 +6576,10 @@ mod serialization {
             PlayerCommand::TransferBusinessCash {
                 from_business_id: BusinessId::new(1),
                 to_business_id: BusinessId::new(2),
+                amount: Money::from_copper(300),
+            },
+            PlayerCommand::WithdrawBusinessCash {
+                business_id: BusinessId::new(1),
                 amount: Money::from_copper(300),
             },
             PlayerCommand::AcquireBusiness {
@@ -6334,6 +6640,10 @@ mod serialization {
                 district_id: DistrictId::new(1),
                 kind: PublicWorkKind::Bridge,
                 budget: Money::from_copper(20_000),
+            },
+            PlayerCommand::FundPublicWork {
+                public_work_id: crate::ids::PublicWorkId::new(1),
+                amount: Money::from_copper(5_000),
             },
             PlayerCommand::FileLegalCase {
                 defendant_dynasty_id: DynastyId::new(2),

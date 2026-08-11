@@ -1,13 +1,15 @@
 //! Canonical player-command validation and dispatch across simulation subsystems.
 
+use super::legal::{LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS};
 use super::transactions::{
     TimelineError, checked_future_day, next_business_finance_version, next_family_charter_version,
 };
 use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
     acquire_business, available_supply_contract_capacity, business_recapitalization_target,
-    buy_unowned_property, capitalize_owned_business, quote_property_liquidation,
-    sell_owned_property, transfer_business_cash, validate_loan, validate_supply_contract,
+    buy_unowned_property, capitalize_owned_business, distribute_owned_business_cash,
+    quote_property_liquidation, sell_owned_property, transfer_business_cash, validate_loan,
+    validate_supply_contract,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
@@ -15,12 +17,13 @@ use crate::core::{
     ChronicleKind, CivicDebt, CivicDebtStatus, ContractStatus, CrisisStatus, DynastyPair,
     EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind, HouseGovernance,
     InformationConfidence, InformationReport, InformationTarget, LawKind, LegalCase, LegalCaseKind,
-    LegalCaseStatus, LegalClaimSource, LoanStatus, OfficeDirectiveState, OfficePower, OutboxKind,
-    PublicWork, PublicWorkKind, PublicWorkStatus,
+    LegalCaseStatus, LoanStatus, OfficeDirectiveState, OfficePower, OutboxKind, PublicWork,
+    PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId,
     IdentifierAllocationError, InformationReportId, InstitutionId, OutboxMessageId, PropertyId,
+    PublicWorkId,
 };
 use crate::money::Money;
 use crate::registry::Registry;
@@ -65,6 +68,10 @@ pub enum PlayerCommand {
         to_business_id: BusinessId,
         amount: Money,
     },
+    WithdrawBusinessCash {
+        business_id: BusinessId,
+        amount: Money,
+    },
     AcquireBusiness {
         business_id: BusinessId,
         manager_id: CharacterId,
@@ -103,6 +110,10 @@ pub enum PlayerCommand {
         district_id: DistrictId,
         kind: PublicWorkKind,
         budget: Money,
+    },
+    FundPublicWork {
+        public_work_id: PublicWorkId,
+        amount: Money,
     },
     FileLegalCase {
         defendant_dynasty_id: DynastyId,
@@ -174,11 +185,6 @@ struct BusinessPolicyInput {
 }
 
 pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 180;
-pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 90;
-pub(crate) const LEGAL_CASE_FILING_COST: Money = Money::from_copper(300);
-const LEGAL_DELINQUENT_DEBT_EVIDENCE_BASIS_POINTS: u16 = 7_500;
-const LEGAL_DEFAULTED_DEBT_EVIDENCE_BASIS_POINTS: u16 = 9_000;
-const LEGAL_CONTRACT_BREACH_EVIDENCE_BASIS_POINTS: u16 = 8_500;
 pub(crate) const LAW_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const LAW_LEGITIMACY_REQUIREMENT: u16 = 3_000;
 pub(crate) const LAW_LEGITIMACY_COST: u16 = 250;
@@ -399,6 +405,8 @@ pub enum CommandError {
     },
     #[error("public-work budget must be positive")]
     InvalidPublicWorkBudget,
+    #[error(transparent)]
+    PublicWorkFunding(#[from] PublicWorkFundingError),
     #[error("the player dynasty must hold political office before sponsoring a public work")]
     PublicWorkSponsorshipRequiresOffice,
     #[error("public-work sponsorship requires an office with PublicWorks power")]
@@ -636,6 +644,26 @@ pub enum CommandError {
     MissingNotification { message_id: OutboxMessageId },
 }
 
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum PublicWorkFundingError {
+    #[error("public-work funding must be positive")]
+    InvalidAmount,
+    #[error("public work {public_work_id} does not exist")]
+    Missing { public_work_id: PublicWorkId },
+    #[error("public work {public_work_id} is not sponsored by the player dynasty")]
+    NotPlayerSponsored { public_work_id: PublicWorkId },
+    #[error("public work {public_work_id} is already complete")]
+    AlreadyComplete { public_work_id: PublicWorkId },
+    #[error(
+        "public work {public_work_id} has only {remaining} unfunded; requested contribution {requested}"
+    )]
+    ExceedsRemaining {
+        public_work_id: PublicWorkId,
+        remaining: Money,
+        requested: Money,
+    },
+}
+
 impl From<super::strategic::DurableFeedbackError> for CommandError {
     fn from(error: super::strategic::DurableFeedbackError) -> Self {
         match error {
@@ -670,6 +698,8 @@ pub fn apply_player_command(
     let mut candidate = state.clone();
     match dispatch_player_command(registry, &mut candidate, command) {
         Ok(outcome) => {
+            super::expire_time_limited_state(&mut candidate);
+            super::refresh_campaign_phases(&mut candidate);
             super::validate_invariants(registry, &candidate);
             *state = candidate;
             Ok(outcome)
@@ -689,6 +719,10 @@ fn dispatch_player_command(
             to_business_id,
             amount,
         } => apply_cash_transfer(state, from_business_id, to_business_id, amount),
+        PlayerCommand::WithdrawBusinessCash {
+            business_id,
+            amount,
+        } => apply_business_cash_withdrawal(registry, state, business_id, amount),
         PlayerCommand::AcquireBusiness {
             business_id,
             manager_id,
@@ -698,24 +732,9 @@ fn dispatch_player_command(
             business_id,
             amount,
         } => apply_business_investment(state, business_id, amount),
-        PlayerCommand::SetBusinessPolicy {
-            business_id,
-            target_input_days,
-            target_output_days,
-            minimum_cash_reserve,
-            maintenance_basis_points,
-            quality_target_basis_points,
-        } => apply_business_policy(
-            state,
-            business_id,
-            BusinessPolicyInput {
-                target_input_days,
-                target_output_days,
-                minimum_cash_reserve,
-                maintenance_basis_points,
-                quality_target_basis_points,
-            },
-        ),
+        command @ PlayerCommand::SetBusinessPolicy { .. } => {
+            apply_business_policy_command(state, &command)
+        }
         PlayerCommand::CreateSupplyContract { terms } => apply_contract(registry, state, &terms),
         PlayerCommand::IssueLoan { terms } => apply_loan(registry, state, &terms),
         PlayerCommand::BuyProperty { property_id } => apply_property_purchase(state, property_id),
@@ -729,6 +748,10 @@ fn dispatch_player_command(
             kind,
             budget,
         } => apply_public_work(registry, state, district_id, kind, budget),
+        PlayerCommand::FundPublicWork {
+            public_work_id,
+            amount,
+        } => apply_public_work_funding(state, public_work_id, amount),
         PlayerCommand::FileLegalCase {
             defendant_dynasty_id,
             kind,
@@ -781,6 +804,32 @@ fn dispatch_player_command(
         }
         PlayerCommand::AcknowledgeNotification { message_id } => acknowledge(state, message_id),
     }
+}
+
+fn apply_business_policy_command(
+    state: &mut AppState,
+    command: &PlayerCommand,
+) -> Result<CommandOutcome, CommandError> {
+    let PlayerCommand::SetBusinessPolicy {
+        business_id,
+        target_input_days,
+        target_output_days,
+        minimum_cash_reserve,
+        maintenance_basis_points,
+        quality_target_basis_points,
+    } = command
+    else {
+        unreachable!("business-policy dispatcher must receive a business-policy command")
+    };
+    apply_business_policy_values(
+        state,
+        *business_id,
+        *target_input_days,
+        *target_output_days,
+        *minimum_cash_reserve,
+        *maintenance_basis_points,
+        *quality_target_basis_points,
+    )
 }
 
 fn apply_contract(
@@ -982,6 +1031,33 @@ fn apply_cash_transfer(
     })
 }
 
+fn apply_business_cash_withdrawal(
+    registry: &Registry,
+    state: &mut AppState,
+    business_id: BusinessId,
+    amount: Money,
+) -> Result<CommandOutcome, CommandError> {
+    ensure_owned_business(state, business_id)?;
+    distribute_owned_business_cash(
+        registry,
+        state,
+        state.player_dynasty_id,
+        business_id,
+        amount,
+    )?;
+    super::strategic::try_push_outbox(
+        state,
+        OutboxKind::Finance,
+        format!("Business {business_id} distributed cash to the dynasty"),
+        format!(
+            "The dynasty withdrew {amount} of surplus cash from business {business_id} while preserving its operating reserve."
+        ),
+    )?;
+    Ok(CommandOutcome {
+        summary: format!("Withdrew {amount} from business {business_id}."),
+    })
+}
+
 fn apply_business_investment(
     state: &mut AppState,
     business_id: BusinessId,
@@ -1035,6 +1111,28 @@ fn apply_business_investment(
             "Invested {amount} in business {business_id} and restored {rehabilitation} basis points of condition."
         ),
     })
+}
+
+fn apply_business_policy_values(
+    state: &mut AppState,
+    business_id: BusinessId,
+    target_input_days: u16,
+    target_output_days: u16,
+    minimum_cash_reserve: Money,
+    maintenance_basis_points: u16,
+    quality_target_basis_points: u16,
+) -> Result<CommandOutcome, CommandError> {
+    apply_business_policy(
+        state,
+        business_id,
+        BusinessPolicyInput {
+            target_input_days,
+            target_output_days,
+            minimum_cash_reserve,
+            maintenance_basis_points,
+            quality_target_basis_points,
+        },
+    )
 }
 
 fn apply_business_policy(
@@ -1856,6 +1954,152 @@ fn apply_public_work(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PublicWorkFundingQuote {
+    player_id: DynastyId,
+    district_id: DistrictId,
+    kind: PublicWorkKind,
+    treasury_after: Money,
+    contributions_after: Money,
+    spent_after: Money,
+    progress_basis_points: u16,
+    completed: bool,
+}
+
+fn apply_public_work_funding(
+    state: &mut AppState,
+    public_work_id: PublicWorkId,
+    amount: Money,
+) -> Result<CommandOutcome, CommandError> {
+    let quote = quote_public_work_funding(state, public_work_id, amount)?;
+    let player = state
+        .dynasties
+        .get_mut(&quote.player_id)
+        .expect("validated player dynasty must exist");
+    player.resources.treasury = quote.treasury_after;
+    player.resources.civic_contributions = quote.contributions_after;
+    let work = state
+        .public_works
+        .get_mut(&public_work_id)
+        .expect("validated public work must exist");
+    work.spent = quote.spent_after;
+    work.progress_basis_points = quote.progress_basis_points;
+    if quote.completed {
+        work.status = PublicWorkStatus::Completed;
+        super::strategic::apply_public_work_completion(state, quote.district_id, quote.kind);
+    }
+    super::strategic::try_push_outbox(
+        state,
+        OutboxKind::Politics,
+        if quote.completed {
+            format!("Public work {public_work_id} completed with dynasty funding")
+        } else {
+            format!("Public work {public_work_id} received dynasty funding")
+        },
+        if quote.completed {
+            format!(
+                "The dynasty contributed {amount} directly to finish the {:?} project in district {}.",
+                quote.kind, quote.district_id
+            )
+        } else {
+            format!(
+                "The dynasty contributed {amount} directly to public work {public_work_id}; project progress is now {} basis points.",
+                quote.progress_basis_points
+            )
+        },
+    )?;
+    Ok(CommandOutcome {
+        summary: if quote.completed {
+            format!("Funded and completed public work {public_work_id} with {amount}.")
+        } else {
+            format!("Funded public work {public_work_id} with {amount}.")
+        },
+    })
+}
+
+fn quote_public_work_funding(
+    state: &AppState,
+    public_work_id: PublicWorkId,
+    amount: Money,
+) -> Result<PublicWorkFundingQuote, CommandError> {
+    if amount <= Money::ZERO {
+        return Err(PublicWorkFundingError::InvalidAmount.into());
+    }
+    let (sponsor_dynasty_id, status, budget, spent, district_id, kind) = {
+        let work = state
+            .public_works
+            .get(&public_work_id)
+            .ok_or(PublicWorkFundingError::Missing { public_work_id })?;
+        (
+            work.sponsor_dynasty_id,
+            work.status,
+            work.budget,
+            work.spent,
+            work.district_id,
+            work.kind,
+        )
+    };
+    if sponsor_dynasty_id != Some(state.player_dynasty_id) {
+        return Err(PublicWorkFundingError::NotPlayerSponsored { public_work_id }.into());
+    }
+    if status == PublicWorkStatus::Completed {
+        return Err(PublicWorkFundingError::AlreadyComplete { public_work_id }.into());
+    }
+    let remaining = budget
+        .checked_sub(spent)
+        .expect("validated public work spending must not exceed its budget");
+    if amount > remaining {
+        return Err(PublicWorkFundingError::ExceedsRemaining {
+            public_work_id,
+            remaining,
+            requested: amount,
+        }
+        .into());
+    }
+    let player_id = state.player_dynasty_id;
+    let player = state
+        .dynasties
+        .get(&player_id)
+        .expect("player dynasty must exist");
+    if player.treasury() < amount {
+        return Err(CommandError::InsufficientPlayerFunds {
+            available: player.treasury(),
+            required: amount,
+        });
+    }
+    let treasury_after = player
+        .treasury()
+        .checked_sub(amount)
+        .expect("validated public-work funding must fit player treasury");
+    let contributions_after = player.civic_contributions().checked_add(amount).ok_or(
+        super::SimulationError::DynastyCivicContributionsOverflow {
+            dynasty_id: player_id,
+            current: player.civic_contributions(),
+            incoming: amount,
+        },
+    )?;
+    let spent_after = spent
+        .checked_add(amount)
+        .expect("bounded public-work funding must fit project budget");
+    let progress_basis_points = u16::try_from(
+        spent_after
+            .saturating_mul_ratio(10_000, budget.copper())
+            .copper()
+            .clamp(0, 10_000),
+    )
+    .expect("clamped public-work progress must fit u16");
+    Ok(PublicWorkFundingQuote {
+        player_id,
+        district_id,
+        kind,
+        treasury_after,
+        contributions_after,
+        spent_after,
+        progress_basis_points,
+        completed: spent_after == budget,
+    })
+}
+
 fn validate_public_work_cooldown(state: &AppState, subject: &str) -> Result<(), CommandError> {
     if let Some(last_start_day) = state
         .audit_log
@@ -1955,21 +2199,11 @@ pub(crate) const fn required_office_power_for_law(kind: LawKind) -> OfficePower 
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LegalClaimQuote {
-    pub defendant_dynasty_id: DynastyId,
-    pub kind: LegalCaseKind,
-    pub claim_source: LegalClaimSource,
-    pub evidence_basis_points: u16,
-    pub maximum_damages: Money,
-    pub description: String,
-}
-
 pub(crate) fn quote_player_legal_claim(
     state: &AppState,
     defendant_dynasty_id: DynastyId,
     kind: LegalCaseKind,
-) -> Result<LegalClaimQuote, CommandError> {
+) -> Result<super::LegalClaimQuote, CommandError> {
     if defendant_dynasty_id == state.player_dynasty_id {
         return Err(CommandError::SameLegalParty);
     }
@@ -1978,106 +2212,11 @@ pub(crate) fn quote_player_legal_claim(
             dynasty_id: defendant_dynasty_id,
         });
     }
-    let player_id = state.player_dynasty_id;
-    match kind {
-        LegalCaseKind::Debt => state
-            .loans
-            .values()
-            .filter(|loan| {
-                loan.lender_dynasty_id == player_id
-                    && loan.borrower_dynasty_id == defendant_dynasty_id
-                    && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
-                    && player_legal_claim_source_unused(
-                        state,
-                        LegalClaimSource::Loan { loan_id: loan.id },
-                    )
-            })
-            .max_by_key(|loan| {
-                (
-                    u8::from(loan.status == LoanStatus::Defaulted),
-                    loan.balance,
-                    loan.id,
-                )
-            })
-            .map(|loan| {
-                let evidence_basis_points = if loan.status == LoanStatus::Defaulted {
-                    LEGAL_DEFAULTED_DEBT_EVIDENCE_BASIS_POINTS
-                } else {
-                    LEGAL_DELINQUENT_DEBT_EVIDENCE_BASIS_POINTS
-                };
-                LegalClaimQuote {
-                    defendant_dynasty_id,
-                    kind,
-                    claim_source: LegalClaimSource::Loan { loan_id: loan.id },
-                    evidence_basis_points,
-                    maximum_damages: loan.balance,
-                    description: format!(
-                        "enforce {:?} loan {} with {} outstanding",
-                        loan.status, loan.id, loan.balance
-                    ),
-                }
-            })
-            .ok_or(CommandError::LegalClaimNotGrounded {
-                defendant_dynasty_id,
-                kind,
-            }),
-        LegalCaseKind::ContractBreach => {
-            quote_player_contract_breach_claim(state, defendant_dynasty_id)
-        }
-        LegalCaseKind::Property
-        | LegalCaseKind::Corruption
-        | LegalCaseKind::Fraud
-        | LegalCaseKind::Inheritance => Err(CommandError::LegalClaimNotGrounded {
-            defendant_dynasty_id,
-            kind,
-        }),
-    }
-}
-
-fn quote_player_contract_breach_claim(
-    state: &AppState,
-    defendant_dynasty_id: DynastyId,
-) -> Result<LegalClaimQuote, CommandError> {
-    state
-        .contracts
-        .values()
-        .filter(|contract| {
-            contract.status == ContractStatus::Breached
-                && contract.breaching_dynasty_id == Some(defendant_dynasty_id)
-                && contract.breach_victim_dynasty_id == Some(state.player_dynasty_id)
-                && contract.unpaid_breach_penalty > Money::ZERO
-                && player_legal_claim_source_unused(
-                    state,
-                    LegalClaimSource::Contract {
-                        contract_id: contract.id,
-                    },
-                )
-        })
-        .max_by_key(|contract| (contract.penalty, contract.id))
-        .map(|contract| LegalClaimQuote {
-            defendant_dynasty_id,
-            kind: LegalCaseKind::ContractBreach,
-            claim_source: LegalClaimSource::Contract {
-                contract_id: contract.id,
-            },
-            evidence_basis_points: LEGAL_CONTRACT_BREACH_EVIDENCE_BASIS_POINTS,
-            maximum_damages: contract.unpaid_breach_penalty,
-            description: format!(
-                "recover {} still unpaid on breached supply contract {}",
-                contract.unpaid_breach_penalty, contract.id
-            ),
-        })
+    super::quote_grounded_legal_claim(state, state.player_dynasty_id, defendant_dynasty_id, kind)
         .ok_or(CommandError::LegalClaimNotGrounded {
             defendant_dynasty_id,
-            kind: LegalCaseKind::ContractBreach,
+            kind,
         })
-}
-
-fn player_legal_claim_source_unused(state: &AppState, claim_source: LegalClaimSource) -> bool {
-    !state.legal_cases.values().any(|legal_case| {
-        legal_case.plaintiff_dynasty_id == state.player_dynasty_id
-            && legal_case.claim_source == Some(claim_source)
-    })
 }
 
 fn apply_legal_case(
@@ -3510,15 +3649,7 @@ pub(crate) fn institution_support_day(
 }
 
 pub(crate) fn player_contract_deliveries(state: &AppState) -> u32 {
-    state.contracts.values().fold(0_u32, |total, contract| {
-        total.saturating_add(u32::from(
-            contract
-                .fulfilled_deliveries_by_dynasty
-                .get(&state.player_dynasty_id)
-                .copied()
-                .unwrap_or(0),
-        ))
-    })
+    super::contract_deliveries_for_dynasty(state, state.player_dynasty_id)
 }
 
 fn apply_crisis_response(

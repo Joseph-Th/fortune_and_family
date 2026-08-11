@@ -248,6 +248,32 @@ if observed_personas != expected_personas:
 missing = [campaign["persona"] for campaign in campaigns if campaign["fantasy_arc"]["first_succession_day"] is None]
 if missing:
     raise SystemExit(f"generation audit did not reach succession for: {missing}")
+missing_transitions = [
+    campaign["persona"]
+    for campaign in campaigns
+    if campaign.get("succession_transition") is None
+]
+if missing_transitions:
+    raise SystemExit(
+        f"generation audit did not capture succession transitions for: {missing_transitions}"
+    )
+for campaign in campaigns:
+    transition = campaign["succession_transition"]
+    succession_day = campaign["fantasy_arc"]["first_succession_day"]
+    if transition["day"] != succession_day:
+        persona = campaign["persona"]
+        transition_day = transition["day"]
+        raise SystemExit(
+            f"{persona} succession transition day {transition_day} "
+            f"did not match fantasy milestone day {succession_day}"
+        )
+stranded = [
+    finding
+    for finding in report["findings"]
+    if finding["title"] == "Political succession can strand institutional recovery"
+]
+if stranded:
+    raise SystemExit(stranded[0]["evidence"])
 phase = report["aggregate"]["phase_stats"].get("SuccessionLegacy", {})
 if phase.get("decision_cycles", 0) == 0 or phase.get("substantive_actions", 0) == 0:
     raise SystemExit("generation audit did not observe substantive succession-and-legacy play")
