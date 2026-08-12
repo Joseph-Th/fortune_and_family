@@ -17,7 +17,7 @@ usage:
   $0 docs                run documentation consistency and doctests
   $0 cli                 run CLI smoke tests
   $0 gameplay            run release gameplay and generation-length quality gates
-  $0 gameplay-audit      run mature multi-seed and multi-persona generation design audits
+  $0 gameplay-audit      run mature multi-seed, generation, and credit-stress design audits
   $0 all                 run syntax, library, doc, soak, CLI, and gameplay tests
 EOF
   exit 2
@@ -235,6 +235,44 @@ run_gameplay_audit() {
       --fail-on-critical \
       --json \
       --output target/gameplay-generation-matrix.json
+  run_step 'Opportunist credit stress audit' \
+    cargo run --release --quiet --locked -- playtest \
+      --days 7200 \
+      --start-seed 1 \
+      --seeds 2 \
+      --persona opportunist \
+      --trace-limit 20 \
+      --minimum-overall 75 \
+      --fail-on-critical \
+      --json \
+      --output target/gameplay-credit-stress.json
+  run_step 'Credit stress validation' "$python_command" -c '
+import json
+from pathlib import Path
+
+report = json.loads(Path("target/gameplay-credit-stress.json").read_text(encoding="utf-8"))
+campaigns = report["campaigns"]
+credit_actions = sum(
+    campaign["commands"]["ExtendCredit"]["executed"] for campaign in campaigns
+)
+minimum_credit_sample = len(campaigns) * 2
+if credit_actions < minimum_credit_sample:
+    raise SystemExit(
+        f"credit stress audit observed only {credit_actions} player loans; "
+        f"requires at least {minimum_credit_sample}"
+    )
+distressed = [
+    campaign
+    for campaign in campaigns
+    if campaign["maximum_player_delinquent_lending"] > 0
+    or campaign["maximum_player_defaulted_lending"] > 0
+]
+if not distressed:
+    raise SystemExit("credit stress audit observed no distress on player-issued loans")
+enforcement_cases = sum(campaign["player_debt_enforcement_cases"] for campaign in campaigns)
+if enforcement_cases == 0:
+    raise SystemExit("credit stress audit observed player lending distress but no debt enforcement")
+'
   run_step 'Deep gameplay fantasy validation' "$python_command" -c '
 import json
 from pathlib import Path

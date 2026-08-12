@@ -1183,18 +1183,21 @@ mod migrations {
     fn v16_normalizes_progression_and_expired_time_limited_state() {
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
+        crate::systems::advance_days(&crate::registry::build_rivergate_registry(), &mut state, 1)
+            .expect("migration fixture must advance through the canonical simulation path");
         state
             .dynasties
             .get_mut(&player_id)
             .expect("player dynasty must exist")
             .runtime
             .phase = CampaignPhase::Dominion;
-        state
-            .information_reports
-            .values_mut()
-            .next()
-            .expect("campaign must contain an information report")
-            .expires_day = 90;
+        assert!(
+            !state.information_reports.is_empty(),
+            "campaign must contain information reports after one simulated day"
+        );
+        for report in state.information_reports.values_mut() {
+            report.expires_day = 0;
+        }
         let institution_id = state
             .institutions
             .iter()
@@ -1212,11 +1215,10 @@ mod migrations {
             .expect("institution must exist")
             .active_directive = Some(OfficeDirectiveState {
             power,
-            expires_day: 90,
+            expires_day: 0,
         });
         let mut value = serde_json::to_value(state).expect("state must serialize");
         value["schema_version"] = Value::from(16);
-        value["clock"]["day"] = Value::from(100);
         let (_directory, path) = write_test_json_fixture("v16-normalization.json", &value);
 
         let loaded = load_state(&path).expect("version-sixteen campaign must migrate");
@@ -2294,6 +2296,70 @@ mod validation {
             StateValidationKind::NumericRanges,
             "invalid or exhausted elapsed day",
         );
+    }
+
+    #[track_caller]
+    fn assert_stale_weekly_due_rejected(
+        filename: &str,
+        mutate: fn(&mut Value),
+        expected_reason: &str,
+    ) {
+        let mut state = make_test_campaign();
+        advance_days(rivergate_registry_for_test(), &mut state, 8)
+            .expect("stale-due fixture must cross one weekly settlement boundary");
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        mutate(&mut value);
+        let (_directory, path) = write_test_json_fixture(filename, &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            expected_reason,
+        );
+    }
+
+    #[test]
+    fn rejects_stale_active_weekly_obligation_due_dates() {
+        assert_stale_weekly_due_rejected(
+            "stale-loan-due-day.json",
+            |value| {
+                value["loans"]
+                    .as_object_mut()
+                    .and_then(|loans| loans.values_mut().next())
+                    .expect("serialized state must contain a loan")["next_due_day"] =
+                    Value::from(7);
+            },
+            "invalid due date",
+        );
+        assert_stale_weekly_due_rejected(
+            "stale-contract-due-day.json",
+            |value| {
+                value["contracts"]
+                    .as_object_mut()
+                    .and_then(|contracts| contracts.values_mut().next())
+                    .expect("serialized state must contain a contract")["next_due_day"] =
+                    Value::from(7);
+            },
+            "invalid dates",
+        );
+    }
+
+    #[test]
+    fn accepts_pre_campaign_historical_dates() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["institutions"]
+            .as_object_mut()
+            .and_then(|institutions| institutions.values_mut().next())
+            .expect("serialized state must contain an institution")["term_started_day"] =
+            Value::from(-180);
+        value["audit_log"]
+            .as_array_mut()
+            .and_then(|records| records.first_mut())
+            .expect("serialized state must contain an audit record")["day"] = Value::from(-180);
+        let (_directory, path) = write_test_json_fixture("pre-campaign-history.json", &value);
+
+        load_state(&path).expect("pre-campaign historical dates must remain loadable");
     }
 
     #[test]

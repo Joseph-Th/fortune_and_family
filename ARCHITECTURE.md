@@ -178,6 +178,13 @@ load_state
 
 Owner: `src/persistence.rs`.
 
+Release-mode persistence validation also rejects repayment-active weekly obligations whose next due
+date is at or before the most recent weekly settlement boundary. Canonical simulation always moves
+an active contract, private loan, or municipal debt schedule beyond that boundary after settlement;
+accepting an older active due date would let malformed saves resume with a permanently lagging
+schedule. Historical timestamps remain part of the date domain, including legitimate pre-campaign
+history and preserved due dates on terminal obligations.
+
 A serialized contract change requires a schema increment, one migration from the previous version, migration coverage, round-trip coverage, and `STATUS.md` updates.
 
 ### Projection

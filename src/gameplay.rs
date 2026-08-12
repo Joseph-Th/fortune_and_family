@@ -17,11 +17,11 @@ use crate::systems::{
     HEIR_DESIGNATION_LEGITIMACY_COST, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
     INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
     INSTITUTION_ENDOWMENT_MAX, INSTITUTION_ENDOWMENT_MIN, INSTITUTION_SUPPORT_COST,
-    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
-    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, InformationFocus, LABOR_REPLACEMENT_COST,
-    LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST,
-    LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
-    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
+    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
+    InformationFocus, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
+    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
+    LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
+    MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
     OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
     OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
     OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, OFFICE_POWER_ESTABLISHMENT_DAYS,
@@ -41,15 +41,15 @@ use crate::systems::{
     office_nomination_next_day, player_contract_deliveries,
     private_loan_borrower_financing_pressure, projected_dynasty_monthly_office_duty,
     projected_dynasty_monthly_office_duty_with_additional_offices, quote_business_acquisition,
-    quote_information_leverage, quote_player_legal_claim, quote_property_liquidation,
-    required_office_power_for_law, validate_invariants,
+    quote_information_leverage, quote_player_legal_claim, quote_player_legal_settlement,
+    quote_property_liquidation, required_office_power_for_law, validate_invariants,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use thiserror::Error;
 
-const ALL_COMMAND_KINDS: [GameplayCommandKind; 28] = [
+const ALL_COMMAND_KINDS: [GameplayCommandKind; 30] = [
     GameplayCommandKind::TransferBusinessCash,
     GameplayCommandKind::AcquireBusiness,
     GameplayCommandKind::InvestInBusiness,
@@ -62,7 +62,9 @@ const ALL_COMMAND_KINDS: [GameplayCommandKind; 28] = [
     GameplayCommandKind::SellProperty,
     GameplayCommandKind::EnactLaw,
     GameplayCommandKind::StartPublicWork,
+    GameplayCommandKind::FundPublicWork,
     GameplayCommandKind::FileLegalCase,
+    GameplayCommandKind::SettleLegalCase,
     GameplayCommandKind::SetHouseGovernance,
     GameplayCommandKind::ConveneFamilyCouncil,
     GameplayCommandKind::DesignateHeir,
@@ -101,7 +103,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 48;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 49;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -304,7 +306,9 @@ pub enum GameplayCommandKind {
     SellProperty,
     EnactLaw,
     StartPublicWork,
+    FundPublicWork,
     FileLegalCase,
+    SettleLegalCase,
     SetHouseGovernance,
     ConveneFamilyCouncil,
     DesignateHeir,
@@ -338,7 +342,9 @@ impl GameplayCommandKind {
             Self::SellProperty => "sell-property",
             Self::EnactLaw => "enact-law",
             Self::StartPublicWork => "public-work",
+            Self::FundPublicWork => "public-work-funding",
             Self::FileLegalCase => "legal-case",
+            Self::SettleLegalCase => "legal-settlement",
             Self::SetHouseGovernance => "house-governance",
             Self::ConveneFamilyCouncil => "family-council",
             Self::DesignateHeir => "designate-heir",
@@ -365,6 +371,7 @@ impl GameplayCommandKind {
             | Self::SecureSupply
             | Self::SellOutput
             | Self::FileLegalCase
+            | Self::SettleLegalCase
             | Self::RespondToCrisis
             | Self::ConveneFamilyCouncil
             | Self::AdoptWard
@@ -376,7 +383,10 @@ impl GameplayCommandKind {
             | Self::LeverageInformation
             | Self::WithdrawFromInstitution => 360,
             Self::DesignateHeir => 7_200,
-            Self::ResolveLaborDispute | Self::EnactLaw | Self::StartPublicWork => 720,
+            Self::ResolveLaborDispute
+            | Self::EnactLaw
+            | Self::StartPublicWork
+            | Self::FundPublicWork => 720,
             Self::SetBusinessPolicy
             | Self::BorrowFunds
             | Self::ExtendCredit
@@ -397,9 +407,11 @@ impl GameplayCommandKind {
                 | Self::SecureSupply
                 | Self::SellOutput
                 | Self::FileLegalCase
+                | Self::SettleLegalCase
                 | Self::RespondToCrisis
                 | Self::ResolveLaborDispute
                 | Self::SellProperty
+                | Self::BuyProperty
                 | Self::BorrowFunds
                 | Self::ExtendCredit
                 | Self::SetHouseGovernance
@@ -407,6 +419,7 @@ impl GameplayCommandKind {
                 | Self::EnactLaw
                 | Self::EndowInstitution
                 | Self::StartPublicWork
+                | Self::FundPublicWork
                 | Self::ExerciseOfficePower
                 | Self::WithdrawFromInstitution
                 | Self::CommissionInformation
@@ -623,6 +636,7 @@ pub struct GameplaySnapshot {
     pub district_conditions: Vec<GameplayDistrictCondition>,
     pub district_state_checksum: u64,
     pub open_legal_cases: u16,
+    pub player_open_legal_cases_as_defendant: u16,
     pub decided_legal_cases: u16,
     pub legal_case_state_checksum: u64,
     pub active_crises: u16,
@@ -641,6 +655,22 @@ pub struct GameplaySnapshot {
     pub outbox_state_checksum: u64,
     pub chronicle_state_checksum: u64,
     pub audit_state_checksum: u64,
+}
+
+fn count_player_open_legal_cases_as_defendant(state: &AppState) -> u16 {
+    usize_to_u16(
+        state
+            .legal_cases
+            .values()
+            .filter(|case| {
+                case.defendant_dynasty_id == state.player_dynasty_id
+                    && matches!(
+                        case.status,
+                        LegalCaseStatus::Filed | LegalCaseStatus::Hearing
+                    )
+            })
+            .count(),
+    )
 }
 
 #[derive(Debug)]
@@ -1335,6 +1365,7 @@ struct WorldSnapshotPart {
     average_district_safety: u16,
     district_conditions: Vec<GameplayDistrictCondition>,
     open_legal_cases: u16,
+    player_open_legal_cases_as_defendant: u16,
     decided_legal_cases: u16,
     active_crises: u16,
     escalated_crises: u16,
@@ -1364,6 +1395,7 @@ impl WorldSnapshotPart {
             average_district_safety: district.safety,
             district_conditions: district.conditions,
             open_legal_cases: count_open_legal_cases(state),
+            player_open_legal_cases_as_defendant: count_player_open_legal_cases_as_defendant(state),
             decided_legal_cases: count_decided_legal_cases(state),
             active_crises: usize_to_u16(
                 state
@@ -1562,6 +1594,7 @@ macro_rules! assemble_gameplay_snapshot {
             district_conditions: $world.district_conditions,
             district_state_checksum: stable_serialized_checksum(&$state.districts),
             open_legal_cases: $world.open_legal_cases,
+            player_open_legal_cases_as_defendant: $world.player_open_legal_cases_as_defendant,
             decided_legal_cases: $world.decided_legal_cases,
             legal_case_state_checksum: stable_serialized_checksum(&$state.legal_cases),
             active_crises: $world.active_crises,
@@ -1642,6 +1675,7 @@ pub struct GameplayDecisionContext {
     pub generation: u16,
     pub player_disputed_employment: u16,
     pub maximum_contract_relationship_pressure_basis_points: u16,
+    pub player_open_legal_cases_as_defendant: u16,
     pub active_crises: u16,
     pub unread_notifications: u16,
 }
@@ -1685,6 +1719,7 @@ impl From<&GameplaySnapshot> for GameplayDecisionContext {
             player_disputed_employment: snapshot.player_disputed_employment,
             maximum_contract_relationship_pressure_basis_points: snapshot
                 .maximum_contract_relationship_pressure_basis_points,
+            player_open_legal_cases_as_defendant: snapshot.player_open_legal_cases_as_defendant,
             active_crises: snapshot.active_crises,
             unread_notifications: snapshot.unread_notifications,
         }
@@ -1729,6 +1764,7 @@ pub enum GameplayMeasure {
     PlayerDelinquentBorrowing,
     PlayerDefaultedBorrowing,
     UnmetOfficeDuties,
+    PlayerOpenLegalCasesAsDefendant,
     InformationReports,
 }
 
@@ -1794,6 +1830,10 @@ impl GameplayConsequenceProfile {
         record!(PlayerDelinquentBorrowing, player_delinquent_borrowing);
         record!(PlayerDefaultedBorrowing, player_defaulted_borrowing);
         record!(UnmetOfficeDuties, player_unmet_office_duties);
+        record!(
+            PlayerOpenLegalCasesAsDefendant,
+            player_open_legal_cases_as_defendant
+        );
         record!(InformationReports, information_reports);
         profile.impact_fingerprint = impact_outcome_fingerprint(outcome);
         profile.strategic_fingerprint = strategic_outcome_fingerprint(outcome);
@@ -1828,6 +1868,7 @@ fn impact_outcome_fingerprint(snapshot: &GameplaySnapshot) -> u64 {
         u64::from(snapshot.player_delinquent_borrowing),
         u64::from(snapshot.player_defaulted_borrowing),
         u64::from(snapshot.player_unmet_office_duties),
+        u64::from(snapshot.player_open_legal_cases_as_defendant),
         u64::from(snapshot.information_reports),
         u64::from(snapshot.player_family_capability_checksum),
         signed_bits(snapshot.player_office_checksum),
@@ -2207,10 +2248,10 @@ fn classify_player_command(
         PlayerCommand::BuyProperty { .. } => Some(GameplayCommandKind::BuyProperty),
         PlayerCommand::SellProperty { .. } => Some(GameplayCommandKind::SellProperty),
         PlayerCommand::EnactLaw { .. } => Some(GameplayCommandKind::EnactLaw),
-        PlayerCommand::StartPublicWork { .. } | PlayerCommand::FundPublicWork { .. } => {
-            Some(GameplayCommandKind::StartPublicWork)
-        }
+        PlayerCommand::StartPublicWork { .. } => Some(GameplayCommandKind::StartPublicWork),
+        PlayerCommand::FundPublicWork { .. } => Some(GameplayCommandKind::FundPublicWork),
         PlayerCommand::FileLegalCase { .. } => Some(GameplayCommandKind::FileLegalCase),
+        PlayerCommand::SettleLegalCase { .. } => Some(GameplayCommandKind::SettleLegalCase),
         PlayerCommand::SetHouseGovernance { .. } => Some(GameplayCommandKind::SetHouseGovernance),
         PlayerCommand::ConveneFamilyCouncil => Some(GameplayCommandKind::ConveneFamilyCouncil),
         PlayerCommand::DesignateHeir { .. } => Some(GameplayCommandKind::DesignateHeir),
@@ -2486,6 +2527,7 @@ impl CampaignAccumulator {
             kind,
             GameplayCommandKind::EnactLaw
                 | GameplayCommandKind::StartPublicWork
+                | GameplayCommandKind::FundPublicWork
                 | GameplayCommandKind::ExerciseOfficePower
         ) {
             self.fantasy_arc
@@ -2565,6 +2607,7 @@ impl CampaignAccumulator {
             | PlayerCommand::StartPublicWork { .. }
             | PlayerCommand::FundPublicWork { .. }
             | PlayerCommand::FileLegalCase { .. }
+            | PlayerCommand::SettleLegalCase { .. }
             | PlayerCommand::SetHouseGovernance { .. }
             | PlayerCommand::ConveneFamilyCouncil
             | PlayerCommand::DesignateHeir { .. }
@@ -3419,13 +3462,15 @@ fn consequence_horizon_days(
             | GameplayCommandKind::DesignateHeir
             | GameplayCommandKind::AdoptWard
             | GameplayCommandKind::EducateFamilyMember
-            | GameplayCommandKind::StartPublicWork,
+            | GameplayCommandKind::StartPublicWork
+            | GameplayCommandKind::FundPublicWork,
         ) => 360,
         Some(GameplayCommandKind::NominateForOffice) => 120,
         Some(
             GameplayCommandKind::CultivateInstitutionSupport
             | GameplayCommandKind::EndowInstitution
             | GameplayCommandKind::FileLegalCase
+            | GameplayCommandKind::SettleLegalCase
             | GameplayCommandKind::EnactLaw
             | GameplayCommandKind::ExerciseOfficePower
             | GameplayCommandKind::RespondToCrisis
@@ -3549,19 +3594,7 @@ fn record_activation_opportunities(
                 .any(|candidate| candidate.kind == kind),
         );
     }
-    let mut civic_candidates = Vec::new();
-    generate_law_candidates(registry, state, persona, &mut civic_candidates);
-    generate_public_work_candidates(registry, state, persona, &mut civic_candidates);
-    generate_office_power_directive_candidates(registry, state, persona, &mut civic_candidates);
-    let law_opportunity = civic_candidates
-        .iter()
-        .any(|candidate| candidate.kind == GameplayCommandKind::EnactLaw);
-    let public_work_opportunity = civic_candidates
-        .iter()
-        .any(|candidate| candidate.kind == GameplayCommandKind::StartPublicWork);
-    let office_power_opportunity = civic_candidates
-        .iter()
-        .any(|candidate| candidate.kind == GameplayCommandKind::ExerciseOfficePower);
+    record_civic_activation_opportunities(registry, state, persona, accumulator);
     let mut information_candidates = Vec::new();
     generate_information_candidates(registry, state, persona, &mut information_candidates);
     let information_commission_opportunity = information_candidates
@@ -3575,6 +3608,10 @@ fn record_activation_opportunities(
         (GameplayCommandKind::ResolveLaborDispute, labor_opportunity),
         (GameplayCommandKind::FileLegalCase, legal_opportunity),
         (
+            GameplayCommandKind::SettleLegalCase,
+            has_legal_settlement_opportunity(state),
+        ),
+        (
             GameplayCommandKind::SellProperty,
             property_liquidation_opportunity,
         ),
@@ -3587,15 +3624,6 @@ fn record_activation_opportunities(
             GameplayCommandKind::TransferBusinessCash,
             transfer_cash_opportunity,
         ),
-        (GameplayCommandKind::EnactLaw, law_opportunity),
-        (
-            GameplayCommandKind::StartPublicWork,
-            public_work_opportunity,
-        ),
-        (
-            GameplayCommandKind::ExerciseOfficePower,
-            office_power_opportunity,
-        ),
         (
             GameplayCommandKind::CommissionInformation,
             information_commission_opportunity,
@@ -3606,6 +3634,31 @@ fn record_activation_opportunities(
         ),
     ] {
         record_activation_opportunity(accumulator, kind, available);
+    }
+}
+
+fn record_civic_activation_opportunities(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    accumulator: &mut CampaignAccumulator,
+) {
+    let mut candidates = Vec::new();
+    generate_law_candidates(registry, state, persona, &mut candidates);
+    generate_public_work_funding_candidates(state, persona, &mut candidates);
+    generate_public_work_candidates(registry, state, persona, &mut candidates);
+    generate_office_power_directive_candidates(registry, state, persona, &mut candidates);
+    for kind in [
+        GameplayCommandKind::EnactLaw,
+        GameplayCommandKind::StartPublicWork,
+        GameplayCommandKind::FundPublicWork,
+        GameplayCommandKind::ExerciseOfficePower,
+    ] {
+        record_activation_opportunity(
+            accumulator,
+            kind,
+            candidates.iter().any(|candidate| candidate.kind == kind),
+        );
     }
 }
 
@@ -4120,6 +4173,7 @@ fn candidate_preserves_office_duty_reserve(
         | PlayerCommand::StartPublicWork { .. }
         | PlayerCommand::FundPublicWork { .. }
         | PlayerCommand::FileLegalCase { .. }
+        | PlayerCommand::SettleLegalCase { .. }
         | PlayerCommand::SetHouseGovernance { .. }
         | PlayerCommand::ConveneFamilyCouncil
         | PlayerCommand::DesignateHeir { .. }
@@ -4205,6 +4259,7 @@ fn candidate_is_emergency_spending(state: &AppState, candidate: &Candidate) -> b
         | PlayerCommand::StartPublicWork { .. }
         | PlayerCommand::FundPublicWork { .. }
         | PlayerCommand::FileLegalCase { .. }
+        | PlayerCommand::SettleLegalCase { .. }
         | PlayerCommand::SetHouseGovernance { .. }
         | PlayerCommand::ConveneFamilyCouncil
         | PlayerCommand::DesignateHeir { .. }
@@ -4334,6 +4389,9 @@ fn candidate_player_treasury_cost(
             Money::from_copper((budget.copper() / 10).max(1)).min(*budget)
         }
         PlayerCommand::FileLegalCase { .. } => LEGAL_CASE_FILING_COST,
+        PlayerCommand::SettleLegalCase { case_id } => {
+            quote_player_legal_settlement(state, *case_id).map_or(Money::ZERO, |quote| quote.amount)
+        }
         PlayerCommand::ConveneFamilyCouncil => FAMILY_COUNCIL_MEETING_COST,
         PlayerCommand::AdoptWard { .. } => WARD_ADOPTION_COST,
         PlayerCommand::EducateFamilyMember { .. } => FAMILY_EDUCATION_COST,
@@ -4372,6 +4430,7 @@ fn generate_reactive_candidates(
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) {
+    generate_legal_settlement_candidates(state, persona, candidates);
     for crisis in state.crises.values().filter(|crisis| {
         crisis.status.is_active() && !crisis_has_containment_response(state, crisis.id)
     }) {
@@ -4438,6 +4497,56 @@ fn generate_reactive_candidates(
                 message.id
             ),
             0,
+        );
+    }
+}
+
+fn has_legal_settlement_opportunity(state: &AppState) -> bool {
+    state
+        .legal_cases
+        .values()
+        .any(|legal_case| quote_player_legal_settlement(state, legal_case.id).is_ok())
+}
+
+fn generate_legal_settlement_candidates(
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) {
+    let player_treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    for legal_case in state.legal_cases.values() {
+        let Ok(quote) = quote_player_legal_settlement(state, legal_case.id) else {
+            continue;
+        };
+        if player_treasury < quote.amount {
+            continue;
+        }
+        let days_to_hearing = legal_case
+            .hearing_day
+            .saturating_sub(state.clock.day())
+            .max(0);
+        let urgency = 60_i64.saturating_sub(days_to_hearing).saturating_mul(20);
+        let persona_bonus: i64 = match persona {
+            GameplayPersona::Steward => 700,
+            GameplayPersona::Entrepreneur => 480,
+            GameplayPersona::PowerBroker => 760,
+            GameplayPersona::Opportunist => 260,
+        };
+        push_candidate(
+            candidates,
+            GameplayCommandKind::SettleLegalCase,
+            PlayerCommand::SettleLegalCase {
+                case_id: quote.case_id,
+            },
+            format!(
+                "settle {:?} case {} for {} before judgment",
+                quote.kind, quote.case_id, quote.amount
+            ),
+            persona_bonus.saturating_add(urgency),
         );
     }
 }
@@ -5563,18 +5672,38 @@ fn generate_finance_candidates(
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist")
         .treasury();
-    let property_bonus = match persona {
+    let property_bonus: i64 = match persona {
         GameplayPersona::Entrepreneur => 430,
         GameplayPersona::Opportunist => 520,
         GameplayPersona::PowerBroker => 230,
         GameplayPersona::Steward => 160,
     };
+    let minimum_property_yield_basis_points = match persona {
+        GameplayPersona::Entrepreneur => 1_200,
+        GameplayPersona::Opportunist => 1_400,
+        GameplayPersona::PowerBroker => 1_600,
+        GameplayPersona::Steward => 1_800,
+    };
     let mut properties: Vec<_> = state
         .properties
         .values()
-        .filter(|property| property.owner_dynasty_id.is_none() && property.value <= treasury)
+        .filter(|property| {
+            property.owner_dynasty_id.is_none()
+                && property.value <= treasury
+                && property_meets_investment_hurdle(
+                    state,
+                    property,
+                    minimum_property_yield_basis_points,
+                )
+        })
         .collect();
-    properties.sort_by_key(|property| (property.value, property.id));
+    properties.sort_by_key(|property| {
+        (
+            std::cmp::Reverse(effective_property_annual_rent(state, property)),
+            property.value,
+            property.id,
+        )
+    });
     for property in properties.into_iter().take(4) {
         let district = registry
             .get_district(property.district_id)
@@ -5585,6 +5714,14 @@ fn generate_finance_candidates(
             .expect("property district runtime must exist")
             .rent_index_basis_points;
         let effective_rent = crate::systems::effective_property_weekly_rent(state, property);
+        let annual_rent = effective_property_annual_rent(state, property);
+        let minimum_annual_return = property
+            .value
+            .saturating_mul_ratio(i64::from(minimum_property_yield_basis_points), 10_000);
+        let yield_bonus = annual_rent
+            .saturating_sub(minimum_annual_return)
+            .copper()
+            .saturating_div(10);
         push_candidate(
             candidates,
             GameplayCommandKind::BuyProperty,
@@ -5598,9 +5735,24 @@ fn generate_finance_candidates(
                 district.name(),
                 property.value,
             ),
-            property_bonus,
+            property_bonus.saturating_add(yield_bonus),
         );
     }
+}
+
+fn effective_property_annual_rent(state: &AppState, property: &crate::core::Property) -> Money {
+    crate::systems::effective_property_weekly_rent(state, property).saturating_mul(52)
+}
+
+fn property_meets_investment_hurdle(
+    state: &AppState,
+    property: &crate::core::Property,
+    minimum_yield_basis_points: u16,
+) -> bool {
+    let minimum_annual_return = property
+        .value
+        .saturating_mul_ratio(i64::from(minimum_yield_basis_points), 10_000);
+    effective_property_annual_rent(state, property) >= minimum_annual_return
 }
 
 fn add_property_liquidation_candidates(
@@ -6552,7 +6704,7 @@ fn generate_public_work_funding_candidates(
         };
         push_candidate(
             candidates,
-            GameplayCommandKind::StartPublicWork,
+            GameplayCommandKind::FundPublicWork,
             PlayerCommand::FundPublicWork {
                 public_work_id: work.id,
                 amount,
@@ -6848,7 +7000,7 @@ fn generate_public_work_candidates(
             .districts
             .get(&district.id())
             .expect("district runtime must exist");
-        for kind in preferred_public_work_kinds(runtime, persona) {
+        for kind in preferred_public_work_kinds(state, runtime, persona, bonus) {
             if state.public_works.values().any(|work| {
                 work.district_id == district.id()
                     && work.kind == kind
@@ -6912,8 +7064,10 @@ fn public_work_candidate_priority(
 }
 
 fn preferred_public_work_kinds(
+    state: &AppState,
     district: &crate::core::DistrictRuntime,
     persona: GameplayPersona,
+    base_bonus: i64,
 ) -> [PublicWorkKind; 2] {
     let mut scored = [
         PublicWorkKind::Road,
@@ -6927,8 +7081,13 @@ fn preferred_public_work_kinds(
     ]
     .map(|kind| {
         (
-            public_work_need_score(district, kind)
-                .saturating_add(public_work_shortlist_bonus(persona, kind)),
+            public_work_candidate_priority(
+                base_bonus,
+                district,
+                persona,
+                kind,
+                completed_player_public_works_of_kind(state, kind),
+            ),
             kind,
         )
     });
@@ -6990,45 +7149,6 @@ const fn public_work_persona_bonus(persona: GameplayPersona, kind: PublicWorkKin
             | PublicWorkKind::Drainage
             | PublicWorkKind::Hospital
             | PublicWorkKind::School => 20,
-        },
-    }
-}
-
-const fn public_work_shortlist_bonus(persona: GameplayPersona, kind: PublicWorkKind) -> i64 {
-    match persona {
-        GameplayPersona::Steward => match kind {
-            PublicWorkKind::Drainage
-            | PublicWorkKind::Granary
-            | PublicWorkKind::Hospital
-            | PublicWorkKind::School => 2_500,
-            PublicWorkKind::Road
-            | PublicWorkKind::Bridge
-            | PublicWorkKind::Market
-            | PublicWorkKind::WatchStation => 100,
-        },
-        GameplayPersona::Entrepreneur => match kind {
-            PublicWorkKind::Road | PublicWorkKind::Bridge | PublicWorkKind::Market => 2_000,
-            PublicWorkKind::Granary => 700,
-            PublicWorkKind::Drainage
-            | PublicWorkKind::WatchStation
-            | PublicWorkKind::Hospital
-            | PublicWorkKind::School => 100,
-        },
-        GameplayPersona::PowerBroker => match kind {
-            PublicWorkKind::Road | PublicWorkKind::Market | PublicWorkKind::WatchStation => 2_200,
-            PublicWorkKind::Bridge => 900,
-            PublicWorkKind::Granary
-            | PublicWorkKind::Drainage
-            | PublicWorkKind::Hospital
-            | PublicWorkKind::School => 100,
-        },
-        GameplayPersona::Opportunist => match kind {
-            PublicWorkKind::Bridge | PublicWorkKind::Market | PublicWorkKind::WatchStation => 2_000,
-            PublicWorkKind::Road => 900,
-            PublicWorkKind::Granary
-            | PublicWorkKind::Drainage
-            | PublicWorkKind::Hospital
-            | PublicWorkKind::School => 100,
         },
     }
 }
@@ -8141,7 +8261,7 @@ fn generate_family_education_candidates(
             .reputation_quality_basis_points
             .max(player.resources.reputation_reliability_basis_points)
             >= INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT
-        && player_contract_deliveries(state) >= INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT;
+        && player_contract_deliveries(state) >= MIN_TARGETED_PREPARATION_DELIVERIES;
     if !education_available {
         return;
     }
@@ -8714,7 +8834,9 @@ fn recovery_priority_adjustment(state: &AppState, kind: GameplayCommandKind) -> 
         | GameplayCommandKind::NominateForOffice
         | GameplayCommandKind::EnactLaw
         | GameplayCommandKind::StartPublicWork
+        | GameplayCommandKind::FundPublicWork
         | GameplayCommandKind::FileLegalCase
+        | GameplayCommandKind::SettleLegalCase
         | GameplayCommandKind::SetHouseGovernance
         | GameplayCommandKind::ConveneFamilyCouncil
         | GameplayCommandKind::DesignateHeir
@@ -8734,6 +8856,7 @@ fn steward_weight(kind: GameplayCommandKind) -> i64 {
         GameplayCommandKind::ConveneFamilyCouncil => 850,
         GameplayCommandKind::DesignateHeir | GameplayCommandKind::EducateFamilyMember => 650,
         GameplayCommandKind::SetBusinessPolicy | GameplayCommandKind::StartPublicWork => 600,
+        GameplayCommandKind::FundPublicWork => 620,
         GameplayCommandKind::AdoptWard | GameplayCommandKind::EndowInstitution => 520,
         GameplayCommandKind::CommissionInformation => 480,
         GameplayCommandKind::LeverageInformation => 700,
@@ -8749,6 +8872,7 @@ fn steward_weight(kind: GameplayCommandKind) -> i64 {
         | GameplayCommandKind::SellProperty
         | GameplayCommandKind::EnactLaw
         | GameplayCommandKind::FileLegalCase
+        | GameplayCommandKind::SettleLegalCase
         | GameplayCommandKind::SetHouseGovernance
         | GameplayCommandKind::NominateForOffice => 180,
     }
@@ -8778,7 +8902,9 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             GameplayCommandKind::CultivateInstitutionSupport => 300,
             GameplayCommandKind::EnactLaw
             | GameplayCommandKind::StartPublicWork
+            | GameplayCommandKind::FundPublicWork
             | GameplayCommandKind::FileLegalCase
+            | GameplayCommandKind::SettleLegalCase
             | GameplayCommandKind::SetHouseGovernance
             | GameplayCommandKind::NominateForOffice
             | GameplayCommandKind::RespondToCrisis
@@ -8794,7 +8920,9 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::NominateForOffice
             | GameplayCommandKind::ExerciseOfficePower
             | GameplayCommandKind::StartPublicWork
+            | GameplayCommandKind::FundPublicWork
             | GameplayCommandKind::FileLegalCase
+            | GameplayCommandKind::SettleLegalCase
             | GameplayCommandKind::LeverageInformation => 900,
             GameplayCommandKind::ExtendCredit => 820,
             GameplayCommandKind::CommissionInformation => 760,
@@ -8823,6 +8951,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::BuyProperty
             | GameplayCommandKind::SellProperty
             | GameplayCommandKind::FileLegalCase
+            | GameplayCommandKind::SettleLegalCase
             | GameplayCommandKind::LeverageInformation => 850,
             GameplayCommandKind::SellOutput | GameplayCommandKind::ExerciseOfficePower => 700,
             GameplayCommandKind::CommissionInformation
@@ -8839,6 +8968,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::SecureSupply
             | GameplayCommandKind::EnactLaw
             | GameplayCommandKind::StartPublicWork
+            | GameplayCommandKind::FundPublicWork
             | GameplayCommandKind::SetHouseGovernance
             | GameplayCommandKind::NominateForOffice
             | GameplayCommandKind::ResolveLaborDispute
@@ -8873,6 +9003,7 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         GameplayCommandKind::LeverageInformation => 600,
         GameplayCommandKind::WithdrawFromInstitution => institution_withdrawal_urgency(state),
         GameplayCommandKind::FileLegalCase => legal_case_urgency(state),
+        GameplayCommandKind::SettleLegalCase => legal_settlement_urgency(state),
         GameplayCommandKind::ConveneFamilyCouncil => family_council_urgency(state),
         GameplayCommandKind::SecureSupply
         | GameplayCommandKind::SellOutput
@@ -8880,6 +9011,7 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         | GameplayCommandKind::BuyProperty
         | GameplayCommandKind::EnactLaw
         | GameplayCommandKind::StartPublicWork
+        | GameplayCommandKind::FundPublicWork
         | GameplayCommandKind::SetHouseGovernance
         | GameplayCommandKind::DesignateHeir
         | GameplayCommandKind::AdoptWard
@@ -8890,6 +9022,28 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         | GameplayCommandKind::ExerciseOfficePower
         | GameplayCommandKind::NominateForOffice => 0,
     }
+}
+
+fn legal_settlement_urgency(state: &AppState) -> i64 {
+    state
+        .legal_cases
+        .values()
+        .filter(|legal_case| {
+            legal_case.defendant_dynasty_id == state.player_dynasty_id
+                && matches!(
+                    legal_case.status,
+                    LegalCaseStatus::Filed | LegalCaseStatus::Hearing
+                )
+        })
+        .map(|legal_case| {
+            let days = legal_case
+                .hearing_day
+                .saturating_sub(state.clock.day())
+                .max(0);
+            60_i64.saturating_sub(days).saturating_mul(25)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn family_council_urgency(state: &AppState) -> i64 {
@@ -10203,7 +10357,7 @@ fn add_property_concentration_finding(
             campaign
                 .commands
                 .get(&GameplayCommandKind::BuyProperty)
-                .is_some_and(|stats| stats.executed >= 3)
+                .is_some_and(|stats| stats.executed >= 2)
         })
         .count();
     if scaled_ratio_usize(repeated_acquirers, campaigns.len(), 100) < 50 {
@@ -10213,7 +10367,7 @@ fn add_property_concentration_finding(
         severity: GameplayFindingSeverity::Warning,
         title: "Property acquisition becomes a universal progression path".to_owned(),
         evidence: format!(
-            "{repeated_acquirers} of {} campaigns acquired at least three additional properties. Repeated land acquisition across distinct personas is a concentration signal because property is intended to compete with business investment, credit, family capacity, and political commitments rather than become an automatic wealth step.",
+            "{repeated_acquirers} of {} campaigns acquired at least two additional properties. Repeated land acquisition across distinct personas is a concentration signal because property is intended to compete with business investment, credit, family capacity, and political commitments rather than become an automatic wealth step.",
             campaigns.len()
         ),
     });
@@ -10983,6 +11137,12 @@ fn add_long_horizon_risk_findings(
         .saturating_add(
             aggregate
                 .commands
+                .get(&GameplayCommandKind::FundPublicWork)
+                .map_or(0, |stats| stats.executed),
+        )
+        .saturating_add(
+            aggregate
+                .commands
                 .get(&GameplayCommandKind::EnactLaw)
                 .map_or(0, |stats| stats.executed),
         );
@@ -11511,6 +11671,16 @@ fn add_domain_findings(aggregate: &GameplayAggregate, findings: &mut Vec<Gamepla
                     .get(kind)
                     .is_some_and(|stats| stats.offered_cycles > 0)
             });
+            if domain == GameplayDomain::Legal && !player_route_offered && !player_route_expected {
+                findings.push(GameplayFinding {
+                    severity: GameplayFindingSeverity::Info,
+                    title: "Legal domain was active without player-facing standing".to_owned(),
+                    evidence: format!(
+                        "It changed in {ambient} baseline observations, but neither a grounded player claim nor a grounded unresolved case against the player activated during the configured horizon."
+                    ),
+                });
+                continue;
+            }
             findings.push(GameplayFinding {
                 severity: if player_route_offered || player_route_expected {
                     GameplayFindingSeverity::Warning
@@ -11562,7 +11732,27 @@ fn average_campaign_days(aggregate: &GameplayAggregate) -> u64 {
     }
 }
 
-const fn domain_player_commands(domain: GameplayDomain) -> &'static [GameplayCommandKind] {
+fn domain_player_commands(domain: GameplayDomain) -> &'static [GameplayCommandKind] {
+    if matches!(
+        domain,
+        GameplayDomain::Economy
+            | GameplayDomain::Business
+            | GameplayDomain::Market
+            | GameplayDomain::Contracts
+            | GameplayDomain::Loans
+            | GameplayDomain::Property
+            | GameplayDomain::Labor
+            | GameplayDomain::Relationships
+    ) {
+        commercial_domain_player_commands(domain)
+    } else {
+        civic_domain_player_commands(domain)
+    }
+}
+
+const fn commercial_domain_player_commands(
+    domain: GameplayDomain,
+) -> &'static [GameplayCommandKind] {
     match domain {
         GameplayDomain::Economy => &[
             GameplayCommandKind::TransferBusinessCash,
@@ -11611,9 +11801,16 @@ const fn domain_player_commands(domain: GameplayDomain) -> &'static [GameplayCom
             GameplayCommandKind::ExtendCredit,
             GameplayCommandKind::SellProperty,
             GameplayCommandKind::FileLegalCase,
+            GameplayCommandKind::SettleLegalCase,
             GameplayCommandKind::CultivateInstitutionSupport,
             GameplayCommandKind::LeverageInformation,
         ],
+        _ => &[],
+    }
+}
+
+const fn civic_domain_player_commands(domain: GameplayDomain) -> &'static [GameplayCommandKind] {
+    match domain {
         GameplayDomain::Dynasty => &[
             GameplayCommandKind::BorrowFunds,
             GameplayCommandKind::ExtendCredit,
@@ -11638,6 +11835,7 @@ const fn domain_player_commands(domain: GameplayDomain) -> &'static [GameplayCom
         ],
         GameplayDomain::Institutions => &[
             GameplayCommandKind::StartPublicWork,
+            GameplayCommandKind::FundPublicWork,
             GameplayCommandKind::CultivateInstitutionSupport,
             GameplayCommandKind::NominateForOffice,
             GameplayCommandKind::ExerciseOfficePower,
@@ -11646,12 +11844,16 @@ const fn domain_player_commands(domain: GameplayDomain) -> &'static [GameplayCom
         GameplayDomain::Law => &[GameplayCommandKind::EnactLaw],
         GameplayDomain::Districts => &[
             GameplayCommandKind::StartPublicWork,
+            GameplayCommandKind::FundPublicWork,
             GameplayCommandKind::ExerciseOfficePower,
             GameplayCommandKind::RespondToCrisis,
             GameplayCommandKind::ResolveLaborDispute,
             GameplayCommandKind::LeverageInformation,
         ],
-        GameplayDomain::Legal => &[GameplayCommandKind::FileLegalCase],
+        GameplayDomain::Legal => &[
+            GameplayCommandKind::FileLegalCase,
+            GameplayCommandKind::SettleLegalCase,
+        ],
         GameplayDomain::Crises => &[GameplayCommandKind::RespondToCrisis],
         GameplayDomain::Information => &[
             GameplayCommandKind::SecureSupply,
@@ -11662,6 +11864,7 @@ const fn domain_player_commands(domain: GameplayDomain) -> &'static [GameplayCom
             GameplayCommandKind::LeverageInformation,
         ],
         GameplayDomain::Feedback => &ALL_COMMAND_KINDS,
+        _ => &[],
     }
 }
 
@@ -12930,10 +13133,12 @@ fn add_power_conversion_finding(
         GameplayCommandKind::ExtendCredit,
         GameplayCommandKind::BuyProperty,
     ];
-    const INSTITUTIONAL_COMMANDS: [GameplayCommandKind; 6] = [
+    const INSTITUTIONAL_COMMANDS: [GameplayCommandKind; 8] = [
         GameplayCommandKind::EnactLaw,
         GameplayCommandKind::StartPublicWork,
+        GameplayCommandKind::FundPublicWork,
         GameplayCommandKind::FileLegalCase,
+        GameplayCommandKind::SettleLegalCase,
         GameplayCommandKind::SetHouseGovernance,
         GameplayCommandKind::NominateForOffice,
         GameplayCommandKind::ExerciseOfficePower,
@@ -13078,7 +13283,9 @@ const fn is_persona_identity_command(kind: GameplayCommandKind) -> bool {
             | GameplayCommandKind::SellProperty
             | GameplayCommandKind::EnactLaw
             | GameplayCommandKind::StartPublicWork
+            | GameplayCommandKind::FundPublicWork
             | GameplayCommandKind::FileLegalCase
+            | GameplayCommandKind::SettleLegalCase
             | GameplayCommandKind::SetHouseGovernance
             | GameplayCommandKind::AdoptWard
             | GameplayCommandKind::EducateFamilyMember

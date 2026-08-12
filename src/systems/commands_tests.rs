@@ -6078,6 +6078,165 @@ mod legal_cases {
         (borrower_id, loan_id)
     }
 
+    fn filed_rival_debt_case_against_player(
+        state: &mut AppState,
+    ) -> (crate::ids::LegalCaseId, DynastyId, crate::ids::LoanId) {
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| {
+                *dynasty_id != player_id
+                    && !state.loans.values().any(|loan| {
+                        loan.lender_dynasty_id == *dynasty_id
+                            && loan.borrower_dynasty_id == player_id
+                            && loan.status.is_repayment_active()
+                    })
+            })
+            .expect("campaign must contain a rival available to lend to the player");
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("rival dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let loan_id = crate::systems::issue_loan(
+            state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(5_000),
+                weekly_payment: Money::from_copper(300),
+                interest_basis_points: 1_000,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture rival loan must be issuable");
+        let loan = state
+            .loans
+            .get_mut(&loan_id)
+            .expect("fixture loan must exist");
+        loan.status = LoanStatus::Delinquent;
+        loan.missed_payments = 1;
+        let case_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            case_id,
+            LegalCase {
+                id: case_id,
+                plaintiff_dynasty_id: lender_id,
+                defendant_dynasty_id: player_id,
+                kind: LegalCaseKind::Debt,
+                claim_source: Some(LegalClaimSource::Loan { loan_id }),
+                evidence_basis_points: 7_500,
+                public_attention_basis_points: 1_500,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: Money::from_copper(5_000),
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        (case_id, lender_id, loan_id)
+    }
+
+    #[test]
+    fn player_can_settle_grounded_rival_debt_case_before_judgment() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (case_id, plaintiff_id, loan_id) = filed_rival_debt_case_against_player(&mut state);
+        let quote = quote_player_legal_settlement(&state, case_id)
+            .expect("grounded rival case must expose a settlement quote");
+        assert_eq!(quote.amount, Money::from_copper(4_375));
+        let player_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
+        let plaintiff_before = state
+            .dynasties
+            .get(&plaintiff_id)
+            .expect("plaintiff dynasty must exist")
+            .treasury();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SettleLegalCase { case_id },
+        )
+        .expect("player defendant must be able to settle a grounded case");
+
+        assert_eq!(
+            state
+                .legal_cases
+                .get(&case_id)
+                .expect("settled case must remain auditable")
+                .status,
+            LegalCaseStatus::Settled
+        );
+        assert_eq!(
+            state
+                .loans
+                .get(&loan_id)
+                .expect("source loan must remain")
+                .status,
+            LoanStatus::Repaid
+        );
+        assert_eq!(
+            state
+                .loans
+                .get(&loan_id)
+                .expect("source loan must remain")
+                .balance,
+            Money::ZERO
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            player_before.saturating_sub(quote.amount)
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&plaintiff_id)
+                .expect("plaintiff dynasty must exist")
+                .treasury(),
+            plaintiff_before.saturating_add(quote.amount)
+        );
+    }
+
+    #[test]
+    fn unaffordable_legal_settlement_is_atomic() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (case_id, _, _) = filed_rival_debt_case_against_player(&mut state);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SettleLegalCase { case_id },
+        );
+
+        assert!(matches!(
+            result,
+            Err(CommandError::InsufficientPlayerFunds { .. })
+        ));
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an unaffordable settlement must not alter the case or its source obligation",
+        );
+    }
+
     #[test]
     fn rejects_rapid_repeat_filing_without_charging_cost() {
         let registry = rivergate_registry_for_test();
@@ -6716,7 +6875,7 @@ mod serialization {
     use super::*;
     use std::collections::BTreeSet;
 
-    const COMMAND_KINDS: [&str; 28] = [
+    const COMMAND_KINDS: [&str; 29] = [
         "acquire-business",
         "acknowledge-notification",
         "adopt-ward",
@@ -6739,6 +6898,7 @@ mod serialization {
         "nominate-for-office",
         "resolve-labor-dispute",
         "respond-to-crisis",
+        "settle-legal-case",
         "set-business-policy",
         "set-house-governance",
         "start-public-work",
@@ -6762,6 +6922,7 @@ mod serialization {
             PlayerCommand::StartPublicWork { .. } => "start-public-work",
             PlayerCommand::FundPublicWork { .. } => "fund-public-work",
             PlayerCommand::FileLegalCase { .. } => "file-legal-case",
+            PlayerCommand::SettleLegalCase { .. } => "settle-legal-case",
             PlayerCommand::SetHouseGovernance { .. } => "set-house-governance",
             PlayerCommand::ConveneFamilyCouncil => "convene-family-council",
             PlayerCommand::DesignateHeir { .. } => "designate-heir",
@@ -6887,6 +7048,9 @@ mod serialization {
                 kind: LegalCaseKind::ContractBreach,
                 evidence_basis_points: 7_500,
                 damages: Money::from_copper(2_000),
+            },
+            PlayerCommand::SettleLegalCase {
+                case_id: crate::ids::LegalCaseId::new(1),
             },
             PlayerCommand::SetHouseGovernance {
                 governance: HouseGovernance::BranchFederation,

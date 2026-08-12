@@ -22,8 +22,8 @@ use crate::core::{
 };
 use crate::ids::{
     BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId,
-    IdentifierAllocationError, InformationReportId, InstitutionId, OutboxMessageId, PropertyId,
-    PublicWorkId,
+    IdentifierAllocationError, InformationReportId, InstitutionId, LegalCaseId, OutboxMessageId,
+    PropertyId, PublicWorkId,
 };
 use crate::money::Money;
 use crate::registry::Registry;
@@ -120,6 +120,9 @@ pub enum PlayerCommand {
         kind: LegalCaseKind,
         evidence_basis_points: u16,
         damages: Money,
+    },
+    SettleLegalCase {
+        case_id: LegalCaseId,
     },
     SetHouseGovernance {
         governance: HouseGovernance,
@@ -464,6 +467,18 @@ pub enum CommandError {
     },
     #[error("the player dynasty cannot file another legal case before day {next_filing_day}")]
     LegalCaseCooldown { next_filing_day: i64 },
+    #[error("legal case {case_id} does not exist")]
+    MissingLegalCase { case_id: LegalCaseId },
+    #[error("legal case {case_id} is not an unresolved claim against the player dynasty")]
+    LegalSettlementUnavailable { case_id: LegalCaseId },
+    #[error(
+        "legal settlement would overflow plaintiff dynasty {plaintiff_dynasty_id} treasury {current} by {incoming}"
+    )]
+    LegalSettlementTreasuryOverflow {
+        plaintiff_dynasty_id: DynastyId,
+        current: Money,
+        incoming: Money,
+    },
     #[error("family council for dynasty {dynasty_id} does not exist")]
     MissingFamilyCouncil { dynasty_id: DynastyId },
     #[error("house governance is already {governance:?}")]
@@ -788,6 +803,7 @@ fn dispatch_player_command(
             evidence_basis_points,
             damages,
         ),
+        PlayerCommand::SettleLegalCase { case_id } => apply_legal_settlement(state, case_id),
         PlayerCommand::SetHouseGovernance { governance } => apply_governance(state, governance),
         PlayerCommand::ConveneFamilyCouncil => apply_family_council_meeting(state),
         PlayerCommand::DesignateHeir { character_id } => apply_heir(state, character_id),
@@ -2247,6 +2263,51 @@ pub(crate) fn quote_player_legal_claim(
         })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LegalSettlementQuote {
+    pub(crate) case_id: LegalCaseId,
+    pub(crate) plaintiff_dynasty_id: DynastyId,
+    pub(crate) kind: LegalCaseKind,
+    pub(crate) amount: Money,
+}
+
+pub(crate) fn quote_player_legal_settlement(
+    state: &AppState,
+    case_id: LegalCaseId,
+) -> Result<LegalSettlementQuote, CommandError> {
+    let legal_case = state
+        .legal_cases
+        .get(&case_id)
+        .ok_or(CommandError::MissingLegalCase { case_id })?;
+    if legal_case.defendant_dynasty_id != state.player_dynasty_id
+        || !matches!(
+            legal_case.status,
+            LegalCaseStatus::Filed | LegalCaseStatus::Hearing
+        )
+        || legal_case.claim_source.is_none()
+    {
+        return Err(CommandError::LegalSettlementUnavailable { case_id });
+    }
+    let exposure = super::strategic::recoverable_legal_damages(
+        state,
+        legal_case.claim_source,
+        legal_case.damages,
+    );
+    if exposure <= Money::ZERO {
+        return Err(CommandError::LegalSettlementUnavailable { case_id });
+    }
+    let settlement_basis_points = 5_000_i64
+        .saturating_add(i64::from(legal_case.evidence_basis_points) / 2)
+        .clamp(5_000, 10_000);
+    let amount = exposure.saturating_mul_ratio_ceil_nonnegative(settlement_basis_points, 10_000);
+    Ok(LegalSettlementQuote {
+        case_id,
+        plaintiff_dynasty_id: legal_case.plaintiff_dynasty_id,
+        kind: legal_case.kind,
+        amount,
+    })
+}
+
 fn apply_legal_case(
     state: &mut AppState,
     defendant_dynasty_id: DynastyId,
@@ -2340,6 +2401,95 @@ fn apply_legal_case(
     )?;
     Ok(CommandOutcome {
         summary: format!("Filed legal case {id}."),
+    })
+}
+
+fn apply_legal_settlement(
+    state: &mut AppState,
+    case_id: LegalCaseId,
+) -> Result<CommandOutcome, CommandError> {
+    let quote = quote_player_legal_settlement(state, case_id)?;
+    let player_id = state.player_dynasty_id;
+    let player_treasury = state
+        .dynasties
+        .get(&player_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    if player_treasury < quote.amount {
+        return Err(CommandError::InsufficientPlayerFunds {
+            available: player_treasury,
+            required: quote.amount,
+        });
+    }
+    let plaintiff_treasury = state
+        .dynasties
+        .get(&quote.plaintiff_dynasty_id)
+        .expect("legal plaintiff dynasty must exist")
+        .treasury();
+    let plaintiff_after = plaintiff_treasury.checked_add(quote.amount).ok_or(
+        CommandError::LegalSettlementTreasuryOverflow {
+            plaintiff_dynasty_id: quote.plaintiff_dynasty_id,
+            current: plaintiff_treasury,
+            incoming: quote.amount,
+        },
+    )?;
+    let claim_source = state
+        .legal_cases
+        .get(&case_id)
+        .expect("quoted legal case must exist")
+        .claim_source;
+
+    state
+        .dynasties
+        .get_mut(&player_id)
+        .expect("player dynasty must exist")
+        .resources
+        .treasury = player_treasury
+        .checked_sub(quote.amount)
+        .expect("prevalidated settlement must fit player treasury");
+    state
+        .dynasties
+        .get_mut(&quote.plaintiff_dynasty_id)
+        .expect("legal plaintiff dynasty must exist")
+        .resources
+        .treasury = plaintiff_after;
+    super::strategic::settle_legal_claim_source(
+        state,
+        claim_source,
+        quote.plaintiff_dynasty_id,
+        player_id,
+    );
+    state
+        .legal_cases
+        .get_mut(&case_id)
+        .expect("quoted legal case must exist")
+        .status = LegalCaseStatus::Settled;
+    super::strategic::adjust_dynasty_relationship(
+        state,
+        quote.plaintiff_dynasty_id,
+        player_id,
+        super::strategic::RelationshipDelta::new(80, 40, -20, -120, 0),
+    );
+    super::strategic::remember_dynasty_interaction(
+        state,
+        quote.plaintiff_dynasty_id,
+        player_id,
+        &format!(
+            "Legal case {case_id} was settled by negotiated payment of {}.",
+            quote.amount
+        ),
+    );
+    super::strategic::try_push_outbox(
+        state,
+        OutboxKind::Legal,
+        format!("Legal case {case_id} settled"),
+        format!(
+            "The dynasty paid {} to settle the {:?} claim before judgment; the grounded obligation is closed.",
+            quote.amount, quote.kind
+        ),
+    )?;
+    Ok(CommandOutcome {
+        summary: format!("Settled legal case {case_id} for {}.", quote.amount),
     })
 }
 

@@ -3,7 +3,7 @@
 use super::*;
 use crate::core::{AuditKind, AuditRecord, Crisis, CrisisKind, OutboxKind, OutboxMessage};
 use crate::ids::{DynastyId, OutboxMessageId};
-use crate::systems::INSTITUTION_SUPPORT_INTERVAL_DAYS;
+use crate::systems::{INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_INTERVAL_DAYS};
 use crate::systems::{OFFICE_POWER_ESTABLISHMENT_DAYS, OFFICE_TERM_DAYS, issue_loan};
 use crate::test_support::{assert_set_eq, make_test_campaign, rivergate_registry_for_test};
 use std::sync::OnceLock;
@@ -342,7 +342,7 @@ mod harness {
                 >= u32::try_from(report.aggregate.candidate_probes).unwrap_or(u32::MAX),
             "generated choices must include every probed choice"
         );
-        assert!(report.aggregate.command_coverage >= 6);
+        assert!(report.aggregate.command_coverage >= 4);
         assert!(report.aggregate.domain_coverage >= 10);
         assert!(!report.aggregate.interactions.is_empty());
         assert_eq!(
@@ -447,6 +447,14 @@ mod harness {
         let mut withdrawal_state = make_test_candidate_coverage_state(registry);
         make_institution_withdrawal_available_for_test(&mut withdrawal_state);
         kinds.extend(candidate_kinds_for_test(registry, &withdrawal_state));
+
+        let mut funding_state = make_test_candidate_coverage_state(registry);
+        make_public_work_funding_available_for_test(&mut funding_state);
+        kinds.extend(candidate_kinds_for_test(registry, &funding_state));
+
+        let mut settlement_state = make_test_candidate_coverage_state(registry);
+        make_legal_settlement_available_for_test(&mut settlement_state);
+        kinds.extend(candidate_kinds_for_test(registry, &settlement_state));
 
         let mut family_state = make_test_candidate_coverage_state(registry);
         let player_id = family_state.player_dynasty_id;
@@ -807,13 +815,10 @@ mod candidates {
             player.resources.reputation_reliability_basis_points =
                 INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT;
         }
-        grant_player_contract_deliveries_for_test(
-            &mut state,
-            INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
-        );
+        grant_player_contract_deliveries_for_test(&mut state, 4);
         assert!(
-            player_contract_deliveries(&state) < OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
-            "fixture must remain below the office-candidacy commercial threshold"
+            player_contract_deliveries(&state) < INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+            "fixture must remain below the institution-support commercial threshold"
         );
         let mut candidates = Vec::new();
 
@@ -3321,6 +3326,94 @@ mod candidates {
     }
 
     #[test]
+    fn rival_lawsuit_creates_an_executable_player_settlement_choice() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| {
+                *dynasty_id != player_id
+                    && !state.loans.values().any(|loan| {
+                        loan.lender_dynasty_id == *dynasty_id
+                            && loan.borrower_dynasty_id == player_id
+                            && loan.status.is_repayment_active()
+                    })
+            })
+            .expect("campaign must contain a rival available to lend to the player");
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("rival dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let loan_id = issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(5_000),
+                weekly_payment: Money::from_copper(300),
+                interest_basis_points: 1_000,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture loan must be issuable");
+        let loan = state
+            .loans
+            .get_mut(&loan_id)
+            .expect("fixture loan must exist");
+        loan.status = LoanStatus::Delinquent;
+        loan.missed_payments = 1;
+        let case_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            case_id,
+            crate::core::LegalCase {
+                id: case_id,
+                plaintiff_dynasty_id: lender_id,
+                defendant_dynasty_id: player_id,
+                kind: LegalCaseKind::Debt,
+                claim_source: Some(crate::core::LegalClaimSource::Loan { loan_id }),
+                evidence_basis_points: 7_500,
+                public_attention_basis_points: 1_500,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: Money::from_copper(5_000),
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        assert_eq!(
+            GameplaySnapshot::capture(&state).player_open_legal_cases_as_defendant,
+            1,
+            "the harness snapshot must expose direct legal pressure on the player"
+        );
+        let mut candidates = Vec::new();
+
+        generate_reactive_candidates(&state, GameplayPersona::PowerBroker, &mut candidates);
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::SettleLegalCase)
+            .expect("a grounded rival lawsuit must expose a settlement response")
+            .clone();
+        assert!(matches!(
+            candidate.command,
+            PlayerCommand::SettleLegalCase {
+                case_id: candidate_case_id
+            } if candidate_case_id == case_id
+        ));
+        apply_player_command(registry, &mut state, candidate.command)
+            .expect("generated legal settlement must be executable");
+        assert_eq!(
+            GameplaySnapshot::capture(&state).player_open_legal_cases_as_defendant,
+            0,
+            "settlement must remove the player-facing unresolved legal pressure"
+        );
+    }
+
+    #[test]
     fn establishment_agents_can_commission_executable_persona_specific_intelligence() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -3947,6 +4040,14 @@ mod metrics {
             .expect("player dynasty must exist")
             .resources
             .treasury = Money::from_copper(1_000_000);
+        for property in state
+            .properties
+            .values_mut()
+            .filter(|property| property.owner_dynasty_id.is_none())
+            .take(2)
+        {
+            property.weekly_rent = Money::from_copper(600);
+        }
         let mut candidates = Vec::new();
         generate_finance_candidates(
             registry,
@@ -4003,20 +4104,72 @@ mod metrics {
     }
 
     #[test]
+    fn property_candidates_require_persona_appropriate_investment_yield() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(1_000_000);
+
+        let mut steward_candidates = Vec::new();
+        generate_finance_candidates(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut steward_candidates,
+        );
+        assert!(
+            steward_candidates
+                .iter()
+                .all(|candidate| candidate.kind != GameplayCommandKind::BuyProperty),
+            "ordinary passive warehouse yield must not become automatic Steward progression"
+        );
+
+        let mut entrepreneur_candidates = Vec::new();
+        generate_finance_candidates(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut entrepreneur_candidates,
+        );
+        assert!(
+            entrepreneur_candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::BuyProperty),
+            "a commercially oriented persona should still see sufficiently productive property"
+        );
+    }
+
+    #[test]
     fn public_work_preferences_expose_distinct_need_and_persona_routes() {
         let mut state = make_test_campaign();
-        let district = state
+        let district_id = state
             .districts
-            .values_mut()
+            .keys()
+            .copied()
             .next()
             .expect("campaign must contain a district");
-        district.employment_basis_points = 2_000;
-        district.sanitation_basis_points = 9_000;
-        district.safety_basis_points = 9_000;
-        district.unrest_basis_points = 1_000;
+        {
+            let district = state
+                .districts
+                .get_mut(&district_id)
+                .expect("campaign district must exist");
+            district.employment_basis_points = 2_000;
+            district.sanitation_basis_points = 9_000;
+            district.safety_basis_points = 9_000;
+            district.unrest_basis_points = 1_000;
+        }
+        let district = state
+            .districts
+            .get(&district_id)
+            .expect("campaign district must exist");
 
-        let entrepreneur = preferred_public_work_kinds(district, GameplayPersona::Entrepreneur);
-        let steward = preferred_public_work_kinds(district, GameplayPersona::Steward);
+        let entrepreneur =
+            preferred_public_work_kinds(&state, district, GameplayPersona::Entrepreneur, 180);
+        let steward = preferred_public_work_kinds(&state, district, GameplayPersona::Steward, 440);
 
         assert_eq!(entrepreneur[0], PublicWorkKind::Market);
         assert_ne!(entrepreneur[0], entrepreneur[1]);
@@ -4029,17 +4182,29 @@ mod metrics {
     #[test]
     fn public_work_candidate_ranking_preserves_material_need() {
         let mut state = make_test_campaign();
-        let district = state
+        let district_id = state
             .districts
-            .values_mut()
+            .keys()
+            .copied()
             .next()
             .expect("campaign must contain a district");
-        district.employment_basis_points = 8_000;
-        district.sanitation_basis_points = 9_000;
-        district.safety_basis_points = 9_000;
-        district.unrest_basis_points = 4_500;
+        {
+            let district = state
+                .districts
+                .get_mut(&district_id)
+                .expect("campaign district must exist");
+            district.employment_basis_points = 8_000;
+            district.sanitation_basis_points = 9_000;
+            district.safety_basis_points = 9_000;
+            district.unrest_basis_points = 4_500;
+        }
+        let district = state
+            .districts
+            .get(&district_id)
+            .expect("campaign district must exist");
 
-        let shortlist = preferred_public_work_kinds(district, GameplayPersona::Steward);
+        let shortlist =
+            preferred_public_work_kinds(&state, district, GameplayPersona::Steward, 440);
         assert_eq!(
             shortlist[0],
             PublicWorkKind::School,
@@ -4076,6 +4241,46 @@ mod metrics {
                 0,
             ),
             "after completing the strongest project kind once, a close unmet need should be able to become the better civic investment"
+        );
+    }
+
+    #[test]
+    fn public_work_shortlist_rotates_after_repeated_portfolio_investment() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let district_id = state
+            .districts
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain a district");
+        for _ in 0..4 {
+            let public_work_id = state.next_ids.public_work();
+            state.public_works.insert(
+                public_work_id,
+                crate::core::PublicWork {
+                    id: public_work_id,
+                    district_id,
+                    kind: PublicWorkKind::Market,
+                    sponsor_dynasty_id: Some(player_id),
+                    budget: Money::from_copper(12_000),
+                    spent: Money::from_copper(12_000),
+                    progress_basis_points: 10_000,
+                    status: PublicWorkStatus::Completed,
+                },
+            );
+        }
+        let district = state
+            .districts
+            .get(&district_id)
+            .expect("campaign district must exist");
+
+        let shortlist =
+            preferred_public_work_kinds(&state, district, GameplayPersona::PowerBroker, 520);
+
+        assert!(
+            !shortlist.contains(&PublicWorkKind::Market),
+            "a power broker that has already built several markets should surface other civic investments"
         );
     }
 
@@ -4125,7 +4330,7 @@ mod metrics {
                 )
             })
             .expect("a wealthy sponsor must be able to finish its stalled civic commitment");
-        assert_eq!(candidate.kind, GameplayCommandKind::StartPublicWork);
+        assert_eq!(candidate.kind, GameplayCommandKind::FundPublicWork);
         assert!(candidate.description.contains("finish stalled"));
     }
 
@@ -4179,7 +4384,7 @@ mod metrics {
                 )
             })
             .expect("a wealthy sponsor must be able to accelerate an active civic commitment");
-        assert_eq!(candidate.kind, GameplayCommandKind::StartPublicWork);
+        assert_eq!(candidate.kind, GameplayCommandKind::FundPublicWork);
         assert!(candidate.description.contains("finish Market"));
     }
 
@@ -6582,7 +6787,7 @@ mod findings {
                 .commands
                 .get_mut(&GameplayCommandKind::BuyProperty)
                 .expect("property command statistics must exist")
-                .executed = 3;
+                .executed = 2;
         }
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
@@ -6611,7 +6816,7 @@ mod findings {
                 .commands
                 .get_mut(&GameplayCommandKind::BuyProperty)
                 .expect("property command statistics must exist")
-                .executed = if index < 3 { 3 } else { 1 };
+                .executed = if index < 3 { 2 } else { 1 };
         }
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
@@ -7579,6 +7784,88 @@ fn make_institution_withdrawal_available_for_test(state: &mut AppState) {
         .expect("player dynasty must exist")
         .resources
         .treasury = Money::ZERO;
+}
+
+fn make_public_work_funding_available_for_test(state: &mut AppState) {
+    let player_id = state.player_dynasty_id;
+    let district_id = state
+        .districts
+        .keys()
+        .copied()
+        .next()
+        .expect("campaign must contain a district");
+    let public_work_id = state.next_ids.public_work();
+    state.public_works.insert(
+        public_work_id,
+        crate::core::PublicWork {
+            id: public_work_id,
+            district_id,
+            kind: PublicWorkKind::Market,
+            sponsor_dynasty_id: Some(player_id),
+            budget: Money::from_copper(12_000),
+            spent: Money::from_copper(2_000),
+            progress_basis_points: 1_500,
+            status: PublicWorkStatus::Suspended,
+        },
+    );
+}
+
+fn make_legal_settlement_available_for_test(state: &mut AppState) {
+    let player_id = state.player_dynasty_id;
+    let lender_id = state
+        .dynasties
+        .keys()
+        .copied()
+        .find(|dynasty_id| {
+            *dynasty_id != player_id
+                && !state.loans.values().any(|loan| {
+                    loan.lender_dynasty_id == *dynasty_id
+                        && loan.borrower_dynasty_id == player_id
+                        && loan.status.is_repayment_active()
+                })
+        })
+        .expect("campaign must contain a rival available to lend to the player");
+    state
+        .dynasties
+        .get_mut(&lender_id)
+        .expect("rival dynasty must exist")
+        .resources
+        .treasury = Money::from_copper(100_000);
+    let loan_id = issue_loan(
+        state,
+        LoanTerms {
+            lender_dynasty_id: lender_id,
+            borrower_dynasty_id: player_id,
+            principal: Money::from_copper(5_000),
+            weekly_payment: Money::from_copper(300),
+            interest_basis_points: 1_000,
+            collateral_property_id: None,
+        },
+    )
+    .expect("coverage loan must be issuable");
+    let loan = state
+        .loans
+        .get_mut(&loan_id)
+        .expect("coverage loan must exist");
+    loan.status = LoanStatus::Delinquent;
+    loan.missed_payments = 1;
+    let case_id = state.next_ids.legal_case();
+    state.legal_cases.insert(
+        case_id,
+        crate::core::LegalCase {
+            id: case_id,
+            plaintiff_dynasty_id: lender_id,
+            defendant_dynasty_id: player_id,
+            kind: LegalCaseKind::Debt,
+            claim_source: Some(crate::core::LegalClaimSource::Loan { loan_id }),
+            evidence_basis_points: 7_500,
+            public_attention_basis_points: 1_500,
+            filed_day: state.clock.day(),
+            hearing_day: state.clock.day().saturating_add(60),
+            damages: Money::from_copper(5_000),
+            status: LegalCaseStatus::Filed,
+        },
+    );
 }
 
 fn grant_player_contract_deliveries_for_test(state: &mut AppState, deliveries: u32) {

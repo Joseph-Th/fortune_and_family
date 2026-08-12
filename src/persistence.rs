@@ -337,6 +337,11 @@ const fn is_schedulable_day(day: i64) -> bool {
     day != i64::MAX
 }
 
+fn is_current_weekly_due_day(current_day: i64, due_day: i64) -> bool {
+    let latest_weekly_boundary = current_day - current_day.rem_euclid(7);
+    is_schedulable_day(due_day) && due_day > latest_weekly_boundary
+}
+
 fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
     for dynasty in state.dynasties.values() {
         if dynasty.treasury() < Money::ZERO
@@ -435,7 +440,10 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         {
             return Err(format!("loan {} has an invalid financial value", loan.id));
         }
-        if !is_schedulable_day(loan.next_due_day) {
+        if !is_schedulable_day(loan.next_due_day)
+            || (loan.status.is_repayment_active()
+                && !is_current_weekly_due_day(state.clock.day(), loan.next_due_day))
+        {
             return Err(format!("loan {} has an invalid due date", loan.id));
         }
     }
@@ -450,7 +458,12 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
                 debt.id
             ));
         }
-        if !is_schedulable_day(debt.next_due_day) {
+        if !is_schedulable_day(debt.next_due_day)
+            || (matches!(
+                debt.status,
+                crate::core::CivicDebtStatus::Current | crate::core::CivicDebtStatus::Delinquent
+            ) && !is_current_weekly_due_day(state.clock.day(), debt.next_due_day))
+        {
             return Err(format!("civic debt {} has invalid dates", debt.id));
         }
     }
@@ -490,7 +503,11 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
                 contract.id
             ));
         }
-        if !is_schedulable_day(contract.next_due_day) || !is_schedulable_day(contract.end_day) {
+        if !is_schedulable_day(contract.next_due_day)
+            || !is_schedulable_day(contract.end_day)
+            || (contract.status == crate::core::ContractStatus::Active
+                && !is_current_weekly_due_day(state.clock.day(), contract.next_due_day))
+        {
             return Err(format!("supply contract {} has invalid dates", contract.id));
         }
     }

@@ -124,6 +124,8 @@ pub(crate) fn synchronize_employment_for_business_status(
 }
 
 pub use bootstrap::{NewGameError, build_new_game};
+#[cfg(test)]
+pub(crate) use commands::INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT;
 pub(crate) use commands::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
     COMMISSIONED_INFORMATION_SOURCE, FAMILY_COUNCIL_MEETING_COST,
@@ -131,23 +133,23 @@ pub(crate) use commands::{
     HEIR_DESIGNATION_LEGITIMACY_COST, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
     INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
     INSTITUTION_ENDOWMENT_MAX, INSTITUTION_ENDOWMENT_MIN, INSTITUTION_SUPPORT_COST,
-    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
-    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
-    MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
-    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, OFFICE_NOMINATION_RESOLUTION_DAYS,
-    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
-    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
-    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT,
-    WARD_ADOPTION_INTERVAL_DAYS, WARD_ADOPTION_LEGITIMACY_REQUIREMENT,
-    WARD_ADOPTION_REPUTATION_REQUIREMENT, contract_counterparty_price_bounds,
-    contract_relationship_pressure_basis_points, family_education_next_day,
-    has_established_player_institution_membership, has_established_player_office_power,
-    institution_endowment_next_day, institution_membership_count, institution_support_day,
+    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
+    LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_INTERVAL_DAYS,
+    MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
+    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+    OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
+    OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, PRIVATE_LOAN_COUNTERPARTY_RESERVE,
+    PROPERTY_COUNTERPARTY_BUYER_RESERVE, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST,
+    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT,
+    contract_counterparty_price_bounds, contract_relationship_pressure_basis_points,
+    family_education_next_day, has_established_player_institution_membership,
+    has_established_player_office_power, institution_endowment_next_day,
+    institution_membership_count, institution_support_day,
     institution_support_delivery_requirement, institution_support_next_day,
     office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
     private_loan_borrower_financing_pressure, quote_information_leverage, quote_player_legal_claim,
-    required_office_power_for_law,
+    quote_player_legal_settlement, required_office_power_for_law,
 };
 pub use commands::{
     CommandError, CommandOutcome, CrisisResponse, EducationFocus, InformationFocus, LaborResponse,

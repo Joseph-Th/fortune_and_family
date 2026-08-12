@@ -2328,7 +2328,7 @@ fn initialize_properties(registry: &Registry, state: &mut AppState) {
                 occupant_business_id: None,
                 tenant_dynasty_id: None,
                 value: Money::from_copper(55_000),
-                weekly_rent: Money::from_copper(420),
+                weekly_rent: Money::from_copper(140),
                 condition_basis_points: 6_500,
                 collateral_loan_id: None,
             },
@@ -7008,7 +7008,7 @@ fn settle_legal_damages(
     Ok(paid)
 }
 
-fn recoverable_legal_damages(
+pub(crate) fn recoverable_legal_damages(
     state: &AppState,
     claim_source: Option<LegalClaimSource>,
     requested: Money,
@@ -7028,7 +7028,7 @@ fn recoverable_legal_damages(
     }
 }
 
-fn settle_legal_claim_source(
+pub(crate) fn settle_legal_claim_source(
     state: &mut AppState,
     claim_source: Option<LegalClaimSource>,
     plaintiff_id: DynastyId,
