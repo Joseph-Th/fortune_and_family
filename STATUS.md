@@ -11,9 +11,9 @@ Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code own
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 18 |
-| Supported save migrations | Versions 0 through 17 |
-| Gameplay report schema | 50 |
+| Save schema | 19 |
+| Supported save migrations | Versions 0 through 18 |
+| Gameplay report schema | 51 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -53,7 +53,7 @@ The Rivergate campaign supports multi-generation deterministic continuation.
 | Information | Source, confidence, summary, creation, expiry, passive reports, and paid player-directed market, district, and counterparty intelligence. |
 | AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; sustained containment can worsen the commercial terms the player receives from that house. |
 | Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, monthly escalation while unaddressed, one-time exploitation followed by optional containment, response-driven recovery, effects, and resolution. |
-| Observability | Summary, projection, HTML dashboard, outbox, chronicle, audit history, validation, progression-aligned campaign phases, and gameplay reports with separate player borrowing/lending distress, direct player-defendant legal pressure, exact before/after values for measured command consequences, first-succession transition profiles for family unity, legitimacy, offices, memberships, and represented institutions, plus mature-liquidity and starting-trade balance diagnostics so high resilience cannot hide an economically solved dynasty or a hidden background difficulty mode. |
+| Observability | Summary, projection, HTML dashboard, outbox, chronicle, audit history, validation, progression-aligned campaign phases, and gameplay reports with separate player borrowing/lending distress, direct player-defendant legal pressure, exact before/after values for measured command consequences, first-succession transition profiles for family unity, legitimacy, offices, memberships, and represented institutions, persona-level mature variety diagnostics, plus mature-liquidity and starting-trade balance diagnostics so healthy aggregate scores cannot hide a strategically narrow persona, an economically solved dynasty, or a hidden background difficulty mode. |
 
 ## Player commands
 
@@ -94,6 +94,7 @@ Commands use the same canonical validation and mutation paths from the library, 
 - Deterministic migrations from supported older schemas
 - Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, and ID allocation
 - Preservation of RNG state and generated records required for deterministic continuation
+- Schema-19 office-directive history records the issuing dynasty explicitly; version-18 saves migrate legacy player directives to that canonical attribution before campaign phases are rebuilt
 - Synchronized same-directory temporary writes followed by atomic replacement
 
 A serialized contract change requires a schema increment and one migration from the previous version.

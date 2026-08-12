@@ -60,16 +60,16 @@ fn dynasty_city_shaping_history(state: &AppState, dynasty_id: DynastyId) -> bool
             .public_works
             .values()
             .any(|work| work.sponsor_dynasty_id == Some(dynasty_id))
-        || (dynasty_id == state.player_dynasty_id
-            && state.audit_log.iter().any(|record| {
-                record.kind() == AuditKind::OfficeDirective
-                    && record
-                        .audit_subject()
-                        .institution_id()
-                        .is_some_and(|institution_id| {
-                            state.institutions.contains_key(&institution_id)
-                        })
-            }))
+        || state.audit_log.iter().any(|record| {
+            if record.kind() != AuditKind::OfficeDirective {
+                return false;
+            }
+            let subject = record.audit_subject();
+            subject
+                .institution_id()
+                .is_some_and(|institution_id| state.institutions.contains_key(&institution_id))
+                && subject.dynasty_id() == Some(dynasty_id)
+        })
 }
 
 fn reconstructed_campaign_phase(state: &AppState, dynasty_id: DynastyId) -> CampaignPhase {
@@ -418,20 +418,9 @@ mod tests {
     }
 
     #[test]
-    fn office_directive_progression_is_attributed_to_the_issuing_dynasty() {
+    fn untagged_office_directive_does_not_create_current_schema_progression() {
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
-        let rival_id = state
-            .dynasties
-            .keys()
-            .copied()
-            .find(|dynasty_id| *dynasty_id != player_id)
-            .expect("campaign must contain a rival dynasty");
-        let rival_head_id = state
-            .dynasties
-            .get(&rival_id)
-            .expect("rival dynasty must exist")
-            .head_id();
         state
             .dynasties
             .get_mut(&player_id)
@@ -449,7 +438,6 @@ mod tests {
             .next()
             .expect("institution must expose an office power");
         let institution_id = institution.institution_id;
-        institution.office_holder_id = Some(rival_head_id);
         institution.active_directive = Some(crate::core::OfficeDirectiveState {
             power,
             expires_day: state.clock.day(),
@@ -463,7 +451,7 @@ mod tests {
 
         refresh_campaign_phases(&mut state);
 
-        assert_eq!(
+        assert_ne!(
             state
                 .dynasties
                 .get(&player_id)
@@ -471,14 +459,48 @@ mod tests {
                 .phase(),
             CampaignPhase::Dominion
         );
+    }
+
+    #[test]
+    fn tagged_office_directive_progression_is_attributed_to_its_actor_dynasty() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let rival_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival dynasty");
+        let institution_id = state
+            .institutions
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain an institution");
+        state.audit_log.push(crate::core::AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeDirective,
+            subject: format!("institution:{institution_id};dynasty:{rival_id}").into(),
+            detail: "actor-attributed directive".to_owned(),
+        });
+
+        refresh_campaign_phases(&mut state);
+
         assert_ne!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .phase(),
+            CampaignPhase::Dominion
+        );
+        assert_eq!(
             state
                 .dynasties
                 .get(&rival_id)
                 .expect("rival dynasty must exist")
                 .phase(),
-            CampaignPhase::Dominion,
-            "a successor officeholder must not inherit campaign credit for another dynasty's directive"
+            CampaignPhase::Dominion
         );
     }
 }

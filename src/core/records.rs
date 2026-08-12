@@ -637,6 +637,21 @@ impl AuditSubject {
     }
 
     #[must_use]
+    pub fn dynasty_id(&self) -> Option<DynastyId> {
+        let mut dynasty_id = None;
+        for segment in self.0.split(';') {
+            let Some(value) = segment.strip_prefix("dynasty:") else {
+                continue;
+            };
+            let parsed = value.parse::<u32>().ok().map(DynastyId::new)?;
+            if dynasty_id.replace(parsed).is_some() {
+                return None;
+            }
+        }
+        dynasty_id
+    }
+
+    #[must_use]
     pub fn references_institution_character(
         &self,
         institution_id: InstitutionId,
@@ -647,16 +662,17 @@ impl AuditSubject {
 
     #[must_use]
     pub fn institution_id(&self) -> Option<InstitutionId> {
-        let mut segments = self.0.split(':');
-        if segments.next() != Some("institution") {
-            return None;
+        let mut institution_id = None;
+        for segment in self.0.split(';') {
+            let Some(value) = segment.strip_prefix("institution:") else {
+                continue;
+            };
+            let parsed = value.parse::<u32>().ok().map(InstitutionId::new)?;
+            if institution_id.replace(parsed).is_some() {
+                return None;
+            }
         }
-        let institution_id = segments
-            .next()?
-            .parse::<u32>()
-            .ok()
-            .map(InstitutionId::new)?;
-        segments.next().is_none().then_some(institution_id)
+        institution_id
     }
 
     #[must_use]
@@ -753,6 +769,12 @@ mod audit_subject_tests {
 
         assert!(subject.references_dynasty(DynastyId::new(10)));
         assert!(!subject.references_dynasty(DynastyId::new(1)));
+        assert_eq!(subject.dynasty_id(), Some(DynastyId::new(10)));
+        assert_eq!(AuditSubject::from("dynasty:10:extra").dynasty_id(), None);
+        assert_eq!(
+            AuditSubject::from("dynasty:10;dynasty:11").dynasty_id(),
+            None
+        );
     }
 
     #[test]
@@ -786,7 +808,15 @@ mod audit_subject_tests {
             Some(InstitutionId::new(3))
         );
         assert_eq!(
+            AuditSubject::from("institution:3;dynasty:10").institution_id(),
+            Some(InstitutionId::new(3))
+        );
+        assert_eq!(
             AuditSubject::from("institution:3:extra").institution_id(),
+            None
+        );
+        assert_eq!(
+            AuditSubject::from("institution:3;institution:4").institution_id(),
             None
         );
         assert_eq!(AuditSubject::from("other:3").institution_id(), None);

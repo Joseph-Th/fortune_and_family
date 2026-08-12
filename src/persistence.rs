@@ -1875,7 +1875,9 @@ fn validate_audit_record_references(
 ) -> Result<(), String> {
     if matches!(
         record.kind(),
-        AuditKind::InstitutionPatronage | AuditKind::OfficeNomination
+        AuditKind::InstitutionPatronage
+            | AuditKind::InstitutionWithdrawal
+            | AuditKind::OfficeNomination
     ) {
         let Some((institution_id, character_id)) =
             record.audit_subject().institution_character_ids()
@@ -1910,6 +1912,89 @@ fn validate_audit_record_references(
                 record.kind()
             ));
         }
+    }
+    if record.kind() == AuditKind::OfficeDirective {
+        validate_office_directive_audit_reference(state, record)?;
+    }
+    if record.kind() == AuditKind::InstitutionEndowment {
+        validate_institution_endowment_audit_reference(record)?;
+    }
+    if matches!(
+        record.kind(),
+        AuditKind::OfficeDutyShortfall | AuditKind::OfficeDutyForfeiture
+    ) {
+        validate_office_duty_audit_reference(state, record)?;
+    }
+    Ok(())
+}
+
+fn validate_office_directive_audit_reference(
+    state: &AppState,
+    record: &crate::core::AuditRecord,
+) -> Result<(), String> {
+    let subject = record.audit_subject();
+    let institution_id = subject
+        .institution_id()
+        .expect("office directive institution subject was validated above");
+    let Some(dynasty_id) = subject.dynasty_id() else {
+        return Err("OfficeDirective audit record lacks dynasty attribution".to_owned());
+    };
+    if !state.dynasties.contains_key(&dynasty_id) {
+        return Err(format!(
+            "OfficeDirective audit record references missing dynasty {dynasty_id}"
+        ));
+    }
+    if subject.as_str() != format!("institution:{institution_id};dynasty:{dynasty_id}") {
+        return Err("OfficeDirective audit record has an invalid dynasty attribution".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_institution_endowment_audit_reference(
+    record: &crate::core::AuditRecord,
+) -> Result<(), String> {
+    let institution_id = record
+        .audit_subject()
+        .institution_id()
+        .expect("institution endowment subject was validated above");
+    if record.subject() != format!("institution:{institution_id}") {
+        return Err(
+            "InstitutionEndowment audit record has an invalid institution subject".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_office_duty_audit_reference(
+    state: &AppState,
+    record: &crate::core::AuditRecord,
+) -> Result<(), String> {
+    let subject = record.audit_subject();
+    let Some(institution_id) = subject.institution_id() else {
+        return Err(format!(
+            "{:?} audit record has an invalid institution subject",
+            record.kind()
+        ));
+    };
+    let Some(dynasty_id) = subject.dynasty_id() else {
+        return Err(format!(
+            "{:?} audit record has an invalid dynasty subject",
+            record.kind()
+        ));
+    };
+    if !state.institutions.contains_key(&institution_id)
+        || !state.dynasties.contains_key(&dynasty_id)
+    {
+        return Err(format!(
+            "{:?} audit record references a missing institution or dynasty",
+            record.kind()
+        ));
+    }
+    if subject.as_str() != format!("institution:{institution_id};dynasty:{dynasty_id}") {
+        return Err(format!(
+            "{:?} audit record has an invalid office-duty subject shape",
+            record.kind()
+        ));
     }
     Ok(())
 }
@@ -1970,6 +2055,7 @@ fn migrate_to_current(mut value: Value, path: &Path) -> Result<Value, Persistenc
             15 => migrate_v15_to_v16(value)?,
             16 => migrate_v16_to_v17(value)?,
             17 => migrate_v17_to_v18(value)?,
+            18 => migrate_v18_to_v19(value)?,
             _ => return Err(PersistenceError::UnsupportedSchema { version }),
         };
         version += 1;
@@ -2665,6 +2751,67 @@ fn migrate_v17_to_v18(mut value: Value) -> Result<Value, PersistenceError> {
         })?;
     object.insert("schema_version".to_owned(), Value::from(18));
     Ok(value)
+}
+
+fn migrate_v18_to_v19(mut value: Value) -> Result<Value, PersistenceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 18,
+            reason: "save root must be an object".to_owned(),
+        })?;
+    let player_dynasty_id = object
+        .get("player_dynasty_id")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 18,
+            reason: "save player_dynasty_id must fit u32".to_owned(),
+        })?;
+    let audit_log = object
+        .get_mut("audit_log")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| PersistenceError::Migration {
+            version: 18,
+            reason: "save audit_log must be an array".to_owned(),
+        })?;
+    for record in audit_log {
+        let record = record
+            .as_object_mut()
+            .ok_or_else(|| PersistenceError::Migration {
+                version: 18,
+                reason: "save audit record must be an object".to_owned(),
+            })?;
+        if record.get("kind").and_then(Value::as_str) != Some("OfficeDirective") {
+            continue;
+        }
+        let Some(subject) = record.get("subject").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(institution_id) = subject
+            .strip_prefix("institution:")
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        record.insert(
+            "subject".to_owned(),
+            Value::String(format!(
+                "institution:{institution_id};dynasty:{player_dynasty_id}"
+            )),
+        );
+    }
+    object.insert("schema_version".to_owned(), Value::from(19));
+    let mut state: AppState =
+        serde_json::from_value(value).map_err(|source| PersistenceError::Migration {
+            version: 18,
+            reason: format!("version-eighteen state cannot be normalized: {source}"),
+        })?;
+    crate::systems::rebuild_campaign_phases(&mut state);
+    serde_json::to_value(state).map_err(|source| PersistenceError::Migration {
+        version: 18,
+        reason: format!("normalized version-nineteen state cannot be serialized: {source}"),
+    })
 }
 
 fn v14_active_office_directives(

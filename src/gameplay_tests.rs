@@ -1293,7 +1293,7 @@ mod candidates {
             .resources
             .legitimacy_basis_points = 0;
         assert_eq!(
-            institution_support_recovery_bonus(&state, true),
+            institution_support_recovery_bonus(&state, true, GameplayPersona::Steward),
             AGENT_POLITICAL_RECOVERY_SUPPORT_BONUS
         );
         assert!(
@@ -5426,6 +5426,27 @@ mod metrics {
     }
 
     #[test]
+    fn power_broker_rebuilds_legitimacy_before_lawmaking_becomes_impossible() {
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points = WARD_ADOPTION_LEGITIMACY_REQUIREMENT.saturating_sub(1);
+
+        assert_eq!(
+            institution_support_recovery_bonus(&state, true, GameplayPersona::PowerBroker),
+            AGENT_POLITICAL_RECOVERY_SUPPORT_BONUS
+        );
+        assert_eq!(
+            institution_support_recovery_bonus(&state, true, GameplayPersona::Entrepreneur),
+            0,
+            "non-political personas should keep the emergency-only recovery threshold"
+        );
+    }
+
+    #[test]
     fn personas_prioritize_distinct_family_education() {
         assert!(
             education_focus_persona_bonus(GameplayPersona::Steward, EducationFocus::Administration)
@@ -6988,6 +7009,27 @@ mod findings {
     }
 
     #[test]
+    fn findings_surface_weak_persona_level_variety() {
+        let mut report = cached_focused_report(360);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused report must contain one campaign");
+        campaign.simulated_days = 3_600;
+        campaign.scores.variety = 65;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(&findings, "A mature persona has weak strategic variety");
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        assert!(
+            finding
+                .evidence
+                .contains("steward persona scored 65 for variety")
+        );
+    }
+
+    #[test]
     fn findings_identify_an_economic_recovery_dead_end() {
         let mut report = cached_focused_report(30);
         let campaign = report
@@ -7124,6 +7166,29 @@ mod findings {
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
         finding_with_title(&findings, "Dynasty fills every available officeholder slot");
+    }
+
+    #[test]
+    fn officeholder_capacity_finding_respects_prior_ward_adoption() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 720;
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused configuration must produce one campaign");
+        campaign.simulated_days = 720;
+        campaign.end.available_offices = 11;
+        campaign.end.eligible_officeholders = 2;
+        campaign.maximum_offices_held = 2;
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::AdoptWard)
+            .expect("ward command statistics must exist")
+            .executed = 1;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(&findings, "Dynasty fills every available officeholder slot");
     }
 
     #[test]

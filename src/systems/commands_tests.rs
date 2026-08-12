@@ -4773,7 +4773,10 @@ mod politics {
         );
         assert!(state.audit_log.iter().any(|record| {
             record.kind() == AuditKind::OfficeDirective
-                && record.subject() == format!("institution:{institution_id}")
+                && record.audit_subject().institution_id() == Some(institution_id)
+                && record
+                    .audit_subject()
+                    .references_dynasty(state.player_dynasty_id)
         }));
         assert!(state.chronicle.iter().any(|entry| {
             entry.kind() == ChronicleKind::OfficeDirective

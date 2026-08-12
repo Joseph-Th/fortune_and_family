@@ -1273,6 +1273,46 @@ mod migrations {
     }
 
     #[test]
+    fn v18_attributes_legacy_office_directives_to_the_player_dynasty() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeDirective,
+            subject: format!("institution:{institution_id};dynasty:{player_id}").into(),
+            detail: "legacy player directive".to_owned(),
+        });
+        crate::systems::refresh_campaign_phases(&mut state);
+        let expected = state.clone();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["schema_version"] = Value::from(18);
+        let audit_log = value["audit_log"]
+            .as_array_mut()
+            .expect("audit log must be an array");
+        let directive = audit_log
+            .iter_mut()
+            .find(|record| record.get("kind").and_then(Value::as_str) == Some("OfficeDirective"))
+            .expect("fixture must contain an office directive");
+        directive["subject"] = Value::String(format!("institution:{institution_id}"));
+        let (_directory, path) =
+            write_test_json_fixture("v18-office-directive-attribution.json", &value);
+
+        let loaded = load_state(&path).expect("version-eighteen campaign must migrate");
+
+        assert_state_eq(
+            &expected,
+            &loaded,
+            "version-eighteen player directives must gain durable actor attribution",
+        );
+        assert_eq!(loaded.schema_version(), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
     fn v16_credits_prior_collateral_seizure_against_defaulted_balance() {
         let mut state = make_test_campaign();
         let loan_id = state
@@ -1416,6 +1456,31 @@ mod migrations {
 
 mod validation {
     use super::*;
+
+    #[test]
+    fn rejects_current_office_directive_without_actor_attribution() {
+        let mut state = make_test_campaign();
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeDirective,
+            subject: format!("institution:{institution_id}").into(),
+            detail: "untagged current directive".to_owned(),
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("untagged-current-office-directive.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "OfficeDirective audit record lacks dynasty attribution",
+        );
+    }
 
     #[test]
     fn rejects_zero_dynasty_generation() {
@@ -3534,6 +3599,55 @@ mod validation {
             load_state(&path),
             StateValidationKind::StrategicRecords,
             "OfficeDirective audit record has an invalid institution subject",
+        );
+    }
+
+    #[test]
+    fn rejects_office_directive_audit_with_missing_actor_dynasty() {
+        let mut state = make_test_campaign();
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeDirective,
+            subject: format!("institution:{institution_id};dynasty:{}", u32::MAX).into(),
+            detail: "fabricated directive actor".to_owned(),
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("invalid-office-directive-actor.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "OfficeDirective audit record references missing dynasty",
+        );
+    }
+
+    #[test]
+    fn rejects_office_duty_audit_with_missing_dynasty_reference() {
+        let mut state = make_test_campaign();
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::OfficeDutyShortfall,
+            subject: format!("institution:{institution_id};dynasty:{}", u32::MAX).into(),
+            detail: "fabricated office duty".to_owned(),
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("invalid-office-duty-actor.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "OfficeDutyShortfall audit record references a missing institution or dynasty",
         );
     }
 

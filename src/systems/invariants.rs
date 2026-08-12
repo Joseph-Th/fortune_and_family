@@ -1676,15 +1676,86 @@ fn validate_history(state: &AppState) {
             !record.subject().trim().is_empty() && !record.detail().trim().is_empty(),
             "No Lost Runtime State: audit record lacks diagnostic content"
         );
-        if record.kind() == AuditKind::OfficeDirective {
-            debug_assert!(
-                record
-                    .audit_subject()
-                    .institution_id()
-                    .is_some_and(|institution_id| state.institutions.contains_key(&institution_id)),
-                "Record Reference Validity: office directive audit record has invalid institution subject"
-            );
-        }
+        validate_audit_record_invariants(state, record);
         prior_audit_day = record.day();
+    }
+}
+
+fn validate_audit_record_invariants(state: &AppState, record: &crate::core::AuditRecord) {
+    if matches!(
+        record.kind(),
+        AuditKind::InstitutionPatronage
+            | AuditKind::InstitutionWithdrawal
+            | AuditKind::OfficeNomination
+    ) {
+        debug_assert!(
+            record
+                .audit_subject()
+                .institution_character_ids()
+                .is_some_and(|(institution_id, character_id)| {
+                    state.institutions.contains_key(&institution_id)
+                        && state.characters.get(character_id).is_some()
+                }),
+            "Record Reference Validity: institutional audit record has invalid institution/character subject"
+        );
+    }
+    if record.kind() == AuditKind::InstitutionEndowment {
+        let subject = record.audit_subject();
+        debug_assert!(
+            subject.institution_id().is_some_and(|institution_id| {
+                state.institutions.contains_key(&institution_id)
+                    && subject.as_str() == format!("institution:{institution_id}")
+            }),
+            "Record Reference Validity: institution endowment audit record has invalid institution subject"
+        );
+    }
+    if matches!(
+        record.kind(),
+        AuditKind::OfficeDirective
+            | AuditKind::OfficeDutyShortfall
+            | AuditKind::OfficeDutyForfeiture
+    ) {
+        debug_assert!(
+            record
+                .audit_subject()
+                .institution_id()
+                .is_some_and(|institution_id| state.institutions.contains_key(&institution_id)),
+            "Record Reference Validity: office audit record has invalid institution subject"
+        );
+    }
+    if matches!(
+        record.kind(),
+        AuditKind::OfficeDutyShortfall | AuditKind::OfficeDutyForfeiture
+    ) {
+        let subject = record.audit_subject();
+        let valid_subject = subject
+            .institution_id()
+            .zip(subject.dynasty_id())
+            .is_some_and(|(institution_id, dynasty_id)| {
+                state.institutions.contains_key(&institution_id)
+                    && state.dynasties.contains_key(&dynasty_id)
+                    && subject.as_str()
+                        == format!("institution:{institution_id};dynasty:{dynasty_id}")
+            });
+        debug_assert!(
+            valid_subject,
+            "Record Reference Validity: office duty audit record has invalid subject"
+        );
+    }
+    if record.kind() == AuditKind::OfficeDirective {
+        let subject = record.audit_subject();
+        let valid_attribution = subject
+            .institution_id()
+            .zip(subject.dynasty_id())
+            .is_some_and(|(institution_id, dynasty_id)| {
+                state.institutions.contains_key(&institution_id)
+                    && state.dynasties.contains_key(&dynasty_id)
+                    && subject.as_str()
+                        == format!("institution:{institution_id};dynasty:{dynasty_id}")
+            });
+        debug_assert!(
+            valid_attribution,
+            "Record Reference Validity: office directive audit record has invalid dynasty attribution"
+        );
     }
 }

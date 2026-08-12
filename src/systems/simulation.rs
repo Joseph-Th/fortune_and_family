@@ -2222,7 +2222,7 @@ fn transfer_succession_business_management(
     }
 }
 
-fn create_succession_heir(
+fn insert_succession_heir(
     state: &mut AppState,
     dynasty_id: DynastyId,
     incoming_head_id: CharacterId,
@@ -2231,7 +2231,10 @@ fn create_succession_heir(
     new_heir_link_kind: FamilyLinkKind,
     new_heir_capabilities: CharacterCapabilities,
 ) -> Result<CharacterId, SimulationError> {
-    let new_heir_id = state.next_ids.try_character()?;
+    let mut next_ids = state.next_ids.clone();
+    let new_heir_id = next_ids.try_character()?;
+    let family_link_id = next_ids.try_family_link()?;
+    state.next_ids = next_ids;
     state.characters.insert(Character {
         identity: CharacterIdentity {
             id: new_heir_id,
@@ -2247,7 +2250,6 @@ fn create_succession_heir(
             role: CharacterRole::Heir,
         },
     });
-    let family_link_id = state.next_ids.try_family_link()?;
     state.family_links.insert(
         family_link_id,
         FamilyLink {
@@ -2338,6 +2340,19 @@ fn apply_successions(
     state: &mut AppState,
     lines: Vec<SuccessionLine>,
 ) -> Result<(), SimulationError> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let mut candidate = state.clone();
+    apply_successions_in_place(&mut candidate, lines)?;
+    *state = candidate;
+    Ok(())
+}
+
+fn apply_successions_in_place(
+    state: &mut AppState,
+    lines: Vec<SuccessionLine>,
+) -> Result<(), SimulationError> {
     for line in lines {
         let SuccessionLine {
             dynasty_id,
@@ -2377,7 +2392,7 @@ fn apply_successions(
             outgoing_head_id,
             incoming_head_id,
         );
-        let new_heir_id = create_succession_heir(
+        let new_heir_id = insert_succession_heir(
             state,
             dynasty_id,
             incoming_head_id,

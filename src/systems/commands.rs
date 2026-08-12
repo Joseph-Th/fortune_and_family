@@ -748,6 +748,10 @@ pub fn apply_player_command(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the exhaustive player-command dispatcher keeps canonical command routing visible"
+)]
 fn dispatch_player_command(
     registry: &Registry,
     state: &mut AppState,
@@ -772,9 +776,22 @@ fn dispatch_player_command(
             business_id,
             amount,
         } => apply_business_investment(state, business_id, amount),
-        command @ PlayerCommand::SetBusinessPolicy { .. } => {
-            apply_business_policy_command(state, &command)
-        }
+        PlayerCommand::SetBusinessPolicy {
+            business_id,
+            target_input_days,
+            target_output_days,
+            minimum_cash_reserve,
+            maintenance_basis_points,
+            quality_target_basis_points,
+        } => apply_business_policy_values(
+            state,
+            business_id,
+            target_input_days,
+            target_output_days,
+            minimum_cash_reserve,
+            maintenance_basis_points,
+            quality_target_basis_points,
+        ),
         PlayerCommand::CreateSupplyContract { terms } => apply_contract(registry, state, &terms),
         PlayerCommand::IssueLoan { terms } => apply_loan(registry, state, &terms),
         PlayerCommand::BuyProperty { property_id } => apply_property_purchase(state, property_id),
@@ -849,32 +866,6 @@ fn dispatch_player_command(
         }
         PlayerCommand::AcknowledgeNotification { message_id } => acknowledge(state, message_id),
     }
-}
-
-fn apply_business_policy_command(
-    state: &mut AppState,
-    command: &PlayerCommand,
-) -> Result<CommandOutcome, CommandError> {
-    let PlayerCommand::SetBusinessPolicy {
-        business_id,
-        target_input_days,
-        target_output_days,
-        minimum_cash_reserve,
-        maintenance_basis_points,
-        quality_target_basis_points,
-    } = command
-    else {
-        unreachable!("business-policy dispatcher must receive a business-policy command")
-    };
-    apply_business_policy_values(
-        state,
-        *business_id,
-        *target_input_days,
-        *target_output_days,
-        *minimum_cash_reserve,
-        *maintenance_basis_points,
-        *quality_target_basis_points,
-    )
 }
 
 fn apply_contract(
@@ -3692,12 +3683,14 @@ fn validate_office_power_directive(
             required: OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
         });
     }
-    let subject = format!("institution:{institution_id}");
     if let Some(last_directive_day) = state
         .audit_log
         .iter()
         .rev()
-        .find(|record| record.kind() == AuditKind::OfficeDirective && record.subject() == subject)
+        .find(|record| {
+            record.kind() == AuditKind::OfficeDirective
+                && record.audit_subject().institution_id() == Some(institution_id)
+        })
         .map(AuditRecord::day)
     {
         let next_directive_day =
@@ -3714,6 +3707,10 @@ fn validate_office_power_directive(
         .get_institution(institution_id)
         .ok_or(CommandError::MissingInstitution { institution_id })?
         .district_id();
+    let subject = format!(
+        "institution:{institution_id};dynasty:{}",
+        state.player_dynasty_id
+    );
     Ok(OfficePowerDirectivePlan {
         institution_id,
         district_id,

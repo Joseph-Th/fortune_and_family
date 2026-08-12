@@ -2494,6 +2494,45 @@ mod health_and_succession {
     }
 
     #[test]
+    fn exhausted_succession_record_allocation_leaves_state_unchanged() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let head_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        state
+            .characters
+            .get_mut(head_id)
+            .expect("dynasty head must exist")
+            .runtime
+            .health_basis_points = 0;
+        let lines = decide_successions(&mut state).expect("forced succession must be planned");
+        assert!(
+            lines.iter().any(|line| line.dynasty_id == dynasty_id),
+            "fixture must plan a player succession"
+        );
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["next_ids"]["family_link"] = serde_json::Value::from(u32::MAX - 1);
+        let mut state: AppState =
+            serde_json::from_value(value).expect("allocator exhaustion fixture must deserialize");
+        let before = state.clone();
+
+        let result = apply_successions(&mut state, lines);
+
+        assert!(matches!(
+            result,
+            Err(SimulationError::IdentifierAllocation(_))
+        ));
+        assert_state_unchanged(
+            &before,
+            &state,
+            "succession allocation failure must not expose a retired head or partially inserted heir",
+        );
+    }
+
+    #[test]
     fn annual_health_reflects_age_and_epidemic_pressure() {
         assert_eq!(
             resolve_annual_health(0, 30, 0),

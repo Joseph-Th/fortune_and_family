@@ -103,7 +103,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 50;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 51;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -7835,7 +7835,7 @@ fn institution_is_strategic_target(
     persona: GameplayPersona,
 ) -> bool {
     let political_recovery_target =
-        institution_support_recovery_bonus(state, player_has_institutional_foothold) > 0;
+        institution_support_recovery_bonus(state, player_has_institutional_foothold, persona) > 0;
     let held_by_player = institution.office_holder_id.is_some_and(|character_id| {
         state
             .characters
@@ -7861,14 +7861,18 @@ fn institution_is_strategic_target(
 fn institution_support_recovery_bonus(
     state: &AppState,
     player_has_institutional_foothold: bool,
+    persona: GameplayPersona,
 ) -> i64 {
+    let recovery_threshold = if persona == GameplayPersona::PowerBroker {
+        WARD_ADOPTION_LEGITIMACY_REQUIREMENT
+    } else {
+        OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST
+    };
     if player_has_institutional_foothold
         && state
             .dynasties
             .get(&state.player_dynasty_id)
-            .is_some_and(|dynasty| {
-                dynasty.resources.legitimacy_basis_points < OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST
-            })
+            .is_some_and(|dynasty| dynasty.resources.legitimacy_basis_points < recovery_threshold)
     {
         AGENT_POLITICAL_RECOVERY_SUPPORT_BONUS
     } else {
@@ -7877,12 +7881,14 @@ fn institution_support_recovery_bonus(
 }
 
 fn office_power_directive_available(state: &AppState, institution_id: InstitutionId) -> bool {
-    let subject = format!("institution:{institution_id}");
     state
         .audit_log
         .iter()
         .rev()
-        .find(|record| record.kind() == AuditKind::OfficeDirective && record.subject() == subject)
+        .find(|record| {
+            record.kind() == AuditKind::OfficeDirective
+                && record.audit_subject().institution_id() == Some(institution_id)
+        })
         .is_none_or(|record| {
             state.clock.day()
                 >= record
@@ -8069,7 +8075,7 @@ fn generate_institution_ascent_candidates(
     let controlled_powers = player_controlled_office_powers(state);
     let player_has_institutional_foothold = has_player_institutional_foothold(state);
     let recovery_bonus =
-        institution_support_recovery_bonus(state, player_has_institutional_foothold);
+        institution_support_recovery_bonus(state, player_has_institutional_foothold, persona);
     for institution in state.institutions.values() {
         if !institution_is_strategic_target(
             state,
@@ -9459,6 +9465,10 @@ const NO_CIVIC_DEBT: &str = "civic debt unavailable";
 const NO_TARGET: &str = "missing command target";
 const BAD_WORK: &str = "invalid public work";
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "exhaustive command-error classification is safer than wildcard fallback helpers"
+)]
 const fn command_error_category(error: &CommandError) -> &'static str {
     match error {
         CommandError::IdentifierAllocation(_) => "identifier allocation exhausted",
@@ -9467,15 +9477,13 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::Simulation(source) => simulation_error_category(source),
         CommandError::MissingBusiness { .. } | CommandError::BusinessNotOwned { .. } => NO_BIZ,
         CommandError::PlayerNotParty => "player not party",
-        CommandError::LoanCounterpartyLenderReserve { .. }
-        | CommandError::LoanCounterpartyInterestTooLow { .. }
-        | CommandError::LoanCounterpartyInterestTooHigh { .. }
-        | CommandError::LoanCounterpartyPaymentTooLow { .. }
-        | CommandError::LoanCounterpartyPaymentTooHigh { .. }
-        | CommandError::LoanCounterpartyCollateralTooLarge { .. }
-        | CommandError::LoanCounterpartyNoFinancingNeed { .. } => {
-            loan_command_error_category(error)
-        }
+        CommandError::LoanCounterpartyLenderReserve { .. } => "loan counterparty lender reserve",
+        CommandError::LoanCounterpartyInterestTooLow { .. } => "loan counterparty interest low",
+        CommandError::LoanCounterpartyInterestTooHigh { .. } => "loan counterparty interest high",
+        CommandError::LoanCounterpartyPaymentTooLow { .. } => "loan counterparty payment low",
+        CommandError::LoanCounterpartyPaymentTooHigh { .. } => "loan counterparty payment high",
+        CommandError::LoanCounterpartyCollateralTooLarge { .. } => LOAN_COLLATERAL_LARGE,
+        CommandError::LoanCounterpartyNoFinancingNeed { .. } => LOAN_NO_FINANCING_NEED,
         CommandError::ContractCounterpartyPriceTooLow { .. } => "contract counterparty price low",
         CommandError::ContractCounterpartyPriceTooHigh { .. } => "contract counterparty price high",
         CommandError::ContractCounterpartyPenaltyOutOfRange { .. } => CONTRACT_PENALTY,
@@ -9512,6 +9520,11 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         | CommandError::LegalDamagesExceedClaim { .. } => "invalid legal claim",
         CommandError::DuplicateActiveLegalCase { .. } => "duplicate active legal case",
         CommandError::LegalCaseCooldown { .. } => "legal-case cooldown",
+        CommandError::MissingLegalCase { .. } => "missing legal case",
+        CommandError::LegalSettlementUnavailable { .. } => "legal settlement unavailable",
+        CommandError::LegalSettlementTreasuryOverflow { .. } => {
+            "legal settlement treasury overflow"
+        }
         CommandError::MissingFamilyCouncil { .. } => "missing family council",
         CommandError::UnchangedHouseGovernance { .. } => "unchanged governance",
         CommandError::HouseGovernanceCooldown { .. } => "governance cooldown",
@@ -9533,28 +9546,22 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::OfficePowerUnavailable { .. } => "office power unavailable",
         CommandError::OfficePowerDirectiveNotEstablished { .. } => OFFICE_DIRECTIVE_PENDING,
         CommandError::OfficePowerDirectiveCooldown { .. } => "office power directive cooldown",
-        CommandError::InsufficientInstitutionSupportReputation { .. }
-        | CommandError::InsufficientInstitutionSupportCommercialRecord { .. }
-        | CommandError::InstitutionSupportAlreadyEstablished { .. }
-        | CommandError::InstitutionMembershipCapacity { .. }
-        | CommandError::InstitutionSupportCooldown { .. }
-        | CommandError::InstitutionEndowmentOutOfRange { .. }
-        | CommandError::InstitutionEndowmentRequiresMembership { .. }
-        | CommandError::InstitutionEndowmentCooldown { .. }
-        | CommandError::InstitutionBudgetOverflow { .. }
-        | CommandError::MissingInstitutionSupport { .. }
-        | CommandError::InstitutionSupportNotEstablished { .. } => {
-            institution_error_category(error)
+        CommandError::InsufficientInstitutionSupportReputation { .. } => SUPPORT_REPUTATION_SHORT,
+        CommandError::InsufficientInstitutionSupportCommercialRecord { .. } => SUPPORT_RECORD_SHORT,
+        CommandError::InstitutionSupportAlreadyEstablished { .. } => SUPPORT_EXISTS,
+        CommandError::InstitutionMembershipCapacity { .. } => "institution membership capacity",
+        CommandError::InstitutionSupportCooldown { .. } => "institution support cooldown",
+        CommandError::InstitutionEndowmentOutOfRange { .. } => "institution endowment out of range",
+        CommandError::InstitutionEndowmentRequiresMembership { .. } => {
+            "institution endowment requires membership"
         }
+        CommandError::InstitutionEndowmentCooldown { .. } => "institution endowment cooldown",
+        CommandError::InstitutionBudgetOverflow { .. } => "institution budget overflow",
+        CommandError::MissingInstitutionSupport { .. } => "missing institution support",
+        CommandError::InstitutionSupportNotEstablished { .. } => SUPPORT_MISSING,
         CommandError::InvalidNominee { .. } => "invalid nominee",
         CommandError::NomineeAlreadyHoldsOffice { .. } => "nominee already holds office",
         CommandError::InvalidInstitutionWithdrawal { .. } => "invalid institution withdrawal",
-        _ => secondary_command_error_category(error),
-    }
-}
-
-const fn secondary_command_error_category(error: &CommandError) -> &'static str {
-    match error {
         CommandError::MissingCrisis { .. } => "missing crisis",
         CommandError::InactiveCrisis { .. } => "inactive crisis",
         CommandError::CrisisAlreadyAddressed { .. } => "crisis already addressed",
@@ -9572,39 +9579,6 @@ const fn secondary_command_error_category(error: &CommandError) -> &'static str 
         CommandError::InformationReportExpired { .. } => "intelligence report expired",
         CommandError::InformationReportHasNoLeverage { .. } => REPORT_NO_LEVERAGE,
         CommandError::MissingNotification { .. } => "missing notification",
-        _ => "command unavailable",
-    }
-}
-
-const fn institution_error_category(error: &CommandError) -> &'static str {
-    match error {
-        CommandError::InsufficientInstitutionSupportReputation { .. } => SUPPORT_REPUTATION_SHORT,
-        CommandError::InsufficientInstitutionSupportCommercialRecord { .. } => SUPPORT_RECORD_SHORT,
-        CommandError::InstitutionSupportAlreadyEstablished { .. } => SUPPORT_EXISTS,
-        CommandError::InstitutionMembershipCapacity { .. } => "institution membership capacity",
-        CommandError::InstitutionSupportCooldown { .. } => "institution support cooldown",
-        CommandError::InstitutionEndowmentOutOfRange { .. } => "institution endowment out of range",
-        CommandError::InstitutionEndowmentRequiresMembership { .. } => {
-            "institution endowment requires membership"
-        }
-        CommandError::InstitutionEndowmentCooldown { .. } => "institution endowment cooldown",
-        CommandError::InstitutionBudgetOverflow { .. } => "institution budget overflow",
-        CommandError::MissingInstitutionSupport { .. } => "missing institution support",
-        CommandError::InstitutionSupportNotEstablished { .. } => SUPPORT_MISSING,
-        _ => "institution command unavailable",
-    }
-}
-
-const fn loan_command_error_category(error: &CommandError) -> &'static str {
-    match error {
-        CommandError::LoanCounterpartyLenderReserve { .. } => "loan counterparty lender reserve",
-        CommandError::LoanCounterpartyInterestTooLow { .. } => "loan counterparty interest low",
-        CommandError::LoanCounterpartyInterestTooHigh { .. } => "loan counterparty interest high",
-        CommandError::LoanCounterpartyPaymentTooLow { .. } => "loan counterparty payment low",
-        CommandError::LoanCounterpartyPaymentTooHigh { .. } => "loan counterparty payment high",
-        CommandError::LoanCounterpartyCollateralTooLarge { .. } => LOAN_COLLATERAL_LARGE,
-        CommandError::LoanCounterpartyNoFinancingNeed { .. } => LOAN_NO_FINANCING_NEED,
-        _ => "loan command unavailable",
     }
 }
 
@@ -10343,6 +10317,7 @@ fn derive_findings(
     add_phase_quality_findings(aggregate, campaigns, &mut findings);
     add_phase_action_mix_findings(aggregate, &mut findings);
     add_individual_action_concentration_finding(campaigns, &mut findings);
+    add_persona_variety_findings(campaigns, &mut findings);
     add_core_fantasy_findings(aggregate, campaigns, &mut findings);
     add_variance_finding(campaigns, &mut findings);
     if findings.is_empty() {
@@ -10353,6 +10328,46 @@ fn derive_findings(
         });
     }
     findings
+}
+
+fn add_persona_variety_findings(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    const MINIMUM_MATURE_PERSONA_VARIETY: u16 = 70;
+
+    for (persona, aggregate) in aggregate_campaigns_by_persona(campaigns) {
+        if average_campaign_days(&aggregate) < 3_600
+            || aggregate.scores.variety >= MINIMUM_MATURE_PERSONA_VARIETY
+        {
+            continue;
+        }
+        let mut executed = aggregate
+            .commands
+            .iter()
+            .filter(|(kind, stats)| {
+                **kind != GameplayCommandKind::AcknowledgeNotification && stats.executed > 0
+            })
+            .map(|(kind, stats)| (*kind, stats.executed))
+            .collect::<Vec<_>>();
+        executed.sort_by_key(|(kind, count)| (std::cmp::Reverse(*count), *kind));
+        let leading_actions = executed
+            .into_iter()
+            .take(3)
+            .map(|(kind, count)| format!("{}={count}", kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "A mature persona has weak strategic variety".to_owned(),
+            evidence: format!(
+                "The {} persona scored {} for variety across {} mature campaign(s), below the diagnostic floor of {MINIMUM_MATURE_PERSONA_VARIETY}. Its most-used substantive command families were {leading_actions}. Aggregate matrices can hide a persona that repeatedly reaches the same narrow slice of the game, so persona-level variety is evaluated independently.",
+                persona.label(),
+                aggregate.scores.variety,
+                aggregate.campaigns,
+            ),
+        });
+    }
 }
 
 fn add_player_borrowing_distress_finding(
@@ -12075,7 +12090,15 @@ const fn commercial_domain_player_commands(
             GameplayCommandKind::CultivateInstitutionSupport,
             GameplayCommandKind::LeverageInformation,
         ],
-        _ => &[],
+        GameplayDomain::Dynasty
+        | GameplayDomain::Family
+        | GameplayDomain::Institutions
+        | GameplayDomain::Law
+        | GameplayDomain::Districts
+        | GameplayDomain::Legal
+        | GameplayDomain::Crises
+        | GameplayDomain::Information
+        | GameplayDomain::Feedback => &[],
     }
 }
 
@@ -12134,7 +12157,14 @@ const fn civic_domain_player_commands(domain: GameplayDomain) -> &'static [Gamep
             GameplayCommandKind::LeverageInformation,
         ],
         GameplayDomain::Feedback => &ALL_COMMAND_KINDS,
-        _ => &[],
+        GameplayDomain::Economy
+        | GameplayDomain::Business
+        | GameplayDomain::Market
+        | GameplayDomain::Contracts
+        | GameplayDomain::Loans
+        | GameplayDomain::Property
+        | GameplayDomain::Labor
+        | GameplayDomain::Relationships => &[],
     }
 }
 
@@ -12887,8 +12917,12 @@ fn add_political_health_finding(
                 .end
                 .available_offices
                 .min(campaign.end.eligible_officeholders);
+            let adopted_ward = campaign
+                .commands
+                .get(&GameplayCommandKind::AdoptWard)
+                .is_some_and(|stats| stats.executed > 0);
             effective_capacity > 1
-                && campaign.end.active_wards == 0
+                && !adopted_ward
                 && campaign.maximum_offices_held >= effective_capacity
         })
         .count();
@@ -12897,7 +12931,7 @@ fn add_political_health_finding(
             severity: GameplayFindingSeverity::Warning,
             title: "Dynasty fills every available officeholder slot".to_owned(),
             evidence: format!(
-                "{officeholder_capacity_capture} of {} campaigns filled every office slot their active family members could legally occupy without adopting a ward, so political growth stalled at the founding household.",
+                "{officeholder_capacity_capture} of {} campaigns filled every office slot their active family members could legally occupy without ever adopting a ward, so political growth stalled at the founding household.",
                 campaigns.len()
             ),
         });
