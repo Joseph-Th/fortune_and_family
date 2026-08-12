@@ -1145,6 +1145,85 @@ mod validation {
     }
 
     #[test]
+    fn distressed_non_player_borrower_accepts_shorter_emergency_amortization() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let borrower_dynasty_id = non_player_credit_counterparty(&state, true);
+        state
+            .dynasties
+            .get_mut(&borrower_dynasty_id)
+            .expect("selected borrower must exist")
+            .resources
+            .treasury = Money::from_copper(20_000);
+        state
+            .businesses
+            .iter_mut()
+            .find(|business| business.owner_dynasty_id() == borrower_dynasty_id)
+            .expect("selected borrower must own a business")
+            .operations
+            .status = BusinessStatus::Distressed;
+        let principal = Money::from_copper(8_000);
+        let terms = LoanTerms {
+            lender_dynasty_id: state.player_dynasty_id,
+            borrower_dynasty_id,
+            principal,
+            weekly_payment: ceil_positive_money_div(
+                principal,
+                PRIVATE_LOAN_DISTRESSED_BORROWER_MIN_AMORTIZATION_WEEKS,
+            ),
+            interest_basis_points: PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS,
+            collateral_property_id: None,
+        };
+
+        apply_player_command(registry, &mut state, PlayerCommand::IssueLoan { terms })
+            .expect("a distressed borrower may accept a shorter emergency amortization");
+    }
+
+    #[test]
+    fn merely_cash_poor_non_player_borrower_rejects_distressed_amortization() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let borrower_dynasty_id = non_player_credit_counterparty(&state, true);
+        state
+            .dynasties
+            .get_mut(&borrower_dynasty_id)
+            .expect("selected borrower must exist")
+            .resources
+            .treasury = Money::from_copper(20_000);
+        let principal = Money::from_copper(8_000);
+        let weekly_payment = ceil_positive_money_div(
+            principal,
+            PRIVATE_LOAN_DISTRESSED_BORROWER_MIN_AMORTIZATION_WEEKS,
+        );
+        let maximum_payment =
+            ceil_positive_money_div(principal, PRIVATE_LOAN_COUNTERPARTY_MIN_AMORTIZATION_WEEKS);
+        let terms = LoanTerms {
+            lender_dynasty_id: state.player_dynasty_id,
+            borrower_dynasty_id,
+            principal,
+            weekly_payment,
+            interest_basis_points: PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS,
+            collateral_property_id: None,
+        };
+        let before = state.clone();
+
+        let result = apply_player_command(registry, &mut state, PlayerCommand::IssueLoan { terms });
+
+        assert_eq!(
+            result,
+            Err(CommandError::LoanCounterpartyPaymentTooHigh {
+                weekly_payment,
+                maximum_payment,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "ordinary liquidity pressure must not make a borrower accept distressed repayment terms",
+        );
+    }
+
+    #[test]
     fn non_player_borrower_deploys_new_credit_into_distressed_business() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -5895,6 +5974,68 @@ mod information {
         assert!(relationship.trust_basis_points > before.trust_basis_points);
         assert!(relationship.respect_basis_points > before.respect_basis_points);
         assert!(relationship.resentment_basis_points < before.resentment_basis_points);
+        assert!(relationship.obligation > before.obligation);
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn counterparty_intelligence_converts_a_bilateral_contract_into_material_leverage() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let fixture = market_leverage_fixture(&state);
+        let counterparty_id = if fixture.pair.first == player_id {
+            fixture.pair.second
+        } else {
+            fixture.pair.first
+        };
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CommissionInformation {
+                focus: InformationFocus::Counterparty {
+                    dynasty_id: counterparty_id,
+                },
+            },
+        )
+        .expect("counterparty commission must succeed");
+        let report_id = commissioned_report_id(&state);
+        let price_before = state
+            .contracts
+            .get(&fixture.contract.id)
+            .expect("fixture contract must remain present")
+            .unit_price;
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::LeverageInformation { report_id },
+        )
+        .expect("house intelligence must support bilateral contract leverage");
+
+        let price_after = state
+            .contracts
+            .get(&fixture.contract.id)
+            .expect("fixture contract must remain present")
+            .unit_price;
+        if fixture.buyer_owner == player_id {
+            assert!(price_after < price_before);
+        } else {
+            assert!(price_after > price_before);
+        }
+        let relationship = state
+            .relationships
+            .get(&fixture.pair)
+            .expect("counterparty relationship must remain present");
+        assert!(relationship.trust_basis_points > fixture.relationship_before.trust_basis_points);
+        assert!(
+            relationship.respect_basis_points > fixture.relationship_before.respect_basis_points
+        );
+        assert!(
+            relationship.resentment_basis_points
+                < fixture.relationship_before.resentment_basis_points
+        );
+        assert!(relationship.obligation > fixture.relationship_before.obligation);
         validate_invariants(registry, &state);
     }
 

@@ -13,7 +13,7 @@ Use `DESIGN.md` for intended product behavior and `ARCHITECTURE.md` for code own
 | Minimum Rust version | 1.97 |
 | Save schema | 18 |
 | Supported save migrations | Versions 0 through 17 |
-| Gameplay report schema | 49 |
+| Gameplay report schema | 50 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |

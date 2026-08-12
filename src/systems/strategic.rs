@@ -4448,7 +4448,7 @@ fn update_fully_paid_employment(
     environment: LaborEnvironment,
 ) -> (bool, bool) {
     if prior_status != EmploymentStatus::Disputed {
-        let strain = labor_strain_basis_points(environment);
+        let strain = labor_strain_basis_points(agreement, environment);
         if strain > 0 {
             agreement.conditions_basis_points =
                 agreement.conditions_basis_points.saturating_sub(strain);
@@ -4490,7 +4490,10 @@ fn update_fully_paid_employment(
     (recovered, false)
 }
 
-fn labor_strain_basis_points(environment: LaborEnvironment) -> u16 {
+fn labor_strain_basis_points(
+    agreement: &EmploymentAgreement,
+    environment: LaborEnvironment,
+) -> u16 {
     if environment.utilization < 9_000 {
         return 0;
     }
@@ -4500,7 +4503,19 @@ fn labor_strain_basis_points(environment: LaborEnvironment) -> u16 {
     let condition_strain = 7_000_u16
         .saturating_sub(environment.business_condition)
         .saturating_div(20);
-    maintenance_strain.saturating_add(condition_strain).min(180)
+    let raw_strain = maintenance_strain.saturating_add(condition_strain).min(180);
+
+    // A workforce with accumulated loyalty and decent conditions can absorb ordinary periods of
+    // high utilization without turning every growth policy into a predictable dispute timer.
+    // Extreme under-maintenance still erodes that buffer and eventually creates resistance, while
+    // missed payroll continues to bypass this path and directly damages the relationship.
+    let social_resilience = 68_u16.saturating_add(
+        agreement
+            .loyalty_basis_points
+            .min(agreement.conditions_basis_points)
+            .saturating_div(200),
+    );
+    raw_strain.saturating_sub(social_resilience)
 }
 
 fn emit_employment_outcome(
@@ -7532,10 +7547,13 @@ fn form_dynastic_marriage(state: &mut AppState) -> Result<(), SimulationError> {
             .saturating_add(1_000)
             .min(10_000);
         relationship.obligation = relationship.obligation.saturating_add(2);
-        relationship
-            .memories
-            .push("A dynastic marriage joined the two houses.".to_owned());
     }
+    remember_dynasty_interaction(
+        state,
+        left_dynasty,
+        right_dynasty,
+        "A dynastic marriage joined the two houses.",
+    );
     try_push_outbox(
         state,
         OutboxKind::Family,

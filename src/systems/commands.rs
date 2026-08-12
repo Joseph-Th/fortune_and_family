@@ -205,6 +205,7 @@ const PRIVATE_LOAN_COUNTERPARTY_MIN_INTEREST_BASIS_POINTS: u16 = 400;
 const PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS: u16 = 2_500;
 const PRIVATE_LOAN_COUNTERPARTY_MAX_AMORTIZATION_WEEKS: i64 = 260;
 const PRIVATE_LOAN_COUNTERPARTY_MIN_AMORTIZATION_WEEKS: i64 = 13;
+const PRIVATE_LOAN_DISTRESSED_BORROWER_MIN_AMORTIZATION_WEEKS: i64 = 8;
 const PRIVATE_LOAN_COUNTERPARTY_MIN_COLLATERAL_LTV_BASIS_POINTS: i64 = 2_000;
 pub(crate) const PROPERTY_COUNTERPARTY_BUYER_RESERVE: Money = Money::from_copper(10_000);
 pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
@@ -1540,8 +1541,13 @@ fn ensure_non_player_loan_counterparty_accepts(
                 maximum_basis_points: PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS,
             });
         }
-        let maximum_payment =
-            ceil_positive_money_div(exposure, PRIVATE_LOAN_COUNTERPARTY_MIN_AMORTIZATION_WEEKS);
+        let minimum_amortization_weeks =
+            if private_loan_borrower_financing_pressure(state, terms.borrower_dynasty_id) >= 2 {
+                PRIVATE_LOAN_DISTRESSED_BORROWER_MIN_AMORTIZATION_WEEKS
+            } else {
+                PRIVATE_LOAN_COUNTERPARTY_MIN_AMORTIZATION_WEEKS
+            };
+        let maximum_payment = ceil_positive_money_div(exposure, minimum_amortization_weeks);
         if terms.weekly_payment > maximum_payment {
             return Err(CommandError::LoanCounterpartyPaymentTooHigh {
                 weekly_payment: terms.weekly_payment,
@@ -3462,7 +3468,10 @@ pub(crate) fn has_established_player_institution_membership(
                 || institution_support_day(state, institution_id, character_id).is_some_and(
                     |support_day| {
                         state.clock.day()
-                            >= support_day.saturating_add(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)
+                            >= future_day_or_terminal(
+                                support_day,
+                                INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
+                            )
                     },
                 ))
     })
@@ -4665,6 +4674,12 @@ enum InformationLeverageEffect {
     Counterparty {
         dynasty_id: DynastyId,
     },
+    CounterpartyContract {
+        dynasty_id: DynastyId,
+        contract_id: ContractId,
+        previous_price: Money,
+        new_price: Money,
+    },
     District {
         district_id: DistrictId,
         initiative: DistrictInformationInitiative,
@@ -4825,6 +4840,36 @@ fn resolve_counterparty_information_leverage(
     if !state.relationships.contains_key(&pair) {
         return Err(CommandError::InformationReportHasNoLeverage { report_id });
     }
+    if let Some((contract, new_price)) = state
+        .contracts
+        .values()
+        .filter(|contract| contract.status == ContractStatus::Active)
+        .find_map(|contract| {
+            market_contract_leverage_terms(state, state.player_dynasty_id, contract)
+                .filter(|(counterparty_id, _)| *counterparty_id == dynasty_id)
+                .map(|(_, new_price)| (contract, new_price))
+        })
+    {
+        return Ok(InformationLeveragePlan {
+            quote: InformationLeverageQuote {
+                report_id,
+                cost: INFORMATION_LEVERAGE_COST,
+                description: format!(
+                    "use report {report_id} to negotiate contract {} with House {} from {} to {} per unit",
+                    contract.id,
+                    dynasty.name(),
+                    contract.unit_price,
+                    new_price
+                ),
+            },
+            effect: InformationLeverageEffect::CounterpartyContract {
+                dynasty_id,
+                contract_id: contract.id,
+                previous_price: contract.unit_price,
+                new_price,
+            },
+        });
+    }
     Ok(InformationLeveragePlan {
         quote: InformationLeverageQuote {
             report_id,
@@ -4937,7 +4982,7 @@ fn apply_information_leverage_effect(state: &mut AppState, effect: &InformationL
             let memory = format!(
                 "intelligence-backed contract renegotiation changed unit price from {previous_price} to {new_price}"
             );
-            adjust_information_relationship(state, counterparty_id, -75, 50, 125, &memory);
+            adjust_information_relationship(state, counterparty_id, -75, 50, 125, 0, &memory);
         }
         InformationLeverageEffect::Counterparty { dynasty_id } => {
             adjust_information_relationship(
@@ -4946,7 +4991,31 @@ fn apply_information_leverage_effect(state: &mut AppState, effect: &InformationL
                 300,
                 200,
                 -200,
+                2,
                 "targeted outreach based on a commissioned house brief",
+            );
+        }
+        InformationLeverageEffect::CounterpartyContract {
+            dynasty_id,
+            contract_id,
+            previous_price,
+            new_price,
+        } => {
+            state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("validated counterparty contract must exist")
+                .unit_price = new_price;
+            adjust_information_relationship(
+                state,
+                dynasty_id,
+                200,
+                150,
+                -125,
+                1,
+                &format!(
+                    "a commissioned house brief supported a negotiated contract adjustment from {previous_price} to {new_price}"
+                ),
             );
         }
         InformationLeverageEffect::District {
@@ -4987,32 +5056,23 @@ fn adjust_information_relationship(
     trust_change: i16,
     respect_change: i16,
     resentment_change: i16,
+    obligation_change: i32,
     memory: &str,
 ) {
-    let day = state.clock.day();
-    let relationship = state
-        .relationships
-        .get_mut(&DynastyPair::new(state.player_dynasty_id, counterparty_id))
-        .expect("validated relationship must exist");
-    relationship.trust_basis_points =
-        adjust_basis_points(relationship.trust_basis_points, trust_change);
-    relationship.respect_basis_points =
-        adjust_basis_points(relationship.respect_basis_points, respect_change);
-    relationship.resentment_basis_points =
-        adjust_basis_points(relationship.resentment_basis_points, resentment_change);
-    relationship.last_interaction_day = day;
-    if relationship.memories.len() >= super::MAX_RELATIONSHIP_MEMORIES {
-        relationship.memories.remove(0);
-    }
-    relationship.memories.push(format!("Day {day}: {memory}"));
-}
-
-fn adjust_basis_points(value: u16, change: i16) -> u16 {
-    if change >= 0 {
-        value.saturating_add(change.unsigned_abs()).min(10_000)
-    } else {
-        value.saturating_sub(change.unsigned_abs())
-    }
+    let player_id = state.player_dynasty_id;
+    super::strategic::adjust_dynasty_relationship(
+        state,
+        player_id,
+        counterparty_id,
+        super::strategic::RelationshipDelta::new(
+            trust_change,
+            respect_change,
+            0,
+            resentment_change,
+            obligation_change,
+        ),
+    );
+    super::strategic::remember_dynasty_interaction(state, player_id, counterparty_id, memory);
 }
 
 fn acknowledge(

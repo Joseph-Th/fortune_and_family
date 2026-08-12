@@ -3338,7 +3338,40 @@ mod employment {
     use super::*;
 
     #[test]
-    fn sustained_high_utilization_with_low_maintenance_creates_labor_pressure() {
+    fn sustained_high_utilization_with_aggressive_undermaintenance_creates_labor_pressure() {
+        let state = make_test_campaign();
+        let mut agreement = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment")
+            .clone();
+        let environment = LaborEnvironment {
+            utilization: 10_000,
+            business_condition: 8_000,
+            maintenance: 400,
+        };
+        let mut became_disputed = false;
+
+        for _ in 0..154 {
+            let (_, disputed) =
+                update_fully_paid_employment(&mut agreement, EmploymentStatus::Active, environment);
+            if disputed {
+                became_disputed = true;
+                break;
+            }
+        }
+
+        assert!(
+            became_disputed,
+            "an aggressively under-maintained growth policy must expose labor conflict within roughly three campaign years"
+        );
+        assert_eq!(agreement.status, EmploymentStatus::Disputed);
+        assert!(agreement.conditions_basis_points < 3_000);
+    }
+
+    #[test]
+    fn established_worker_relationship_absorbs_moderate_growth_pressure() {
         let state = make_test_campaign();
         let mut agreement = state
             .employment
@@ -3351,20 +3384,19 @@ mod employment {
             business_condition: 8_000,
             maintenance: 800,
         };
-        let mut became_disputed = false;
 
-        for _ in 0..120 {
+        for _ in 0..360 {
             let (_, disputed) =
                 update_fully_paid_employment(&mut agreement, EmploymentStatus::Active, environment);
-            if disputed {
-                became_disputed = true;
-                break;
-            }
+            assert!(
+                !disputed,
+                "moderate growth pressure should not become scheduled labor maintenance when payroll and the employment relationship remain strong"
+            );
         }
 
-        assert!(became_disputed);
-        assert_eq!(agreement.status, EmploymentStatus::Disputed);
-        assert!(agreement.conditions_basis_points < 3_000);
+        assert_eq!(agreement.status, EmploymentStatus::Active);
+        assert!(agreement.loyalty_basis_points >= 6_500);
+        assert!(agreement.conditions_basis_points >= 6_800);
     }
 
     #[test]
@@ -4216,6 +4248,55 @@ mod loans {
                 .last()
                 .is_some_and(|memory| memory.contains("interaction 19"))
         );
+    }
+
+    #[test]
+    fn dynastic_marriage_respects_relationship_memory_bound() {
+        let mut state = make_test_campaign();
+        let dynasty_ids: Vec<_> = state.dynasties.keys().copied().take(2).collect();
+        let [left_dynasty_id, right_dynasty_id] = dynasty_ids.as_slice() else {
+            panic!("fixture must contain at least two dynasties: {dynasty_ids:?}");
+        };
+        let pair = DynastyPair::new(*left_dynasty_id, *right_dynasty_id);
+        for index in 0..MAX_RELATIONSHIP_MEMORIES {
+            remember_dynasty_interaction(
+                &mut state,
+                *left_dynasty_id,
+                *right_dynasty_id,
+                &format!("prior interaction {index}"),
+            );
+        }
+        let (trust_before, obligation_before) = {
+            let relationship = state
+                .relationships
+                .get(&pair)
+                .expect("relationship must exist");
+            (relationship.trust_basis_points, relationship.obligation)
+        };
+
+        form_dynastic_marriage(&mut state).expect("eligible dynasties must be able to marry");
+
+        let relationship = state
+            .relationships
+            .get(&pair)
+            .expect("relationship must exist");
+        assert_eq!(relationship.memories.len(), MAX_RELATIONSHIP_MEMORIES);
+        assert!(
+            relationship
+                .memories
+                .first()
+                .is_some_and(|memory| memory.contains("prior interaction 1"))
+        );
+        assert_eq!(
+            relationship.memories.last().map(String::as_str),
+            Some("Day 0: A dynastic marriage joined the two houses.")
+        );
+        assert_eq!(
+            relationship.trust_basis_points,
+            trust_before.saturating_add(1_000).min(10_000)
+        );
+        assert_eq!(relationship.obligation, obligation_before.saturating_add(2));
+        assert_eq!(relationship.last_interaction_day, state.clock.day());
     }
 
     #[test]

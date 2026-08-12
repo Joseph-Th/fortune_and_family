@@ -286,6 +286,34 @@ mod harness {
     }
 
     #[test]
+    fn rejects_duplicate_campaign_dimensions() {
+        let registry = rivergate_registry_for_test();
+        let mut config = focused_config(30);
+        config.personas.push(GameplayPersona::Steward);
+
+        let error = run_gameplay_harness(registry, config)
+            .expect_err("duplicate personas must not duplicate matrix samples");
+
+        assert!(matches!(
+            error,
+            GameplayHarnessError::InvalidConfig { reason }
+                if reason == "persona Steward was configured more than once"
+        ));
+
+        let mut config = focused_config(30);
+        config.backgrounds.push(StartingBackground::Baker);
+
+        let error = run_gameplay_harness(registry, config)
+            .expect_err("duplicate backgrounds must not duplicate matrix samples");
+
+        assert!(matches!(
+            error,
+            GameplayHarnessError::InvalidConfig { reason }
+                if reason == "background Baker was configured more than once"
+        ));
+    }
+
+    #[test]
     fn rejects_seed_ranges_that_would_repeat_through_saturation() {
         let registry = rivergate_registry_for_test();
         let mut config = focused_config(30);
@@ -2160,6 +2188,28 @@ mod candidates {
             &mut candidates,
         );
 
+        assert!(
+            candidates.is_empty(),
+            "a new enterprise should establish a strategy and produce trade evidence before generic modernization becomes a diagnostic priority"
+        );
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("player business must exist");
+            business.finance.lifetime_revenue = Money::from_copper(8_000);
+            business.finance.lifetime_costs = Money::from_copper(6_000);
+        }
+        generate_planned_business_investment(
+            &state,
+            GameplayPersona::Entrepreneur,
+            state
+                .businesses
+                .get(business_id)
+                .expect("player business must exist"),
+            &mut candidates,
+        );
+
         let candidate = single_candidate(&candidates, "planned modernization");
         assert!(matches!(
             candidate.command,
@@ -2167,6 +2217,27 @@ mod candidates {
                 if amount >= Money::from_copper(1_000)
                     && amount <= AGENT_PLANNED_CAPITALIZATION_MAX
         ));
+
+        for persona in [
+            GameplayPersona::Steward,
+            GameplayPersona::PowerBroker,
+            GameplayPersona::Opportunist,
+        ] {
+            let mut other_candidates = Vec::new();
+            generate_planned_business_investment(
+                &state,
+                persona,
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("player business must exist"),
+                &mut other_candidates,
+            );
+            assert!(
+                other_candidates.is_empty(),
+                "healthy generic modernization should remain an entrepreneur specialization; other personas still use need-driven recapitalization"
+            );
+        }
 
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
@@ -2418,6 +2489,205 @@ mod candidates {
             1,
             "activation metrics must include safe owner distributions"
         );
+    }
+
+    #[test]
+    fn pending_legal_settlement_unlocks_emergency_business_liquidity() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        make_legal_settlement_available_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        let requirement = active_legal_settlement_requirement(&state)
+            .expect("grounded defendant case must expose a settlement requirement");
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let business_id = *state
+            .businesses
+            .ids_for_owner(player_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let reserve = business_owner_distribution_reserve(
+            registry,
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        );
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist")
+            .finance
+            .cash = reserve.saturating_add(requirement);
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::BusinessDividend,
+            subject: format!("business:{business_id}").into(),
+            detail: "owner_distribution=500".to_owned(),
+        });
+        let businesses = vec![
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        ];
+        let mut candidates = Vec::new();
+
+        generate_owner_distribution_candidate(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &businesses,
+            &mut candidates,
+        );
+
+        let candidate = single_candidate(&candidates, "settlement liquidity distribution");
+        assert!(matches!(
+            candidate.command,
+            PlayerCommand::WithdrawBusinessCash { amount, .. } if amount == requirement
+        ));
+        assert!(candidate.score >= 3_900);
+    }
+
+    #[test]
+    fn pending_legal_settlement_reserve_blocks_discretionary_spending() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        make_legal_settlement_available_for_test(&mut state);
+        let requirement = active_legal_settlement_requirement(&state)
+            .expect("grounded defendant case must expose a settlement requirement");
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = requirement;
+        let discretionary = Candidate {
+            kind: GameplayCommandKind::ConveneFamilyCouncil,
+            command: PlayerCommand::ConveneFamilyCouncil,
+            description: "discretionary family meeting".to_owned(),
+            score: 0,
+        };
+        let case_id = state
+            .legal_cases
+            .values()
+            .find_map(|legal_case| {
+                quote_player_legal_settlement(&state, legal_case.id)
+                    .ok()
+                    .map(|quote| quote.case_id)
+            })
+            .expect("grounded case must remain settleable");
+        let settlement = Candidate {
+            kind: GameplayCommandKind::SettleLegalCase,
+            command: PlayerCommand::SettleLegalCase { case_id },
+            description: "settle grounded case".to_owned(),
+            score: 0,
+        };
+
+        assert!(!candidate_preserves_office_duty_reserve(
+            registry,
+            &state,
+            &discretionary
+        ));
+        assert!(candidate_preserves_office_duty_reserve(
+            registry,
+            &state,
+            &settlement
+        ));
+    }
+
+    #[test]
+    fn urgent_legal_funding_shortens_the_harness_decision_window() {
+        let mut state = make_test_campaign();
+        make_legal_settlement_available_for_test(&mut state);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let legal_case = state
+            .legal_cases
+            .values_mut()
+            .find(|legal_case| legal_case.defendant_dynasty_id == state.player_dynasty_id)
+            .expect("fixture must contain a player-defendant case");
+        legal_case.hearing_day = state.clock.day().saturating_add(20);
+
+        assert_eq!(
+            next_campaign_step_days(&state, 30),
+            10,
+            "an unaffordable settlement with twenty days remaining must preserve another decision before judgment"
+        );
+
+        let requirement = active_legal_settlement_requirement(&state)
+            .expect("grounded case must remain settleable");
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = requirement;
+        assert_eq!(
+            next_campaign_step_days(&state, 30),
+            30,
+            "once settlement is affordable the harness should return to its configured cadence"
+        );
+    }
+
+    #[test]
+    fn urgent_legal_funding_prioritizes_liquidity_over_internal_rebalancing() {
+        let mut state = make_test_campaign();
+        make_legal_settlement_available_for_test(&mut state);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let player_id = state.player_dynasty_id;
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a lender");
+        let business_id = *state
+            .businesses
+            .ids_for_owner(player_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let borrow = Candidate {
+            kind: GameplayCommandKind::BorrowFunds,
+            command: PlayerCommand::IssueLoan {
+                terms: LoanTerms {
+                    lender_dynasty_id: lender_id,
+                    borrower_dynasty_id: player_id,
+                    principal: Money::from_copper(5_000),
+                    weekly_payment: Money::from_copper(100),
+                    interest_basis_points: 700,
+                    collateral_property_id: None,
+                },
+            },
+            description: "raise settlement cash".to_owned(),
+            score: 0,
+        };
+        let rebalance = Candidate {
+            kind: GameplayCommandKind::TransferBusinessCash,
+            command: PlayerCommand::TransferBusinessCash {
+                from_business_id: business_id,
+                to_business_id: business_id,
+                amount: Money::from_copper(1),
+            },
+            description: "internal rebalance".to_owned(),
+            score: 0,
+        };
+
+        assert!(legal_funding_candidate_adjustment(&state, &borrow) > 0);
+        assert!(legal_funding_candidate_adjustment(&state, &rebalance) < 0);
     }
 
     #[test]
@@ -3825,6 +4095,49 @@ mod candidates {
                 .iter()
                 .all(|candidate| candidate.kind != GameplayCommandKind::ExtendCredit),
             "conservative personas must also require an actual counterparty financing pressure"
+        );
+    }
+
+    #[test]
+    fn opportunist_uses_more_aggressive_terms_for_a_distressed_borrower() {
+        let mut state = make_test_campaign();
+        make_external_credit_need_available_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        let borrower_id = eligible_lending_borrower(&state)
+            .expect("fixture must expose a financing-pressure borrower")
+            .id();
+        state
+            .businesses
+            .iter_mut()
+            .find(|business| business.owner_dynasty_id() == borrower_id)
+            .expect("borrower must own a business")
+            .operations
+            .status = BusinessStatus::Distressed;
+        assert!(lending_pressure(&state, borrower_id) >= 2);
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(120_000);
+        let mut candidates = Vec::new();
+
+        add_lend_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::ExtendCredit)
+            .expect("distressed borrower must expose opportunistic credit");
+        let PlayerCommand::IssueLoan { terms } = &candidate.command else {
+            panic!("extend-credit candidate must issue a loan");
+        };
+        assert!(terms.principal >= Money::from_copper(5_000));
+        assert_eq!(
+            terms.weekly_payment,
+            positive_money_ceil_div(
+                terms.principal,
+                AGENT_OPPORTUNIST_STRESSED_LOAN_AMORTIZATION_WEEKS
+            )
         );
     }
 
@@ -5801,7 +6114,7 @@ mod findings {
                 let mut campaign = baseline.clone();
                 campaign.seed = campaign.seed.saturating_add(seed_offset);
                 campaign.persona = GameplayPersona::Opportunist;
-                campaign.simulated_days = 3_600;
+                campaign.simulated_days = 7_200;
                 campaign.maximum_player_delinquent_lending = u16::from(seed_offset == 0);
                 campaign
                     .commands
@@ -5817,7 +6130,7 @@ mod findings {
             })
             .collect();
         report.aggregate.campaigns = 3;
-        report.aggregate.simulated_days = 10_800;
+        report.aggregate.simulated_days = 21_600;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
@@ -5850,6 +6163,50 @@ mod findings {
             &findings,
             "Player credit distress never reaches enforcement",
         );
+    }
+
+    #[test]
+    fn credit_risk_horizon_does_not_overinterpret_ten_year_perfect_repayment() {
+        let mut report = cached_focused_report(30);
+        let baseline = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        report.campaigns = (0_u64..3)
+            .map(|seed_offset| {
+                let mut campaign = baseline.clone();
+                campaign.seed = campaign.seed.saturating_add(seed_offset);
+                campaign.persona = GameplayPersona::Opportunist;
+                campaign.simulated_days = 3_600;
+                campaign
+                    .commands
+                    .get_mut(&GameplayCommandKind::ExtendCredit)
+                    .expect("credit statistics must exist")
+                    .executed = 6;
+                campaign
+            })
+            .collect();
+        report.aggregate.campaigns = 3;
+        report.aggregate.simulated_days = 10_800;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(
+            &findings,
+            "Risk-seeking player lending never becomes distressed",
+        );
+
+        for campaign in &mut report.campaigns {
+            campaign.simulated_days = 7_200;
+        }
+        report.aggregate.simulated_days = 21_600;
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "Risk-seeking player lending never becomes distressed",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
     }
 
     #[test]
@@ -6461,6 +6818,37 @@ mod findings {
     }
 
     #[test]
+    fn ordinary_nomination_share_in_ascent_is_informational_not_a_duplicate_warning() {
+        let mut report = cached_focused_report(30);
+        let stats = report
+            .aggregate
+            .phase_stats
+            .entry(GameplayPhase::InstitutionalAscent)
+            .or_default();
+        *stats = GameplayPhaseStats::default();
+        stats.decision_cycles = 50;
+        stats.substantive_actions = 40;
+        stats.total_viable_choices = 120;
+        stats.total_viable_command_kinds = 70;
+        stats
+            .executed_commands
+            .insert(GameplayCommandKind::NominateForOffice, 16);
+        stats
+            .executed_commands
+            .insert(GameplayCommandKind::EducateFamilyMember, 10);
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding =
+            finding_with_title(&findings, "institutional-ascent action mix is concentrated");
+        assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+        assert_finding_absent(
+            &findings,
+            "Institutional ascent becomes campaign administration",
+        );
+    }
+
+    #[test]
     fn findings_surface_phase_command_dominance() {
         let mut report = cached_focused_report(30);
         let stats = report
@@ -6492,6 +6880,111 @@ mod findings {
                 .evidence
                 .contains("family-education accounted for 16 of 40")
         );
+    }
+
+    #[test]
+    fn findings_surface_foundation_command_dominance() {
+        let mut report = cached_focused_report(30);
+        let stats = report
+            .aggregate
+            .phase_stats
+            .entry(GameplayPhase::Foundation)
+            .or_default();
+        *stats = GameplayPhaseStats::default();
+        stats.decision_cycles = 30;
+        stats.substantive_actions = 30;
+        stats.total_viable_choices = 70;
+        stats.total_viable_command_kinds = 50;
+        stats
+            .executed_commands
+            .insert(GameplayCommandKind::InvestInBusiness, 15);
+        stats
+            .executed_commands
+            .insert(GameplayCommandKind::SetBusinessPolicy, 8);
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(&findings, "foundation action mix is concentrated");
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        assert!(
+            finding
+                .evidence
+                .contains("invest-business accounted for 15 of 30")
+        );
+    }
+
+    #[test]
+    fn one_initial_policy_choice_per_campaign_is_informational() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.campaigns = 24;
+        let stats = report
+            .aggregate
+            .phase_stats
+            .entry(GameplayPhase::Foundation)
+            .or_default();
+        *stats = GameplayPhaseStats::default();
+        stats.decision_cycles = 72;
+        stats.substantive_actions = 48;
+        stats.total_viable_choices = 120;
+        stats.total_viable_command_kinds = 80;
+        stats
+            .executed_commands
+            .insert(GameplayCommandKind::SetBusinessPolicy, 24);
+        stats
+            .executed_commands
+            .insert(GameplayCommandKind::SetHouseGovernance, 12);
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(&findings, "foundation action mix is concentrated");
+        assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+
+        report
+            .aggregate
+            .phase_stats
+            .get_mut(&GameplayPhase::Foundation)
+            .expect("foundation stats must exist")
+            .executed_commands
+            .insert(GameplayCommandKind::SetBusinessPolicy, 25);
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(&findings, "foundation action mix is concentrated");
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn findings_surface_persona_specific_mature_action_concentration() {
+        let mut report = cached_focused_report(360);
+        let campaign = report
+            .campaigns
+            .first_mut()
+            .expect("focused report must contain one campaign");
+        campaign.simulated_days = 3_600;
+        for stats in campaign.commands.values_mut() {
+            stats.executed = 0;
+        }
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::ResolveLaborDispute)
+            .expect("labor command statistics must exist")
+            .executed = 31;
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::SecureSupply)
+            .expect("contract command statistics must exist")
+            .executed = 29;
+        campaign
+            .commands
+            .get_mut(&GameplayCommandKind::EducateFamilyMember)
+            .expect("education command statistics must exist")
+            .executed = 20;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(
+            &findings,
+            "An individual mature campaign has a concentrated action mix",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        assert!(finding.evidence.contains("labor-response for 31 of 80"));
     }
 
     #[test]
@@ -6977,6 +7470,100 @@ mod findings {
 
         assert_eq!(accumulator.commission_leverage_pairs, 1);
         assert_eq!(accumulator.last_information_commission_day, None);
+    }
+
+    #[test]
+    fn findings_surface_information_leverage_without_delayed_trajectory_change() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 3_600;
+        let stats = report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::LeverageInformation)
+            .expect("information leverage statistics must exist");
+        stats.executed = 20;
+        stats.actions_with_persistent_consequences = 2;
+        stats.actions_with_delayed_consequences = 2;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(
+            &findings,
+            "Commissioned intelligence rarely changes the later trajectory",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn delayed_information_consequences_avoid_false_trajectory_warning() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 3_600;
+        let stats = report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::LeverageInformation)
+            .expect("information leverage statistics must exist");
+        stats.executed = 20;
+        stats.actions_with_persistent_consequences = 20;
+        stats.actions_with_delayed_consequences = 0;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        assert_finding_absent(
+            &findings,
+            "Commissioned intelligence rarely changes the later trajectory",
+        );
+    }
+
+    #[test]
+    fn succession_legacy_quiet_streak_uses_mature_annual_cadence() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.phase_stats.insert(
+            GameplayPhase::SuccessionLegacy,
+            GameplayPhaseStats {
+                decision_cycles: 100,
+                substantive_actions: 70,
+                institutional_campaign_actions: 0,
+                quiet_cycles: 30,
+                quiet_cycles_with_ambient_change: 30,
+                longest_quiet_streak_cycles: GOVERNANCE_MAX_QUIET_STREAK_CYCLES,
+                blocked_cycles: 0,
+                cycles_with_multiple_viable_command_kinds: 40,
+                cycles_with_close_viable_command_kinds: 20,
+                cycles_with_distinct_immediate_consequences: 40,
+                cycles_with_distinct_projected_consequences: 40,
+                cycles_with_multiple_viable_options: 70,
+                cycles_with_close_viable_options: 20,
+                cycles_with_distinct_immediate_option_consequences: 70,
+                cycles_with_distinct_projected_option_consequences: 70,
+                total_viable_choices: 300,
+                total_viable_command_kinds: 160,
+                executed_commands: BTreeMap::new(),
+            },
+        );
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        assert_finding_absent(
+            &findings,
+            "Succession and legacy lack post-transition strategy",
+        );
+
+        report
+            .aggregate
+            .phase_stats
+            .get_mut(&GameplayPhase::SuccessionLegacy)
+            .expect("succession phase statistics must exist")
+            .longest_quiet_streak_cycles = GOVERNANCE_MAX_QUIET_STREAK_CYCLES + 1;
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(
+            &findings,
+            "Succession and legacy lack post-transition strategy",
+        );
+        assert!(
+            finding
+                .evidence
+                .contains("longest quiet streak 12 > 11 cycles")
+        );
     }
 
     #[test]
