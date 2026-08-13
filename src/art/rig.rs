@@ -3,7 +3,7 @@
 //! Joint positions are resolved in sixteenth-pixel units so that small rotations still move a
 //! limb predictably before the result is snapped to the pixel grid.
 
-use super::math::{Angle, ONE, lerp, scale};
+use super::math::{Angle, ONE, scale};
 use serde::{Deserialize, Serialize};
 
 /// Sub-pixel units per pixel used by rig resolution.
@@ -231,15 +231,6 @@ impl Segment {
     pub const fn pixel_radius(self) -> i32 {
         let radius = to_pixels(self.thickness);
         if radius < 1 { 1 } else { radius }
-    }
-
-    /// Returns the point at `weight` per-mille along the bone, in sub-pixels.
-    #[must_use]
-    pub fn point_along(self, weight: i32) -> (i32, i32) {
-        (
-            lerp(self.start.0, self.end.0, weight),
-            lerp(self.start.1, self.end.1, weight),
-        )
     }
 }
 

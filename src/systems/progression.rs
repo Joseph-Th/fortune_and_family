@@ -194,23 +194,6 @@ fn runtime_campaign_phase(state: &AppState, dynasty_id: DynastyId) -> CampaignPh
     }
 }
 
-pub(crate) fn rebuild_campaign_phases(state: &mut AppState) {
-    let phases = state
-        .dynasties
-        .keys()
-        .copied()
-        .map(|dynasty_id| (dynasty_id, reconstructed_campaign_phase(state, dynasty_id)))
-        .collect::<Vec<_>>();
-    for (dynasty_id, phase) in phases {
-        state
-            .dynasties
-            .get_mut(&dynasty_id)
-            .expect("campaign phase dynasty must exist")
-            .runtime
-            .phase = phase;
-    }
-}
-
 pub(crate) fn refresh_campaign_phases(state: &mut AppState) {
     let updates = state
         .dynasties
@@ -319,29 +302,6 @@ mod tests {
                 .expect("player dynasty must exist")
                 .phase(),
             CampaignPhase::Legacy
-        );
-    }
-
-    #[test]
-    fn rebuilding_phases_discards_legacy_calendar_age_state() {
-        let mut state = make_test_campaign();
-        let player_id = state.player_dynasty_id;
-        state
-            .dynasties
-            .get_mut(&player_id)
-            .expect("player dynasty must exist")
-            .runtime
-            .phase = CampaignPhase::Dominion;
-
-        rebuild_campaign_phases(&mut state);
-
-        assert_eq!(
-            state
-                .dynasties
-                .get(&player_id)
-                .expect("player dynasty must exist")
-                .phase(),
-            CampaignPhase::Foundation
         );
     }
 

@@ -20,7 +20,7 @@ pub mod persistence;
 pub mod projection;
 pub mod registry;
 pub mod rng;
-pub mod systems;
+mod systems;
 
 pub use art::{
     ART_REVIEW_SCHEMA_VERSION, ArtReview, ArtReviewConfig, ArtReviewError, ArtReviewReport,
@@ -46,9 +46,10 @@ pub use projection::{
 pub use registry::{Registry, build_rivergate_registry};
 pub use systems::{
     BusinessAcquisitionQuote, CommandError, CommandOutcome, CrisisResponse, EducationFocus,
-    InformationFocus, LaborResponse, NewGameError, PlayerCommand, PropertyLiquidationQuote,
-    PublicWorkFundingError, SimulationError, TimelineError, advance_days, apply_player_command,
-    build_new_game, quote_business_acquisition, quote_property_liquidation, validate_invariants,
+    InformationFocus, LaborResponse, LoanTerms, NewGameError, PlayerCommand,
+    PropertyLiquidationQuote, PublicWorkFundingError, SimulationError, StrategicError,
+    SupplyContractTerms, TimelineError, advance_days, apply_player_command, build_new_game,
+    quote_business_acquisition, quote_property_liquidation, validate_invariants,
 };
 
 #[cfg(test)]

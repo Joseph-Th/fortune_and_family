@@ -615,7 +615,8 @@ pub enum AuditKind {
 }
 
 /// Serialized audit subject text wrapped as a domain type so runtime identity is not represented
-/// by an unclassified `String` field. The transparent representation preserves save compatibility.
+/// by an unclassified `String` field. The transparent representation keeps the serialized shape
+/// compact while preserving a typed runtime boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AuditSubject(String);
@@ -749,7 +750,7 @@ mod audit_subject_tests {
     use super::*;
 
     #[test]
-    fn transparent_serialization_preserves_the_existing_save_shape() {
+    fn transparent_serialization_uses_string_shape() {
         let subject = AuditSubject::from("institution:3;dynasty:10");
 
         let value = serde_json::to_value(&subject).expect("audit subject must serialize");

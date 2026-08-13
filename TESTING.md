@@ -71,7 +71,7 @@ Extract setup helpers when they describe reusable domain conditions. Extract ass
 
 Assert public behavior, durable state, accounting, or explicit invariants.
 
-- Use exact values for accounting, arithmetic boundaries, schemas, migrations, serialization, and ordering when order is a contract.
+- Use exact values for accounting, arithmetic boundaries, schemas, serialization, and ordering when order is a contract.
 - Use relational assertions for intentionally flexible emergent behavior.
 - Compare sets for exhaustive route or enum coverage and report missing/unexpected members.
 - Assert preconditions when a test could otherwise pass vacuously.
@@ -97,7 +97,7 @@ Consequential mutation normally requires:
 7. Invariant coverage for new cross-record requirements.
 8. Projection or durable-feedback coverage when the result must be observable.
 
-Save-schema changes additionally require a schema increment, one deterministic migration from the immediately preceding schema, exact migration assertions, current-schema round-trip equality, invalid-state rejection, and atomic-write tests when write behavior changes.
+Save-schema changes additionally require a schema increment, rejection tests for non-current schema versions, current-schema round-trip equality, invalid-state rejection, and atomic-write tests when write behavior changes.
 
 Gameplay-harness changes should cover candidate discoverability, classification, pacing, consequence attribution, relevant resilience metrics, progression, and structured report semantics. Keep finding-rule tests cheap; long-horizon behavior belongs in explicit harness or release gameplay tiers. See `GAMEPLAY_HARNESS.md`.
 

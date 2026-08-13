@@ -7,7 +7,7 @@
 //! restyled without redrawing it.
 
 use super::canvas::Canvas;
-use super::color::{Palette, RampHandle, TRANSPARENT_INDEX};
+use super::color::{Palette, RampHandle};
 
 /// Identifies a material slot in a [`MaterialTable`]. Zero means "no material".
 pub type MaterialId = u8;
@@ -369,12 +369,6 @@ pub fn resolve_with_palette(
     palette: &Palette,
 ) -> (Canvas, Palette) {
     (surface.resolve(materials), palette.clone())
-}
-
-/// Returns whether `index` denotes transparency.
-#[must_use]
-pub const fn is_transparent(index: u8) -> bool {
-    index == TRANSPARENT_INDEX
 }
 
 #[cfg(test)]

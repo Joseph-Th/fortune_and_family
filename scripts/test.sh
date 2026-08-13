@@ -27,6 +27,17 @@ EOF
   exit 2
 }
 
+resolve_python() {
+  if python3 --version >/dev/null 2>&1; then
+    printf 'python3'
+  elif python --version >/dev/null 2>&1; then
+    printf 'python'
+  else
+    printf 'Python is required for repository validation\n' >&2
+    return 1
+  fi
+}
+
 run_shell_syntax() {
   run_step 'Shell syntax checks' bash -n scripts/test.sh scripts/verify_cli.sh
 }
@@ -174,14 +185,7 @@ run_soak() {
 
 run_docs() {
   local python_command
-  if python3 --version >/dev/null 2>&1; then
-    python_command=python3
-  elif python --version >/dev/null 2>&1; then
-    python_command=python
-  else
-    printf 'Python is required for documentation consistency checks\n' >&2
-    return 1
-  fi
+  python_command=$(resolve_python) || return
   run_step 'Documentation consistency' "$python_command" scripts/check_docs.py
   run_step 'Documentation tests' cargo test --quiet --locked --doc
 }
@@ -195,16 +199,9 @@ run_gameplay() {
       --output target/gameplay-quality-gate.json
 }
 
-run_legacy_gameplay() {
+run_generation_gameplay() {
   local python_command
-  if python3 --version >/dev/null 2>&1; then
-    python_command=python3
-  elif python --version >/dev/null 2>&1; then
-    python_command=python
-  else
-    printf 'Python is required for generation-length gameplay validation\n' >&2
-    return 1
-  fi
+  python_command=$(resolve_python) || return
   run_step 'Generation-length gameplay gate' \
     cargo run --release --quiet --locked -- playtest \
       --days 7200 \
@@ -214,12 +211,12 @@ run_legacy_gameplay() {
       --minimum-overall 75 \
       --fail-on-critical \
       --json \
-      --output target/gameplay-legacy-gate.json
+      --output target/gameplay-generation-gate.json
   run_step 'Generation-length fantasy validation' "$python_command" -c '
 import json
 from pathlib import Path
 
-report = json.loads(Path("target/gameplay-legacy-gate.json").read_text(encoding="utf-8"))
+report = json.loads(Path("target/gameplay-generation-gate.json").read_text(encoding="utf-8"))
 campaigns = report["campaigns"]
 if not campaigns or campaigns[0]["fantasy_arc"]["first_succession_day"] is None:
     raise SystemExit("generation-length gameplay gate did not reach succession")
@@ -231,14 +228,7 @@ if phase.get("decision_cycles", 0) == 0:
 
 run_gameplay_audit() {
   local python_command
-  if python3 --version >/dev/null 2>&1; then
-    python_command=python3
-  elif python --version >/dev/null 2>&1; then
-    python_command=python
-  else
-    printf 'Python is required for deep gameplay validation\n' >&2
-    return 1
-  fi
+  python_command=$(resolve_python) || return
   run_step 'Mature multi-seed gameplay audit' \
     cargo run --release --quiet --locked -- playtest \
       --days 3600 \
@@ -395,7 +385,7 @@ case "$mode" in
   gameplay)
     [[ $# -eq 1 ]] || usage
     run_gameplay
-    run_legacy_gameplay
+    run_generation_gameplay
     ;;
   gameplay-audit)
     [[ $# -eq 1 ]] || usage
@@ -408,7 +398,7 @@ case "$mode" in
     run_cli_art
     run_cli_gameplay
     run_gameplay
-    run_legacy_gameplay
+    run_generation_gameplay
     ;;
   *)
     usage

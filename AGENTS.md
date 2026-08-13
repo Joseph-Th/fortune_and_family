@@ -22,7 +22,7 @@ Primary owners:
 | Scheduled/cross-domain systems | `src/systems/strategic.rs` |
 | Legal claim grounding | `src/systems/legal.rs` |
 | Campaign progression | `src/systems/progression.rs` |
-| Persistence and migrations | `src/persistence.rs` |
+| Persistence and schema validation | `src/persistence.rs` |
 | Read models and HTML | `src/projection.rs` |
 | Gameplay analysis | `src/gameplay.rs` |
 | Procedural art | `src/art/*` |
@@ -85,10 +85,10 @@ Core systems perform no implicit IO. Persistence, CLI, projections, HTML, gamepl
 
 | Change | Required work |
 |---|---|
-| Persistent state | Record/store ownership, IDs if needed, bootstrap or migration, persistence validation, invariants, projection if visible, round-trip and invalid-state tests, schema increment when serialized shape changes. |
+| Persistent state | Record/store ownership, IDs if needed, bootstrap, persistence validation, invariants, projection if visible, round-trip and invalid-state tests, schema increment when serialized shape changes. |
 | Player command | Exhaustive `PlayerCommand` variant, typed errors, complete preflight, canonical commit, durable feedback when consequential, success/rejection/atomicity tests, projection and gameplay integration when observable. |
 | Simulation behavior | Explicit cadence, canonical owner, causal ordering, focused tests, durable feedback when player-relevant, invariants, soak coverage for accumulating effects. |
-| Persistence contract | Schema increment, one deterministic migration from the immediately preceding schema, migration test, current round trip, release validation, atomic write behavior. |
+| Persistence contract | Schema increment, current-schema enforcement, current round trip, release validation, atomic write behavior. |
 | Projection/report field | Immutable derivation only, schema update when serialized contract changes, focused output tests. |
 | Gameplay behavior | Candidate generation/classification, snapshots, consequence attribution, findings/traces when applicable, harness tests, `GAMEPLAY_HARNESS.md` if the harness contract changes. |
 | Art behavior | Integer/fixed-point rendering, deterministic coverage, lint rule for automatable defect classes, art report schema update when serialized shape changes. |

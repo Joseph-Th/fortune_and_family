@@ -19,7 +19,6 @@ pub struct Angle(u16);
 
 impl Angle {
     pub const ZERO: Self = Self(0);
-    pub const QUARTER_TURN: Self = Self(16_384);
 
     #[must_use]
     pub const fn from_units(units: u16) -> Self {
@@ -124,18 +123,6 @@ pub fn scale(value: i32, numerator: i32, denominator: i32) -> i32 {
     assert!(denominator != 0, "scale denominator must not be zero");
     let result = i64::from(value) * i64::from(numerator) / i64::from(denominator);
     i32::try_from(result).expect("scaled value must fit i32")
-}
-
-/// Returns a linear interpolation between `from` and `to`, where `weight` is per-mille.
-///
-/// # Panics
-///
-/// Panics when the interpolated value does not fit `i32`.
-#[must_use]
-pub fn lerp(from: i32, to: i32, weight: i32) -> i32 {
-    let weight = i64::from(weight.clamp(0, 1_000));
-    let value = i64::from(from) + (i64::from(to) - i64::from(from)) * weight / 1_000;
-    i32::try_from(value).expect("interpolated value must fit i32")
 }
 
 /// Returns the per-mille position of `weight` eased with a smooth cubic curve.

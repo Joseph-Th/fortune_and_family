@@ -131,7 +131,7 @@ src/
     strategic.rs      Scheduled and cross-domain systems
     transactions.rs   Reusable validated transactions
     invariants.rs     Runtime invariant checks
-  persistence.rs      Save/load, migrations, release validation
+  persistence.rs      Current-schema save/load and release validation
   projection.rs       Read-only projections and HTML dashboard
   gameplay.rs         Deterministic gameplay harness
   art/                Procedural sprite renderer and review harness

@@ -64,14 +64,12 @@ def check_status_contracts() -> None:
         art_harness,
         "src/art/harness.rs",
     )
-    previous_schema = str(int(save_schema) - 1)
-
     expected_lines = (
         f"| Crate version | `{crate_version}` |",
         f"| Rust edition | {edition} |",
         f"| Minimum Rust version | {rust_version} |",
         f"| Save schema | {save_schema} |",
-        f"| Supported save migrations | Versions 0 through {previous_schema} |",
+        "| Supported save schemas | Current schema only |",
         f"| Gameplay report schema | {report_schema} |",
         f"| Art review report schema | {art_report_schema} |",
     )

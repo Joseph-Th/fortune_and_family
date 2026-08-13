@@ -569,6 +569,59 @@ mod harness {
     }
 
     #[test]
+    fn contract_candidates_reject_unrepresentable_working_cash_requirements() {
+        let registry = rivergate_registry_for_test();
+        let mut state = build_new_game(
+            registry,
+            NewGameConfig {
+                seed: 17,
+                dynasty_name: "Harness".to_owned(),
+                founder_name: "Harness Founder".to_owned(),
+                background: StartingBackground::Baker,
+            },
+        )
+        .expect("campaign must build");
+        let buyer = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            .expect("player business must exist")
+            .id();
+        let buyer_recipe = registry
+            .get_recipe(
+                state
+                    .businesses
+                    .get(buyer)
+                    .expect("buyer must exist")
+                    .recipe_id(),
+            )
+            .expect("buyer recipe must exist");
+        let input = buyer_recipe
+            .inputs()
+            .first()
+            .expect("baker recipe must consume an input");
+        let seller = contract_sellers(registry, &state, input.good_id(), state.player_dynasty_id)
+            .next()
+            .expect("a nonplayer seller must exist");
+        let buyer_business = state.businesses.get_mut(buyer).expect("buyer must exist");
+        buyer_business.finance.cash = Money::from_copper(i64::MAX);
+        buyer_business.policy.minimum_cash_reserve = Money::ZERO;
+
+        assert!(
+            !can_support_contract_terms(
+                registry,
+                &state,
+                buyer,
+                seller,
+                input.good_id(),
+                input.quantity().saturating_mul_ratio(4, 1),
+                Money::from_copper(i64::MAX),
+            ),
+            "agents must reject contracts whose payment or four-week liquidity requirement cannot be represented exactly"
+        );
+    }
+
+    #[test]
     fn contract_counterparty_discovery_keeps_multiple_viable_houses_visible() {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
@@ -3785,6 +3838,44 @@ mod candidates {
         assert!(
             candidates.is_empty(),
             "the annual commission interval must prevent repetitive intelligence housekeeping after leverage"
+        );
+    }
+
+    #[test]
+    fn market_information_materiality_uses_wide_ratio_intermediates() {
+        let mut state = make_test_campaign();
+        let good_id = establish_player_contract_market(&mut state);
+        let contract_id = state
+            .contracts
+            .values()
+            .find(|contract| {
+                contract.good_id == good_id && player_external_contract(&state, contract)
+            })
+            .expect("player must have an external contract for the selected good")
+            .id;
+        state
+            .contracts
+            .get_mut(&contract_id)
+            .expect("selected contract must exist")
+            .unit_price = Money::from_copper(i64::MAX);
+        let quote = state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("contract good must have a market quote");
+        quote.previous_price = Money::from_copper(i64::MAX / 2);
+        quote.price = Money::from_copper(i64::MAX);
+        quote.stock = quote.target_stock;
+
+        assert!(
+            market_information_is_material(
+                &state,
+                state
+                    .contracts
+                    .get(&contract_id)
+                    .expect("selected contract must exist"),
+            ),
+            "a roughly 100% price move must remain material even when a basis-point numerator would overflow u64"
         );
     }
 

@@ -5,7 +5,7 @@
 //! deterministic.
 
 use super::canvas::Canvas;
-use super::color::{Palette, TRANSPARENT_INDEX};
+use super::color::Palette;
 
 const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 const MAX_STORED_BLOCK: usize = 65_535;
@@ -173,12 +173,6 @@ pub fn encode_base64(data: &[u8]) -> String {
         }
     }
     encoded
-}
-
-/// Returns whether `index` is the reserved transparent palette entry.
-#[must_use]
-pub const fn is_transparent_index(index: u8) -> bool {
-    index == TRANSPARENT_INDEX
 }
 
 #[cfg(test)]

@@ -9,8 +9,8 @@ This document defines the current implementation surface, schemas, runtime guara
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 19 |
-| Supported save migrations | Versions 0 through 18 |
+| Save schema | 20 |
+| Supported save schemas | Current schema only |
 | Gameplay report schema | 51 |
 | Art review report schema | 1 |
 | Runtime services | None |
@@ -76,12 +76,12 @@ All callers use the same command validation and mutation paths.
 ## Persistence guarantees
 
 - Exact current-schema round trips
-- Deterministic migrations from every supported earlier schema
+- Explicit rejection of older, future, and missing save schema versions
 - Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, schedules, and ID allocation
 - Preservation of RNG state and generated records required for deterministic continuation
 - Same-directory synchronized temporary writes followed by atomic replacement
 
-A serialized contract change requires a schema increment and one migration from the immediately preceding schema.
+A serialized contract change requires a schema increment. Existing saves from earlier schemas are intentionally unsupported.
 
 ## Runtime guarantees
 

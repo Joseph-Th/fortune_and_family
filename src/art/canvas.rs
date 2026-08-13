@@ -252,15 +252,6 @@ impl Canvas {
             })
     }
 
-    /// Replaces every occurrence of `from` with `to`.
-    pub fn replace_index(&mut self, from: u8, to: u8) {
-        for pixel in &mut self.pixels {
-            if *pixel == from {
-                *pixel = to;
-            }
-        }
-    }
-
     /// Returns a copy scaled by an integer factor using nearest-neighbor sampling.
     ///
     /// # Panics

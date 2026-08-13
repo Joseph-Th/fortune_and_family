@@ -206,32 +206,28 @@ pub(crate) use legal::{
 };
 pub(crate) use progression::{
     campaign_phase_is_consistent, campaign_phase_is_persistently_consistent,
-    contract_deliveries_for_dynasty, rebuild_campaign_phases, refresh_campaign_phases,
+    contract_deliveries_for_dynasty, refresh_campaign_phases,
 };
 pub use simulation::advance_days;
 pub(crate) use strategic::MAX_RELATIONSHIP_MEMORIES;
 #[cfg(test)]
-pub(crate) use strategic::PROPERTY_LIQUIDATION_BASIS_POINTS;
+pub(crate) use strategic::issue_loan;
 pub use strategic::{
     BusinessAcquisitionQuote, LoanTerms, PropertyLiquidationQuote, StrategicError,
-    SupplyContractTerms, ValidatedLoan, ValidatedSupplyContract, acquire_business,
-    buy_unowned_property, issue_loan, quote_business_acquisition, quote_property_liquidation,
-    sell_owned_property, sign_supply_contract, validate_loan, validate_supply_contract,
+    SupplyContractTerms, quote_business_acquisition, quote_property_liquidation,
 };
 pub(crate) use strategic::{
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, STANDARD_CONTRACT_BATCHES_PER_WEEK,
-    available_supply_contract_capacity, business_owner_distribution_reserve,
-    business_recapitalization_target, capitalize_owned_business, crisis_response_contains_crisis,
-    distribute_owned_business_cash, dynasty_office_administrative_load,
-    effective_property_weekly_rent, expire_time_limited_state, initialize_strategic_state,
+    acquire_business, available_supply_contract_capacity, business_owner_distribution_reserve,
+    business_recapitalization_target, buy_unowned_property, capitalize_owned_business,
+    crisis_response_contains_crisis, distribute_owned_business_cash,
+    dynasty_office_administrative_load, effective_property_weekly_rent, expire_time_limited_state,
     institution_capability_score, projected_dynasty_monthly_office_duty,
-    projected_dynasty_monthly_office_duty_with_additional_offices,
-    rebuild_defaulted_collateral_recoveries,
+    projected_dynasty_monthly_office_duty_with_additional_offices, sell_owned_property,
+    validate_loan, validate_supply_contract,
 };
-pub use transactions::{
-    SimulationError, TimelineError, ValidatedCashTransfer, transfer_business_cash,
-    validate_business_cash_transfer,
-};
+pub(crate) use transactions::transfer_business_cash;
+pub use transactions::{SimulationError, TimelineError};
 
 #[cfg(test)]
 mod tests {

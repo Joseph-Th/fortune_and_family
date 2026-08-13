@@ -7,7 +7,7 @@ use crate::core::{
     ObjectiveStatus, OfficePower, PublicWorkKind, PublicWorkStatus, StartingBackground,
 };
 use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, InstitutionId};
-use crate::money::{Money, Quantity, cost_for};
+use crate::money::{Money, Quantity, checked_cost_for};
 use crate::registry::{GoodCategory, InstitutionKind, Registry};
 use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
@@ -5737,7 +5737,12 @@ fn add_contract_candidate(
     ) {
         return;
     }
-    let penalty = cost_for(quantity_per_week, unit_price).saturating_mul(2);
+    let Some(weekly_payment) = checked_cost_for(quantity_per_week, unit_price) else {
+        return;
+    };
+    let Some(penalty) = weekly_payment.checked_mul_ratio(2, 1) else {
+        return;
+    };
     let relationship_note = if price_bounds.relationship_pressure_basis_points > 0 {
         format!(
             " under {} bp of counterparty pressure",
@@ -5797,11 +5802,16 @@ fn can_support_contract_terms(
     if quantity_per_week > capacity.seller || quantity_per_week > capacity.buyer {
         return false;
     }
-    let weekly_payment = cost_for(quantity_per_week, unit_price);
+    let Some(weekly_payment) = checked_cost_for(quantity_per_week, unit_price) else {
+        return false;
+    };
+    let Some(required_working_cash) = weekly_payment.checked_mul_ratio(4, 1) else {
+        return false;
+    };
     let buyer_working_cash = buyer
         .cash()
         .saturating_sub(buyer.policy.minimum_cash_reserve);
-    if buyer_working_cash < weekly_payment.saturating_mul(4) {
+    if buyer_working_cash < required_working_cash {
         return false;
     }
     seller.inventory_quantity(good_id) >= quantity_per_week
@@ -6577,10 +6587,7 @@ fn market_information_is_material(
                 .copper()
                 .saturating_sub(quote.previous_price.copper())
                 .unsigned_abs();
-            let price_change_basis_points = price_change
-                .saturating_mul(10_000)
-                .checked_div(previous_price)
-                .unwrap_or(u64::MAX);
+            let price_change_basis_points = scaled_ratio_u64(price_change, previous_price, 10_000);
             let target_stock = quote.target_stock.milliunits().max(1).unsigned_abs();
             let shortage = quote
                 .target_stock
@@ -6588,10 +6595,7 @@ fn market_information_is_material(
                 .saturating_sub(quote.stock.milliunits())
                 .max(0)
                 .unsigned_abs();
-            let shortage_basis_points = shortage
-                .saturating_mul(10_000)
-                .checked_div(target_stock)
-                .unwrap_or(u64::MAX);
+            let shortage_basis_points = scaled_ratio_u64(shortage, target_stock, 10_000);
             let buyer_is_player = state
                 .businesses
                 .get(contract.buyer_business_id)
@@ -6613,10 +6617,11 @@ fn market_information_is_material(
             }
             .max(0)
             .unsigned_abs();
-            let adverse_contract_gap_basis_points = adverse_contract_gap
-                .saturating_mul(10_000)
-                .checked_div(current_market_price.unsigned_abs())
-                .unwrap_or(u64::MAX);
+            let adverse_contract_gap_basis_points = scaled_ratio_u64(
+                adverse_contract_gap,
+                current_market_price.unsigned_abs(),
+                10_000,
+            );
             price_change_basis_points >= AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS
                 || shortage_basis_points >= AGENT_INFORMATION_MARKET_SHORTAGE_BASIS_POINTS
                 || adverse_contract_gap_basis_points

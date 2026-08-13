@@ -109,10 +109,6 @@ pub enum PropertyKind {
     Residence,
     Workshop,
     Warehouse,
-    Tenement,
-    MarketRight,
-    RuralEstate,
-    CivicBuilding,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

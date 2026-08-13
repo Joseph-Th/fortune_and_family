@@ -47,7 +47,7 @@ Dependency direction is one way:
 | `src/systems/strategic.rs` | Weekly, monthly, annual, and cross-domain systems. |
 | `src/systems/transactions.rs` | Reusable validated transaction primitives. |
 | `src/systems/invariants.rs` | Runtime cross-record invariants. |
-| `src/persistence.rs` | Versioned save/load, migrations, release validation, atomic writes. |
+| `src/persistence.rs` | Current-schema save/load, release validation, atomic writes. |
 | `src/projection.rs` | Immutable read models and self-contained HTML rendering. |
 | `src/gameplay.rs` | Deterministic player agents, counterfactual attribution, scores, findings, traces. |
 | `src/art/*` | Deterministic procedural sprite rendering and review. |
@@ -143,16 +143,15 @@ save_state
 
 load_state
   -> read schema version
-  -> run deterministic version-by-version migrations
+  -> require the current schema version
   -> deserialize AppState
-  -> reconstruct migration-owned derived state when required
   -> verify indexes and references
   -> release validation
 ```
 
 Owner: `src/persistence.rs`.
 
-Serialized contract changes require a schema increment, one migration from the immediately preceding schema, migration tests, current-schema round-trip tests, and `STATUS.md` updates.
+Serialized contract changes require a schema increment, current-schema round-trip tests, rejection coverage for non-current schemas, and `STATUS.md` updates. Older save schemas are unsupported rather than migrated.
 
 ### Projection and rendering
 
@@ -207,13 +206,13 @@ Important invariant groups include registry references, derived indexes, ownersh
 | Change | Primary owner | Adjacent work |
 |---|---|---|
 | Immutable Rivergate content | `src/registry/mod.rs` | Registry tests, bootstrap, projection when visible. |
-| Persistent state | `src/core/*`, `src/core/state.rs` | Bootstrap/migration, validation, invariants, projection, tests. |
+| Persistent state | `src/core/*`, `src/core/state.rs` | Bootstrap, validation, invariants, projection, tests. |
 | Player command | `src/systems/commands.rs` | Command tests, feedback, projection, gameplay integration, CLI smoke when needed. |
 | Daily economic rule | `src/systems/simulation.rs` | Simulation tests, causal ordering, invariants. |
 | Scheduled strategic rule | `src/systems/strategic.rs` | Strategic tests, feedback, gameplay snapshots. |
 | Cross-record transaction | Owning system or `src/systems/transactions.rs` | Typed errors, atomicity, stale-token tests. |
 | Read-only output | `src/projection.rs` | Projection/rendering tests. |
-| Save format | `src/persistence.rs` | Schema, migration, release validation, round trip, status. |
+| Save format | `src/persistence.rs` | Current schema, release validation, round trip, status. |
 | Gameplay evaluation | `src/gameplay.rs` | Report schema, tests, `GAMEPLAY_HARNESS.md`. |
 | CLI syntax | `src/main.rs` | CLI smoke, README workflow when relevant. |
 | Art primitive/subject/check | `src/art/*` | Determinism, review coverage, schema/status when serialized output changes. |

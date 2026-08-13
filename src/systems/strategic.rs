@@ -1011,7 +1011,8 @@ fn validate_defaulted_loan_restructuring(
 ///
 /// Returns the same errors as [`validate_loan`], plus allocation or timeline exhaustion while
 /// committing the loan and its durable feedback.
-pub fn issue_loan(
+#[cfg(test)]
+pub(crate) fn issue_loan(
     state: &mut AppState,
     terms: LoanTerms,
 ) -> Result<crate::ids::LoanId, StrategicError> {
@@ -3971,20 +3972,6 @@ fn apply_defaulted_collateral_recovery(state: &mut AppState, loan_id: crate::ids
         loan.missed_payments = 0;
     }
     recovery
-}
-
-pub(crate) fn rebuild_defaulted_collateral_recoveries(state: &mut AppState) {
-    let loan_ids = state
-        .loans
-        .values()
-        .filter(|loan| {
-            loan.status == LoanStatus::Defaulted && loan.collateral_property_id.is_some()
-        })
-        .map(|loan| loan.id)
-        .collect::<Vec<_>>();
-    for loan_id in loan_ids {
-        apply_defaulted_collateral_recovery(state, loan_id);
-    }
 }
 
 fn active_interest_limit(state: &AppState) -> Option<u16> {
