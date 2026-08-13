@@ -45,6 +45,7 @@ def check_status_contracts() -> None:
     cargo = read("Cargo.toml")
     state = read("src/core/state.rs")
     gameplay = read("src/gameplay.rs")
+    art_harness = read("src/art/harness.rs")
     status = read("STATUS.md")
 
     crate_version = capture(r'^version\s*=\s*"([^"]+)"', cargo, "Cargo.toml")
@@ -58,6 +59,11 @@ def check_status_contracts() -> None:
         gameplay,
         "src/gameplay.rs",
     )
+    art_report_schema = capture(
+        r"ART_REVIEW_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)",
+        art_harness,
+        "src/art/harness.rs",
+    )
     previous_schema = str(int(save_schema) - 1)
 
     expected_lines = (
@@ -67,6 +73,7 @@ def check_status_contracts() -> None:
         f"| Save schema | {save_schema} |",
         f"| Supported save migrations | Versions 0 through {previous_schema} |",
         f"| Gameplay report schema | {report_schema} |",
+        f"| Art review report schema | {art_report_schema} |",
     )
     for line in expected_lines:
         if line not in status:
@@ -87,17 +94,65 @@ def check_repository_references() -> None:
                 fail(f"{document} references missing path {target}")
 
 
-def check_forward_facing_status() -> None:
-    status = read("STATUS.md")
-    forbidden = (
+def check_readme_map() -> None:
+    readme = read("README.md")
+    for document in REQUIRED_DOCS:
+        if document == "README.md":
+            continue
+        if f"`{document}`" not in readme:
+            fail(f"README.md must orient readers to {document}")
+
+
+def check_test_runner_contract() -> None:
+    runner = read("scripts/test.sh")
+    testing = read("TESTING.md")
+    runner_modes = set(
+        re.findall(r"^  ([a-z][a-z-]*)\)$", runner, re.MULTILINE)
+    )
+    documented_modes = set(
+        re.findall(r"`bash scripts/test\.sh ([a-z][a-z-]*)", testing)
+    )
+    missing_docs = sorted(runner_modes - documented_modes)
+    unknown_docs = sorted(documented_modes - runner_modes)
+    if missing_docs:
+        fail(
+            "TESTING.md does not document test runner modes: "
+            + ", ".join(missing_docs)
+        )
+    if unknown_docs:
+        fail(
+            "TESTING.md references unsupported test runner modes: "
+            + ", ".join(unknown_docs)
+        )
+
+
+def check_document_style() -> None:
+    retrospective_phrases = (
         "Verified on",
         "tests pass",
         "repair history",
-        "release gameplay matrix",
+        "completed repair",
+        "previously",
+        "formerly",
+        "used to",
+        "no longer",
+        "regression fix",
+        "workaround for",
     )
-    for phrase in forbidden:
-        if phrase.lower() in status.lower():
-            fail(f"STATUS.md contains retrospective phrase {phrase!r}")
+    maximum_line_length = 500
+
+    for document in REQUIRED_DOCS:
+        text = read(document)
+        lowered = text.lower()
+        for phrase in retrospective_phrases:
+            if phrase.lower() in lowered:
+                fail(f"{document} contains retrospective phrase {phrase!r}")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if len(line) > maximum_line_length:
+                fail(
+                    f"{document}:{line_number} exceeds {maximum_line_length} characters; "
+                    "split long prose into readable paragraphs or lists"
+                )
 
 
 def main() -> None:
@@ -105,7 +160,9 @@ def main() -> None:
         read(document)
     check_status_contracts()
     check_repository_references()
-    check_forward_facing_status()
+    check_readme_map()
+    check_test_runner_contract()
+    check_document_style()
     print("Documentation contracts are consistent.")
 
 

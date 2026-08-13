@@ -10,17 +10,44 @@ usage() {
   cat >&2 <<EOF
 usage:
   $0 fast [filter]       run non-ignored library tests
+  $0 standard            run the normal pre-commit loop: syntax, library, docs, and core CLI
   $0 exact <test-name>   run one fully qualified library test
   $0 debug <test-name>   run one exact test with captured output disabled
   $0 list [filter]       list matching library tests
   $0 soak                run ignored deterministic soak tests
   $0 docs                run documentation consistency and doctests
-  $0 cli                 run CLI smoke tests
+  $0 cli                 run core campaign/projection/dashboard CLI smoke tests
+  $0 art-cli             run procedural-art CLI smoke tests
+  $0 gameplay-cli        run gameplay-harness CLI smoke tests
+  $0 adapters            run all CLI smoke groups
   $0 gameplay            run release gameplay and generation-length quality gates
   $0 gameplay-audit      run mature multi-seed, generation, and credit-stress design audits
   $0 all                 run syntax, library, doc, soak, CLI, and gameplay tests
 EOF
   exit 2
+}
+
+run_shell_syntax() {
+  run_step 'Shell syntax checks' bash -n scripts/test.sh scripts/verify_cli.sh
+}
+
+run_cli_core() {
+  run_step 'Core CLI smoke tests' bash scripts/verify_cli.sh core
+}
+
+run_cli_art() {
+  run_step 'Art CLI smoke tests' bash scripts/verify_cli.sh art
+}
+
+run_cli_gameplay() {
+  run_step 'Gameplay CLI smoke tests' bash scripts/verify_cli.sh gameplay
+}
+
+run_standard() {
+  run_shell_syntax
+  run_fast
+  run_docs
+  run_cli_core
 }
 
 format_duration() {
@@ -323,6 +350,10 @@ case "$mode" in
     [[ $# -le 2 ]] || usage
     run_fast "${2:-}"
     ;;
+  standard)
+    [[ $# -eq 1 ]] || usage
+    run_standard
+    ;;
   exact)
     [[ $# -eq 2 ]] || usage
     run_exact "$2"
@@ -345,7 +376,21 @@ case "$mode" in
     ;;
   cli)
     [[ $# -eq 1 ]] || usage
-    run_step 'CLI smoke tests' bash scripts/verify_cli.sh
+    run_cli_core
+    ;;
+  art-cli)
+    [[ $# -eq 1 ]] || usage
+    run_cli_art
+    ;;
+  gameplay-cli)
+    [[ $# -eq 1 ]] || usage
+    run_cli_gameplay
+    ;;
+  adapters)
+    [[ $# -eq 1 ]] || usage
+    run_cli_core
+    run_cli_art
+    run_cli_gameplay
     ;;
   gameplay)
     [[ $# -eq 1 ]] || usage
@@ -358,11 +403,10 @@ case "$mode" in
     ;;
   all)
     [[ $# -eq 1 ]] || usage
-    run_step 'Shell syntax checks' bash -n scripts/test.sh scripts/verify_cli.sh
-    run_fast
-    run_docs
+    run_standard
     run_soak
-    run_step 'CLI smoke tests' bash scripts/verify_cli.sh
+    run_cli_art
+    run_cli_gameplay
     run_gameplay
     run_legacy_gameplay
     ;;

@@ -1,6 +1,8 @@
 //! Canonical player-command validation and dispatch across simulation subsystems.
 
-use super::legal::{LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS};
+use super::legal::{
+    LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LEGAL_CASE_HEARING_DELAY_DAYS,
+};
 use super::transactions::{
     TimelineError, checked_future_day, next_business_finance_version, next_family_charter_version,
 };
@@ -255,7 +257,7 @@ pub(crate) const FAMILY_EDUCATION_COST: Money = Money::from_copper(2_000);
 pub(crate) const INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const INFORMATION_COMMISSION_COST: Money = Money::from_copper(600);
 pub(crate) const INFORMATION_LEVERAGE_COST: Money = Money::from_copper(600);
-const INFORMATION_REPORT_LIFETIME_DAYS: i64 = 540;
+pub(crate) const INFORMATION_REPORT_LIFETIME_DAYS: i64 = 540;
 pub(crate) const COMMISSIONED_INFORMATION_SOURCE: &str = "Commissioned intelligence";
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -2362,7 +2364,7 @@ fn apply_legal_case(
             maximum_damages: claim.maximum_damages,
         });
     }
-    let hearing_day = checked_future_day(state.clock.day(), 60)?;
+    let hearing_day = checked_future_day(state.clock.day(), LEGAL_CASE_HEARING_DELAY_DAYS)?;
     spend_player_treasury(state, LEGAL_CASE_FILING_COST)?;
     let id = state.next_ids.try_legal_case()?;
     state.legal_cases.insert(
@@ -4596,13 +4598,13 @@ fn resolve_counterparty_information(
         target: InformationTarget::Counterparty { dynasty_id },
         subject: format!("Commissioned house brief: House {}", dynasty.name()),
         summary: format!(
-            "Treasury {}; reliability {} bp; trust {} bp; respect {} bp; fear {} bp; resentment {} bp; obligation {}; unsettled bilateral credit {}.",
+            "Treasury {}; reliability {:.1}%; trust {:.1}%; respect {:.1}%; fear {:.1}%; resentment {:.1}%; obligation {}; unsettled bilateral credit {}.",
             dynasty.treasury(),
-            dynasty.resources.reputation_reliability_basis_points,
-            relationship.trust_basis_points,
-            relationship.respect_basis_points,
-            relationship.fear_basis_points,
-            relationship.resentment_basis_points,
+            f64::from(dynasty.resources.reputation_reliability_basis_points) / 100.0,
+            f64::from(relationship.trust_basis_points) / 100.0,
+            f64::from(relationship.respect_basis_points) / 100.0,
+            f64::from(relationship.fear_basis_points) / 100.0,
+            f64::from(relationship.resentment_basis_points) / 100.0,
             relationship.obligation,
             unsettled_credit
         ),
@@ -4625,12 +4627,12 @@ fn resolve_district_information(
         target: InformationTarget::District { district_id },
         subject: format!("Commissioned district brief: {}", district.name()),
         summary: format!(
-            "Rent index {} bp; employment {} bp; sanitation {} bp; safety {} bp; unrest {} bp; population {}.",
-            runtime.rent_index_basis_points,
-            runtime.employment_basis_points,
-            runtime.sanitation_basis_points,
-            runtime.safety_basis_points,
-            runtime.unrest_basis_points,
+            "Rent index {:.1}%; employment {:.1}%; sanitation {:.1}%; safety {:.1}%; unrest {:.1}%; population {}.",
+            f64::from(runtime.rent_index_basis_points) / 100.0,
+            f64::from(runtime.employment_basis_points) / 100.0,
+            f64::from(runtime.sanitation_basis_points) / 100.0,
+            f64::from(runtime.safety_basis_points) / 100.0,
+            f64::from(runtime.unrest_basis_points) / 100.0,
             district.population()
         ),
     })

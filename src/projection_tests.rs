@@ -99,6 +99,15 @@ mod coverage {
         );
         assert_eq!(
             projection
+                .employment
+                .iter()
+                .map(|agreement| agreement.id)
+                .collect::<BTreeSet<_>>(),
+            state.employment.keys().copied().collect(),
+            "employment projection IDs must match runtime state"
+        );
+        assert_eq!(
+            projection
                 .civic_debts
                 .iter()
                 .map(|debt| debt.id)
@@ -181,13 +190,21 @@ mod coverage {
                         .values()
                         .filter(|report| report.owner_dynasty_id == state.player_dynasty_id)
                 )
-                .all(|(projected, report)| projected.target == report.target)
+                .all(|(projected, report)| {
+                    projected.id == report.id && projected.target == report.target
+                })
         );
         assert_eq!(
             projection.notifications.len(),
             state.outbox.len().min(50),
             "notification projection must honor its 50-message cap"
         );
+        assert!(projection.notifications.iter().all(|projected| {
+            state
+                .outbox
+                .iter()
+                .any(|message| message.id == projected.id)
+        }));
     }
 
     #[test]
@@ -211,6 +228,47 @@ mod coverage {
         assert_eq!(summary.dynasty_name, projection.player.name);
         assert_eq!(summary.dynasty_treasury, projection.player.treasury);
         assert_eq!(summary.businesses, projection.player.businesses);
+    }
+
+    #[test]
+    fn exposes_actionable_family_labor_and_loan_fields() {
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign();
+
+        let projection = build_campaign_projection(registry, &state);
+        let player = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        let council = state
+            .family_councils
+            .get(&state.player_dynasty_id)
+            .expect("player family council must exist");
+
+        assert_eq!(projection.family.head_id, player.head_id());
+        assert_eq!(projection.family.heir_id, player.heir_id());
+        assert_eq!(projection.family.governance, council.governance);
+        assert_eq!(
+            projection.family.unity_basis_points,
+            council.unity_basis_points
+        );
+        assert!(projection.employment.iter().all(|projected| {
+            state
+                .employment
+                .get(&projected.id)
+                .is_some_and(|agreement| {
+                    projected.business_id == agreement.business_id
+                        && projected.status == agreement.status
+                })
+        }));
+        assert!(projection.loans.iter().all(|projected| {
+            state.loans.get(&projected.id).is_some_and(|loan| {
+                projected.next_due_day == loan.next_due_day
+                    && projected.missed_payments == loan.missed_payments
+                    && projected.lender_dynasty_id == loan.lender_dynasty_id
+                    && projected.borrower_dynasty_id == loan.borrower_dynasty_id
+            })
+        }));
     }
 
     #[test]
@@ -630,16 +688,31 @@ mod html {
             "dashboard must expose the social network that influences institutional outcomes"
         );
         assert!(
-            html.contains("<caption class=\"sr-only\">Business operations</caption>")
+            html.contains("<caption class=\"sr-only\">Player business operations</caption>")
                 && html.contains("<th scope=\"col\">Business</th>")
                 && html.contains(
-                    "<caption class=\"sr-only\">Supply contract obligations and performance</caption>",
+                    "<caption class=\"sr-only\">Player supply contract obligations and performance</caption>",
                 ),
             "dashboard tables must expose captions and column-header semantics"
         );
         assert!(
             html.contains(player_name),
             "dashboard must identify the player dynasty"
+        );
+        for section in [
+            "Needs attention",
+            "Your operations",
+            "Private finance",
+            "Your offices",
+            "Current reports",
+            "City context",
+            "Complete projection data",
+        ] {
+            assert!(html.contains(section), "dashboard must expose {section}");
+        }
+        assert!(
+            html.contains("<details><summary>Complete projection data</summary>"),
+            "raw projection data should remain available without dominating the primary dashboard"
         );
     }
 
@@ -661,12 +734,90 @@ mod html {
 
         assert!(rows.contains("Stock below target, Demand exceeded supply"));
         assert!(!rows.contains("StockBelowTarget"));
+        assert!(rows.contains("↑ from"));
+        assert!(rows.contains(&format!(
+            "{} / {}",
+            Quantity::from_milliunits(1_000),
+            Quantity::from_milliunits(2_000)
+        )));
+        assert!(rows.contains(&format!(
+            "{} / {}",
+            Quantity::from_milliunits(3_000),
+            Quantity::from_milliunits(1_000)
+        )));
         assert_eq!(
             render_notifications(&[]),
-            "<article><p>No recent notices.</p></article>"
+            "<article class=\"empty\"><p>No recent notices.</p></article>"
         );
-        assert!(render_business_rows(&[]).contains("No businesses are operating"));
-        assert!(render_contract_rows(&[]).contains("No supply contracts are recorded"));
+        assert!(render_business_rows(&[]).contains("Your dynasty owns no businesses"));
+        assert!(render_contract_rows(&[]).contains("No supply contracts involve your businesses"));
+    }
+
+    #[test]
+    fn prioritizes_unread_notices_and_exposes_action_ids() {
+        let notices = [
+            NotificationProjection {
+                id: crate::ids::OutboxMessageId::new(1),
+                day: 10,
+                kind: crate::core::OutboxKind::Information,
+                subject: "Unread intelligence".to_owned(),
+                body: "Actionable report arrived.".to_owned(),
+                acknowledged: false,
+            },
+            NotificationProjection {
+                id: crate::ids::OutboxMessageId::new(2),
+                day: 11,
+                kind: crate::core::OutboxKind::Finance,
+                subject: "Read finance note".to_owned(),
+                body: "Already handled.".to_owned(),
+                acknowledged: true,
+            },
+        ];
+
+        let html = render_notifications(&notices);
+        let unread_position = html
+            .find("Unread intelligence")
+            .expect("unread notice must render");
+        let read_position = html
+            .find("Read finance note")
+            .expect("read notice must render");
+
+        assert!(
+            unread_position < read_position,
+            "unread notices must render first"
+        );
+        assert!(html.contains("notice #1"));
+        assert!(html.contains("notice #2"));
+    }
+
+    #[test]
+    fn attention_section_exposes_actionable_labor_dispute_id() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let agreement_id = state
+            .employment
+            .values()
+            .find(|agreement| {
+                state
+                    .businesses
+                    .get(agreement.business_id)
+                    .is_some_and(|business| business.owner_dynasty_id() == player_id)
+            })
+            .expect("campaign must contain player employment")
+            .id;
+        state
+            .employment
+            .get_mut(&agreement_id)
+            .expect("player employment must exist")
+            .status = crate::core::EmploymentStatus::Disputed;
+
+        let html = render_campaign_html(registry, &state).expect("dashboard must render");
+
+        assert!(html.contains("Labor dispute"));
+        assert!(html.contains(&format!(
+            "Resolve labor dispute #{agreement_id} before operations deteriorate."
+        )));
     }
 
     #[test]

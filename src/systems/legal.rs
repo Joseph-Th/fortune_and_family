@@ -6,6 +6,7 @@ use crate::money::Money;
 
 pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 90;
 pub(crate) const LEGAL_CASE_FILING_COST: Money = Money::from_copper(300);
+pub(crate) const LEGAL_CASE_HEARING_DELAY_DAYS: i64 = 60;
 pub(crate) const LEGAL_DELINQUENT_DEBT_EVIDENCE_BASIS_POINTS: u16 = 7_500;
 pub(crate) const LEGAL_DEFAULTED_DEBT_EVIDENCE_BASIS_POINTS: u16 = 9_000;
 pub(crate) const LEGAL_CONTRACT_BREACH_EVIDENCE_BASIS_POINTS: u16 = 8_500;
@@ -18,6 +19,13 @@ pub(crate) struct LegalClaimQuote {
     pub evidence_basis_points: u16,
     pub maximum_damages: Money,
     pub description: String,
+}
+
+pub(crate) fn is_valid_legal_hearing_day(filed_day: i64, hearing_day: i64) -> bool {
+    hearing_day != i64::MAX
+        && hearing_day
+            .checked_sub(filed_day)
+            .is_some_and(|delay| (0..=LEGAL_CASE_HEARING_DELAY_DAYS).contains(&delay))
 }
 
 pub(crate) fn quote_grounded_legal_claim(

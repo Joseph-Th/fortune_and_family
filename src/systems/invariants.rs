@@ -485,8 +485,10 @@ fn validate_institutions(registry: &Registry, state: &AppState, ids: &RegistryId
                 && institution.term_number > 0
                 && institution.term_number < u32::MAX
                 && institution.term_started_day <= state.clock.day()
-                && institution.next_selection_day >= institution.term_started_day
-                && is_schedulable_day(institution.next_selection_day),
+                && super::is_valid_institution_selection_day(
+                    institution.term_started_day,
+                    institution.next_selection_day,
+                ),
             "Lifecycle Validity: institution budget or term timing is invalid"
         );
         debug_assert!(
@@ -495,8 +497,7 @@ fn validate_institutions(registry: &Registry, state: &AppState, ids: &RegistryId
         );
         debug_assert!(
             institution.active_directive.is_none_or(|directive| {
-                directive.expires_day >= state.clock.day()
-                    && directive.expires_day < i64::MAX
+                super::is_valid_active_directive_expiry(state.clock.day(), directive.expires_day)
                     && institution.powers.contains(&directive.power)
             }),
             "Lifecycle Validity: institution directive is invalid"
@@ -594,14 +595,7 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             "Registry Reference Validity: contract good does not exist"
         );
         validate_contract_financial_values(contract);
-        debug_assert!(
-            is_schedulable_day(contract.next_due_day) && is_schedulable_day(contract.end_day),
-            "Lifecycle Validity: contract schedule exceeds the supported timeline"
-        );
-        debug_assert!(
-            contract.next_due_day <= contract.end_day || contract.status != ContractStatus::Active,
-            "Lifecycle Validity: active contract due date exceeds its term"
-        );
+        validate_contract_schedule(contract);
         debug_assert!(
             contract_breach_attribution_is_valid(state, contract),
             "Lifecycle Validity: contract breach attribution is inconsistent"
@@ -659,6 +653,17 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             );
         }
     }
+}
+
+fn validate_contract_schedule(contract: &crate::core::SupplyContract) {
+    debug_assert!(
+        is_schedulable_day(contract.next_due_day) && is_schedulable_day(contract.end_day),
+        "Lifecycle Validity: contract schedule exceeds the supported timeline"
+    );
+    debug_assert!(
+        contract.next_due_day <= contract.end_day || contract.status != ContractStatus::Active,
+        "Lifecycle Validity: active contract due date exceeds its term"
+    );
 }
 
 fn validate_contract_financial_values(contract: &crate::core::SupplyContract) {
@@ -1295,10 +1300,11 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
             "Record Reference Validity: information report owner does not exist"
         );
         debug_assert!(
-            is_schedulable_day(report.expires_day)
-                && report.created_day <= state.clock.day()
-                && report.expires_day >= state.clock.day()
-                && report.expires_day >= report.created_day,
+            super::is_valid_information_report_dates(
+                state.clock.day(),
+                report.created_day,
+                report.expires_day,
+            ),
             "Lifecycle Validity: information report dates are invalid"
         );
         debug_assert!(
@@ -1492,9 +1498,8 @@ fn validate_legal_cases(state: &AppState) {
             "Lifecycle Validity: legal case measure is outside basis-point range"
         );
         debug_assert!(
-            is_schedulable_day(case.hearing_day)
-                && case.filed_day <= state.clock.day()
-                && case.hearing_day >= case.filed_day,
+            case.filed_day <= state.clock.day()
+                && super::is_valid_legal_hearing_day(case.filed_day, case.hearing_day),
             "Lifecycle Validity: legal case dates are invalid"
         );
         debug_assert!(

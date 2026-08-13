@@ -522,6 +522,7 @@ fn ensure_output_parent(path: &Path) -> Result<(), CliError> {
 
 fn print_human_summary(registry: &Registry, state: &civic_dynasty::AppState) {
     let summary = build_state_summary(registry, state);
+    let projection = build_campaign_projection(registry, state);
     println!(
         "{} | year {}, day {} | elapsed {} days",
         summary.scenario_name, summary.year, summary.day_of_year, summary.elapsed_days
@@ -534,49 +535,228 @@ fn print_human_summary(registry: &Registry, state: &civic_dynasty::AppState) {
         summary.business_cash
     );
     println!(
-        "Businesses: {} total, {} active | household groups: {} | food satisfaction: {:.1}%",
-        summary.businesses,
-        summary.active_businesses,
-        summary.population_groups,
-        f64::from(summary.average_food_satisfaction_basis_points) / 100.0
+        "Capacity {} / {} | {} businesses | {} properties | {:.1}% family unity",
+        projection.player.effective_administrative_load,
+        projection.player.administrative_capacity,
+        projection.player.businesses,
+        projection.player.properties,
+        f64::from(projection.family.unity_basis_points) / 100.0
     );
-    println!(
-        "Strategic: {} contracts | {} private loans | {} civic debts ({}) | {} properties | {} active crises | {} unread notices",
-        summary.active_contracts,
-        summary.current_loans,
-        summary.outstanding_civic_debts,
-        summary.civic_debt_balance,
-        summary.properties,
-        summary.active_crises,
-        summary.unread_notifications
-    );
-
-    println!("Market:");
-    for quote in state.market().quotes() {
-        let good = registry
-            .get_good(quote.good_id())
-            .expect("market quote good must exist");
-        println!(
-            "  {:<10} {:>10} | stock {:>10} | {:?}",
-            good.name(),
-            quote.price(),
-            quote.stock(),
-            quote.causes()
-        );
-    }
-
+    print_cli_attention(&projection);
+    print_cli_market(&projection);
+    print_cli_intelligence(&projection);
     println!("Recent chronicle:");
-    for entry in state.chronicle().iter().rev().take(8).rev() {
+    for entry in state.chronicle().iter().rev().take(6).rev() {
         println!("  day {:>5}: {}", entry.day(), entry.summary());
     }
-    println!("Recent notices:");
-    for message in state.outbox().iter().rev().take(6).rev() {
+    print_cli_notices(&projection);
+}
+
+fn print_cli_attention(projection: &civic_dynasty::CampaignProjection) {
+    use civic_dynasty::core::{BusinessStatus, EmploymentStatus, LegalCaseStatus, LoanStatus};
+
+    let player_id = projection.player.id;
+    let disputed_labor = projection.employment.iter().filter(|agreement| {
+        agreement.owner_dynasty_id == player_id && agreement.status == EmploymentStatus::Disputed
+    });
+    let distressed = projection.businesses.iter().filter(|business| {
+        business.owner_dynasty_id == player_id
+            && matches!(
+                business.status,
+                BusinessStatus::Distressed | BusinessStatus::Insolvent
+            )
+    });
+    let adverse_loans = projection.loans.iter().filter(|loan| {
+        loan.borrower_dynasty_id == player_id
+            && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
+    });
+    let defendant_cases = projection.legal_cases.iter().filter(|case| {
+        case.defendant_dynasty_id == player_id
+            && matches!(
+                case.status,
+                LegalCaseStatus::Filed | LegalCaseStatus::Hearing
+            )
+    });
+
+    println!("Needs attention:");
+    let mut found = false;
+    if projection.player.unmet_office_duties > 0 {
         println!(
-            "  day {:>5} [{:?}] {}: {}",
-            message.day(),
-            message.kind(),
-            message.subject(),
-            message.body()
+            "  ! {} unmet office duties",
+            projection.player.unmet_office_duties
+        );
+        found = true;
+    }
+    for agreement in disputed_labor {
+        println!(
+            "  ! labor dispute #{} at {}",
+            agreement.id, agreement.business
+        );
+        found = true;
+    }
+    for business in distressed {
+        println!(
+            "  ! business #{} {} is {} with {} cash",
+            business.id,
+            business.name,
+            cli_business_status_label(business.status),
+            business.cash
+        );
+        found = true;
+    }
+    for loan in adverse_loans {
+        println!(
+            "  ! loan #{} is {}: {} outstanding, {} missed payments",
+            loan.id,
+            cli_loan_status_label(loan.status),
+            loan.balance,
+            loan.missed_payments
+        );
+        found = true;
+    }
+    for case in defendant_cases {
+        let settlement = case
+            .settlement_amount
+            .map_or_else(String::new, |amount| format!("; settlement {amount}"));
+        println!(
+            "  ! legal case #{} by {}: hearing day {}, damages {}{}",
+            case.id, case.plaintiff, case.hearing_day, case.damages, settlement
+        );
+        found = true;
+    }
+    for crisis in projection
+        .crises
+        .iter()
+        .filter(|crisis| crisis.status.is_active())
+    {
+        println!(
+            "  ! crisis #{} {}: {:.1}% severity",
+            crisis.id,
+            cli_crisis_kind_label(crisis.kind),
+            f64::from(crisis.severity_basis_points) / 100.0
+        );
+        found = true;
+    }
+    if !found {
+        println!("  none flagged by current campaign state");
+    }
+}
+
+const fn cli_business_status_label(status: civic_dynasty::core::BusinessStatus) -> &'static str {
+    use civic_dynasty::core::BusinessStatus;
+    match status {
+        BusinessStatus::Active => "active",
+        BusinessStatus::Distressed => "distressed",
+        BusinessStatus::Insolvent => "insolvent",
+        BusinessStatus::Closed => "closed",
+    }
+}
+
+const fn cli_loan_status_label(status: civic_dynasty::core::LoanStatus) -> &'static str {
+    use civic_dynasty::core::LoanStatus;
+    match status {
+        LoanStatus::Current => "current",
+        LoanStatus::Delinquent => "delinquent",
+        LoanStatus::Defaulted => "defaulted",
+        LoanStatus::Repaid => "repaid",
+        LoanStatus::Restructured => "restructured",
+    }
+}
+
+const fn cli_crisis_kind_label(kind: civic_dynasty::core::CrisisKind) -> &'static str {
+    use civic_dynasty::core::CrisisKind;
+    match kind {
+        CrisisKind::GrainShortage => "grain shortage",
+        CrisisKind::BankingPanic => "banking panic",
+        CrisisKind::UrbanFire => "urban fire",
+        CrisisKind::GuildRevolt => "guild revolt",
+        CrisisKind::NobleDemand => "noble demand",
+        CrisisKind::Epidemic => "epidemic",
+        CrisisKind::TradeDisruption => "trade disruption",
+    }
+}
+
+fn print_cli_market(projection: &civic_dynasty::CampaignProjection) {
+    println!("Market watch:");
+    let mut notable = projection
+        .market
+        .iter()
+        .filter(|quote| {
+            quote.price != quote.previous_price
+                || quote.stock != quote.target_stock
+                || quote.demand_today != quote.supply_today
+        })
+        .take(8)
+        .peekable();
+    if notable.peek().is_none() {
+        println!("  no material market movement");
+        return;
+    }
+    for quote in notable {
+        let movement = match quote.price.cmp(&quote.previous_price) {
+            std::cmp::Ordering::Greater => "up",
+            std::cmp::Ordering::Less => "down",
+            std::cmp::Ordering::Equal => "flat",
+        };
+        println!(
+            "  {:<10} {:>10} ({movement:<4}) | stock {} / target {} | demand {} / supply {}",
+            quote.good,
+            quote.price,
+            quote.stock,
+            quote.target_stock,
+            quote.demand_today,
+            quote.supply_today
+        );
+    }
+}
+
+const fn cli_information_confidence_label(
+    confidence: civic_dynasty::core::InformationConfidence,
+) -> &'static str {
+    use civic_dynasty::core::InformationConfidence;
+    match confidence {
+        InformationConfidence::Rumored => "rumored",
+        InformationConfidence::Probable => "probable",
+        InformationConfidence::Confirmed => "confirmed",
+    }
+}
+
+fn print_cli_intelligence(projection: &civic_dynasty::CampaignProjection) {
+    println!("Current intelligence:");
+    let mut reports = projection.information.iter().rev().take(4).peekable();
+    if reports.peek().is_none() {
+        println!("  none");
+        return;
+    }
+    for report in reports {
+        println!(
+            "  #{} [{}] {}: {} (expires day {})",
+            report.id,
+            cli_information_confidence_label(report.confidence),
+            report.subject,
+            report.summary,
+            report.expires_day
+        );
+    }
+}
+
+fn print_cli_notices(projection: &civic_dynasty::CampaignProjection) {
+    println!("Unread notices:");
+    let mut unread = projection
+        .notifications
+        .iter()
+        .rev()
+        .filter(|message| !message.acknowledged)
+        .take(6)
+        .peekable();
+    if unread.peek().is_none() {
+        println!("  none");
+        return;
+    }
+    for message in unread {
+        println!(
+            "  #{} day {:>5}: {}: {}",
+            message.id, message.day, message.subject, message.body
         );
     }
 }

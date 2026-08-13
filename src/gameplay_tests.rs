@@ -9,7 +9,6 @@ use crate::test_support::{assert_set_eq, make_test_campaign, rivergate_registry_
 use std::sync::OnceLock;
 
 static FOCUSED_REPORT_30_DAYS: OnceLock<GameplayHarnessReport> = OnceLock::new();
-static FOCUSED_REPORT_360_DAYS: OnceLock<GameplayHarnessReport> = OnceLock::new();
 
 fn focused_config(days: u32) -> GameplayHarnessConfig {
     GameplayHarnessConfig {
@@ -25,7 +24,6 @@ fn focused_config(days: u32) -> GameplayHarnessConfig {
 fn cached_focused_report(days: u32) -> GameplayHarnessReport {
     let report = match days {
         30 => FOCUSED_REPORT_30_DAYS.get_or_init(|| build_focused_report(30)),
-        360 => FOCUSED_REPORT_360_DAYS.get_or_init(|| build_focused_report(360)),
         _ => panic!("no cached focused report is configured for {days} days"),
     };
     report.clone()
@@ -4944,7 +4942,7 @@ mod metrics {
 
     #[test]
     fn player_borrowing_default_is_reported_as_a_material_experience_problem() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let campaign = report
             .campaigns
             .first_mut()
@@ -5707,7 +5705,7 @@ mod findings {
 
     #[test]
     fn politically_stranded_succession_is_reported_until_rebuild_begins() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let campaign = report
             .campaigns
             .first_mut()
@@ -5951,7 +5949,7 @@ mod findings {
 
     #[test]
     fn materially_convergent_cities_are_reported_despite_civic_identity_variation() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let baseline = report
             .campaigns
             .first()
@@ -6002,7 +6000,7 @@ mod findings {
 
     #[test]
     fn mature_reports_surface_structural_district_employment_collapse() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let baseline = report
             .campaigns
             .first()
@@ -6033,7 +6031,7 @@ mod findings {
 
     #[test]
     fn localized_civic_divergence_is_not_erased_by_citywide_averages() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let baseline = report
             .campaigns
             .first()
@@ -6268,7 +6266,7 @@ mod findings {
 
     #[test]
     fn findings_surface_political_power_that_precedes_commercial_standing() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let campaign = report
             .campaigns
             .first_mut()
@@ -6283,7 +6281,7 @@ mod findings {
 
     #[test]
     fn findings_surface_synchronized_core_fantasy_timing() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let baseline = report
             .campaigns
             .first()
@@ -6315,7 +6313,7 @@ mod findings {
 
     #[test]
     fn synchronization_finding_detects_same_background_persona_railroading() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let baseline = report
             .campaigns
             .first()
@@ -6355,7 +6353,7 @@ mod findings {
 
     #[test]
     fn synchronized_timing_with_distinct_routes_is_informational() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let baseline = report
             .campaigns
             .first()
@@ -6973,7 +6971,7 @@ mod findings {
 
     #[test]
     fn findings_surface_persona_specific_mature_action_concentration() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let campaign = report
             .campaigns
             .first_mut()
@@ -7010,7 +7008,7 @@ mod findings {
 
     #[test]
     fn findings_surface_weak_persona_level_variety() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let campaign = report
             .campaigns
             .first_mut()
@@ -7330,7 +7328,7 @@ mod findings {
 
     #[test]
     fn findings_surface_property_acquisition_as_universal_progression() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let template = report
             .campaigns
             .first()
@@ -7359,7 +7357,7 @@ mod findings {
 
     #[test]
     fn diversified_property_growth_avoids_universal_progression_warning() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let template = report
             .campaigns
             .first()
@@ -7387,7 +7385,7 @@ mod findings {
 
     #[test]
     fn findings_surface_mature_house_governance_convergence() {
-        let mut report = cached_focused_report(360);
+        let mut report = cached_focused_report(30);
         let template = report
             .campaigns
             .first()

@@ -436,13 +436,14 @@ impl ValidatedSupplyContract {
     ) -> Result<crate::ids::ContractId, StrategicError> {
         validate_supply_contract_terms(registry, state, &self.terms)?;
         let mut next_state = state.clone();
-        let id = commit_supply_contract(&mut next_state, &self.terms)?;
+        let id = commit_supply_contract(registry, &mut next_state, &self.terms)?;
         *state = next_state;
         Ok(id)
     }
 }
 
 fn commit_supply_contract(
+    registry: &Registry,
     state: &mut AppState,
     terms: &SupplyContractTerms,
 ) -> Result<crate::ids::ContractId, StrategicError> {
@@ -465,6 +466,23 @@ fn commit_supply_contract(
         .get(seller_business_id)
         .expect("validated contract seller must exist")
         .owner_dynasty_id();
+    let buyer_name = state
+        .businesses
+        .get(buyer_business_id)
+        .expect("validated contract buyer must exist")
+        .name()
+        .to_owned();
+    let seller_name = state
+        .businesses
+        .get(seller_business_id)
+        .expect("validated contract seller must exist")
+        .name()
+        .to_owned();
+    let good_name = registry
+        .get_good(good_id)
+        .expect("validated contract good must exist")
+        .name()
+        .to_owned();
     let id = state.next_ids.try_contract()?;
     let day = state.clock.day();
     let next_due_day = checked_future_day(day, 7)?;
@@ -495,7 +513,7 @@ fn commit_supply_contract(
         OutboxKind::Contract,
         format!("Supply contract {id} signed"),
         format!(
-            "Business {seller_business_id} will deliver {quantity_per_week} of good {good_id} to business {buyer_business_id} each week."
+            "{seller_name} (business {seller_business_id}) will deliver {quantity_per_week} of {good_name} to {buyer_name} (business {buyer_business_id}) each week."
         ),
     )?;
     adjust_dynasty_relationship(
@@ -584,6 +602,18 @@ fn commit_loan(
     }
     commit_loan_record(state, terms, id, defaulted_loan_id, next_due_day);
     let restructured = defaulted_loan_id.is_some();
+    let lender_name = state
+        .dynasties
+        .get(&lender_dynasty_id)
+        .expect("validated lender must exist")
+        .name()
+        .to_owned();
+    let borrower_name = state
+        .dynasties
+        .get(&borrower_dynasty_id)
+        .expect("validated borrower must exist")
+        .name()
+        .to_owned();
     try_push_outbox(
         state,
         OutboxKind::Finance,
@@ -594,12 +624,10 @@ fn commit_loan(
         },
         if restructured {
             format!(
-                "Dynasty {lender_dynasty_id} restructured loan {id} and advanced {principal} to dynasty {borrower_dynasty_id}."
+                "House {lender_name} restructured loan {id} and advanced {principal} to House {borrower_name}."
             )
         } else {
-            format!(
-                "Dynasty {lender_dynasty_id} lent {principal} to dynasty {borrower_dynasty_id}."
-            )
+            format!("House {lender_name} lent {principal} to House {borrower_name}.")
         },
     )?;
     adjust_dynasty_relationship(
@@ -5102,10 +5130,11 @@ pub(crate) fn try_record_counterparty_information(
         .get(&pair)
         .expect("counterparty relationship must exist");
     let summary = format!(
-        "Reliability {reliability} bp; trust {} bp; respect {} bp; resentment {} bp; obligation {}.",
-        relationship.trust_basis_points,
-        relationship.respect_basis_points,
-        relationship.resentment_basis_points,
+        "Reliability {:.1}%; trust {:.1}%; respect {:.1}%; resentment {:.1}%; obligation {}.",
+        f64::from(reliability) / 100.0,
+        f64::from(relationship.trust_basis_points) / 100.0,
+        f64::from(relationship.respect_basis_points) / 100.0,
+        f64::from(relationship.resentment_basis_points) / 100.0,
         relationship.obligation
     );
     let day = state.clock.day();
@@ -6737,7 +6766,7 @@ fn file_grounded_ai_legal_cases(state: &mut AppState) -> Result<(), SimulationEr
         let Some(claim) = next_grounded_ai_legal_claim(state, plaintiff_id) else {
             continue;
         };
-        let hearing_day = checked_future_day(day, 60)?;
+        let hearing_day = checked_future_day(day, super::LEGAL_CASE_HEARING_DELAY_DAYS)?;
         let legal_case_id = state.next_ids.try_legal_case()?;
         let plaintiff_treasury = state
             .dynasties

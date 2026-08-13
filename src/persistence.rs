@@ -337,11 +337,6 @@ const fn is_schedulable_day(day: i64) -> bool {
     day != i64::MAX
 }
 
-fn is_current_weekly_due_day(current_day: i64, due_day: i64) -> bool {
-    let latest_weekly_boundary = current_day - current_day.rem_euclid(7);
-    is_schedulable_day(due_day) && due_day > latest_weekly_boundary
-}
-
 fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
     for dynasty in state.dynasties.values() {
         if dynasty.treasury() < Money::ZERO
@@ -442,7 +437,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         }
         if !is_schedulable_day(loan.next_due_day)
             || (loan.status.is_repayment_active()
-                && !is_current_weekly_due_day(state.clock.day(), loan.next_due_day))
+                && !crate::systems::is_current_weekly_due_day(state.clock.day(), loan.next_due_day))
         {
             return Err(format!("loan {} has an invalid due date", loan.id));
         }
@@ -462,7 +457,10 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
             || (matches!(
                 debt.status,
                 crate::core::CivicDebtStatus::Current | crate::core::CivicDebtStatus::Delinquent
-            ) && !is_current_weekly_due_day(state.clock.day(), debt.next_due_day))
+            ) && !crate::systems::is_current_weekly_due_day(
+                state.clock.day(),
+                debt.next_due_day,
+            ))
         {
             return Err(format!("civic debt {} has invalid dates", debt.id));
         }
@@ -506,23 +504,33 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         if !is_schedulable_day(contract.next_due_day)
             || !is_schedulable_day(contract.end_day)
             || (contract.status == crate::core::ContractStatus::Active
-                && !is_current_weekly_due_day(state.clock.day(), contract.next_due_day))
+                && !crate::systems::is_current_weekly_due_day(
+                    state.clock.day(),
+                    contract.next_due_day,
+                ))
         {
             return Err(format!("supply contract {} has invalid dates", contract.id));
         }
     }
+    validate_institution_numeric_ranges(state)
+}
+
+fn validate_institution_numeric_ranges(state: &AppState) -> Result<(), String> {
     for institution in state.institutions.values() {
         if institution.budget < Money::ZERO
             || institution.legitimacy_basis_points > 10_000
             || institution.term_number == 0
             || institution.term_number == u32::MAX
             || institution.term_started_day > state.clock.day()
-            || institution.next_selection_day < institution.term_started_day
-            || !is_schedulable_day(institution.next_selection_day)
+            || !crate::systems::is_valid_institution_selection_day(
+                institution.term_started_day,
+                institution.next_selection_day,
+            )
             || institution.active_directive.is_some_and(|directive| {
-                directive.expires_day < state.clock.day()
-                    || directive.expires_day == i64::MAX
-                    || !institution.powers.contains(&directive.power)
+                !crate::systems::is_valid_active_directive_expiry(
+                    state.clock.day(),
+                    directive.expires_day,
+                ) || !institution.powers.contains(&directive.power)
             })
         {
             return Err(format!(
@@ -636,7 +644,8 @@ fn validate_legal_case_numeric_ranges(state: &AppState) -> Result<(), String> {
                 legal_case.id
             ));
         }
-        if !is_schedulable_day(legal_case.hearing_day) {
+        if !crate::systems::is_valid_legal_hearing_day(legal_case.filed_day, legal_case.hearing_day)
+        {
             return Err(format!("legal case {} has invalid dates", legal_case.id));
         }
     }
@@ -1589,10 +1598,11 @@ fn validate_law_report_and_objective_records(state: &AppState) -> Result<(), Str
     for (report_id, report) in &state.information_reports {
         if report.id != *report_id
             || !state.dynasties.contains_key(&report.owner_dynasty_id)
-            || !is_schedulable_day(report.expires_day)
-            || report.created_day > state.clock.day()
-            || report.expires_day < state.clock.day()
-            || report.expires_day < report.created_day
+            || !crate::systems::is_valid_information_report_dates(
+                state.clock.day(),
+                report.created_day,
+                report.expires_day,
+            )
             || report.subject.trim().is_empty()
             || report.source.trim().is_empty()
             || report.summary.trim().is_empty()

@@ -1,10 +1,10 @@
 # Architecture
 
-This document defines code ownership, dependency direction, mutation flows, execution order, and extension points.
+This document defines code ownership, dependency direction, canonical mutation flows, simulation order, and extension points.
 
 ## System model
 
-Civic Dynasty is a deterministic simulation kernel with explicit definitions, explicit state, and explicit mutation paths.
+Civic Dynasty is a deterministic simulation kernel with explicit definitions, state, and mutation paths.
 
 ```text
 Registry definitions + AppState
@@ -13,85 +13,63 @@ Registry definitions + AppState
 canonical systems
   bootstrap | commands | legal | progression | simulation | strategic | transactions
             |
-            +--> runtime invariants
-            +--> audit, chronicle, and outbox records
+            +--> invariants
+            +--> audit / chronicle / outbox
             |
             v
 boundary adapters
-  persistence | CLI | projections | HTML | gameplay harness
+  persistence | CLI | projections | HTML | gameplay harness | art
 ```
 
 Dependency direction is one way:
 
 1. Core types and registry definitions define data.
 2. Systems read definitions and state, validate operations, and mutate state.
-3. Boundary adapters serialize, render, or invoke canonical systems.
+3. Adapters serialize, render, inspect, or invoke systems.
 4. Adapters do not own domain rules.
 
-## Repository map
+## Ownership map
 
 | Path | Responsibility |
 |---|---|
-| `src/core/records.rs` | Primary population, household, business, market, and contract records. |
-| `src/core/extended.rs` | Family, institutions, finance, property, labor, laws, relationships, crises, and other strategic records. |
-| `src/core/state.rs` | `AppState`, clock, ID allocation, synchronized stores, and public state access. |
+| `src/core/records.rs` | Core population and economic records. |
+| `src/core/extended.rs` | Strategic, civic, family, finance, property, labor, relationship, and crisis records. |
+| `src/core/state.rs` | `AppState`, clock, ID allocation, synchronized stores, state access. |
 | `src/ids.rs` | Typed persistent IDs. |
-| `src/money.rs` | Fixed-point `Money`, `Quantity`, costs, affordability, and ratio arithmetic. |
+| `src/money.rs` | Fixed-point `Money`, `Quantity`, affordability, and ratio arithmetic. |
 | `src/registry/mod.rs` | Immutable Rivergate definitions and lookup validation. |
 | `src/rng.rs` | Serializable deterministic RNG. |
 | `src/systems/bootstrap.rs` | New campaign construction. |
-| `src/systems/commands.rs` | `PlayerCommand`, command validation, and dispatch. |
-| `src/systems/legal.rs` | Grounded debt and contract claims shared by player and rival litigation. |
-| `src/systems/progression.rs` | Monotonic dynasty campaign progression and migration reconstruction. |
-| `src/systems/simulation.rs` | Daily economic pipeline. |
+| `src/systems/commands.rs` | `PlayerCommand`, validation, dispatch, and command-owned mutation. |
+| `src/systems/legal.rs` | Grounded debt and contract claims. |
+| `src/systems/progression.rs` | Monotonic campaign progression. |
+| `src/systems/simulation.rs` | Daily economic pipeline and time advancement. |
 | `src/systems/strategic.rs` | Weekly, monthly, annual, and cross-domain systems. |
 | `src/systems/transactions.rs` | Reusable validated transaction primitives. |
-| `src/systems/invariants.rs` | Debug runtime invariants. |
-| `src/persistence.rs` | Versioned save/load, migrations, and release-mode validation. |
-| `src/projection.rs` | Read-only projections and self-contained HTML rendering. |
-| `src/gameplay.rs` | Player agents, counterfactual analysis, scores, findings, and traces. |
-| `src/art/color.rs` | Integer color model, hue-shifted shading ramps, and indexed palettes. |
-| `src/art/math.rs` | Fixed-point angles, trigonometry, and vector helpers. |
-| `src/art/canvas.rs` | Indexed pixel buffers and compositing. |
-| `src/art/surface.rs` | Material, light, and depth buffers and their resolution to indices. |
-| `src/art/shape.rs` | Shaded rasterization primitives, the light model, and contour passes. |
-| `src/art/rig.rs` | Skeletons, poses, and the humanoid rig. |
-| `src/art/anim.rs` | Keyframed clips and pose sampling. |
-| `src/art/sprite.rs` | Character specifications, posed drawing, and sheet composition. |
-| `src/art/png.rs` | Dependency-free indexed PNG and base64 encoding. |
-| `src/art/lint.rs` | Automated sprite review checks. |
-| `src/art/harness.rs` | Batch sprite review, findings report, and the HTML contact sheet. |
-| `src/main.rs` | CLI parsing and adapter behavior. |
-| `src/*_tests.rs` | Large sibling test suites. |
-| `src/test_support.rs` | Shared deterministic fixtures and diagnostics. |
+| `src/systems/invariants.rs` | Runtime cross-record invariants. |
+| `src/persistence.rs` | Versioned save/load, migrations, release validation, atomic writes. |
+| `src/projection.rs` | Immutable read models and self-contained HTML rendering. |
+| `src/gameplay.rs` | Deterministic player agents, counterfactual attribution, scores, findings, traces. |
+| `src/art/*` | Deterministic procedural sprite rendering and review. |
+| `src/main.rs` | CLI adapter. |
 
-## Ownership
+## State ownership
 
 ### Registry
 
-`Registry` owns immutable scenario definitions: goods, recipes, districts, institutions, routes, backgrounds, and other authored content. Runtime records refer to definitions through typed IDs.
-
-Mutable campaign values do not belong in the registry.
+`Registry` contains immutable authored definitions such as goods, recipes, districts, institutions, routes, and starting backgrounds. Runtime records refer to definitions through typed IDs.
 
 ### AppState
 
-`AppState` owns every value required to resume deterministic execution:
+`AppState` contains every mutable value required to resume deterministic execution, including the clock, RNG, ID allocators, records, derived stores, strategic state, and durable histories.
 
-- Clock, RNG state, schema version, and next-ID allocators
-- Dynasties, characters, households, businesses, and institutions
-- Markets, contracts, loans, municipal debt, property, and employment
-- Laws, public works, courts, routes, crises, information, and relationships
-- Family governance, succession state, AI objectives, outbox, chronicle, and audit history
+If a generated value can affect future behavior, it belongs in `AppState` or a record owned by it.
 
-If a generated value can affect future behavior, it belongs in `AppState` or in a record owned by `AppState`.
+### Records and synchronized stores
 
-### Records
+Records contain identity, references, local values, and lifecycle state. Consequential mutation belongs in systems.
 
-Records hold identity, references, local values, and lifecycle state. Public code reads records through accessors. Consequential mutation belongs in systems.
-
-### Synchronized stores
-
-Character, household, and business stores own records and their derived indexes. Use store methods for insertion, removal, and ownership transfer. Do not mutate backing collections and indexes independently.
+Character, household, and business stores own records plus derived indexes. Use store methods for insertion, removal, and ownership changes; do not update backing records and indexes independently.
 
 ## Canonical flows
 
@@ -114,24 +92,22 @@ Owner: `src/systems/bootstrap.rs`.
 ```text
 PlayerCommand
   -> apply_player_command
-  -> validate all preconditions
-  -> calculate resolved values
-  -> commit one atomic mutation
-  -> append durable feedback and audit data
-  -> validate invariants at the boundary
+  -> validate references, permissions, lifecycle, capacity, and arithmetic
+  -> resolve complete result
+  -> commit atomically
+  -> append durable feedback when consequential
+  -> validate invariants
 ```
 
 Owner: `src/systems/commands.rs` and the subsystem functions it invokes.
 
-Capital movement between a dynasty and its businesses is canonical system behavior, not adapter behavior. Recapitalization moves treasury into an owned business; protected owner distribution moves only cash above the business operating floor back to treasury. Both paths preflight finance versions and supported numeric ranges before mutation. Manual owner distributions reuse the same 21-day operating floor as automatic dividends so command and simulation behavior cannot disagree about what cash is safely distributable.
-
-Civic capital movement is also canonical command behavior. `FundPublicWork` can move treasury only into an unfinished public work already sponsored by the player dynasty. The command preflights treasury, civic-contribution, and remaining-budget bounds, records the private spending as civic contribution, and reuses `apply_public_work_completion` when it closes the budget. Municipal weekly spending and direct dynasty patronage therefore converge on the same completed-infrastructure effects instead of maintaining parallel civic outcome logic.
-
-Cross-record operations may use consumed validated tokens. A token must revalidate state at commit time because the state may have changed after initial validation. Business-finance tokens also capture the finance version of each affected business, so an intervening valid finance mutation invalidates the stale token even when balances would still permit the original operation.
+Multi-record operations may use consumed validated tokens. A deferred commit must revalidate the state it depends on; stale tokens must fail without mutation.
 
 ### Time advancement
 
-`advance_days` validates the requested range and registry compatibility before mutation. It executes the complete requested range against a working copy and replaces the caller's state only after every requested day succeeds. Accounting overflow, finance-version exhaustion, timeline exhaustion, or another typed simulation failure therefore leaves the original campaign unchanged. Future schedules must be created through `checked_future_day`; `i64::MAX` is outside the supported schedulable range so an obligation can never silently saturate into an unreachable due date. Each simulated day runs in this order:
+`advance_days` executes the requested range against a working copy and replaces the caller's state only if every requested day succeeds. A simulation error therefore leaves the original state unchanged.
+
+Each simulated day runs in this order:
 
 1. Reset market flow counters.
 2. Apply routes, laws, and active crisis effects.
@@ -144,140 +120,104 @@ Cross-record operations may use consumed validated tokens. A token must revalida
 9. Apply price controls.
 10. Update business lifecycle state.
 11. Advance the clock.
-12. Expire time-limited reports and office directives whose inclusive expiry day has passed.
+12. Expire time-limited reports and office directives after their inclusive expiry day.
 13. Run weekly systems on week boundaries.
 14. Run monthly systems every 30 days.
 15. Run annual and succession systems every 360 days.
-16. Refresh monotonic campaign progression from durable gameplay milestones.
+16. Refresh campaign progression from durable milestones.
 17. Append the day audit record.
-18. Validate debug invariants.
+18. Validate runtime invariants.
 
 Owners: `src/systems/simulation.rs`, `src/systems/strategic.rs`, and `src/systems/progression.rs`.
 
-Execution order is part of the simulation contract. Change it only with tests that establish the intended causal effect.
-
-Production and maintenance both decide replacement-tool demand before their apply phase. Tool quantities are bounded by the market stock visible when the plan is created, and the corresponding spending is carved out of the operating or maintenance cost the business was already going to pay. Non-tool production may route up to 80% of existing operating overhead through replacement tools, while maintenance may route its full maintenance budget through tools when stock permits. Apply therefore commits a precomputed inter-business market flow without adding a second business charge or inventing demand during mutation.
+Execution order is causal behavior. Change it only with tests that establish the intended effect.
 
 ### Persistence
 
 ```text
 save_state
-  -> release-mode validation
+  -> release validation
   -> serialize current AppState
-  -> write and synchronize a same-directory temporary file
-  -> atomically replace the destination
+  -> write and synchronize same-directory temporary file
+  -> atomically replace destination
 
 load_state
-  -> parse schema version
-  -> run explicit version-by-version migrations
+  -> read schema version
+  -> run deterministic version-by-version migrations
   -> deserialize AppState
-  -> normalize legacy derived campaign phases and expired time-limited state when required
-  -> verify derived ownership and indexes
-  -> release-mode validation
+  -> reconstruct migration-owned derived state when required
+  -> verify indexes and references
+  -> release validation
 ```
 
 Owner: `src/persistence.rs`.
 
-Release-mode persistence validation also rejects repayment-active weekly obligations whose next due
-date is at or before the most recent weekly settlement boundary. Canonical simulation always moves
-an active contract, private loan, or municipal debt schedule beyond that boundary after settlement;
-accepting an older active due date would let malformed saves resume with a permanently lagging
-schedule. Historical timestamps remain part of the date domain, including legitimate pre-campaign
-history and preserved due dates on terminal obligations.
+Serialized contract changes require a schema increment, one migration from the immediately preceding schema, migration tests, current-schema round-trip tests, and `STATUS.md` updates.
 
-A serialized contract change requires a schema increment, one migration from the previous version, migration coverage, round-trip coverage, and `STATUS.md` updates.
+### Projection and rendering
 
-### Projection
+`build_state_summary` and `build_campaign_projection` derive read models from immutable registry and state data. `render_campaign_html` consumes the campaign projection.
 
-`build_state_summary` and `build_campaign_projection` produce adapter-safe read models from immutable registry and state data. `render_campaign_html` consumes the campaign projection.
-
-Projection code may aggregate and format. It must not mutate state, infer hidden commands, or recreate validation rules.
+Projection code may aggregate and format. It must not mutate state or recreate command validation.
 
 ### Gameplay harness
 
-The harness generates state-derived `PlayerCommand` candidates, validates them through the canonical command API on cloned state, commits one viable action, advances both action and baseline branches, and compares the outcomes.
+The harness generates state-derived command candidates, validates them through `apply_player_command` on cloned state, commits through the same API, advances through `advance_days`, and compares action and no-action branches.
 
-The harness does not mutate records directly during play. See `GAMEPLAY_HARNESS.md`.
+The harness does not directly mutate domain records during play. See `GAMEPLAY_HARNESS.md`.
 
-### Art layer
+### Art
 
-The art layer is a boundary adapter that reads specifications and produces images. It owns no campaign state and encodes no domain rules.
-
-```text
-CharacterSpec -> palette and materials -> skeleton and sampled pose -> shaded surface
-  -> indexed canvas -> sprite sheet -> automated review -> HTML review page
-```
-
-Primitives never write palette indices. They write a material identifier, a per-mille light value, a depth value, and a dither flag into a `Surface`. The flag lets flat panels opt out of dithering that only curved forms need. Resolution maps light onto each material's ramp, applies ordered dithering between steps, and replaces silhouette pixels with the material's own darkest step. Form and color therefore stay independent, so a pose can be relit, recolored, or restyled without redrawing it.
-
-All art arithmetic is integer. Angles are binary radians, joint positions resolve in sixteenth-pixel units, and shading uses fixed-point normals, so a specification renders identically on every platform and in both build profiles.
-
-Owners: `src/art/*`. The harness entry point is `build_art_review`; the page renderer is `render_art_review_html`.
+The art layer owns deterministic rendering specifications, integer geometry/shading, sprite composition, encoding, automated review, and review HTML. It owns no campaign state and no gameplay rules.
 
 ## Determinism contract
 
 Given the same registry, state, seed, command sequence, and day count, execution must produce identical state.
 
-Required practices:
-
 - Use `state.rng` for simulation randomness.
 - Use ordered collections or explicit sorting for result-affecting iteration.
 - Use typed IDs as stable tie-breakers.
-- Persist RNG state and generated values that affect later behavior.
+- Persist RNG state and generated values that affect future behavior.
 - Exclude wall-clock time, environment state, filesystem order, external services, and sleeps from core logic.
 
-## Mutation and accounting
+## Mutation and accounting contract
 
 - Validate references, ownership, permissions, lifecycle, capacities, ranges, and arithmetic before mutation.
 - Failed operations leave state unchanged.
-- Calculate all balances and ownership results before committing multi-record transfers.
+- Calculate complete balance and ownership results before multi-record commits.
 - Use fixed-point helpers from `src/money.rs`.
 - Use wide intermediates for multiply-then-divide arithmetic.
-- Use `checked_future_day` for runtime schedules instead of saturating date arithmetic.
+- Use shared checked scheduling helpers for future dates.
 - Keep indexes, ownership, occupancy, collateral, employment, and lifecycle state synchronized.
 - Represent durable external work in state before an adapter performs it.
 
 ## Invariant layers
 
-State validity is enforced at three layers:
+State validity is enforced by:
 
-1. Types and visibility prevent unsupported direct mutation.
-2. System validation rejects invalid operations before commit.
-3. Runtime and persistence validators detect cross-record inconsistency.
+1. Types and visibility that restrict unsupported mutation.
+2. System validation before commit.
+3. Runtime invariants during simulation.
+4. Release-mode validation at persistence boundaries.
 
-Important invariant groups:
-
-- Registry and record references resolve.
-- Store indexes are complete and unique.
-- Ownership, occupancy, tenancy, and collateral agree.
-- Related lifecycle states agree.
-- Financial and quantity values remain within domain bounds.
-- Derived values match authoritative records.
-- Histories are chronological.
-- Next-ID allocators are ahead of all allocated IDs and never use the reserved invalid sentinel.
-  The terminal valid counter may be persisted; a subsequent allocation must fail atomically with
-  `IdentifierAllocationError` rather than wrap or partially mutate state.
+Important invariant groups include registry references, derived indexes, ownership and occupancy, lifecycle agreement, numeric bounds, histories, and ID allocator validity.
 
 ## Extension map
 
-| Change | Primary owner | Required adjacent work |
+| Change | Primary owner | Adjacent work |
 |---|---|---|
-| Add immutable Rivergate content | `src/registry/mod.rs` | Registry tests, bootstrap, projections when visible. |
-| Add persistent state | `src/core/*`, `src/core/state.rs` | Bootstrap or migration, validation, invariants, projections, tests. |
-| Add a player command | `src/systems/commands.rs` | Command tests, feedback, projections, gameplay integration, CLI smoke when needed. |
-| Add a daily economic rule | `src/systems/simulation.rs` | Simulation tests, invariants, causal observability. |
-| Add scheduled strategic behavior | `src/systems/strategic.rs` | Strategic tests, feedback, gameplay snapshots. |
-| Add cross-record transfer | Owning system or `transactions.rs` | Typed errors, atomicity tests, stale-token tests. |
-| Add read-only output | `src/projection.rs` | Projection and rendering tests. |
-| Change save format | `src/persistence.rs` | Schema, migration, validation, round-trip tests, status update. |
-| Extend gameplay evaluation | `src/gameplay.rs` | Harness schema, tests, and documentation. |
-| Add CLI syntax | `src/main.rs` | CLI smoke and README update. |
-| Add a drawing primitive or material | `src/art/shape.rs`, `src/art/surface.rs` | Shading tests, determinism tests. |
-| Add a sprite subject or clip | `src/art/sprite.rs`, `src/art/anim.rs` | Review checks, harness coverage, status update. |
-| Add an art review check | `src/art/lint.rs` | Harness report, HTML sheet, and tests. |
+| Immutable Rivergate content | `src/registry/mod.rs` | Registry tests, bootstrap, projection when visible. |
+| Persistent state | `src/core/*`, `src/core/state.rs` | Bootstrap/migration, validation, invariants, projection, tests. |
+| Player command | `src/systems/commands.rs` | Command tests, feedback, projection, gameplay integration, CLI smoke when needed. |
+| Daily economic rule | `src/systems/simulation.rs` | Simulation tests, causal ordering, invariants. |
+| Scheduled strategic rule | `src/systems/strategic.rs` | Strategic tests, feedback, gameplay snapshots. |
+| Cross-record transaction | Owning system or `src/systems/transactions.rs` | Typed errors, atomicity, stale-token tests. |
+| Read-only output | `src/projection.rs` | Projection/rendering tests. |
+| Save format | `src/persistence.rs` | Schema, migration, release validation, round trip, status. |
+| Gameplay evaluation | `src/gameplay.rs` | Report schema, tests, `GAMEPLAY_HARNESS.md`. |
+| CLI syntax | `src/main.rs` | CLI smoke, README workflow when relevant. |
+| Art primitive/subject/check | `src/art/*` | Determinism, review coverage, schema/status when serialized output changes. |
 
 ## Public API
 
-`src/lib.rs` defines the supported integration surface. Prefer adding stable operations there instead of exposing record internals.
-
-The authoritative player mutation schema is `PlayerCommand` in `src/systems/commands.rs`.
+`src/lib.rs` defines the supported integration surface. Prefer stable operations there over exposing record internals. `PlayerCommand` in `src/systems/commands.rs` is the authoritative player mutation schema.

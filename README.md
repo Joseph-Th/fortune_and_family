@@ -1,8 +1,8 @@
 # Civic Dynasty
 
-Civic Dynasty is a deterministic dynasty, economic, and political simulation written in Rust. The repository contains the Rivergate simulation engine, a CLI, versioned JSON saves, read-only projections, a self-contained HTML dashboard, and a deterministic gameplay-analysis harness.
+Civic Dynasty is a deterministic Rust simulation of a merchant or artisan dynasty operating inside a living city economy. Rivergate combines businesses, households, markets, credit, property, institutions, law, public works, crises, family governance, and succession in one persistent campaign state.
 
-The central gameplay arc is:
+The core arc is:
 
 ```text
 productive work -> commercial standing -> institutional access -> civic power -> dynastic continuity
@@ -10,15 +10,21 @@ productive work -> commercial standing -> institutional access -> civic power ->
 
 ## Start here
 
-For a new contributor or agent:
+For a new contributor or agent, use this reading order:
 
-1. Read this file for the project map and commands.
-2. Read `ARCHITECTURE.md` before changing cross-domain behavior.
-3. Read `AGENTS.md` before editing code.
-4. Read the relevant section of `STATUS.md` to confirm current capability and limits.
-5. Use `DESIGN.md`, `TESTING.md`, or `GAMEPLAY_HARNESS.md` only for the task they own.
+| Need | Read |
+|---|---|
+| Repository orientation and commands | `README.md` |
+| Ownership, dependency direction, mutation paths, execution order | `ARCHITECTURE.md` |
+| Safe change procedure and repository rules | `AGENTS.md` |
+| Product intent and design constraints | `DESIGN.md` |
+| Current schemas, capabilities, API surface, and limits | `STATUS.md` |
+| Test tiers and assertion standards | `TESTING.md` |
+| Gameplay-agent analysis and report semantics | `GAMEPLAY_HARNESS.md` |
 
-Before editing, run:
+Each contract has one owner. Link to the owning document instead of restating it elsewhere.
+
+Before editing:
 
 ```bash
 git status --short
@@ -27,38 +33,50 @@ bash scripts/test.sh fast
 
 Preserve unrelated working-tree changes.
 
-## Documentation map
+## Mental model
 
-| Document | Authority |
-|---|---|
-| `README.md` | Setup, commands, repository navigation, and entry points. |
-| `ARCHITECTURE.md` | State ownership, dependency direction, mutation flows, execution order, and extension points. |
-| `AGENTS.md` | Repository rules and change procedures. |
-| `DESIGN.md` | Product fantasy, gameplay loop, design constraints, and scope. |
-| `STATUS.md` | Current schemas, implemented systems, public surface, and deliberate limits. |
-| `TESTING.md` | Test tiers, test design, and completion gates. |
-| `GAMEPLAY_HARNESS.md` | Player-agent analysis, report semantics, and harness integration. |
+```text
+Registry definitions + AppState
+            |
+            v
+       canonical systems
+            |
+            v
+persistence / CLI / projections / HTML / gameplay analysis / art
+```
 
-Do not duplicate a contract across documents. Link to the owning document instead.
+- `Registry` contains immutable Rivergate definitions.
+- `AppState` contains all mutable state required for deterministic continuation.
+- Records contain identity, references, local values, and lifecycle state.
+- Systems validate and perform canonical mutations.
+- Adapters serialize, render, inspect, or invoke systems. They do not own domain rules.
+
+Given the same registry, state, seed, command sequence, and day count, the simulation must produce identical state.
 
 ## Requirements
 
 - Rust 1.97 or newer
 - Bash for repository scripts
-- Python for CLI JSON smoke validation
+- Python for documentation and CLI structured-output checks
 - `cargo-audit` for the complete security gate
 
 The crate uses Rust 2024 and has no runtime service dependency.
 
-## Quick start
+## Common commands
 
-Run the fast library suite:
+Fast edit-test loop:
 
 ```bash
-bash scripts/test.sh fast
+bash scripts/test.sh fast <filter>
 ```
 
-Create a campaign:
+Normal pre-commit loop:
+
+```bash
+bash scripts/test.sh standard
+```
+
+Create and inspect a campaign:
 
 ```bash
 cargo run --locked -- new \
@@ -68,11 +86,7 @@ cargo run --locked -- new \
   --founder "Elian Valeri" \
   --background baker \
   --advance 30
-```
 
-Advance and inspect it:
-
-```bash
 cargo run --locked -- simulate saves/valeri.json --days 360
 cargo run --locked -- summary saves/valeri.json
 cargo run --locked -- inspect saves/valeri.json
@@ -87,115 +101,69 @@ cargo run --locked -- execute saves/valeri.json \
   --command '{"SetHouseGovernance":{"governance":"FamilyPartnership"}}'
 ```
 
-Render and review sprites:
+Run gameplay analysis or sprite review:
 
 ```bash
+cargo run --release --locked -- playtest
 cargo run --locked -- art --output target/sprite-review.html --seeds 2 --scale 6
 ```
 
-The review page is self-contained: it plays every clip, magnifies every frame, shows palettes, offers silhouette and pixel-grid toggles, and lists automated findings. Add `--json` for the machine-readable report and `--fail-on-critical` to gate on it.
-
-Run `cargo run --locked -- --help` or a subcommand with `--help` for the authoritative CLI syntax. Starting backgrounds are `baker`, `cloth-trader`, and `blacksmith`.
-
-## Core model
-
-The codebase follows a Registry / AppState / Record / System model:
-
-- `Registry` owns immutable Rivergate definitions.
-- `AppState` owns all mutable and serializable campaign state.
-- Records own identity, references, local values, and lifecycle state.
-- Systems validate and perform canonical mutations.
-- Persistence, CLI, projections, rendering, and gameplay analysis are boundary adapters.
-
-The same registry, state, seed, command sequence, and day count must produce identical state.
+Use `cargo run --locked -- --help` or a subcommand with `--help` for CLI syntax. `TESTING.md` owns test commands and completion gates.
 
 ## Repository map
 
 ```text
 src/
   core/
-    records.rs        Primary population and economic records
+    records.rs        Core population and economic records
     extended.rs       Strategic, civic, family, finance, and relationship records
-    state.rs          AppState, synchronized stores, clock, and ID allocation
+    state.rs          AppState, clock, synchronized stores, ID allocation
   registry/mod.rs     Immutable Rivergate definitions
+  ids.rs              Typed persistent IDs
+  money.rs            Fixed-point Money and Quantity
+  rng.rs              Serializable deterministic RNG
   systems/
     bootstrap.rs      New campaign construction
-    commands.rs       Player command schema and dispatch
-    simulation.rs     Daily economic pipeline
-    strategic.rs      Weekly, monthly, annual, and cross-domain systems
-    transactions.rs   Reusable validated transaction primitives
-    invariants.rs     Debug runtime invariants
-  persistence.rs      Save/load, migrations, and release validation
-  projection.rs       Read-only projections and HTML rendering
+    commands.rs       PlayerCommand schema and dispatch
+    legal.rs          Grounded legal claims
+    progression.rs    Campaign progression milestones
+    simulation.rs     Daily simulation pipeline
+    strategic.rs      Scheduled and cross-domain systems
+    transactions.rs   Reusable validated transactions
+    invariants.rs     Runtime invariant checks
+  persistence.rs      Save/load, migrations, release validation
+  projection.rs       Read-only projections and HTML dashboard
   gameplay.rs         Deterministic gameplay harness
-  art/
-    color.rs          Color model, shading ramps, and palettes
-    math.rs           Fixed-point angles and trigonometry
-    canvas.rs         Indexed pixel buffers
-    surface.rs        Material, light, and depth buffers
-    shape.rs          Shaded rasterization primitives
-    rig.rs            Skeletons, poses, and the humanoid rig
-    anim.rs           Keyframed animation clips
-    sprite.rs         Character specifications and sheet composition
-    png.rs            Indexed PNG encoding
-    lint.rs           Automated sprite review checks
-    harness.rs        Visual review harness and HTML contact sheet
+  art/                Procedural sprite renderer and review harness
   main.rs             CLI adapter
   *_tests.rs          Large sibling test suites
   test_support.rs     Shared deterministic fixtures and diagnostics
 scripts/
-  check_docs.py       Documentation contract consistency checks
+  check_docs.py       Documentation consistency checks
   test.sh             Test tier runner
-  verify_cli.sh       End-to-end CLI smoke suite
+  verify_cli.sh       CLI smoke groups
 ```
 
-## Primary entry points
+## Supported library entry points
 
-The supported library facade is exported from `src/lib.rs`.
+`src/lib.rs` is the authoritative public facade. The main operations are:
 
 | Operation | Entry point |
 |---|---|
-| Build definitions | `build_rivergate_registry` |
-| Create campaign | `build_new_game` |
+| Build Rivergate definitions | `build_rivergate_registry` |
+| Create a campaign | `build_new_game` |
 | Advance time | `advance_days` |
-| Apply player action | `apply_player_command` |
-| Quote strategic acquisitions or liquidation | `quote_business_acquisition`, `quote_property_liquidation` |
+| Apply a player action | `apply_player_command` |
+| Quote supported strategic actions | `quote_business_acquisition`, `quote_property_liquidation` |
 | Save or load | `save_state`, `load_state` |
 | Build read models | `build_state_summary`, `build_campaign_projection` |
 | Render dashboard | `render_campaign_html` |
 | Run gameplay analysis | `run_gameplay_harness`, `render_gameplay_report` |
-| Render and review sprites | `build_art_review`, `render_art_review_html`, `build_art_review_report` |
+| Render and review sprites | `build_art_review`, `build_art_review_report`, `render_art_review_html` |
 | Check runtime invariants | `validate_invariants` |
 
-`PlayerCommand` in `src/systems/commands.rs` is the authoritative player-command schema.
+`PlayerCommand` in `src/systems/commands.rs` is the authoritative player mutation schema.
 
-## Library example
+## Working rule
 
-```rust
-use civic_dynasty::{
-    NewGameConfig, advance_days, build_campaign_projection, build_new_game,
-    build_rivergate_registry,
-};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let registry = build_rivergate_registry();
-    let mut state = build_new_game(&registry, NewGameConfig::default())?;
-    advance_days(&registry, &mut state, 30)?;
-    let projection = build_campaign_projection(&registry, &state);
-
-    println!("{}", projection.scenario.name);
-    Ok(())
-}
-```
-
-## Verification
-
-Use focused tests while editing and the complete gate before finishing cross-cutting work:
-
-```bash
-bash scripts/test.sh fast <filter>
-bash scripts/test.sh docs
-bash scripts/test.sh all
-```
-
-`TESTING.md` defines the full workflow. `GAMEPLAY_HARNESS.md` defines when systemic player-agent analysis is required.
+Find the owner before changing behavior. Trace the public entry point to the canonical system, identify the state and invariants it owns, run the narrowest relevant tests, and update the one document that owns any changed contract.

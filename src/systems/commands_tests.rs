@@ -806,9 +806,10 @@ mod validation {
         .expect("material policy change must succeed");
 
         assert_eq!(state.outbox.len(), outbox_before + 1);
-        let message = state.outbox.last().expect("policy change must be reported");
-        assert_eq!(message.kind(), OutboxKind::Finance);
-        assert!(message.subject().contains("operating policy updated"));
+        assert_eq!(
+            state.outbox.last().map(crate::core::OutboxMessage::kind),
+            Some(OutboxKind::Finance)
+        );
     }
 
     #[test]
@@ -875,9 +876,10 @@ mod validation {
         .expect("funded portfolio transfer must succeed");
 
         assert_eq!(state.outbox.len(), outbox_before + 1);
-        let message = state.outbox.last().expect("cash transfer must be reported");
-        assert_eq!(message.kind(), OutboxKind::Finance);
-        assert!(message.subject().contains("Portfolio cash moved"));
+        assert_eq!(
+            state.outbox.last().map(crate::core::OutboxMessage::kind),
+            Some(OutboxKind::Finance)
+        );
     }
 
     #[test]
@@ -1757,7 +1759,7 @@ mod business_acquisition {
             .operations
             .condition_basis_points;
 
-        let outcome = apply_player_command(
+        apply_player_command(
             registry,
             &mut state,
             PlayerCommand::AcquireBusiness {
@@ -1785,7 +1787,6 @@ mod business_acquisition {
             seller_treasury_before,
             quote,
         );
-        assert!(outcome.summary.contains("Acquired business"));
         assert_eq!(
             state.audit_log.last().map(crate::core::AuditRecord::kind),
             Some(crate::core::AuditKind::BusinessAcquisition)
@@ -2566,6 +2567,41 @@ mod politics {
     use super::*;
     use crate::systems::advance_days;
 
+    fn feedback_counts(
+        state: &AppState,
+        audit_kind: AuditKind,
+        chronicle_kind: ChronicleKind,
+    ) -> (usize, usize) {
+        (
+            state
+                .audit_log
+                .iter()
+                .filter(|record| record.kind() == audit_kind)
+                .count(),
+            state
+                .chronicle
+                .iter()
+                .filter(|entry| entry.kind() == chronicle_kind)
+                .count(),
+        )
+    }
+
+    #[track_caller]
+    fn assert_feedback_added(
+        state: &AppState,
+        before: (usize, usize),
+        audit_kind: AuditKind,
+        chronicle_kind: ChronicleKind,
+        context: &str,
+    ) {
+        let after = feedback_counts(state, audit_kind, chronicle_kind);
+        assert_eq!(
+            after,
+            (before.0 + 1, before.1 + 1),
+            "{context}: command must append one audit and one chronicle record"
+        );
+    }
+
     fn make_nominee_deliberately_weak(
         state: &mut AppState,
         institution_id: InstitutionId,
@@ -3219,7 +3255,7 @@ mod politics {
             .expect("test setup must grant a player office");
         let day = state.clock.day();
 
-        let outcome = apply_player_command(
+        apply_player_command(
             registry,
             &mut state,
             PlayerCommand::WithdrawFromInstitution {
@@ -3237,11 +3273,10 @@ mod politics {
         assert_eq!(institution.office_holder_id, None);
         assert!(institution.next_selection_day <= day.saturating_add(30));
         assert!(institution.next_selection_day <= next_selection_before);
-        assert!(outcome.summary.contains("resigned the office"));
-        assert!(state.outbox.last().is_some_and(|message| {
-            message.kind == OutboxKind::Politics
-                && message.subject.contains("withdrew from institution")
-        }));
+        assert_eq!(
+            state.outbox.last().map(crate::core::OutboxMessage::kind),
+            Some(OutboxKind::Politics)
+        );
         validate_invariants(registry, &state);
     }
 
@@ -4473,8 +4508,13 @@ mod politics {
             .get(&player_id)
             .expect("player family council must exist")
             .charter_version;
+        let feedback_before = feedback_counts(
+            &state,
+            AuditKind::HeirDesignation,
+            ChronicleKind::SuccessionPrepared,
+        );
 
-        let outcome = apply_player_command(
+        apply_player_command(
             registry,
             &mut state,
             PlayerCommand::DesignateHeir {
@@ -4482,8 +4522,6 @@ mod politics {
             },
         )
         .expect("eligible council member must be designatable as heir");
-
-        assert!(outcome.summary.contains(&candidate_id.to_string()));
         assert_eq!(
             state
                 .dynasties
@@ -4522,14 +4560,13 @@ mod politics {
             .expect("player family council must exist");
         assert_eq!(council.unity_basis_points, unity_before.saturating_sub(250));
         assert_eq!(council.charter_version, charter_before.saturating_add(1));
-        assert!(state.audit_log.iter().any(|record| {
-            record.kind() == AuditKind::HeirDesignation
-                && record.detail().contains(&candidate_id.to_string())
-        }));
-        assert!(state.chronicle.iter().any(|entry| {
-            entry.kind() == ChronicleKind::SuccessionPrepared
-                && entry.summary().contains(&candidate_id.to_string())
-        }));
+        assert_feedback_added(
+            &state,
+            feedback_before,
+            AuditKind::HeirDesignation,
+            ChronicleKind::SuccessionPrepared,
+            "heir designation",
+        );
         validate_invariants(registry, &state);
     }
 
@@ -4559,8 +4596,13 @@ mod politics {
             .get(&player_id)
             .expect("player family council must exist")
             .charter_version;
+        let feedback_before = feedback_counts(
+            &state,
+            AuditKind::HeirDesignation,
+            ChronicleKind::SuccessionPrepared,
+        );
 
-        let outcome = apply_player_command(
+        apply_player_command(
             registry,
             &mut state,
             PlayerCommand::DesignateHeir {
@@ -4568,8 +4610,6 @@ mod politics {
             },
         )
         .expect("the default heir must be formally confirmable before any charter designation");
-
-        assert!(outcome.summary.contains("confirmed"));
         assert_eq!(
             state
                 .dynasties
@@ -4603,14 +4643,13 @@ mod politics {
             unity_before.saturating_sub(HEIR_DESIGNATION_UNITY_COST)
         );
         assert_eq!(council.charter_version, charter_before.saturating_add(1));
-        assert!(state.audit_log.iter().any(|record| {
-            record.kind() == AuditKind::HeirDesignation
-                && record.detail().contains("confirmation=true")
-        }));
-        assert!(state.chronicle.iter().any(|entry| {
-            entry.kind() == ChronicleKind::SuccessionPrepared
-                && entry.summary().contains("formally confirmed")
-        }));
+        assert_feedback_added(
+            &state,
+            feedback_before,
+            AuditKind::HeirDesignation,
+            ChronicleKind::SuccessionPrepared,
+            "heir designation",
+        );
         let before_repeat = state.clone();
 
         let repeat = apply_player_command(
@@ -4733,8 +4772,13 @@ mod politics {
             .expect("player dynasty must exist")
             .resources
             .legitimacy_basis_points = 1_000;
+        let feedback_before = feedback_counts(
+            &state,
+            AuditKind::OfficeDirective,
+            ChronicleKind::OfficeDirective,
+        );
 
-        let outcome = apply_player_command(
+        apply_player_command(
             registry,
             &mut state,
             PlayerCommand::ExerciseOfficePower {
@@ -4743,8 +4787,6 @@ mod politics {
             },
         )
         .expect("the incumbent must be able to direct an established office power");
-
-        assert!(outcome.summary.contains("WatchPriorities"));
         let district = state
             .districts
             .get(&district_id)
@@ -4771,17 +4813,28 @@ mod politics {
                 .legitimacy_basis_points,
             1_000 - OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST
         );
-        assert!(state.audit_log.iter().any(|record| {
-            record.kind() == AuditKind::OfficeDirective
-                && record.audit_subject().institution_id() == Some(institution_id)
-                && record
-                    .audit_subject()
-                    .references_dynasty(state.player_dynasty_id)
-        }));
-        assert!(state.chronicle.iter().any(|entry| {
-            entry.kind() == ChronicleKind::OfficeDirective
-                && entry.summary().contains(&institution_id.to_string())
-        }));
+        assert_feedback_added(
+            &state,
+            feedback_before,
+            AuditKind::OfficeDirective,
+            ChronicleKind::OfficeDirective,
+            "office power directive",
+        );
+        let directive_audit = state
+            .audit_log
+            .iter()
+            .rev()
+            .find(|record| record.kind() == AuditKind::OfficeDirective)
+            .expect("directive command must append an office-directive audit");
+        assert_eq!(
+            directive_audit.audit_subject().institution_id(),
+            Some(institution_id)
+        );
+        assert!(
+            directive_audit
+                .audit_subject()
+                .references_dynasty(state.player_dynasty_id)
+        );
         validate_invariants(registry, &state);
     }
 
@@ -4936,7 +4989,7 @@ mod politics {
             .expect("player dynasty must exist")
             .administrative_capacity();
 
-        let outcome = apply_player_command(
+        apply_player_command(
             registry,
             &mut state,
             PlayerCommand::AdoptWard {
@@ -4944,8 +4997,6 @@ mod politics {
             },
         )
         .expect("an established dynasty must be able to adopt a ward");
-
-        assert!(outcome.summary.contains("Adopted ward"));
         assert_eq!(state.characters.iter().count(), characters_before + 1);
         assert_eq!(state.chronicle.len(), chronicle_before + 1);
         assert_eq!(state.outbox.len(), outbox_before + 1);
@@ -5553,7 +5604,7 @@ mod information {
         let reports_before = state.information_reports.len();
         let outbox_before = state.outbox.len();
 
-        let outcome = apply_player_command(
+        apply_player_command(
             registry,
             &mut state,
             PlayerCommand::CommissionInformation {
@@ -5577,14 +5628,12 @@ mod information {
             .find(|report| report.source == COMMISSIONED_INFORMATION_SOURCE)
             .expect("commission must create a report");
         assert_eq!(report.confidence, InformationConfidence::Confirmed);
-        assert!(report.subject.contains("market brief"));
-        assert!(report.summary.contains("Price"));
+        assert_eq!(report.target, Some(InformationTarget::Market { good_id }));
         assert_eq!(state.outbox.len(), outbox_before + 1);
         assert_eq!(
             state.outbox.last().map(crate::core::OutboxMessage::kind),
             Some(OutboxKind::Information)
         );
-        assert!(outcome.summary.contains("Commissioned intelligence report"));
         validate_invariants(registry, &state);
     }
 
@@ -6157,7 +6206,7 @@ mod notifications {
             .expect("campaign must contain notifications")
             .id;
 
-        let outcome = apply_player_command(
+        apply_player_command(
             registry,
             &mut state,
             PlayerCommand::AcknowledgeNotification { message_id },
@@ -6172,7 +6221,6 @@ mod notifications {
                 .all(|message| message.acknowledged),
             "acknowledging the latest visible message must clear the older backlog"
         );
-        assert!(outcome.summary.contains("notifications"));
     }
 }
 

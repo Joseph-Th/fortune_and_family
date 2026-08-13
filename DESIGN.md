@@ -1,17 +1,17 @@
 # Civic Dynasty Design
 
-This document defines the product contract: player fantasy, gameplay loop, system relationships, campaign structure, and scope. It does not describe implementation status or code structure.
+This document defines product intent: player fantasy, gameplay loop, system relationships, campaign structure, and scope. It does not define code ownership or current implementation status.
 
-Use `STATUS.md` for current capability and `ARCHITECTURE.md` for implementation ownership.
+Use `ARCHITECTURE.md` for implementation ownership and `STATUS.md` for current capability.
 
 ## Product definition
 
 | Item | Definition |
 |---|---|
-| Genre | Dynasty simulation, economic strategy, political strategy, and social simulation |
+| Genre | Dynasty simulation, economic strategy, political strategy, social simulation |
 | Setting | One late-medieval European-inspired city with abstract regional connections |
 | Player role | Founder and successive heads of a merchant or artisan dynasty |
-| Core fantasy | Turn useful work into commercial standing, institutional power, civic influence, and durable family continuity |
+| Core fantasy | Convert useful work into commercial standing, institutional power, civic influence, and durable family continuity |
 | Campaign scale | One detailed city across multiple generations |
 | Primary mode | Single-player systemic campaign |
 
@@ -19,9 +19,9 @@ Use `STATUS.md` for current capability and `ARCHITECTURE.md` for implementation 
 
 Civic Dynasty is about building a family institution inside a living political economy.
 
-The player begins with a household, a trade, limited capital, and weak protection. Reliable work creates income and reputation. Income creates property, credit, information, and patronage. Those assets create access to guilds, courts, councils, markets, charities, and public office. Institutional power changes laws, contracts, enforcement, public works, and trade access. Every gain creates obligations, rivals, dependencies, and succession risk.
+The player begins with a household, a trade, limited capital, and weak protection. Reliable work creates income and reputation. Those create property, credit, information, patronage, and family capacity. Institutional access converts those assets into authority over laws, contracts, public works, courts, trade, and enforcement. Every gain also creates obligations, rivals, dependencies, and succession risk.
 
-The dynasty should not only become richer. It should become embedded in the city.
+The dynasty should become embedded in the city, not merely wealthy.
 
 A feature belongs when it does at least one of the following:
 
@@ -34,16 +34,14 @@ A feature belongs when it does at least one of the following:
 
 Exclude or simplify features that add routine input without strategic consequence, spectacle without persistent state, or progression detached from the simulated world.
 
-## Core player fantasy
+## Player fantasy
 
-The fantasy has six connected parts:
-
-1. **Productive competence.** The dynasty earns legitimacy by producing, trading, managing, lending, or serving reliably.
-2. **Commercial intelligence.** The player reads shortages, counterparties, districts, credit risk, and seasonal pressure.
-3. **Social ascent.** Quality, reliability, education, family strategy, service, and patronage create standing.
-4. **Institutional control.** The dynasty gains authority over concrete economic and civic outcomes.
-5. **Dynastic continuity.** Family members, wards, managers, allies, and heirs determine what can be controlled safely.
-6. **Historical imprint.** Ownership, laws, debts, public works, institutions, relationships, and public memory preserve major decisions.
+1. **Productive competence.** Produce, trade, manage, lend, or serve reliably.
+2. **Commercial intelligence.** Read shortages, counterparties, districts, credit risk, and disruption.
+3. **Social ascent.** Convert quality, reliability, education, family strategy, service, and patronage into standing.
+4. **Institutional control.** Gain authority over concrete economic and civic outcomes.
+5. **Dynastic continuity.** Build family, management, alliance, and succession capacity that survives individual characters.
+6. **Historical imprint.** Leave durable ownership, laws, debts, works, relationships, and public memory.
 
 ## Core loop
 
@@ -56,127 +54,84 @@ observe conditions
   -> adapt the dynasty's structure and strategy
 ```
 
-Routine operation should be delegated. The player should set policy, choose exceptions, allocate scarce resources, and respond to consequential changes.
+Routine operation should be delegated. The player should set policy, allocate scarce resources, choose exceptions, and respond to consequential change.
 
 ## Campaign arc
 
 ### Foundation
 
-The player stabilizes the household and first business, builds reliable supply and sales, and establishes a commercial record.
+Stabilize the household and first business. Learn the local market and build a reliable commercial record.
 
 ### Establishment
 
-The dynasty acquires property, credit relationships, trained family capacity, stronger counterparties, and social standing. Once reputation and a developing commercial record are credible, the player can begin patronage and coalition-building before the dynasty is ready to contest public office.
+Acquire stronger counterparties, property, credit relationships, trained family capacity, information, and social standing.
 
 ### Institutional ascent
 
-Sustained commercial credibility turns maturing patronage into candidacy and creates access to guild offices, courts, laws, public works, and municipal finance. Officeholding introduces duties, scrutiny, administrative load, and enemies.
+Convert commercial credibility and patronage into membership, office, civic influence, and political obligations.
 
 ### Dynastic governance
 
-The player manages a portfolio of businesses, property, offices, obligations, family roles, and public commitments. The unit of decision shifts from individual operation to institutional governance. Officeholding must provide active directives with visible district tradeoffs, not only passive periodic bonuses. A directive creates six months of institutional momentum, so political choices continue changing businesses, households, markets, relationships, or crises after the initial order.
+Manage a portfolio of businesses, property, offices, family roles, debts, relationships, and public commitments. The unit of decision shifts from operating one enterprise to governing an institutionally embedded house.
 
 ### Succession and legacy
 
-A succession tests whether control depends on one exceptional person or on a durable organization. The player can prepare that test by formally confirming the default adult heir or choosing another adult council member, accepting legitimacy and family-unity costs to bind the succession into the family charter. Formal preparation reduces the cohesion, loyalty, and legitimacy shock when succession actually occurs. Legacy evaluates both family outcomes and civic consequences.
+Test whether control depends on one person or on a durable organization. Inheritance should alter cohesion, legitimacy, responsibilities, and strategic position while preserving the consequences of earlier generations.
 
-These phases may overlap, but they should remain strategically distinct. Political authority should not arrive before sustained commercial performance, and late play should not remain an enlarged version of the opening business loop.
+The phases may overlap, but they must remain strategically distinct. Political authority should require sustained commercial credibility, and late play should not be an enlarged version of the opening business loop.
 
 ## Design pillars
 
 ### Living political economy
 
-Production, consumption, prices, wages, property, credit, law, and politics are causally connected. Economic changes create political interests. Political decisions create material winners and losers.
+Production, consumption, prices, wages, property, credit, law, institutions, and public conditions are causally connected. Economic changes create political interests; political decisions create material winners and losers.
 
 ### Multiple forms of power
 
-Cash, property, credit, reputation, legitimacy, office, information, kinship, coercion, administrative capacity, and public support are distinct resources. They can be converted, but not freely or universally.
+Cash, property, credit, reputation, legitimacy, office, information, kinship, coercion, administrative capacity, and public support are distinct resources. Conversion between them must have limits and costs.
 
 ### Growth changes the game
 
-Expansion changes the player’s unit of decision. Direct control becomes less effective as holdings, offices, family members, and obligations increase.
+Expansion increases delegation, coordination, exposure, and obligation. A larger dynasty should gain strategic reach while becoming harder to manage safely.
 
-### People have interests
+### People and institutions have interests
 
-Important characters are not interchangeable bonuses. Competence, loyalty, ambition, claims, obligations, and relationships affect what they will support, inherit, expose, or resist.
+Characters and institutions are not interchangeable bonuses. Competence, loyalty, ambition, claims, obligations, membership, ownership, and relationships should affect behavior and available strategies.
 
 ### The city remembers
 
-Property, laws, contracts, court outcomes, public works, debts, grudges, obligations, and family reputation persist beyond the event that created them.
+Ownership, contracts, court outcomes, public works, debts, relationships, laws, and family reputation persist beyond the event that created them.
 
 ### Information is strategic
 
-Information has a source, confidence, age, subject, and access path. The player should distinguish confirmed state from uncertain reports. Commissioned intelligence must unlock a discrete follow-up decision, such as renegotiating a contract, approaching a house, or targeting a district problem, with an explicit financial or political cost.
+Information has source, confidence, age, subject, and access path. It should reduce uncertainty or open a concrete follow-up decision, not function as a universal score.
 
 ### Power creates exposure
 
-A larger dynasty has more tools and more vulnerabilities: administrative friction, political scrutiny, concentrated assets, dependent partners, public expectations, family division, and succession risk.
+Wealth and office create administrative burden, scrutiny, coalition resistance, dependent counterparties, public obligations, family division, and succession risk.
 
 ### Recovery has a cost
 
-Major setbacks should be recoverable through restructuring, asset sale, recapitalization, coalition change, marriage, office, resignation, or retreat. Recovery should cost time, wealth, position, public resources, or future obligation.
+Failure should be recoverable through restructuring, asset sale, recapitalization, coalition change, office change, family intervention, or retreat. Recovery must consume time, wealth, position, or future obligation.
 
-## System contracts
+## System expectations
 
-### Dynasty and family
+| Domain | Design expectation |
+|---|---|
+| Dynasty and family | Family structure changes succession, management capacity, office reach, loyalty, and continuity. Education and governance create strategic specialization. |
+| Households and labor | Households consume, work, pay rent, experience welfare changes, and respond politically. Labor connects business outcomes to people. |
+| Businesses | Businesses have distinct cash, inventory, policy, management, capacity, quality, condition, and lifecycle. Growth and recovery require capital and administration. |
+| Markets and contracts | Prices respond to supply, demand, scarcity, policy, and disruption. Contracts create durable counterparties and obligations. |
+| Credit and debt | Credit creates leverage, dependency, collateral risk, restructuring, and enforceable consequences. |
+| Property | Property links wealth to districts, rent, occupancy, collateral, public works, and political interests. It is useful but not perfectly liquid. |
+| Institutions and office | Access is earned. Office controls concrete civic outcomes while imposing duties, administrative load, coalition response, and loss risk. |
+| Law and courts | Claims arise from concrete obligations or events. Procedure and judgment must resolve the underlying dispute rather than create duplicate economic paths. |
+| Districts | Employment, food access, rent, safety, sanitation, infrastructure, ownership, and institutions shape local conditions and public response. |
+| Relationships | Trust, fear, respect, obligation, and resentment alter cooperation, access, and risk. |
+| Rivals | Rival dynasties pursue explicit objectives through the same political economy rather than a separate ruleset. |
+| Crises | Crises expose structural weaknesses, offer several defensible responses, and leave persistent consequences. |
 
-Family structure determines succession, parallel capacity, office eligibility, management coverage, and long-term continuity. Education, governance, wards, marriage, loyalty, claims, and deliberate heir designation should create strategic differences rather than static bonuses. Advanced education remains a once-per-year commitment for each person, while the house can sponsor a different member every six months. A broad dynasty can still prepare specialists in parallel, but education should remain an occasional strategic commitment rather than scheduled quarterly optimization. When cohesion deteriorates, the player can convene a costly family council to settle obligations and rebuild unity and loyalty, with an annual limit so reconciliation remains a response to pressure rather than routine maintenance.
-
-### Households and labor
-
-Households consume goods, supply labor, pay rent, experience welfare changes, and form political responses. Labor agreements connect business performance to wages, conditions, loyalty, disputes, and replacement costs.
-
-### Businesses and production
-
-Businesses have ownership, management, policy, inventory, cash, capacity, condition, quality, and lifecycle. Growth requires capital and competent administration. Failure and recovery must remain part of the same system.
-
-Business cash and dynasty treasury are distinct pools, but ownership must still create deliberate capital-allocation choices. An active business owner may distribute cash back to the dynasty only above a protected operating floor equal to its configured minimum reserve plus 21 days of operating cost. Manual distributions and automatic dividends use the same floor. This lets a commercially successful house fund family, property, and political commitments without treating business cash as permanently trapped, while preventing the player from stripping the working capital the enterprise needs to remain credible.
-
-Industrial goods need productive demand inside that same economy. Replacement tools are purchased from the market as a real component of maintenance and production overhead that businesses already pay, rather than as an additional hidden charge. This connects artisan output to citywide business activity and turns part of previously abstract operating expenditure into an inter-business market flow.
-
-Starting trades may create different cash-flow profiles, but no background is intended to be a hidden difficulty mode. A productive artisan should be able to build commercial standing from city demand without requiring serial borrowing and asset liquidation merely to remain viable. Background identity should change which pressures and opportunities the player reads, not whether the economic-to-institutional fantasy is structurally reachable.
-
-### Markets, contracts, and credit
-
-Prices should emerge from supply, demand, scarcity, policy, and disruption. Contracts create durable counterparties and obligations. Credit creates leverage, dependency, collateral risk, restructuring, and default consequences.
-
-### Property and urban development
-
-Property connects wealth to districts, rent, tenancy, occupancy, collateral, public works, and political interests. Assets should be useful, illiquid, and recoverable through sale at a real cost.
-
-### Institutions and politics
-
-Institutions have earned membership, offices, budgets, legitimacy, powers, and selection rules. Established reputation plus a developing commercial record opens patronage; the amount of commercial proof needed beyond the baseline depends on how well the chosen family member fits the target institution, so education and assignment can change the route into politics instead of only the later election odds. Patronage creates membership and coalition support while the dynasty continues proving itself. Once that foothold is established, a wealthy house may make one major institutional endowment per year. Endowments move private treasury into the institution budget, count as civic contribution, strengthen institutional legitimacy, and improve standing among existing member houses, so mature wealth can be converted into durable coalition capacity without directly purchasing player legitimacy or bypassing candidacy. Sustained commercial standing and mature support then open candidacy. Political power must control concrete outcomes such as laws, debt, public works, courts, licensing, trade, or enforcement. Incumbents can spend legitimacy on time-bounded directives that intensify an office power and produce explicit civic benefits or backlash.
-
-Commercial success must remain convertible into civic execution after political authority has been earned. A dynasty that sponsored an unfinished public work may contribute its own treasury directly to that commitment, including rescuing a project suspended by an empty municipal treasury. The contribution counts as civic patronage and uses the same material completion effects as municipal spending. Municipal construction also purchases tools from the shared market as part of its existing project spending, so civic development creates industrial demand instead of living in a separate abstract budget loop. This route should be expensive enough to create a real capital-allocation choice rather than making civic finance irrelevant.
-
-Officeholding is not a permanent upgrade. It consumes administrative capacity, creates recurring duties, and can be lost through failure.
-
-Concentrating several offices in one dynasty should also create political exposure even when that dynasty is wealthy. Member houses become more fearful and resentful as one family consolidates authority, which should weaken future coalition support and feed back into commercial relationships rather than allowing cash alone to neutralize the cost of political expansion.
-
-### Law, courts, and enforcement
-
-Law shapes contracts, property, debt, trade, labor, inheritance, and public authority. Cases require parties, claims, evidence, procedure, judgment, and consequences. A player-filed case must identify the concrete obligation or event that created the claim; evidence and recoverable damages are bounded by that source, and a judgment must settle the source obligation rather than create a parallel recovery path. Immediate cash recovery is limited by defendant liquidity; any grounded amount that cannot be collected at judgment is written off with the settled source instead of surviving as an unenforceable duplicate claim. Contract-breach damages represent only the terminal contractual penalty that remained unpaid after normal settlement, so litigation cannot collect a penalty the performing party already received.
-
-Courts are part of the living economy rather than a player-only action menu. Rival lenders and contract victims should pursue grounded claims under the same filing-cost, timing, evidence, and source-obligation rules when material defaults or unpaid breaches occur. A debt or contract failure that never creates enforceable institutional pressure leaves the legal system detached from the economy.
-
-### Districts and public opinion
-
-District conditions reflect employment, rent, food access, safety, sanitation, infrastructure, institutional presence, and ownership. Explicit employment agreements represent the businesses simulated in detail, not the whole labor market, so district employment retains a background economy and then responds to modeled jobs and durable infrastructure. Public response should follow material outcomes and remembered actions.
-
-### Information and relationships
-
-Relationships track distinct dimensions such as trust, fear, respect, obligation, and resentment. Information and relationships should open or close strategies rather than act as universal scores.
-
-### Rival dynasties and external pressure
-
-Rivals use the same economic and institutional rules as the player, pursue explicit objectives, and adapt to changing conditions. External powers affect Rivergate through trade, tolls, demands, privileges, migration, credit, and crises rather than tactical warfare.
-
-### Events and crises
-
-Crises should emerge from state where possible. They expose structural choices, provide warning, create several defensible responses, and leave persistent consequences.
-
-## Player information
+## Player information contract
 
 Primary views should answer:
 
@@ -188,19 +143,11 @@ Primary views should answer:
 - What is uncertain?
 - What happens without intervention?
 
-Major consequences require causal explanation. Forecasts should expose assumptions and uncertainty rather than present false precision.
+Major consequences require causal explanation. Forecasts should expose assumptions and uncertainty rather than false precision.
 
 ## Anti-snowball constraints
 
-Growth should introduce:
-
-- Administrative friction from holdings and weak delegation
-- Political visibility and coalition response
-- Shared exposure to suppliers, debtors, districts, and regulation
-- Dependence on skilled managers, creditors, offices, and allies
-- Public obligations created by service and patronage
-- Family division and succession risk
-- Rival adaptation to concentrated power
+Growth should introduce administrative friction, political visibility, shared economic exposure, dependence on skilled people and allies, public obligations, family division, succession risk, and rival adaptation.
 
 A strong position should create more consequential choices, not remove risk.
 
@@ -212,13 +159,13 @@ The game should regularly ask the player to:
 - Accept an economic vulnerability created by political success.
 - Choose between efficient concentration and resilient diversification.
 - Build obligations and dependencies instead of only accumulating money.
-- Assign different family members to parallel strategies.
-- Hold office while funding its duties and managing its enemies.
-- Recover from failure by sacrificing assets, terms, or status.
+- Assign family members to parallel strategies.
+- Hold office while funding its duties and managing opposition.
+- Recover from failure by sacrificing assets, terms, time, or status.
 - Preserve an organization through succession.
-- Judge the city created by the dynasty’s power.
+- Judge the city produced by the dynasty's power.
 
-The game should not reduce the player to routine production correction, character movement, passive waiting, universal influence spending, or inevitable monopoly growth.
+The player should not be reduced to routine production correction, character movement, passive waiting, universal influence spending, or inevitable monopoly growth.
 
 ## Scope
 
@@ -241,21 +188,17 @@ Deliberately limited:
 
 A new scenario should represent a different political economy, not only a different map or set of names.
 
-## Design review questions
+## Design review checklist
 
-Every major feature or review should answer:
-
-1. Does it reinforce the economic-to-institutional-to-dynastic loop?
+1. Does the feature reinforce the economic-to-institutional-to-dynastic loop?
 2. Does it create a meaningful decision instead of routine input?
-3. Can the player explain the major consequences?
+3. Can the player explain its major consequences?
 4. Does political power control something materially concrete?
 5. Can growth make the dynasty less stable?
 6. Do people and institutions have interests derived from their position?
 7. Can the player recover from a major setback at a real cost?
 8. Does the city remember the outcome?
-9. Does the system support different viable strategies?
+9. Does the system support distinct viable strategies?
 10. Does late play require different decisions from early play?
-11. Does succession test the organization rather than only replace a character?
+11. Does succession test the organization rather than simply replace a character?
 12. Is family success evaluated alongside civic consequence?
-
-The final question is not only whether the dynasty becomes powerful. It is what kind of city that power creates and whether the family can survive the order it built.

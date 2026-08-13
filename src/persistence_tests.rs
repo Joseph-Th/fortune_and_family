@@ -1458,6 +1458,89 @@ mod validation {
     use super::*;
 
     #[test]
+    fn rejects_information_report_beyond_the_supported_lifetime() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let report = value["information_reports"]
+            .as_object_mut()
+            .and_then(|reports| reports.values_mut().next())
+            .expect("serialized state must contain an information report");
+        report["expires_day"] = Value::from(crate::systems::INFORMATION_REPORT_LIFETIME_DAYS + 1);
+        let (_directory, path) = write_test_json_fixture("extended-information.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "information report",
+        );
+    }
+
+    #[test]
+    fn rejects_office_directive_beyond_the_supported_lifetime() {
+        let mut state = make_test_campaign();
+        let institution = state
+            .institutions
+            .values_mut()
+            .find(|institution| !institution.powers.is_empty())
+            .expect("campaign must contain an institution with office powers");
+        let power = *institution
+            .powers
+            .iter()
+            .next()
+            .expect("institution must expose an office power");
+        institution.active_directive = Some(OfficeDirectiveState {
+            power,
+            expires_day: crate::systems::OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS + 1,
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("extended-office-directive.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid budget, term timing, or directive",
+        );
+    }
+
+    #[test]
+    fn rejects_legal_hearing_beyond_the_supported_case_schedule() {
+        let mut state = make_test_campaign();
+        let mut dynasty_ids = state.dynasties.keys().copied();
+        let plaintiff_dynasty_id = dynasty_ids.next().expect("campaign must contain a dynasty");
+        let defendant_dynasty_id = dynasty_ids
+            .next()
+            .expect("campaign must contain a second dynasty");
+        let case_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            case_id,
+            LegalCase {
+                id: case_id,
+                plaintiff_dynasty_id,
+                defendant_dynasty_id,
+                kind: LegalCaseKind::Fraud,
+                claim_source: None,
+                evidence_basis_points: 6_500,
+                public_attention_basis_points: 2_000,
+                filed_day: state.clock.day(),
+                hearing_day: state
+                    .clock
+                    .day()
+                    .saturating_add(crate::systems::LEGAL_CASE_HEARING_DELAY_DAYS + 1),
+                damages: Money::from_copper(2_500),
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) = write_test_json_fixture("extended-legal-hearing.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "legal case",
+        );
+    }
+
+    #[test]
     fn rejects_current_office_directive_without_actor_attribution() {
         let mut state = make_test_campaign();
         let institution_id = *state
@@ -1909,6 +1992,24 @@ mod validation {
             .term_started_day = future_day;
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) = write_test_json_fixture("future-office-term.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "invalid budget, term timing",
+        );
+    }
+
+    #[test]
+    fn rejects_institution_selection_after_the_supported_term() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let institution = value["institutions"]
+            .as_object_mut()
+            .and_then(|institutions| institutions.values_mut().next())
+            .expect("serialized state must contain an institution");
+        institution["next_selection_day"] = Value::from(crate::systems::OFFICE_TERM_DAYS + 1);
+        let (_directory, path) = write_test_json_fixture("deferred-office-term.json", &value);
 
         assert_invalid_state(
             load_state(&path),
@@ -2410,14 +2511,41 @@ mod validation {
     }
 
     #[test]
+    fn rejects_active_weekly_obligation_due_dates_beyond_the_next_settlement_window() {
+        assert_stale_weekly_due_rejected(
+            "deferred-loan-due-day.json",
+            |value| {
+                value["loans"]
+                    .as_object_mut()
+                    .and_then(|loans| loans.values_mut().next())
+                    .expect("serialized state must contain a loan")["next_due_day"] =
+                    Value::from(15);
+            },
+            "invalid due date",
+        );
+        assert_stale_weekly_due_rejected(
+            "deferred-contract-due-day.json",
+            |value| {
+                value["contracts"]
+                    .as_object_mut()
+                    .and_then(|contracts| contracts.values_mut().next())
+                    .expect("serialized state must contain a contract")["next_due_day"] =
+                    Value::from(15);
+            },
+            "invalid dates",
+        );
+    }
+
+    #[test]
     fn accepts_pre_campaign_historical_dates() {
         let state = make_test_campaign();
         let mut value = serde_json::to_value(state).expect("state must serialize");
-        value["institutions"]
+        let institution = value["institutions"]
             .as_object_mut()
             .and_then(|institutions| institutions.values_mut().next())
-            .expect("serialized state must contain an institution")["term_started_day"] =
-            Value::from(-180);
+            .expect("serialized state must contain an institution");
+        institution["term_started_day"] = Value::from(-180);
+        institution["next_selection_day"] = Value::from(180);
         value["audit_log"]
             .as_array_mut()
             .and_then(|records| records.first_mut())
