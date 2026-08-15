@@ -163,7 +163,7 @@ Projection code may aggregate and format. It must not mutate state or recreate c
 
 The harness generates state-derived command candidates, validates them through `apply_player_command` on cloned state, commits through the same API, advances through `advance_days`, and compares action and no-action branches.
 
-The harness does not directly mutate domain records during play. See `GAMEPLAY_HARNESS.md`.
+Independent matrix campaigns run in parallel; each campaign owns its state and the shared registry is immutable, so campaign ordering and determinism are preserved. The harness does not directly mutate domain records during play. See `GAMEPLAY_HARNESS.md`.
 
 ### Art
 

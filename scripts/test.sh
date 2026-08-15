@@ -180,7 +180,7 @@ list_tests() {
 
 run_soak() {
   run_step 'Deterministic soak tests' \
-    cargo test --quiet --locked --lib '::soak::' -- --ignored --test-threads=1
+    cargo test --quiet --locked --lib '::soak::' -- --ignored
 }
 
 run_docs() {

@@ -34,6 +34,14 @@ fn build_focused_report(days: u32) -> GameplayHarnessReport {
         .expect("cached focused gameplay report must build")
 }
 
+fn background_order(background: StartingBackground) -> u8 {
+    match background {
+        StartingBackground::Baker => 0,
+        StartingBackground::ClothTrader => 1,
+        StartingBackground::Blacksmith => 2,
+    }
+}
+
 #[track_caller]
 fn single_candidate(candidates: &[Candidate], context: &str) -> Candidate {
     match candidates {
@@ -337,6 +345,78 @@ mod harness {
         let second = run_gameplay_harness(registry, config).expect("second run must succeed");
 
         assert_eq!(first, second, "gameplay reports must be reproducible");
+    }
+
+    #[test]
+    fn multi_campaign_reports_are_deterministic_across_parallel_runs() {
+        let registry = rivergate_registry_for_test();
+        let mut config = focused_config(90);
+        config.personas = GameplayPersona::all().to_vec();
+        config.backgrounds.push(StartingBackground::ClothTrader);
+        config.backgrounds.push(StartingBackground::Blacksmith);
+
+        let first = run_gameplay_harness(registry, config.clone()).expect("first run must succeed");
+        let second = run_gameplay_harness(registry, config).expect("second run must succeed");
+
+        assert_eq!(
+            first, second,
+            "parallel gameplay reports must be reproducible"
+        );
+        assert_eq!(
+            first.aggregate.campaigns, 12,
+            "every persona-background pair must run"
+        );
+        assert!(
+            first.aggregate.simulated_days > 0,
+            "parallel campaigns must simulate time"
+        );
+        assert_eq!(
+            first.persona_aggregates.len(),
+            GameplayPersona::all().len(),
+            "each persona must have its own aggregate"
+        );
+    }
+
+    #[test]
+    fn parallel_matrix_preserves_seed_background_persona_ordering() {
+        let registry = rivergate_registry_for_test();
+        let mut config = focused_config(30);
+        config.start_seed = 5;
+        config.seed_count = 2;
+        config.personas = GameplayPersona::all().to_vec();
+        config.backgrounds.push(StartingBackground::ClothTrader);
+        config.backgrounds.push(StartingBackground::Blacksmith);
+
+        let report =
+            run_gameplay_harness(registry, config).expect("gameplay harness must complete");
+
+        assert_eq!(
+            report.campaigns.len(),
+            24,
+            "matrix must run every combination"
+        );
+        let expected: Vec<_> = report
+            .campaigns
+            .iter()
+            .map(|campaign| {
+                (
+                    campaign.seed,
+                    background_order(campaign.background),
+                    campaign.persona,
+                )
+            })
+            .collect();
+        let mut sorted = expected.clone();
+        sorted.sort();
+        assert_eq!(
+            expected, sorted,
+            "report campaigns must be ordered by seed, then background, then persona"
+        );
+        assert_eq!(
+            report.campaigns.iter().map(|campaign| campaign.seed).min(),
+            Some(5),
+            "the matrix must include the configured starting seed"
+        );
     }
 
     #[test]
@@ -4479,17 +4559,26 @@ mod metrics {
         );
 
         assert_eq!(
-            accumulator.quiet_diagnostic.generator_gaps.get(&GameplayCommandKind::EnactLaw),
+            accumulator
+                .quiet_diagnostic
+                .generator_gaps
+                .get(&GameplayCommandKind::EnactLaw),
             Some(&1),
             "an activation opportunity without any built candidate must be a generator gap"
         );
         assert_eq!(
-            accumulator.quiet_diagnostic.policy_gates.get(&GameplayCommandKind::StartPublicWork),
+            accumulator
+                .quiet_diagnostic
+                .policy_gates
+                .get(&GameplayCommandKind::StartPublicWork),
             Some(&1),
             "built candidates removed by agent spending policy must be policy gates"
         );
         assert_eq!(
-            accumulator.quiet_diagnostic.validation_gates.get(&GameplayCommandKind::FileLegalCase),
+            accumulator
+                .quiet_diagnostic
+                .validation_gates
+                .get(&GameplayCommandKind::FileLegalCase),
             Some(&1),
             "probed candidates the game rejected must be validation gates"
         );

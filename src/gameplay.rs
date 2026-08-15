@@ -2921,26 +2921,8 @@ pub fn run_gameplay_harness(
     config: GameplayHarnessConfig,
 ) -> Result<GameplayHarnessReport, GameplayHarnessError> {
     config.validate()?;
-    let mut campaigns = Vec::with_capacity(config.campaign_count());
-    for seed_offset in 0..config.seed_count {
-        let seed = config
-            .start_seed
-            .checked_add(u64::from(seed_offset))
-            .ok_or_else(|| GameplayHarnessError::InvalidConfig {
-                reason: "configured seed range exceeds u64::MAX".to_owned(),
-            })?;
-        for background in &config.backgrounds {
-            for persona in &config.personas {
-                campaigns.push(run_campaign(
-                    registry,
-                    &config,
-                    seed,
-                    *background,
-                    *persona,
-                )?);
-            }
-        }
-    }
+    let work = campaign_work_items(&config)?;
+    let campaigns = execute_campaigns(registry, &config, &work)?;
     let aggregate = aggregate_campaigns(&campaigns);
     let persona_aggregates = aggregate_campaigns_by_persona(&campaigns);
     let findings = derive_findings(&aggregate, &campaigns);
@@ -2953,6 +2935,85 @@ pub fn run_gameplay_harness(
         findings,
         limitations: gameplay_harness_limitations(),
     })
+}
+
+struct CampaignWorkItem {
+    seed: u64,
+    background: StartingBackground,
+    persona: GameplayPersona,
+}
+
+fn campaign_work_items(
+    config: &GameplayHarnessConfig,
+) -> Result<Vec<CampaignWorkItem>, GameplayHarnessError> {
+    let mut work = Vec::with_capacity(config.campaign_count());
+    for seed_offset in 0..config.seed_count {
+        let seed = config
+            .start_seed
+            .checked_add(u64::from(seed_offset))
+            .ok_or_else(|| GameplayHarnessError::InvalidConfig {
+                reason: "configured seed range exceeds u64::MAX".to_owned(),
+            })?;
+        for background in &config.backgrounds {
+            for persona in &config.personas {
+                work.push(CampaignWorkItem {
+                    seed,
+                    background: *background,
+                    persona: *persona,
+                });
+            }
+        }
+    }
+    Ok(work)
+}
+
+fn execute_campaigns(
+    registry: &Registry,
+    config: &GameplayHarnessConfig,
+    work: &[CampaignWorkItem],
+) -> Result<Vec<GameplayCampaignReport>, GameplayHarnessError> {
+    if work.len() <= 1 {
+        return work
+            .iter()
+            .map(|item| run_campaign(registry, config, item.seed, item.background, item.persona))
+            .collect();
+    }
+    let parallelism = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(work.len());
+    let chunks: Vec<&[CampaignWorkItem]> = work.chunks(work.len().div_ceil(parallelism)).collect();
+    let results: Vec<Result<GameplayCampaignReport, GameplayHarnessError>> =
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunks
+                .into_iter()
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|item| {
+                                run_campaign(
+                                    registry,
+                                    config,
+                                    item.seed,
+                                    item.background,
+                                    item.persona,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            let mut campaigns = Vec::with_capacity(work.len());
+            for handle in handles {
+                campaigns.extend(
+                    handle
+                        .join()
+                        .expect("gameplay harness worker must not panic"),
+                );
+            }
+            campaigns
+        });
+    results.into_iter().collect()
 }
 
 fn gameplay_harness_limitations() -> Vec<String> {
@@ -3265,9 +3326,10 @@ fn run_decision_cycle_internal(
     accumulator.decision_cycles = accumulator.decision_cycles.saturating_add(1);
     apply_notification_housekeeping(registry, state, accumulator)?;
     let phase = gameplay_phase(&accumulator.fantasy_arc);
-    let mut baseline_state = state.clone();
+    let baseline_state = state.clone();
     let before = GameplaySnapshot::capture(state);
-    let (candidates, raw_generated_kinds) = ranked_candidates(registry, state, persona, accumulator);
+    let (candidates, raw_generated_kinds) =
+        ranked_candidates(registry, state, persona, accumulator);
     validate_candidate_classifications(state, &candidates)?;
     let activation_before = activation_opportunity_snapshot(accumulator);
     record_activation_opportunities(registry, state, persona, accumulator, &raw_generated_kinds);
@@ -3282,7 +3344,10 @@ fn run_decision_cycle_internal(
     let retained_kinds: BTreeSet<_> = candidates.iter().map(|candidate| candidate.kind).collect();
     let candidates_to_probe =
         select_probe_candidates(candidates, usize::from(config.max_candidate_probes));
-    let probed_kinds: BTreeSet<_> = candidates_to_probe.iter().map(|candidate| candidate.kind).collect();
+    let probed_kinds: BTreeSet<_> = candidates_to_probe
+        .iter()
+        .map(|candidate| candidate.kind)
+        .collect();
     let probe_limit = candidates_to_probe.len();
     let projection_step_days = match mode {
         DecisionCycleMode::AdvanceCampaign { step_days } => step_days,
@@ -3305,7 +3370,7 @@ fn run_decision_cycle_internal(
     );
     let choice_metrics =
         record_choice_cycle_metrics(accumulator, substantive_candidate_count, &probe);
-    let action = apply_selected_candidate(registry, state, probe.selected, accumulator)?;
+    let action = apply_selected_candidate(registry, state, probe.selected.clone(), accumulator)?;
     let action_kind = action.as_ref().map(|action| action.kind);
     let action_gap_days = match mode {
         DecisionCycleMode::AdvanceCampaign { step_days } => step_days,
@@ -3318,7 +3383,93 @@ fn run_decision_cycle_internal(
         projection_step_days,
         config.max_consequence_horizon_days,
     );
-    let after_time = match mode {
+    let after_time = advance_decision_time(
+        registry,
+        state,
+        mode,
+        consequence_horizon,
+        &after_command,
+        accumulator,
+    )?;
+    let (baseline_after_time, ambient_change) = baseline_observation(
+        registry,
+        action.as_ref(),
+        consequence_horizon,
+        after_time.clone(),
+        baseline_state,
+        &before,
+    )?;
+    accumulator.record_phase_cycle(
+        phase,
+        PhaseCycleObservation {
+            action: action_kind,
+            choices: choice_metrics,
+            ambient_change,
+        },
+    );
+    record_decision_cycle(
+        DecisionCycleSnapshots {
+            before: &before,
+            after_command: &after_command,
+            after_time: &after_time,
+            baseline_after_time: &baseline_after_time,
+        },
+        probe_limit,
+        &probe,
+        ranked_candidates,
+        action,
+        accumulator,
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct DecisionCycleSnapshots<'a> {
+    before: &'a GameplaySnapshot,
+    after_command: &'a GameplaySnapshot,
+    after_time: &'a GameplaySnapshot,
+    baseline_after_time: &'a GameplaySnapshot,
+}
+
+fn record_decision_cycle(
+    snapshots: DecisionCycleSnapshots<'_>,
+    considered: usize,
+    probe: &ProbeResult,
+    ranked_candidates: Vec<GameplayCandidateRanking>,
+    action: Option<ExecutedAction>,
+    accumulator: &mut CampaignAccumulator,
+) {
+    record_cycle(
+        CycleObservation {
+            before: snapshots.before,
+            after_command: snapshots.after_command,
+            after_time: snapshots.after_time,
+            baseline_after_time: snapshots.baseline_after_time,
+            considered,
+            viable: probe.viable_count,
+            substantive_viable: probe.substantive_viable_count,
+            viable_command_kinds: probe.viable_command_kinds.clone(),
+            ranked_candidates,
+            viable_options: probe.viable_options.clone(),
+            close_choice_score_gap: probe.close_choice_score_gap,
+            distinct_immediate_choice_profiles: probe.distinct_immediate_choice_profiles,
+            distinct_projected_choice_profiles: probe.distinct_projected_choice_profiles,
+            rejections: probe.rejections.clone(),
+            action,
+        },
+        accumulator,
+    );
+}
+
+fn advance_decision_time(
+    registry: &Registry,
+    state: &mut AppState,
+    mode: DecisionCycleMode,
+    consequence_horizon: u32,
+    after_command: &GameplaySnapshot,
+    accumulator: &mut CampaignAccumulator,
+) -> Result<GameplaySnapshot, GameplayHarnessError> {
+    Ok(match mode {
         DecisionCycleMode::AdvanceCampaign { step_days } => {
             let mut consequence_state = (consequence_horizon > step_days).then(|| state.clone());
             advance_days(registry, state, step_days)?;
@@ -3333,14 +3484,24 @@ fn run_decision_cycle_internal(
             }
         }
         DecisionCycleMode::Terminal => {
-            accumulator.observe_snapshot(&after_command);
+            accumulator.observe_snapshot(after_command);
             let mut consequence_state = state.clone();
             advance_days(registry, &mut consequence_state, consequence_horizon)?;
             GameplaySnapshot::capture(&consequence_state)
         }
-    };
+    })
+}
+
+fn baseline_observation(
+    registry: &Registry,
+    action: Option<&ExecutedAction>,
+    consequence_horizon: u32,
+    after_time: GameplaySnapshot,
+    mut baseline_state: AppState,
+    before: &GameplaySnapshot,
+) -> Result<(GameplaySnapshot, bool), GameplayHarnessError> {
     let baseline_after_time = if action.is_none() {
-        after_time.clone()
+        after_time
     } else {
         advance_days(registry, &mut baseline_state, consequence_horizon)?;
         GameplaySnapshot::capture(&baseline_state)
@@ -3348,35 +3509,7 @@ fn run_decision_cycle_internal(
     let ambient_change = !before.changed_domains(&baseline_after_time).is_empty()
         || baseline_after_time.outbox_messages > before.outbox_messages
         || baseline_after_time.chronicle_entries > before.chronicle_entries;
-    accumulator.record_phase_cycle(
-        phase,
-        PhaseCycleObservation {
-            action: action_kind,
-            choices: choice_metrics,
-            ambient_change,
-        },
-    );
-    record_cycle(
-        CycleObservation {
-            before: &before,
-            after_command: &after_command,
-            after_time: &after_time,
-            baseline_after_time: &baseline_after_time,
-            considered: probe_limit,
-            viable: probe.viable_count,
-            substantive_viable: probe.substantive_viable_count,
-            viable_command_kinds: probe.viable_command_kinds,
-            ranked_candidates,
-            viable_options: probe.viable_options,
-            close_choice_score_gap: probe.close_choice_score_gap,
-            distinct_immediate_choice_profiles: probe.distinct_immediate_choice_profiles,
-            distinct_projected_choice_profiles: probe.distinct_projected_choice_profiles,
-            rejections: probe.rejections,
-            action,
-        },
-        accumulator,
-    );
-    Ok(())
+    Ok((baseline_after_time, ambient_change))
 }
 
 fn record_choice_cycle_metrics(
@@ -3736,10 +3869,8 @@ fn activation_opportunity_delta(
         .iter()
         .filter_map(|(kind, stats)| {
             let prior = before.get(kind).copied().unwrap_or(0);
-            (stats.activation_opportunities > prior).then_some((
-                *kind,
-                stats.activation_opportunities.saturating_sub(prior),
-            ))
+            (stats.activation_opportunities > prior)
+                .then_some((*kind, stats.activation_opportunities.saturating_sub(prior)))
         })
         .collect()
 }
@@ -10191,37 +10322,32 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
     }
 }
 
-fn aggregate_quiet_diagnostics(
-    campaigns: &[GameplayCampaignReport],
-) -> GameplayQuietDiagnostic {
+fn aggregate_quiet_diagnostics(campaigns: &[GameplayCampaignReport]) -> GameplayQuietDiagnostic {
     let mut diagnostic = GameplayQuietDiagnostic::default();
     for campaign in campaigns {
         for (kind, count) in &campaign.quiet_diagnostic.generator_gaps {
-            *diagnostic.generator_gaps.entry(*kind).or_default() =
-                diagnostic
-                    .generator_gaps
-                    .get(kind)
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(*count);
+            *diagnostic.generator_gaps.entry(*kind).or_default() = diagnostic
+                .generator_gaps
+                .get(kind)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(*count);
         }
         for (kind, count) in &campaign.quiet_diagnostic.policy_gates {
-            *diagnostic.policy_gates.entry(*kind).or_default() =
-                diagnostic
-                    .policy_gates
-                    .get(kind)
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(*count);
+            *diagnostic.policy_gates.entry(*kind).or_default() = diagnostic
+                .policy_gates
+                .get(kind)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(*count);
         }
         for (kind, count) in &campaign.quiet_diagnostic.validation_gates {
-            *diagnostic.validation_gates.entry(*kind).or_default() =
-                diagnostic
-                    .validation_gates
-                    .get(kind)
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(*count);
+            *diagnostic.validation_gates.entry(*kind).or_default() = diagnostic
+                .validation_gates
+                .get(kind)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(*count);
         }
     }
     diagnostic
