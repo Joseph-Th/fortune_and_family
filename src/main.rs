@@ -359,7 +359,7 @@ struct PlaytestArgs {
     #[arg(long, default_value_t = 30)]
     decision_interval: u16,
     /// Maximum candidate commands validated per decision.
-    #[arg(long, default_value_t = 24)]
+    #[arg(long, default_value_t = 16)]
     max_probes: u16,
     /// Maximum simulated days used to attribute delayed command consequences.
     #[arg(long, default_value_t = 360)]

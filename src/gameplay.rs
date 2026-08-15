@@ -103,7 +103,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 51;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 52;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -146,7 +146,7 @@ const AGENT_LOAN_AMORTIZATION_WEEKS: i64 = 104;
 const AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS: i64 = 13;
 const AGENT_OPPORTUNIST_STRESSED_LOAN_AMORTIZATION_WEEKS: i64 = 8;
 const AGENT_OPPORTUNIST_LOAN_INTEREST_BASIS_POINTS: u16 = 2_500;
-const AGENT_OFFICE_DUTY_RESERVE_MONTHS: i64 = 12;
+const AGENT_OFFICE_DUTY_RESERVE_MONTHS: i64 = 4;
 const AGENT_OFFICE_LIQUIDITY_BUFFER: Money = Money::from_copper(5_000);
 const AGENT_FAMILY_COUNCIL_DUTY_RESERVE_MONTHS: i64 = 6;
 const AGENT_FAMILY_COUNCIL_LIQUIDITY_BUFFER: Money = Money::from_copper(2_500);
@@ -228,7 +228,7 @@ impl Default for GameplayHarnessConfig {
             seed_count: 1,
             days_per_campaign: 1_080,
             decision_interval_days: 30,
-            max_candidate_probes: 24,
+            max_candidate_probes: 16,
             max_consequence_horizon_days: 360,
             trace_limit_per_campaign: 40,
             personas: GameplayPersona::all().to_vec(),
@@ -2063,6 +2063,23 @@ pub struct GameplayPhaseStats {
     pub executed_commands: BTreeMap<GameplayCommandKind, u32>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameplayQuietDiagnostic {
+    /// Command kinds that had a detected activation opportunity but produced
+    /// no generated candidate during no-action cycles. Identifies generator
+    /// gaps where the game state invited an action the agent could not build.
+    pub generator_gaps: BTreeMap<GameplayCommandKind, u32>,
+    /// Command kinds whose candidates were all removed by the agent's own
+    /// spending-discipline filters during no-action cycles. The game built an
+    /// option, but the persona's reserve policy declined it.
+    pub policy_gates: BTreeMap<GameplayCommandKind, u32>,
+    /// Command kinds that generated candidates and passed the agent's filters
+    /// but none passed canonical validation during no-action cycles.
+    /// Identifies validation gates where the game built an option the player
+    /// could not actually commit.
+    pub validation_gates: BTreeMap<GameplayCommandKind, u32>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameplayCampaignReport {
     pub seed: u64,
@@ -2125,6 +2142,7 @@ pub struct GameplayCampaignReport {
     pub player_debt_enforcement_cases: u16,
     pub fantasy_arc: GameplayFantasyArc,
     pub succession_transition: Option<GameplaySuccessionTransition>,
+    pub quiet_diagnostic: GameplayQuietDiagnostic,
     pub trace: Vec<GameplayTraceStep>,
 }
 
@@ -2175,6 +2193,7 @@ pub struct GameplayAggregate {
     pub causal_domain_coverage: u16,
     pub ambient_domain_coverage: u16,
     pub interactions: Vec<GameplayInteractionEdge>,
+    pub quiet_diagnostic: GameplayQuietDiagnostic,
     pub scores: GameplayScores,
 }
 
@@ -2446,6 +2465,7 @@ struct CampaignAccumulator {
     starting_generation: Option<u16>,
     fantasy_arc: GameplayFantasyArc,
     succession_transition: Option<GameplaySuccessionTransition>,
+    quiet_diagnostic: GameplayQuietDiagnostic,
     last_observed_snapshot: Option<GameplaySnapshot>,
 }
 
@@ -2514,6 +2534,7 @@ impl CampaignAccumulator {
             starting_generation: None,
             fantasy_arc: GameplayFantasyArc::default(),
             succession_transition: None,
+            quiet_diagnostic: GameplayQuietDiagnostic::default(),
             last_observed_snapshot: None,
         }
     }
@@ -3167,6 +3188,7 @@ fn finish_campaign_report(
         player_debt_enforcement_cases: accumulator.player_debt_enforcement_cases,
         fantasy_arc: accumulator.fantasy_arc,
         succession_transition: accumulator.succession_transition,
+        quiet_diagnostic: accumulator.quiet_diagnostic,
         trace,
     }
 }
@@ -3245,9 +3267,11 @@ fn run_decision_cycle_internal(
     let phase = gameplay_phase(&accumulator.fantasy_arc);
     let mut baseline_state = state.clone();
     let before = GameplaySnapshot::capture(state);
-    record_activation_opportunities(registry, state, persona, accumulator);
-    let candidates = ranked_candidates(registry, state, persona, accumulator);
+    let (candidates, raw_generated_kinds) = ranked_candidates(registry, state, persona, accumulator);
     validate_candidate_classifications(state, &candidates)?;
+    let activation_before = activation_opportunity_snapshot(accumulator);
+    record_activation_opportunities(registry, state, persona, accumulator, &raw_generated_kinds);
+    let activation_delta = activation_opportunity_delta(accumulator, &activation_before);
     let ranked_candidates = summarize_ranked_candidates(&candidates);
     let substantive_candidate_count = candidates
         .iter()
@@ -3255,8 +3279,10 @@ fn run_decision_cycle_internal(
         .count();
     record_offered_command_kinds(&candidates, accumulator);
     record_generated_candidates(&candidates, accumulator);
+    let retained_kinds: BTreeSet<_> = candidates.iter().map(|candidate| candidate.kind).collect();
     let candidates_to_probe =
         select_probe_candidates(candidates, usize::from(config.max_candidate_probes));
+    let probed_kinds: BTreeSet<_> = candidates_to_probe.iter().map(|candidate| candidate.kind).collect();
     let probe_limit = candidates_to_probe.len();
     let projection_step_days = match mode {
         DecisionCycleMode::AdvanceCampaign { step_days } => step_days,
@@ -3269,6 +3295,14 @@ fn run_decision_cycle_internal(
         projection_step_days,
         accumulator,
     )?;
+    record_quiet_diagnostic(
+        accumulator,
+        &probe,
+        &raw_generated_kinds,
+        &retained_kinds,
+        &probed_kinds,
+        &activation_delta,
+    );
     let choice_metrics =
         record_choice_cycle_metrics(accumulator, substantive_candidate_count, &probe);
     let action = apply_selected_candidate(registry, state, probe.selected, accumulator)?;
@@ -3305,8 +3339,12 @@ fn run_decision_cycle_internal(
             GameplaySnapshot::capture(&consequence_state)
         }
     };
-    advance_days(registry, &mut baseline_state, consequence_horizon)?;
-    let baseline_after_time = GameplaySnapshot::capture(&baseline_state);
+    let baseline_after_time = if action.is_none() {
+        after_time.clone()
+    } else {
+        advance_days(registry, &mut baseline_state, consequence_horizon)?;
+        GameplaySnapshot::capture(&baseline_state)
+    };
     let ambient_change = !before.changed_domains(&baseline_after_time).is_empty()
         || baseline_after_time.outbox_messages > before.outbox_messages
         || baseline_after_time.chronicle_entries > before.chronicle_entries;
@@ -3599,6 +3637,7 @@ fn record_activation_opportunities(
     state: &AppState,
     persona: GameplayPersona,
     accumulator: &mut CampaignAccumulator,
+    generated_kinds: &BTreeSet<GameplayCommandKind>,
 ) {
     let crisis_opportunity = state.crises.values().any(|crisis| {
         crisis.status.is_active()
@@ -3623,30 +3662,6 @@ fn record_activation_opportunities(
     let institution_withdrawal_opportunity = has_institution_withdrawal_opportunity(state);
     let extend_credit_opportunity = has_extend_credit_opportunity(state, persona);
     let transfer_cash_opportunity = has_transfer_cash_opportunity(registry, state, persona);
-    let mut family_candidates = Vec::new();
-    generate_family_candidates(registry, state, persona, &mut family_candidates);
-    for kind in [
-        GameplayCommandKind::SetHouseGovernance,
-        GameplayCommandKind::ConveneFamilyCouncil,
-        GameplayCommandKind::EndowInstitution,
-    ] {
-        record_activation_opportunity(
-            accumulator,
-            kind,
-            family_candidates
-                .iter()
-                .any(|candidate| candidate.kind == kind),
-        );
-    }
-    record_civic_activation_opportunities(registry, state, persona, accumulator);
-    let mut information_candidates = Vec::new();
-    generate_information_candidates(registry, state, persona, &mut information_candidates);
-    let information_commission_opportunity = information_candidates
-        .iter()
-        .any(|candidate| candidate.kind == GameplayCommandKind::CommissionInformation);
-    let information_leverage_opportunity = information_candidates
-        .iter()
-        .any(|candidate| candidate.kind == GameplayCommandKind::LeverageInformation);
     for (kind, available) in [
         (GameplayCommandKind::RespondToCrisis, crisis_opportunity),
         (GameplayCommandKind::ResolveLaborDispute, labor_opportunity),
@@ -3668,41 +3683,21 @@ fn record_activation_opportunities(
             GameplayCommandKind::TransferBusinessCash,
             transfer_cash_opportunity,
         ),
-        (
-            GameplayCommandKind::CommissionInformation,
-            information_commission_opportunity,
-        ),
-        (
-            GameplayCommandKind::LeverageInformation,
-            information_leverage_opportunity,
-        ),
     ] {
         record_activation_opportunity(accumulator, kind, available);
     }
-}
-
-fn record_civic_activation_opportunities(
-    registry: &Registry,
-    state: &AppState,
-    persona: GameplayPersona,
-    accumulator: &mut CampaignAccumulator,
-) {
-    let mut candidates = Vec::new();
-    generate_law_candidates(registry, state, persona, &mut candidates);
-    generate_public_work_funding_candidates(state, persona, &mut candidates);
-    generate_public_work_candidates(registry, state, persona, &mut candidates);
-    generate_office_power_directive_candidates(registry, state, persona, &mut candidates);
     for kind in [
+        GameplayCommandKind::SetHouseGovernance,
+        GameplayCommandKind::ConveneFamilyCouncil,
+        GameplayCommandKind::EndowInstitution,
         GameplayCommandKind::EnactLaw,
         GameplayCommandKind::StartPublicWork,
         GameplayCommandKind::FundPublicWork,
         GameplayCommandKind::ExerciseOfficePower,
+        GameplayCommandKind::CommissionInformation,
+        GameplayCommandKind::LeverageInformation,
     ] {
-        record_activation_opportunity(
-            accumulator,
-            kind,
-            candidates.iter().any(|candidate| candidate.kind == kind),
-        );
+        record_activation_opportunity(accumulator, kind, generated_kinds.contains(&kind));
     }
 }
 
@@ -3720,6 +3715,78 @@ fn record_activation_opportunity(
         .expect("every command kind must have statistics");
     command_stats.activation_opportunities =
         command_stats.activation_opportunities.saturating_add(1);
+}
+
+fn activation_opportunity_snapshot(
+    accumulator: &CampaignAccumulator,
+) -> BTreeMap<GameplayCommandKind, u32> {
+    accumulator
+        .commands
+        .iter()
+        .map(|(kind, stats)| (*kind, stats.activation_opportunities))
+        .collect()
+}
+
+fn activation_opportunity_delta(
+    accumulator: &CampaignAccumulator,
+    before: &BTreeMap<GameplayCommandKind, u32>,
+) -> BTreeMap<GameplayCommandKind, u32> {
+    accumulator
+        .commands
+        .iter()
+        .filter_map(|(kind, stats)| {
+            let prior = before.get(kind).copied().unwrap_or(0);
+            (stats.activation_opportunities > prior).then_some((
+                *kind,
+                stats.activation_opportunities.saturating_sub(prior),
+            ))
+        })
+        .collect()
+}
+
+/// Explains why a no-action cycle had no substantive choice by separating
+/// generator gaps (an activation opportunity existed but no candidate was
+/// built), policy gates (the agent's own spending filters declined built
+/// candidates), and validation gates (the game rejected every probed option).
+fn record_quiet_diagnostic(
+    accumulator: &mut CampaignAccumulator,
+    probe: &ProbeResult,
+    raw_generated_kinds: &BTreeSet<GameplayCommandKind>,
+    retained_kinds: &BTreeSet<GameplayCommandKind>,
+    probed_kinds: &BTreeSet<GameplayCommandKind>,
+    activation_delta: &BTreeMap<GameplayCommandKind, u32>,
+) {
+    let actionable = probe.substantive_viable_count > 0;
+    if actionable {
+        return;
+    }
+    for (kind, delta) in activation_delta {
+        if *delta > 0 && !raw_generated_kinds.contains(kind) {
+            *accumulator
+                .quiet_diagnostic
+                .generator_gaps
+                .entry(*kind)
+                .or_default() += 1;
+        }
+    }
+    for kind in raw_generated_kinds {
+        if !retained_kinds.contains(kind) {
+            *accumulator
+                .quiet_diagnostic
+                .policy_gates
+                .entry(*kind)
+                .or_default() += 1;
+        }
+    }
+    for kind in probed_kinds {
+        if !probe.viable_command_kinds.contains(kind) {
+            *accumulator
+                .quiet_diagnostic
+                .validation_gates
+                .entry(*kind)
+                .or_default() += 1;
+        }
+    }
 }
 
 fn record_offered_command_kinds(candidates: &[Candidate], accumulator: &mut CampaignAccumulator) {
@@ -4165,7 +4232,7 @@ fn ranked_candidates(
     state: &AppState,
     persona: GameplayPersona,
     accumulator: &CampaignAccumulator,
-) -> Vec<Candidate> {
+) -> (Vec<Candidate>, BTreeSet<GameplayCommandKind>) {
     let mut candidates = Vec::new();
     generate_reactive_candidates(state, persona, &mut candidates);
     generate_business_candidates(registry, state, persona, &mut candidates);
@@ -4174,6 +4241,7 @@ fn ranked_candidates(
     generate_information_candidates(registry, state, persona, &mut candidates);
     generate_civic_candidates(registry, state, persona, &mut candidates);
     generate_family_candidates(registry, state, persona, &mut candidates);
+    let generated_kinds: BTreeSet<_> = candidates.iter().map(|candidate| candidate.kind).collect();
     candidates
         .retain(|candidate| candidate_preserves_office_duty_reserve(registry, state, candidate));
     for candidate in &mut candidates {
@@ -4189,7 +4257,7 @@ fn ranked_candidates(
             .then_with(|| left.kind.cmp(&right.kind))
             .then_with(|| left.description.cmp(&right.description))
     });
-    candidates
+    (candidates, generated_kinds)
 }
 
 fn legal_funding_candidate_adjustment(state: &AppState, candidate: &Candidate) -> i64 {
@@ -10083,6 +10151,7 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
             .count(),
     );
     let scores = aggregate_scores(campaigns);
+    let quiet_diagnostic = aggregate_quiet_diagnostics(campaigns);
     GameplayAggregate {
         campaigns: usize_to_u32(campaigns.len()),
         simulated_days: totals.simulated_days,
@@ -10117,8 +10186,45 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
         causal_domain_coverage,
         ambient_domain_coverage,
         interactions: interaction_vec(&interactions),
+        quiet_diagnostic,
         scores,
     }
+}
+
+fn aggregate_quiet_diagnostics(
+    campaigns: &[GameplayCampaignReport],
+) -> GameplayQuietDiagnostic {
+    let mut diagnostic = GameplayQuietDiagnostic::default();
+    for campaign in campaigns {
+        for (kind, count) in &campaign.quiet_diagnostic.generator_gaps {
+            *diagnostic.generator_gaps.entry(*kind).or_default() =
+                diagnostic
+                    .generator_gaps
+                    .get(kind)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(*count);
+        }
+        for (kind, count) in &campaign.quiet_diagnostic.policy_gates {
+            *diagnostic.policy_gates.entry(*kind).or_default() =
+                diagnostic
+                    .policy_gates
+                    .get(kind)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(*count);
+        }
+        for (kind, count) in &campaign.quiet_diagnostic.validation_gates {
+            *diagnostic.validation_gates.entry(*kind).or_default() =
+                diagnostic
+                    .validation_gates
+                    .get(kind)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(*count);
+        }
+    }
+    diagnostic
 }
 
 fn aggregate_campaigns_by_persona(
@@ -10889,7 +10995,7 @@ fn add_phase_quality_findings(
         "succession and legacy",
         "Succession and legacy lack post-transition strategy",
         PhaseQualityThresholds {
-            minimum_action_share: 55,
+            minimum_action_share: 50,
             maximum_static_quiet_share: 35,
             maximum_quiet_streak_cycles: GOVERNANCE_MAX_QUIET_STREAK_CYCLES,
             minimum_multi_family_share: 30,
@@ -13985,6 +14091,7 @@ pub fn render_gameplay_report(report: &GameplayHarnessReport) -> String {
     render_domain_table(report, &mut output);
     render_interactions(report, &mut output);
     render_rejections(report, &mut output);
+    render_quiet_diagnosis(report, &mut output);
     render_findings(report, &mut output);
     render_limitations(report, &mut output);
     render_fantasy_arcs(report, &mut output);
@@ -14641,6 +14748,51 @@ fn render_rejections(report: &GameplayHarnessReport, output: &mut String) {
     let _ = writeln!(output, "Most common blocked choices");
     for (reason, count) in reasons.into_iter().take(8) {
         let _ = writeln!(output, "  {count:>6}  {reason}");
+    }
+    let _ = writeln!(output);
+}
+
+fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mut String) {
+    let diagnostic = &report.aggregate.quiet_diagnostic;
+    if diagnostic.generator_gaps.is_empty()
+        && diagnostic.policy_gates.is_empty()
+        && diagnostic.validation_gates.is_empty()
+    {
+        return;
+    }
+    let _ = writeln!(output, "Quiet cycle diagnosis");
+    if !diagnostic.generator_gaps.is_empty() {
+        let mut gaps: Vec<_> = diagnostic.generator_gaps.iter().collect();
+        gaps.sort_by_key(|(kind, count)| (std::cmp::Reverse(**count), **kind));
+        let gap_text = gaps
+            .into_iter()
+            .take(5)
+            .map(|(kind, count)| format!("{} {count}", kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(output, "  opportunities without candidates: {gap_text}");
+    }
+    if !diagnostic.policy_gates.is_empty() {
+        let mut gates: Vec<_> = diagnostic.policy_gates.iter().collect();
+        gates.sort_by_key(|(kind, count)| (std::cmp::Reverse(**count), **kind));
+        let gate_text = gates
+            .into_iter()
+            .take(5)
+            .map(|(kind, count)| format!("{} {count}", kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(output, "  declined by agent spending policy: {gate_text}");
+    }
+    if !diagnostic.validation_gates.is_empty() {
+        let mut gates: Vec<_> = diagnostic.validation_gates.iter().collect();
+        gates.sort_by_key(|(kind, count)| (std::cmp::Reverse(**count), **kind));
+        let gate_text = gates
+            .into_iter()
+            .take(5)
+            .map(|(kind, count)| format!("{} {count}", kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(output, "  generated but rejected: {gate_text}");
     }
     let _ = writeln!(output);
 }

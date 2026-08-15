@@ -113,4 +113,31 @@ mod names {
             })
         );
     }
+
+    #[test]
+    fn founder_starts_near_the_succession_eligibility_age() {
+        let registry = test_registry();
+        for seed in [1_u64, 2, 3, 42, 999] {
+            let state = build_new_game(
+                registry,
+                NewGameConfig {
+                    seed,
+                    ..NewGameConfig::default()
+                },
+            )
+            .expect("game must build");
+            let dynasty = state
+                .get_dynasty(state.player_dynasty_id())
+                .expect("player dynasty must exist");
+            let founder = state
+                .characters()
+                .get(dynasty.head_id())
+                .expect("founder must exist");
+            let age_years = state.clock().day().saturating_sub(founder.birth_day()) / 360;
+            assert!(
+                (45..=51).contains(&age_years),
+                "seed {seed} founder must start between 45 and 51 years old, got {age_years}"
+            );
+        }
+    }
 }

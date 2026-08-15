@@ -34,7 +34,7 @@ pub use gameplay::{
     GameplayConsequenceProfile, GameplayDomain, GameplayFantasyArc, GameplayFinding,
     GameplayFindingSeverity, GameplayHarnessConfig, GameplayHarnessError, GameplayHarnessReport,
     GameplayInteractionEdge, GameplayMeasure, GameplayMeasureChange, GameplayPersona,
-    GameplayPhase, GameplayPhaseStats, GameplayScores, GameplaySnapshot,
+    GameplayPhase, GameplayPhaseStats, GameplayQuietDiagnostic, GameplayScores, GameplaySnapshot,
     GameplaySuccessionTransition, GameplayTraceStep, GameplayViableOption, render_gameplay_report,
     run_gameplay_harness,
 };

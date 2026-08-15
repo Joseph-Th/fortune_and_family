@@ -1366,11 +1366,14 @@ mod candidates {
         make_institution_withdrawal_available_for_test(&mut state);
         assert!(has_institution_withdrawal_opportunity(&state));
         let mut accumulator = CampaignAccumulator::new();
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::Steward, &accumulator).1;
         record_activation_opportunities(
             registry,
             &state,
             GameplayPersona::Steward,
             &mut accumulator,
+            &generated_kinds,
         );
         assert_eq!(
             accumulator
@@ -1734,11 +1737,14 @@ mod candidates {
         let player_id = state.player_dynasty_id;
         assert!(has_property_liquidation_opportunity(registry, &state));
         let mut accumulator = CampaignAccumulator::new();
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::Steward, &accumulator).1;
         record_activation_opportunities(
             registry,
             &state,
             GameplayPersona::Steward,
             &mut accumulator,
+            &generated_kinds,
         );
         assert_eq!(
             accumulator
@@ -2051,11 +2057,14 @@ mod candidates {
             GameplayPersona::PowerBroker
         ));
         let mut accumulator = CampaignAccumulator::new();
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::PowerBroker, &accumulator).1;
         record_activation_opportunities(
             registry,
             &state,
             GameplayPersona::PowerBroker,
             &mut accumulator,
+            &generated_kinds,
         );
         assert_eq!(
             accumulator
@@ -2525,11 +2534,14 @@ mod candidates {
         assert!(amount >= AGENT_OWNER_DISTRIBUTION_TRIGGER);
 
         let mut accumulator = CampaignAccumulator::new();
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::Opportunist, &accumulator).1;
         record_activation_opportunities(
             registry,
             &state,
             GameplayPersona::Opportunist,
             &mut accumulator,
+            &generated_kinds,
         );
         assert_eq!(
             accumulator
@@ -4342,12 +4354,15 @@ mod candidates {
             .expect("institution district must exist")
             .employment_basis_points = 0;
         let mut accumulator = CampaignAccumulator::new();
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::Steward, &accumulator).1;
 
         record_activation_opportunities(
             registry,
             &state,
             GameplayPersona::Steward,
             &mut accumulator,
+            &generated_kinds,
         );
 
         assert_eq!(
@@ -4430,6 +4445,104 @@ mod metrics {
             .expect("institutional-ascent phase statistics must exist");
         assert_eq!(stats.quiet_cycles, 3);
         assert_eq!(stats.longest_quiet_streak_cycles, 2);
+    }
+
+    #[test]
+    fn quiet_diagnostic_separates_policy_gates_from_generator_gaps() {
+        let mut accumulator = CampaignAccumulator::new();
+        let activation_delta = BTreeMap::from([(GameplayCommandKind::EnactLaw, 1_u32)]);
+        let raw_generated_kinds = BTreeSet::from([GameplayCommandKind::StartPublicWork]);
+        let retained_kinds = BTreeSet::new();
+        let probed_kinds = BTreeSet::from([GameplayCommandKind::FileLegalCase]);
+        let probe = ProbeResult {
+            selected: None,
+            viable_count: 0,
+            substantive_viable_count: 0,
+            viable_command_kinds: BTreeSet::new(),
+            viable_options: Vec::new(),
+            close_choice_score_gap: None,
+            distinct_immediate_choice_profiles: 0,
+            distinct_projected_choice_profiles: 0,
+            family_close_choice_score_gap: None,
+            distinct_immediate_family_profiles: 0,
+            distinct_projected_family_profiles: 0,
+            rejections: Vec::new(),
+        };
+
+        record_quiet_diagnostic(
+            &mut accumulator,
+            &probe,
+            &raw_generated_kinds,
+            &retained_kinds,
+            &probed_kinds,
+            &activation_delta,
+        );
+
+        assert_eq!(
+            accumulator.quiet_diagnostic.generator_gaps.get(&GameplayCommandKind::EnactLaw),
+            Some(&1),
+            "an activation opportunity without any built candidate must be a generator gap"
+        );
+        assert_eq!(
+            accumulator.quiet_diagnostic.policy_gates.get(&GameplayCommandKind::StartPublicWork),
+            Some(&1),
+            "built candidates removed by agent spending policy must be policy gates"
+        );
+        assert_eq!(
+            accumulator.quiet_diagnostic.validation_gates.get(&GameplayCommandKind::FileLegalCase),
+            Some(&1),
+            "probed candidates the game rejected must be validation gates"
+        );
+    }
+
+    #[test]
+    fn quiet_diagnostic_skips_cycles_with_an_action() {
+        let mut accumulator = CampaignAccumulator::new();
+        let probe = ProbeResult {
+            selected: None,
+            viable_count: 1,
+            substantive_viable_count: 1,
+            viable_command_kinds: BTreeSet::from([GameplayCommandKind::EducateFamilyMember]),
+            viable_options: Vec::new(),
+            close_choice_score_gap: None,
+            distinct_immediate_choice_profiles: 0,
+            distinct_projected_choice_profiles: 0,
+            family_close_choice_score_gap: None,
+            distinct_immediate_family_profiles: 0,
+            distinct_projected_family_profiles: 0,
+            rejections: Vec::new(),
+        };
+
+        record_quiet_diagnostic(
+            &mut accumulator,
+            &probe,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(accumulator.quiet_diagnostic.generator_gaps.len(), 0);
+        assert_eq!(accumulator.quiet_diagnostic.policy_gates.len(), 0);
+        assert_eq!(accumulator.quiet_diagnostic.validation_gates.len(), 0);
+    }
+
+    #[test]
+    fn quiet_diagnostic_aggregate_sums_campaign_gates() {
+        let report = cached_focused_report(30);
+        let mut expected = GameplayQuietDiagnostic::default();
+        for campaign in &report.campaigns {
+            for (kind, count) in &campaign.quiet_diagnostic.generator_gaps {
+                *expected.generator_gaps.entry(*kind).or_default() += *count;
+            }
+            for (kind, count) in &campaign.quiet_diagnostic.policy_gates {
+                *expected.policy_gates.entry(*kind).or_default() += *count;
+            }
+            for (kind, count) in &campaign.quiet_diagnostic.validation_gates {
+                *expected.validation_gates.entry(*kind).or_default() += *count;
+            }
+        }
+        assert_eq!(report.aggregate.quiet_diagnostic, expected);
     }
 
     #[test]
@@ -5391,6 +5504,7 @@ mod metrics {
         );
         assert!(
             ranked_candidates(registry, &state, GameplayPersona::Steward, &accumulator,)
+                .0
                 .iter()
                 .any(|candidate| candidate.kind == GameplayCommandKind::SetHouseGovernance)
         );
@@ -8447,7 +8561,7 @@ fn candidate_kinds_for_test(
     GameplayPersona::all()
         .into_iter()
         .flat_map(|persona| {
-            ranked_candidates(registry, state, persona, &CampaignAccumulator::new())
+            ranked_candidates(registry, state, persona, &CampaignAccumulator::new()).0
         })
         .map(|candidate| candidate.kind)
         .collect()

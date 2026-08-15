@@ -432,6 +432,12 @@ fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
 
 const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = 8_000;
 
+/// Heads become eligible for succession at this age. Combined with the
+/// annual chance ramp below, this keeps the first transition within a
+/// playable session rather than pushing the dynasty fantasy past the
+/// horizon most campaigns reach.
+const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 50;
+
 fn decide_business_production(
     registry: &Registry,
     state: &AppState,
@@ -2006,7 +2012,7 @@ fn decide_successions(state: &mut AppState) -> Result<Vec<SuccessionLine>, Simul
         let age_days = state.clock.day().saturating_sub(head.birth_day());
         let age_years = age_days / 360;
         let health_forces_succession = head.runtime.health_basis_points == 0;
-        if age_years < 55 && !health_forces_succession {
+        if age_years < SUCCESSION_ELIGIBILITY_AGE_YEARS && !health_forces_succession {
             continue;
         }
         let annual_chance = succession_chance_basis_points(
@@ -2145,10 +2151,10 @@ fn succession_chance_basis_points(
     succession_risk_basis_points: u16,
     health_basis_points: u16,
 ) -> u16 {
-    if age_years < 55 {
+    if age_years < SUCCESSION_ELIGIBILITY_AGE_YEARS {
         return 0;
     }
-    let age_pressure = (age_years - 50).saturating_mul(120);
+    let age_pressure = (age_years - SUCCESSION_ELIGIBILITY_AGE_YEARS).saturating_mul(200);
     let governance_pressure = i64::from(succession_risk_basis_points / 2);
     let health_pressure = i64::from(10_000_u16.saturating_sub(health_basis_points) / 2);
     u16::try_from(

@@ -11,7 +11,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Minimum Rust version | 1.97 |
 | Save schema | 20 |
 | Supported save schemas | Current schema only |
-| Gameplay report schema | 51 |
+| Gameplay report schema | 52 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |

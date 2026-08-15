@@ -75,7 +75,7 @@ bash scripts/test.sh gameplay-audit
 | `--seeds` | Number of consecutive seeds | `1` |
 | `--days` | Simulated days per campaign | `1080` |
 | `--decision-interval` | Normal days advanced after a player decision | `30` |
-| `--max-probes` | Maximum candidate commands validated per decision | `24` |
+| `--max-probes` | Maximum candidate commands validated per decision | `16` |
 | `--consequence-horizon` | Maximum delayed-attribution horizon in days | `360` |
 | `--trace-limit` | Representative trace steps retained per campaign | `40` |
 | `--persona` | Repeatable persona filter; omit for all | All |
@@ -155,6 +155,18 @@ Changed domains are classified as:
 
 Only action-attributable differences create command-to-domain interaction edges.
 
+## Quiet-cycle diagnosis
+
+A no-action cycle happens when the agent has no viable substantive choice. The report distinguishes three causes per command family so design work does not conflate game gaps with agent discipline:
+
+| Cause | Meaning |
+|---|---|
+| Generator gap | An activation opportunity existed but no candidate was built |
+| Policy gate | Candidates were built but the persona's spending filters declined every one of them |
+| Validation gate | Candidates were built and probed but canonical validation rejected every one of them |
+
+Quiet cycles with no recorded cause are dormant state: the game world offered no detected opportunity. The diagnosis is recorded per campaign and summed in the aggregate and persona aggregates.
+
 ## Report contract
 
 `GAMEPLAY_REPORT_SCHEMA_VERSION` in `src/gameplay.rs` versions the structured report.
@@ -167,6 +179,7 @@ Reports contain:
 - Command generation, viability, selection, and consequence statistics
 - Phase-level activity and choice metrics
 - Immediate, persistent, delayed, and ambient domain attribution
+- Quiet-cycle diagnosis separating generator gaps, agent-policy gates, and validation gates
 - Economic, civic, family, institutional, legal, crisis, and information snapshots
 - Representative decision traces
 - Findings and stated limitations

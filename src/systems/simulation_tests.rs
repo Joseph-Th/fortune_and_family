@@ -2316,6 +2316,12 @@ mod health_and_succession {
             .get(&dynasty_id)
             .expect("player dynasty must exist")
             .head_id();
+        state
+            .characters
+            .get_mut(head_id)
+            .expect("dynasty head must exist")
+            .identity
+            .birth_day = state.clock.day().saturating_sub(40 * 360);
         let age_years = state.clock.day().saturating_sub(
             state
                 .characters
@@ -2323,7 +2329,10 @@ mod health_and_succession {
                 .expect("dynasty head must exist")
                 .birth_day(),
         ) / 360;
-        assert!(age_years < 55, "fixture head must be younger than 55");
+        assert!(
+            age_years < SUCCESSION_ELIGIBILITY_AGE_YEARS,
+            "fixture head must be below the succession eligibility age"
+        );
         state
             .characters
             .get_mut(head_id)
@@ -2810,9 +2819,18 @@ mod health_and_succession {
             "poor health must increase annual succession probability"
         );
         assert_eq!(
-            succession_chance_basis_points(54, 10_000, 0),
+            succession_chance_basis_points(49, 10_000, 0),
             0,
             "the minimum succession age remains explicit"
+        );
+        assert!(
+            succession_chance_basis_points(50, 1_000, 9_000) > 0,
+            "an eligible head must begin to accumulate annual succession pressure"
+        );
+        assert!(
+            succession_chance_basis_points(60, 1_000, 9_000)
+                > succession_chance_basis_points(50, 1_000, 9_000),
+            "age must increase annual succession pressure once eligible"
         );
     }
 }

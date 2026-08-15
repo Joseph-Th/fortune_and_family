@@ -76,7 +76,7 @@ Manage a portfolio of businesses, property, offices, family roles, debts, relati
 
 ### Succession and legacy
 
-Test whether control depends on one person or on a durable organization. Inheritance should alter cohesion, legitimacy, responsibilities, and strategic position while preserving the consequences of earlier generations.
+Test whether control depends on one person or on a durable organization. Inheritance should alter cohesion, legitimacy, responsibilities, and strategic position while preserving the consequences of earlier generations. Succession must arrive within a playable horizon: founders start near the eligibility age so the first transition happens in the same session that builds the dynasty, rather than only in generation-length simulations.
 
 The phases may overlap, but they must remain strategically distinct. Political authority should require sustained commercial credibility, and late play should not be an enlarged version of the opening business loop.
 

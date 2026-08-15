@@ -379,7 +379,7 @@ fn insert_dynasty(
             id: head_id,
             dynasty_id,
             name: head_name.to_owned(),
-            birth_day: -13_500 - i64::from(state.rng.range_u32(4_000)),
+            birth_day: -16_800 - i64::from(state.rng.range_u32(1_400)),
         },
         capabilities: CharacterCapabilities {
             administration: head_administration,
