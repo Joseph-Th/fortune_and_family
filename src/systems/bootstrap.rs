@@ -234,7 +234,7 @@ fn insert_npc_foundations(state: &mut AppState, registry: &Registry) {
             state,
             seed.dynasty_name,
             seed.head_name,
-            Money::from_copper(70_000 + i64::try_from(index).expect("index fits i64") * 8_000),
+            Money::from_copper(45_000 + i64::try_from(index).expect("index fits i64") * 5_000),
             64 + u16::try_from(index).expect("index fits u16") * 3,
         );
         let head_id = state
@@ -379,7 +379,7 @@ fn insert_dynasty(
             id: head_id,
             dynasty_id,
             name: head_name.to_owned(),
-            birth_day: -16_800 - i64::from(state.rng.range_u32(1_400)),
+            birth_day: -18_000 - i64::from(state.rng.range_u32(1_080)),
         },
         capabilities: CharacterCapabilities {
             administration: head_administration,

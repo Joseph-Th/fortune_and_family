@@ -2154,7 +2154,7 @@ fn succession_chance_basis_points(
     if age_years < SUCCESSION_ELIGIBILITY_AGE_YEARS {
         return 0;
     }
-    let age_pressure = (age_years - SUCCESSION_ELIGIBILITY_AGE_YEARS).saturating_mul(200);
+    let age_pressure = (age_years - SUCCESSION_ELIGIBILITY_AGE_YEARS).saturating_mul(300);
     let governance_pressure = i64::from(succession_risk_basis_points / 2);
     let health_pressure = i64::from(10_000_u16.saturating_sub(health_basis_points) / 2);
     u16::try_from(

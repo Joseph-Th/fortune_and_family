@@ -3819,17 +3819,19 @@ fn record_activation_opportunities(
     ] {
         record_activation_opportunity(accumulator, kind, available);
     }
-    for kind in [
-        GameplayCommandKind::SetHouseGovernance,
-        GameplayCommandKind::ConveneFamilyCouncil,
-        GameplayCommandKind::EndowInstitution,
-        GameplayCommandKind::EnactLaw,
-        GameplayCommandKind::StartPublicWork,
-        GameplayCommandKind::FundPublicWork,
-        GameplayCommandKind::ExerciseOfficePower,
-        GameplayCommandKind::CommissionInformation,
-        GameplayCommandKind::LeverageInformation,
-    ] {
+    for kind in ALL_COMMAND_KINDS.iter().copied().filter(|kind| {
+        !matches!(
+            kind,
+            GameplayCommandKind::RespondToCrisis
+                | GameplayCommandKind::ResolveLaborDispute
+                | GameplayCommandKind::FileLegalCase
+                | GameplayCommandKind::SettleLegalCase
+                | GameplayCommandKind::SellProperty
+                | GameplayCommandKind::WithdrawFromInstitution
+                | GameplayCommandKind::ExtendCredit
+                | GameplayCommandKind::TransferBusinessCash
+        )
+    }) {
         record_activation_opportunity(accumulator, kind, generated_kinds.contains(&kind));
     }
 }

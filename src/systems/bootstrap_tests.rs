@@ -135,8 +135,8 @@ mod names {
                 .expect("founder must exist");
             let age_years = state.clock().day().saturating_sub(founder.birth_day()) / 360;
             assert!(
-                (45..=51).contains(&age_years),
-                "seed {seed} founder must start between 45 and 51 years old, got {age_years}"
+                (50..=54).contains(&age_years),
+                "seed {seed} founder must start at or above the 50-year succession eligibility age, got {age_years}"
             );
         }
     }

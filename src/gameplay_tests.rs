@@ -424,6 +424,7 @@ mod harness {
         let registry = rivergate_registry_for_test();
         let mut config = focused_config(180);
         config.decision_interval_days = 7;
+        config.personas = vec![GameplayPersona::Entrepreneur];
         let report =
             run_gameplay_harness(registry, config).expect("gameplay harness must complete");
         let campaign = report.campaigns.first().expect("one campaign must run");
@@ -432,7 +433,9 @@ mod harness {
         assert_eq!(report.aggregate.campaigns, 1);
         assert_eq!(report.aggregate.simulated_days, 180);
         assert_eq!(
-            report.persona_aggregates.get(&GameplayPersona::Steward),
+            report
+                .persona_aggregates
+                .get(&GameplayPersona::Entrepreneur),
             Some(&report.aggregate),
             "a single-persona run should expose the same metrics through its persona aggregate"
         );
@@ -5503,6 +5506,17 @@ mod metrics {
     fn notification_housekeeping_does_not_displace_a_substantive_choice() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
+        let player_head = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        state
+            .characters
+            .get_mut(player_head)
+            .expect("player head must exist")
+            .identity
+            .birth_day = state.clock.day().saturating_sub(40 * 360);
         state.outbox.clear();
         for index in 1..=NOTIFICATION_BATCH_THRESHOLD {
             let message_id = state.next_ids.outbox();
@@ -5560,6 +5574,17 @@ mod metrics {
     fn automatic_notification_housekeeping_clears_backlog_without_advancing_the_campaign() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
+        let player_head = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        state
+            .characters
+            .get_mut(player_head)
+            .expect("player head must exist")
+            .identity
+            .birth_day = state.clock.day().saturating_sub(40 * 360);
         state.outbox.clear();
         for index in 1..=NOTIFICATION_BATCH_THRESHOLD {
             let message_id = state.next_ids.outbox();

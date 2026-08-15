@@ -2650,7 +2650,7 @@ mod politics {
 
     fn resolved_failed_nomination_fixture(
         registry: &Registry,
-    ) -> (AppState, CharacterId, InstitutionId, usize) {
+    ) -> (AppState, CharacterId, InstitutionId) {
         let mut state = make_test_campaign();
         let character_id = state
             .dynasties
@@ -2679,12 +2679,6 @@ mod politics {
             },
         )
         .expect("first nomination must add the heir as a member");
-        let member_count = state
-            .institutions
-            .get(&institution_id)
-            .expect("institution must exist")
-            .members
-            .len();
         advance_days(
             registry,
             &mut state,
@@ -2707,7 +2701,7 @@ mod politics {
             .expect("player dynasty must exist");
         player.resources.reputation_quality_basis_points = OFFICE_NOMINATION_REPUTATION_REQUIREMENT;
         player.resources.treasury = Money::from_copper(10_000);
-        (state, character_id, institution_id, member_count)
+        (state, character_id, institution_id)
     }
 
     fn make_patronage_fixture(
@@ -4093,7 +4087,7 @@ mod politics {
     #[test]
     fn failed_candidate_can_campaign_again_after_the_recovery_period() {
         let registry = rivergate_registry_for_test();
-        let (mut state, character_id, institution_id, member_count) =
+        let (mut state, character_id, institution_id) =
             resolved_failed_nomination_fixture(registry);
         let before_recovery = state.clone();
 
@@ -4127,6 +4121,12 @@ mod politics {
             .expect("remaining nomination recovery must fit the simulation day command"),
         )
         .expect("campaign must advance through the remaining nomination recovery");
+        let member_count = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist")
+            .members
+            .len();
         let player = state
             .dynasties
             .get_mut(&state.player_dynasty_id)

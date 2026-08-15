@@ -7216,4 +7216,158 @@ mod ai {
             "office objectives must also scale progress to actual spending"
         );
     }
+
+    #[test]
+    fn ai_households_pay_proportional_monthly_upkeep() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a rival dynasty");
+        let treasury_before = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("rival dynasty must exist")
+            .treasury();
+        let family_members = state
+            .family_councils
+            .get(&dynasty_id)
+            .expect("rival dynasty must have a family council")
+            .members
+            .len();
+        let business_count = state
+            .businesses
+            .ids_for_owner(dynasty_id)
+            .expect("rival owner index must exist")
+            .len();
+        let expected = AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY
+            .saturating_add(
+                AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER
+                    .saturating_mul(i64::try_from(family_members).unwrap_or(i64::MAX)),
+            )
+            .saturating_add(
+                AI_DYNASTY_UPKEEP_PER_BUSINESS
+                    .saturating_mul(i64::try_from(business_count).unwrap_or(i64::MAX)),
+            );
+        assert!(
+            expected > Money::ZERO,
+            "rival household upkeep must be nonzero"
+        );
+
+        apply_ai_dynasty_upkeep(&mut state).expect("AI dynasty upkeep must commit");
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("rival dynasty must exist")
+                .treasury(),
+            treasury_before.saturating_sub(expected),
+            "AI dynasties must fund their household and portfolio upkeep from treasury"
+        );
+        assert!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury()
+                > Money::ZERO,
+            "player treasury must be exempt from automatic upkeep"
+        );
+        assert!(state.audit_log.iter().rev().any(|record| {
+            record.kind() == AuditKind::HouseholdUpkeep
+                && record.subject() == "ai-dynasties"
+                && record.detail().starts_with("monthly_upkeep=")
+        }));
+    }
+
+    #[test]
+    fn ai_upkeep_never_drives_treasury_negative() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a rival dynasty");
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("rival dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(1);
+
+        apply_ai_dynasty_upkeep(&mut state).expect("AI dynasty upkeep must remain representable");
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("rival dynasty must exist")
+                .treasury(),
+            Money::ZERO,
+            "upkeep must never drive a dynasty treasury below zero"
+        );
+    }
+
+    #[test]
+    fn chronically_unprofitable_ai_businesses_are_not_recapitalized() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let owner_dynasty_id = state
+            .businesses
+            .get(business_id)
+            .expect("selected business must exist")
+            .owner_dynasty_id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.finance.cash = Money::ZERO;
+            business.finance.lifetime_costs = Money::from_copper(1_000);
+            business.finance.lifetime_revenue = Money::from_copper(500);
+        }
+        state
+            .dynasties
+            .get_mut(&owner_dynasty_id)
+            .expect("business owner must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let treasury_before = state
+            .dynasties
+            .get(&owner_dynasty_id)
+            .expect("business owner must exist")
+            .treasury();
+
+        recover_ai_businesses(registry, &mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("selected business must exist")
+                .cash(),
+            Money::ZERO,
+            "AI houses must not subsidize a business that loses money over its lifetime"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&owner_dynasty_id)
+                .expect("business owner must exist")
+                .treasury(),
+            treasury_before,
+            "a refused recapitalization must not spend owner treasury"
+        );
+    }
 }

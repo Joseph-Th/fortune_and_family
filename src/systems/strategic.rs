@@ -31,6 +31,9 @@ pub(crate) const OFFICE_ADMINISTRATIVE_LOAD_PER_POWER: u16 = 10;
 pub(crate) const OFFICE_DUTY_COST_PER_POWER: Money = Money::from_copper(100);
 pub(crate) const OFFICE_DUTY_PORTFOLIO_SURCHARGE_PER_ADDITIONAL_OFFICE: Money =
     Money::from_copper(50);
+const AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY: Money = Money::from_copper(500);
+const AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER: Money = Money::from_copper(250);
+const AI_DYNASTY_UPKEEP_PER_BUSINESS: Money = Money::from_copper(400);
 const OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS: i64 = 90;
 const OFFICE_DUTY_FORFEITURE_WINDOW_DAYS: i64 = 90;
 const OFFICE_DUTY_REELECTION_BAN_DAYS: i64 = 180;
@@ -5180,6 +5183,7 @@ pub(crate) fn run_monthly_strategic_systems(
     apply_office_power_effects(registry, state)?;
     apply_active_office_directives(registry, state)?;
     advance_ai_objectives(registry, state)?;
+    apply_ai_dynasty_upkeep(state)?;
     update_information_reports(registry, state)?;
     file_grounded_ai_legal_cases(state)?;
     advance_legal_case_hearings(state)?;
@@ -5187,6 +5191,85 @@ pub(crate) fn run_monthly_strategic_systems(
     update_external_route_risk(state);
     detect_and_advance_crises(registry, state)?;
     recover_external_routes(state);
+    Ok(())
+}
+
+/// Applies a monthly household upkeep to every non-player dynasty so that rival houses
+/// bear real recurring costs for their families and business portfolios.
+///
+/// A dynasty that cannot cover its upkeep falls behind on its obligations instead of
+/// accumulating unlimited wealth, which makes credit demand, loan defaults, and grounded
+/// legal claims reachable in normal play. The player is exempt because the player's own
+/// discretionary spending already taxes the dynasty treasury.
+fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> {
+    let player_id = state.player_dynasty_id;
+    let dynasties: Vec<_> = state
+        .dynasties
+        .values()
+        .filter(|dynasty| dynasty.id() != player_id)
+        .map(|dynasty| {
+            let family_members = state
+                .family_councils
+                .get(&dynasty.id())
+                .map_or(0, |council| council.members.len());
+            let business_count = state
+                .businesses
+                .ids_for_owner(dynasty.id())
+                .into_iter()
+                .flatten()
+                .count();
+            (
+                dynasty.id(),
+                family_members,
+                business_count,
+                dynasty.treasury(),
+            )
+        })
+        .collect();
+    let mut total_upkeep = Money::ZERO;
+    for (dynasty_id, family_members, business_count, treasury) in dynasties {
+        let family = AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER
+            .saturating_mul(i64::try_from(family_members).unwrap_or(i64::MAX));
+        let portfolio = AI_DYNASTY_UPKEEP_PER_BUSINESS
+            .saturating_mul(i64::try_from(business_count).unwrap_or(i64::MAX));
+        let required = AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY
+            .saturating_add(family)
+            .saturating_add(portfolio);
+        if required == Money::ZERO {
+            continue;
+        }
+        let paid = required.min(treasury);
+        if paid == Money::ZERO {
+            continue;
+        }
+        let dynasty = state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("upkeep dynasty must exist");
+        dynasty.resources.treasury = dynasty.resources.treasury.checked_sub(paid).ok_or(
+            SimulationError::DynastyTreasuryOverflow {
+                dynasty_id,
+                current: dynasty.resources.treasury,
+                incoming: paid,
+            },
+        )?;
+        total_upkeep =
+            total_upkeep
+                .checked_add(paid)
+                .ok_or(SimulationError::DynastyTreasuryOverflow {
+                    dynasty_id,
+                    current: total_upkeep,
+                    incoming: paid,
+                })?;
+    }
+    if total_upkeep > Money::ZERO {
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::HouseholdUpkeep,
+            subject: "ai-dynasties".into(),
+            detail: format!("monthly_upkeep={}", total_upkeep.copper()),
+        });
+    }
     Ok(())
 }
 
@@ -5211,6 +5294,9 @@ fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
             .get(business_id)
             .expect("indexed AI business must exist");
         if checked_next_business_finance_version(business).is_none() {
+            continue;
+        }
+        if business.finance.lifetime_costs > business.finance.lifetime_revenue {
             continue;
         }
         let owner_dynasty_id = business.owner_dynasty_id();

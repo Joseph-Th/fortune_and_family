@@ -141,7 +141,7 @@ Strategic scheduling lives in `src/systems/strategic.rs`:
 - **Monthly**: district conditions, institution selections, office duties and directives, AI objectives, AI legal filings and case resolution, crisis detection.
 - **Annual**: character health, succession, dynastic milestones.
 
-The market clearing account is the market's internal cash pool: business purchases credit it, business sales debit it, and weekly household income is paid from it. AI dynasties act on the same cadence through `recover_ai_businesses` (daily), `advance_ai_objectives`, `file_grounded_ai_legal_cases`, and `resolve_institution_selections` (monthly).
+The market clearing account is the market's internal cash pool: business purchases credit it, business sales debit it, and weekly household income is paid from it. AI dynasties act on the same cadence through `recover_ai_businesses` (daily), `advance_ai_objectives`, `apply_ai_dynasty_upkeep`, `file_grounded_ai_legal_cases`, and `resolve_institution_selections` (monthly).
 
 ### Campaign phases
 

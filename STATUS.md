@@ -9,7 +9,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 20 |
+| Save schema | 21 |
 | Supported save schemas | Current schema only |
 | Gameplay report schema | 52 |
 | Art review report schema | 1 |
@@ -49,7 +49,7 @@ Rivergate supports deterministic continuation across multiple generations.
 | Civic systems | Laws, differentiated public works, district conditions, grounded legal cases and settlements, crisis response, municipal debt, and private funding of sponsored public works. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, subject, summary, creation, expiry, passive reports, and paid market/district/counterparty intelligence. |
-| AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure. |
+| AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; monthly household upkeep for family and portfolio; recapitalization only for lifetime-profitable businesses; grounded legal filing; and institution selection. |
 | Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, response, recovery, effects, and resolution. |
 | Observability | State summary, campaign projection, HTML dashboard, outbox, chronicle, audit history, validation, campaign progression, gameplay reports, and art review reports. |
 

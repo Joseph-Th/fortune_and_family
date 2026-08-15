@@ -169,6 +169,8 @@ A no-action cycle happens when the agent has no viable substantive choice. The r
 
 Quiet cycles with no recorded cause are dormant state: the game world offered no detected opportunity. The diagnosis is recorded per campaign and summed in the aggregate and persona aggregates.
 
+Activation opportunities are recorded for every command kind. Commands with a dedicated world-state predicate (crisis, labor, legal, settlement, property liquidation, institution withdrawal, credit extension, and business-cash transfer) use that predicate; every other command kind records an activation whenever its generator built a candidate. This keeps the `triggers` column and the generator-gap diagnosis meaningful for all command families.
+
 ## Report contract
 
 `GAMEPLAY_REPORT_SCHEMA_VERSION` in `src/gameplay.rs` versions the structured report.
