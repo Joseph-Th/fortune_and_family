@@ -11,8 +11,10 @@ use civic_dynasty::{
     run_gameplay_harness, save_state, validate_invariants,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use tempfile::Builder;
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -300,15 +302,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             println!("{json}");
         }
         Command::Dashboard { input, output } => {
-            let state = load_state(input)?;
-            validate_invariants(&registry, &state);
-            let html = render_campaign_html(&registry, &state)
-                .map_err(|source| CliError::DashboardSerialization { source })?;
-            ensure_output_parent(&output)?;
-            std::fs::write(&output, html).map_err(|source| CliError::DashboardWrite {
-                path: output.clone(),
-                source,
-            })?;
+            write_dashboard(&registry, input, &output)?;
             println!("Wrote {}", output.display());
         }
         Command::Execute {
@@ -423,9 +417,11 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
     };
     if let Some(path) = args.output {
         ensure_output_parent(&path)?;
-        std::fs::write(&path, rendered).map_err(|source| CliError::GameplayReportWrite {
-            path: path.clone(),
-            source,
+        write_generated_output(&path, rendered.as_bytes()).map_err(|source| {
+            CliError::GameplayReportWrite {
+                path: path.clone(),
+                source,
+            }
         })?;
         println!("Wrote {}", path.display());
     } else {
@@ -484,9 +480,11 @@ fn run_art(args: ArtArgs) -> Result<(), CliError> {
         render_art_review_html(&review)
     };
     ensure_output_parent(&args.output)?;
-    std::fs::write(&args.output, rendered).map_err(|source| CliError::ArtReviewWrite {
-        path: args.output.clone(),
-        source,
+    write_generated_output(&args.output, rendered.as_bytes()).map_err(|source| {
+        CliError::ArtReviewWrite {
+            path: args.output.clone(),
+            source,
+        }
     })?;
     println!(
         "Wrote {} ({} subjects, {} critical, {} warning or worse)",
@@ -504,6 +502,56 @@ fn run_art(args: ArtArgs) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+fn write_dashboard(registry: &Registry, input: PathBuf, output: &Path) -> Result<(), CliError> {
+    let state = load_state(input)?;
+    validate_invariants(registry, &state);
+    let html = render_campaign_html(registry, &state)
+        .map_err(|source| CliError::DashboardSerialization { source })?;
+    ensure_output_parent(output)?;
+    write_generated_output(output, html.as_bytes()).map_err(|source| CliError::DashboardWrite {
+        path: output.to_path_buf(),
+        source,
+    })
+}
+
+fn write_generated_output(path: &Path, contents: &[u8]) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "generated output path is not a regular file: {}",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let prefix = path.file_name().and_then(|name| name.to_str()).map_or_else(
+        || ".generated-output-".to_owned(),
+        |name| format!(".{name}."),
+    );
+    let mut temporary = Builder::new().prefix(&prefix).tempfile_in(parent)?;
+    temporary.write_all(contents)?;
+    temporary.as_file_mut().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    sync_generated_output_directory(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_generated_output_directory(parent: &Path) -> io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
 }
 
 fn ensure_output_parent(path: &Path) -> Result<(), CliError> {
@@ -780,5 +828,41 @@ mod tests {
             output.parent().expect("output must have a parent").is_dir(),
             "all adapter file outputs must support missing nested parent directories"
         );
+    }
+
+    #[test]
+    fn generated_output_replaces_existing_file_without_work_artifacts() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let output = directory.path().join("report.json");
+        std::fs::write(&output, b"old report").expect("existing report fixture must be written");
+
+        write_generated_output(&output, b"new report").expect("generated output must publish");
+
+        assert_eq!(std::fs::read(&output).unwrap(), b"new report");
+        let entries = std::fs::read_dir(directory.path())
+            .expect("temporary directory must be readable")
+            .map(|entry| entry.expect("directory entry must be readable").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, ["report.json"]);
+    }
+
+    #[test]
+    fn generated_output_rejects_directory_destination_without_mutating_it() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let output = directory.path().join("report.json");
+        std::fs::create_dir(&output).expect("directory destination fixture must be created");
+        std::fs::write(output.join("sentinel"), b"preserve")
+            .expect("directory sentinel fixture must be written");
+
+        let error = write_generated_output(&output, b"new report")
+            .expect_err("directory destination must be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(output.join("sentinel")).unwrap(), b"preserve");
+        let entries = std::fs::read_dir(directory.path())
+            .expect("temporary directory must be readable")
+            .map(|entry| entry.expect("directory entry must be readable").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, ["report.json"]);
     }
 }
