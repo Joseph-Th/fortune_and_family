@@ -115,14 +115,16 @@ Use `cargo run --locked -- --help` or a subcommand with `--help` for CLI syntax.
 ```text
 src/
   core/
+    mod.rs            Core facade: record and state type re-exports
     records.rs        Core population and economic records
-    extended.rs       Strategic, civic, family, finance, and relationship records
+    extended.rs       Strategic, civic, family, property, labor, finance, relationship, and crisis records
     state.rs          AppState, clock, synchronized stores, ID allocation
   registry/mod.rs     Immutable Rivergate definitions
   ids.rs              Typed persistent IDs
   money.rs            Fixed-point Money and Quantity
   rng.rs              Serializable deterministic RNG
   systems/
+    mod.rs            Systems facade: entry-point re-exports and shared scheduling helpers
     bootstrap.rs      New campaign construction
     commands.rs       PlayerCommand schema and dispatch
     legal.rs          Grounded legal claims

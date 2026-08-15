@@ -11,7 +11,7 @@ Registry definitions + AppState
             |
             v
 canonical systems
-  bootstrap | commands | legal | progression | simulation | strategic | transactions
+  bootstrap | commands | invariants | legal | progression | simulation | strategic | transactions
             |
             +--> invariants
             +--> audit / chronicle / outbox
@@ -34,6 +34,7 @@ Dependency direction is one way:
 |---|---|
 | `src/core/records.rs` | Core population and economic records. |
 | `src/core/extended.rs` | Strategic, civic, family, finance, property, labor, relationship, and crisis records. |
+| `src/core/mod.rs` | Core facade: record and state type re-exports. |
 | `src/core/state.rs` | `AppState`, clock, ID allocation, synchronized stores, state access. |
 | `src/ids.rs` | Typed persistent IDs. |
 | `src/money.rs` | Fixed-point `Money`, `Quantity`, affordability, and ratio arithmetic. |
@@ -41,10 +42,11 @@ Dependency direction is one way:
 | `src/rng.rs` | Serializable deterministic RNG. |
 | `src/systems/bootstrap.rs` | New campaign construction. |
 | `src/systems/commands.rs` | `PlayerCommand`, validation, dispatch, and command-owned mutation. |
+| `src/systems/mod.rs` | Systems facade: entry-point re-exports and shared scheduling and worker helpers. |
 | `src/systems/legal.rs` | Grounded debt and contract claims. |
 | `src/systems/progression.rs` | Monotonic campaign progression. |
 | `src/systems/simulation.rs` | Daily economic pipeline and time advancement. |
-| `src/systems/strategic.rs` | Weekly, monthly, annual, and cross-domain systems. |
+| `src/systems/strategic.rs` | Daily, weekly, monthly, annual, and cross-domain systems. |
 | `src/systems/transactions.rs` | Reusable validated transaction primitives. |
 | `src/systems/invariants.rs` | Runtime cross-record invariants. |
 | `src/persistence.rs` | Current-schema save/load, release validation, atomic writes. |
@@ -110,7 +112,7 @@ Multi-record operations may use consumed validated tokens. A deferred commit mus
 Each simulated day runs in this order:
 
 1. Reset market flow counters.
-2. Apply routes, laws, and active crisis effects.
+2. Apply routes, laws, active crisis effects, and AI business recovery.
 3. Decide and apply business purchases.
 4. Decide and apply production.
 5. Decide and apply business sales.
@@ -121,8 +123,8 @@ Each simulated day runs in this order:
 10. Update business lifecycle state.
 11. Advance the clock.
 12. Expire time-limited reports and office directives after their inclusive expiry day.
-13. Run weekly systems on week boundaries.
-14. Run monthly systems every 30 days.
+13. Run weekly systems on week boundaries, including household wage settlement from the market clearing account.
+14. Run monthly systems every 30 days, including AI objectives, AI legal filings, and institution selections.
 15. Run annual and succession systems every 360 days.
 16. Refresh campaign progression from durable milestones.
 17. Append the day audit record.
@@ -131,6 +133,29 @@ Each simulated day runs in this order:
 Owners: `src/systems/simulation.rs`, `src/systems/strategic.rs`, and `src/systems/progression.rs`.
 
 Execution order is causal behavior. Change it only with tests that establish the intended effect.
+
+Strategic scheduling lives in `src/systems/strategic.rs`:
+
+- **Daily**: routes, crisis effects, AI business recovery, external route supply.
+- **Weekly**: household wage settlement, contracts, loans, civic debts, property rents, employment, dividends, public works, relationship and reputation updates.
+- **Monthly**: district conditions, institution selections, office duties and directives, AI objectives, AI legal filings and case resolution, crisis detection.
+- **Annual**: character health, succession, dynastic milestones.
+
+The market clearing account is the market's internal cash pool: business purchases credit it, business sales debit it, and weekly household income is paid from it. AI dynasties act on the same cadence through `recover_ai_businesses` (daily), `advance_ai_objectives`, `file_grounded_ai_legal_cases`, and `resolve_institution_selections` (monthly).
+
+### Campaign phases
+
+`CampaignPhase` in `src/core/records.rs` is the persistent, monotonically advancing phase enum. Its variants are `Foundation`, `Establishment`, `Ascendancy`, `Dominion`, and `Legacy`; `CampaignPhase::label` maps them to the product-facing names used by `DESIGN.md` and `GAMEPLAY_HARNESS.md`:
+
+| Variant | Product label |
+|---|---|
+| `Foundation` | Foundation |
+| `Establishment` | Establishment |
+| `Ascendancy` | Institutional ascent |
+| `Dominion` | Dynastic governance |
+| `Legacy` | Succession and legacy |
+
+`refresh_campaign_phases` in `src/systems/progression.rs` derives the phase from durable commercial, institutional, civic, and succession milestones and never moves it backwards.
 
 ### Persistence
 

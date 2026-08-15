@@ -40,7 +40,7 @@ Rivergate supports deterministic continuation across multiple generations.
 | Businesses | Ownership, management, policy, cash, inventory, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, and protected owner distributions. |
 | Markets | Scarce procurement, production, business and household demand, industrial tool demand, spoilage, maintenance, price formation, controls, and regional supply. |
 | Contracts | Scheduled supply, payment, penalties, fulfillment, attribution, breach, and termination. |
-| Private finance | Loans, interest, repayment, delinquency, default, collateral, seizure, restructuring, and repayment history. |
+| Private finance | Loans, interest, repayment, delinquency, default, collateral, seizure, restructuring, and repayment records. |
 | Municipal finance | Authorizing laws, dynasty creditors, treasury proceeds, debt service, delinquency, default, and civic consequences. |
 | Property | Ownership, value, tenancy, occupancy, rent, purchase, collateral, liquidation, lien settlement, and distressed civic guarantees. |
 | Labor | Employment agreements, wages, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. |
