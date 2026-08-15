@@ -124,7 +124,7 @@ Each simulated day runs in this order:
 11. Advance the clock.
 12. Expire time-limited reports and office directives after their inclusive expiry day.
 13. Run weekly systems on week boundaries, including household wage settlement from the market clearing account.
-14. Run monthly systems every 30 days, including AI objectives, AI legal filings, and institution selections.
+14. Run monthly systems every 30 days, including AI objectives, AI dynasty upkeep, AI legal filings, and institution selections.
 15. Run annual and succession systems every 360 days.
 16. Refresh campaign progression from durable milestones.
 17. Append the day audit record.
@@ -138,7 +138,7 @@ Strategic scheduling lives in `src/systems/strategic.rs`:
 
 - **Daily**: routes, crisis effects, AI business recovery, external route supply.
 - **Weekly**: household wage settlement, contracts, loans, civic debts, property rents, employment, dividends, public works, relationship and reputation updates.
-- **Monthly**: district conditions, institution selections, office duties and directives, AI objectives, AI legal filings and case resolution, crisis detection.
+- **Monthly**: district conditions, institution selections, office duties and directives, AI objectives, AI dynasty upkeep, AI legal filings and case resolution, crisis detection.
 - **Annual**: character health, succession, dynastic milestones.
 
 The market clearing account is the market's internal cash pool: business purchases credit it, business sales debit it, and weekly household income is paid from it. AI dynasties act on the same cadence through `recover_ai_businesses` (daily), `advance_ai_objectives`, `apply_ai_dynasty_upkeep`, `file_grounded_ai_legal_cases`, and `resolve_institution_selections` (monthly).

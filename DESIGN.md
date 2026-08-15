@@ -9,7 +9,7 @@ Use `ARCHITECTURE.md` for implementation ownership and `STATUS.md` for current c
 | Item | Definition |
 |---|---|
 | Genre | Dynasty simulation, economic strategy, political strategy, social simulation |
-| Setting | One late-medieval European-inspired city with abstract regional connections |
+| Setting | Rivergate, one late-medieval European-inspired city with abstract regional connections |
 | Player role | Founder and successive heads of a merchant or artisan dynasty |
 | Core fantasy | Convert useful work into commercial standing, institutional power, civic influence, and durable family continuity |
 | Campaign scale | One detailed city across multiple generations |

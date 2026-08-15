@@ -29,7 +29,7 @@ The repository provides:
 - Deterministic gameplay-analysis harness
 - Deterministic procedural sprite renderer and review harness
 
-Rivergate supports deterministic continuation across multiple generations.
+Civic Dynasty campaigns support deterministic continuation across multiple generations.
 
 ## Implemented domains
 

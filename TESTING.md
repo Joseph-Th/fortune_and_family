@@ -131,3 +131,5 @@ git diff --check
 ```
 
 Cross-cutting changes include persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and gameplay-report schemas.
+
+CI runs the equivalent full gate on every push to `main` and on every pull request via `.github/workflows/ci.yml`.

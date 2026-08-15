@@ -1,6 +1,6 @@
 # Civic Dynasty
 
-Civic Dynasty is a deterministic Rust simulation of a merchant or artisan dynasty operating inside a living city economy. Rivergate combines businesses, households, markets, credit, property, institutions, law, public works, crises, family governance, and succession in one persistent campaign state.
+Civic Dynasty is a deterministic Rust simulation of a merchant or artisan dynasty operating inside a living city economy. The game is set in Rivergate, one detailed city scenario that combines businesses, households, markets, credit, property, institutions, law, public works, crises, family governance, and succession in one persistent campaign state.
 
 The core arc is:
 
@@ -144,11 +144,13 @@ scripts/
   check_docs.py       Documentation consistency checks
   test.sh             Test tier runner
   verify_cli.sh       CLI smoke groups
+.github/
+  workflows/ci.yml    CI gate for pushes to main and pull requests
 ```
 
 ## Supported library entry points
 
-`src/lib.rs` is the authoritative public facade. The main operations are:
+`src/lib.rs` is the authoritative public facade (the crate imports as `civic_dynasty`). The main operations are:
 
 | Operation | Entry point |
 |---|---|
