@@ -11,6 +11,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Minimum Rust version | 1.97 |
 | Save schema | 21 |
 | Supported save schemas | Current schema only |
+| Maximum save file size | 256 MiB |
 | Gameplay report schema | 52 |
 | Art review report schema | 1 |
 | Runtime services | None |
@@ -77,6 +78,7 @@ All callers use the same command validation and mutation paths.
 
 - Exact current-schema round trips
 - Explicit rejection of older, future, and missing save schema versions
+- Save loads require paths that resolve to regular files and reject inputs larger than 256 MiB before parsing
 - Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, schedules, and ID allocation
 - Preservation of RNG state and generated records required for deterministic continuation
 - Same-directory synchronized temporary writes followed by atomic replacement

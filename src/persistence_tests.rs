@@ -42,6 +42,45 @@ mod round_trip {
     use super::*;
 
     #[test]
+    fn load_rejects_directory_save_path() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+
+        let error = load_state(directory.path()).expect_err("directory save path must be rejected");
+
+        match error {
+            PersistenceError::NotRegularFile { path } => {
+                assert_eq!(path, directory.path());
+            }
+            unexpected => panic!("expected non-regular-file error, got {unexpected:?}"),
+        }
+    }
+
+    #[test]
+    fn oversized_save_is_rejected_before_allocation_or_parsing() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("oversized-campaign.json");
+        fs::File::create(&path)
+            .expect("oversized fixture must be created")
+            .set_len(MAX_SAVE_FILE_BYTES + 1)
+            .expect("oversized fixture must become sparse");
+
+        let error = load_state(&path).expect_err("oversized save must be rejected");
+
+        match error {
+            PersistenceError::SaveTooLarge {
+                path: error_path,
+                actual,
+                maximum,
+            } => {
+                assert_eq!(error_path, path);
+                assert_eq!(actual, MAX_SAVE_FILE_BYTES + 1);
+                assert_eq!(maximum, MAX_SAVE_FILE_BYTES);
+            }
+            unexpected => panic!("expected oversized-save error, got {unexpected:?}"),
+        }
+    }
+
+    #[test]
     fn preserves_deterministic_state() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

@@ -9,10 +9,12 @@ use crate::money::{Money, Quantity, checked_cost_for};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tempfile::Builder;
 use thiserror::Error;
+
+pub const MAX_SAVE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateValidationKind {
@@ -61,6 +63,14 @@ pub enum PersistenceError {
         path: PathBuf,
         #[source]
         source: std::io::Error,
+    },
+    #[error("save path does not resolve to a regular file: {path}")]
+    NotRegularFile { path: PathBuf },
+    #[error("save file {path} is too large: {actual} bytes exceeds the {maximum}-byte limit")]
+    SaveTooLarge {
+        path: PathBuf,
+        actual: u64,
+        maximum: u64,
     },
     #[error("failed to parse save file {path}: {source}")]
     Parse {
@@ -169,14 +179,11 @@ fn sync_save_directory(parent: &Path) -> Result<(), PersistenceError> {
 ///
 /// # Errors
 ///
-/// Returns an error when the file cannot be read or parsed, the schema version is not current, or
-/// the deserialized state fails release validation.
+/// Returns an error when the path is not a bounded regular file, the file cannot be read or parsed,
+/// the schema version is not current, or the deserialized state fails release validation.
 pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> {
     let path = path.as_ref();
-    let bytes = fs::read(path).map_err(|source| PersistenceError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let bytes = read_bounded_save(path)?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|source| PersistenceError::Parse {
             path: path.to_path_buf(),
@@ -194,6 +201,55 @@ pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> 
         reason: error.reason,
     })?;
     Ok(state)
+}
+
+fn read_bounded_save(path: &Path) -> Result<Vec<u8>, PersistenceError> {
+    let metadata = fs::metadata(path).map_err(|source| PersistenceError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(PersistenceError::NotRegularFile {
+            path: path.to_path_buf(),
+        });
+    }
+    reject_oversized_save(path, metadata.len())?;
+
+    let file = fs::File::open(path).map_err(|source| PersistenceError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let opened_metadata = file.metadata().map_err(|source| PersistenceError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !opened_metadata.is_file() {
+        return Err(PersistenceError::NotRegularFile {
+            path: path.to_path_buf(),
+        });
+    }
+    reject_oversized_save(path, opened_metadata.len())?;
+
+    let mut bytes = Vec::with_capacity(usize::try_from(opened_metadata.len()).unwrap_or(0));
+    file.take(MAX_SAVE_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| PersistenceError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    reject_oversized_save(path, u64::try_from(bytes.len()).unwrap_or(u64::MAX))?;
+    Ok(bytes)
+}
+
+fn reject_oversized_save(path: &Path, actual: u64) -> Result<(), PersistenceError> {
+    if actual > MAX_SAVE_FILE_BYTES {
+        return Err(PersistenceError::SaveTooLarge {
+            path: path.to_path_buf(),
+            actual,
+            maximum: MAX_SAVE_FILE_BYTES,
+        });
+    }
+    Ok(())
 }
 
 fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
