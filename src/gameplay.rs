@@ -103,7 +103,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 52;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 53;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -160,6 +160,9 @@ const AGENT_OWNER_DISTRIBUTION_INTERVAL_DAYS: i64 = 90;
 const AGENT_POLITICAL_RECOVERY_SUPPORT_BONUS: i64 = 1_500;
 const AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS: i64 = 360;
 const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_000);
+/// Monthly maintenance copper per resident family member the agent reserves
+/// before committing treasury to property acquisitions.
+const FAMILY_MAINTENANCE_MONTHLY_COPPER: i64 = 250;
 const AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER: Money = Money::from_copper(80_000);
 const AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION: Money = Money::from_copper(12_000);
 const AGENT_ENDOWMENT_LIQUIDITY_FLOOR: Money = Money::from_copper(80_000);
@@ -217,6 +220,7 @@ pub struct GameplayHarnessConfig {
     pub max_candidate_probes: u16,
     pub max_consequence_horizon_days: u16,
     pub trace_limit_per_campaign: u16,
+    pub decision_log_campaigns: u8,
     pub personas: Vec<GameplayPersona>,
     pub backgrounds: Vec<StartingBackground>,
 }
@@ -231,6 +235,7 @@ impl Default for GameplayHarnessConfig {
             max_candidate_probes: 16,
             max_consequence_horizon_days: 360,
             trace_limit_per_campaign: 40,
+            decision_log_campaigns: 3,
             personas: GameplayPersona::all().to_vec(),
             backgrounds: vec![
                 StartingBackground::Baker,
@@ -1969,6 +1974,10 @@ pub struct GameplayTraceStep {
     pub command_description: Option<String>,
     pub outcome: Option<String>,
     pub rejection_summary: Vec<String>,
+    /// Why the agent took no substantive action this cycle. Presented when the
+    /// world offered no viable choice, separating dormant cycles from
+    /// generator-gap, spending-policy, and validation-gate causes.
+    pub no_action_reason: Option<String>,
     pub immediate_domains: BTreeSet<GameplayDomain>,
     pub delayed_domains: BTreeSet<GameplayDomain>,
     pub persistent_domains: BTreeSet<GameplayDomain>,
@@ -2078,6 +2087,10 @@ pub struct GameplayQuietDiagnostic {
     /// Identifies validation gates where the game built an option the player
     /// could not actually commit.
     pub validation_gates: BTreeMap<GameplayCommandKind, u32>,
+    /// No-action cycles where no generator gap, spending-policy gate, or
+    /// validation gate was detected. The world offered no detected opportunity;
+    /// the agent was genuinely dormant rather than blocked by its own policy.
+    pub dormant_cycles: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3360,7 +3373,7 @@ fn run_decision_cycle_internal(
         projection_step_days,
         accumulator,
     )?;
-    record_quiet_diagnostic(
+    let no_action_reason = record_quiet_diagnostic(
         accumulator,
         &probe,
         &raw_generated_kinds,
@@ -3418,6 +3431,7 @@ fn run_decision_cycle_internal(
         &probe,
         ranked_candidates,
         action,
+        no_action_reason,
         accumulator,
     );
     Ok(())
@@ -3437,6 +3451,7 @@ fn record_decision_cycle(
     probe: &ProbeResult,
     ranked_candidates: Vec<GameplayCandidateRanking>,
     action: Option<ExecutedAction>,
+    no_action_reason: Option<String>,
     accumulator: &mut CampaignAccumulator,
 ) {
     record_cycle(
@@ -3456,6 +3471,7 @@ fn record_decision_cycle(
             distinct_projected_choice_profiles: probe.distinct_projected_choice_profiles,
             rejections: probe.rejections.clone(),
             action,
+            no_action_reason,
         },
         accumulator,
     );
@@ -3881,6 +3897,8 @@ fn activation_opportunity_delta(
 /// generator gaps (an activation opportunity existed but no candidate was
 /// built), policy gates (the agent's own spending filters declined built
 /// candidates), and validation gates (the game rejected every probed option).
+/// Returns a human-readable reason for the retained trace when the cycle had
+/// no actionable choice, and `None` when the agent could act.
 fn record_quiet_diagnostic(
     accumulator: &mut CampaignAccumulator,
     probe: &ProbeResult,
@@ -3888,13 +3906,15 @@ fn record_quiet_diagnostic(
     retained_kinds: &BTreeSet<GameplayCommandKind>,
     probed_kinds: &BTreeSet<GameplayCommandKind>,
     activation_delta: &BTreeMap<GameplayCommandKind, u32>,
-) {
+) -> Option<String> {
     let actionable = probe.substantive_viable_count > 0;
     if actionable {
-        return;
+        return None;
     }
+    let mut gap_kinds = Vec::new();
     for (kind, delta) in activation_delta {
         if *delta > 0 && !raw_generated_kinds.contains(kind) {
+            gap_kinds.push(*kind);
             *accumulator
                 .quiet_diagnostic
                 .generator_gaps
@@ -3902,8 +3922,10 @@ fn record_quiet_diagnostic(
                 .or_default() += 1;
         }
     }
+    let mut gated_kinds = Vec::new();
     for kind in raw_generated_kinds {
         if !retained_kinds.contains(kind) {
+            gated_kinds.push(*kind);
             *accumulator
                 .quiet_diagnostic
                 .policy_gates
@@ -3911,8 +3933,10 @@ fn record_quiet_diagnostic(
                 .or_default() += 1;
         }
     }
+    let mut rejected_kinds = Vec::new();
     for kind in probed_kinds {
         if !probe.viable_command_kinds.contains(kind) {
+            rejected_kinds.push(*kind);
             *accumulator
                 .quiet_diagnostic
                 .validation_gates
@@ -3920,6 +3944,47 @@ fn record_quiet_diagnostic(
                 .or_default() += 1;
         }
     }
+    if gap_kinds.is_empty() && gated_kinds.is_empty() && rejected_kinds.is_empty() {
+        accumulator.quiet_diagnostic.dormant_cycles = accumulator
+            .quiet_diagnostic
+            .dormant_cycles
+            .saturating_add(1);
+        return Some(
+            "dormant: no candidate was built and no activation opportunity fired; the world offered no detected action"
+                .to_owned(),
+        );
+    }
+    gap_kinds.sort();
+    gated_kinds.sort();
+    rejected_kinds.sort();
+    let mut causes = Vec::new();
+    if !gap_kinds.is_empty() {
+        causes.push(format!(
+            "activation without candidate [{}]",
+            kind_labels(&gap_kinds)
+        ));
+    }
+    if !gated_kinds.is_empty() {
+        causes.push(format!(
+            "declined by agent policy [{}]",
+            kind_labels(&gated_kinds)
+        ));
+    }
+    if !rejected_kinds.is_empty() {
+        causes.push(format!(
+            "rejected by validation [{}]",
+            kind_labels(&rejected_kinds)
+        ));
+    }
+    Some(causes.join("; "))
+}
+
+fn kind_labels(kinds: &[GameplayCommandKind]) -> String {
+    kinds
+        .iter()
+        .map(|kind| kind.label())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn record_offered_command_kinds(candidates: &[Candidate], accumulator: &mut CampaignAccumulator) {
@@ -4160,6 +4225,7 @@ struct CycleObservation<'a> {
     distinct_projected_choice_profiles: usize,
     rejections: Vec<String>,
     action: Option<ExecutedAction>,
+    no_action_reason: Option<String>,
 }
 
 fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAccumulator) {
@@ -4179,6 +4245,7 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         distinct_projected_choice_profiles,
         rejections,
         action,
+        no_action_reason,
     } = observation;
     let immediate_domains = before.changed_domains(after_command);
     let total_causal_domains = baseline_after_time.changed_domains(after_time);
@@ -4240,6 +4307,7 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         command_description: action.as_ref().map(|action| action.description.clone()),
         outcome: action.map(|action| action.outcome),
         rejection_summary: rejections,
+        no_action_reason,
         immediate_domains,
         delayed_domains,
         persistent_domains,
@@ -6040,17 +6108,20 @@ fn generate_finance_candidates(
         GameplayPersona::Steward => 160,
     };
     let minimum_property_yield_basis_points = match persona {
-        GameplayPersona::Entrepreneur => 1_200,
-        GameplayPersona::Opportunist => 1_400,
-        GameplayPersona::PowerBroker => 1_600,
-        GameplayPersona::Steward => 1_800,
+        GameplayPersona::Entrepreneur => 1_000,
+        GameplayPersona::Opportunist => 1_100,
+        GameplayPersona::PowerBroker | GameplayPersona::Steward => 1_200,
     };
+    let affordability_cap = treasury.saturating_sub(property_purchase_liquidity_floor(
+        state,
+        state.player_dynasty_id,
+    ));
     let mut properties: Vec<_> = state
         .properties
         .values()
         .filter(|property| {
             property.owner_dynasty_id.is_none()
-                && property.value <= treasury
+                && property.value <= affordability_cap
                 && property_meets_investment_hurdle(
                     state,
                     property,
@@ -6103,6 +6174,37 @@ fn generate_finance_candidates(
 
 fn effective_property_annual_rent(state: &AppState, property: &crate::core::Property) -> Money {
     crate::systems::effective_property_weekly_rent(state, property).saturating_mul(52)
+}
+
+/// Near-term liquidity the dynasty must keep accessible after acquiring
+/// property: an emergency reserve, two months of office duties, two months of
+/// loan service, and two months of family upkeep. Property purchases should not
+/// decapitalize the household.
+fn property_purchase_liquidity_floor(state: &AppState, dynasty_id: DynastyId) -> Money {
+    let emergency_reserve = Money::from_copper(2_000);
+    let two_month_office_duty =
+        projected_dynasty_monthly_office_duty(state, dynasty_id, 0).saturating_mul(2);
+    let two_month_loan_service = state
+        .loans
+        .values()
+        .filter(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status.is_repayment_active())
+        .fold(Money::ZERO, |total, loan| {
+            total.saturating_add(loan.weekly_payment.saturating_mul(8))
+        });
+    let family_members = state
+        .family_councils
+        .get(&dynasty_id)
+        .map_or(0, |council| council.members.len());
+    let two_month_family_upkeep = FAMILY_MAINTENANCE_MONTHLY_COPPER
+        .saturating_mul(i64::try_from(family_members).unwrap_or(0))
+        .saturating_mul(2);
+    emergency_reserve
+        .saturating_add(two_month_office_duty)
+        .saturating_add(two_month_loan_service)
+        .saturating_add(Money::from_copper(two_month_family_upkeep))
+        // A purchase must leave enough working capital to keep acting on the
+        // political economy rather than forcing a long liquidity recovery.
+        .saturating_add(AGENT_OFFICE_LIQUIDITY_BUFFER)
 }
 
 fn property_meets_investment_hurdle(
@@ -10351,6 +10453,9 @@ fn aggregate_quiet_diagnostics(campaigns: &[GameplayCampaignReport]) -> Gameplay
                 .unwrap_or(0)
                 .saturating_add(*count);
         }
+        diagnostic.dormant_cycles = diagnostic
+            .dormant_cycles
+            .saturating_add(campaign.quiet_diagnostic.dormant_cycles);
     }
     diagnostic
 }
@@ -14224,7 +14329,7 @@ pub fn render_gameplay_report(report: &GameplayHarnessReport) -> String {
     render_limitations(report, &mut output);
     render_fantasy_arcs(report, &mut output);
     render_campaign_summaries(report, &mut output);
-    render_trace_samples(report, &mut output);
+    render_decision_log(report, &mut output);
     output
 }
 
@@ -14885,6 +14990,7 @@ fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mut String) {
     if diagnostic.generator_gaps.is_empty()
         && diagnostic.policy_gates.is_empty()
         && diagnostic.validation_gates.is_empty()
+        && diagnostic.dormant_cycles == 0
     {
         return;
     }
@@ -14921,6 +15027,13 @@ fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mut String) {
             .collect::<Vec<_>>()
             .join(", ");
         let _ = writeln!(output, "  generated but rejected: {gate_text}");
+    }
+    if diagnostic.dormant_cycles > 0 {
+        let _ = writeln!(
+            output,
+            "  dormant: {} quiet cycle(s) where no candidate was built and no activation opportunity fired; the world offered no detected action",
+            diagnostic.dormant_cycles
+        );
     }
     let _ = writeln!(output);
 }
@@ -14986,55 +15099,171 @@ fn render_campaign_summaries(report: &GameplayHarnessReport, output: &mut String
     let _ = writeln!(output);
 }
 
-fn render_trace_samples(report: &GameplayHarnessReport, output: &mut String) {
-    let _ = writeln!(output, "Representative decisions");
-    for campaign in &report.campaigns {
-        let Some(step) = campaign
-            .trace
-            .iter()
-            .max_by_key(|step| step.consequence_breadth())
-        else {
-            continue;
-        };
-        let command = step
-            .selected_command
-            .map_or("none", GameplayCommandKind::label);
+fn render_decision_log(report: &GameplayHarnessReport, output: &mut String) {
+    let selected =
+        decision_log_campaigns(report, usize::from(report.config.decision_log_campaigns));
+    if selected.is_empty() {
+        return;
+    }
+    let _ = writeln!(output, "Decision log");
+    let _ = writeln!(
+        output,
+        "  campaigns shown: {} (of {}); ordered to favor city-shaping, succession, quiet diagnosis, and command variety",
+        selected.len(),
+        report.campaigns.len()
+    );
+    for campaign in selected {
+        let no_action_cycles = campaign.quiet_cycles + campaign.blocked_cycles;
         let _ = writeln!(
             output,
-            "  seed {} {:<12} {:?} day {:>4}: {:<18} viable [{}] gap {:?} profiles immediate:{} projected:{} immediate [{}] delayed [{}] ambient [{}] signals [{}]",
+            "  campaign seed {} | {:<12} | {:<10?} | {} days | {} cycles | {} actions | {} quiet/blocked | {} viable choices | score {}",
             campaign.seed,
             campaign.persona.label(),
             campaign.background,
-            step.day,
-            command,
-            step.viable_options
-                .iter()
-                .take(3)
-                .map(|candidate| format!(
-                    "{}:{}:{}:now={}{}:next={}{}",
-                    candidate.command.label(),
-                    candidate.score,
-                    candidate.description,
-                    domain_labels(&candidate.immediate_domains),
-                    history_suffix(candidate.immediate_history_change),
-                    domain_labels(&candidate.projected_domains),
-                    history_suffix(candidate.projected_history_change)
-                ))
-                .collect::<Vec<_>>()
-                .join(","),
-            step.close_choice_score_gap,
-            step.distinct_immediate_choice_profiles,
-            step.distinct_projected_choice_profiles,
-            domain_labels(&step.immediate_domains),
-            domain_labels(&step.delayed_domains),
-            domain_labels(&step.ambient_domains),
-            trace_signal_labels(&step.signals)
+            campaign.simulated_days,
+            campaign.decision_cycles,
+            campaign
+                .commands
+                .values()
+                .map(|stats| stats.executed)
+                .sum::<u32>(),
+            no_action_cycles,
+            campaign.total_viable_choices,
+            campaign.scores.overall,
         );
+        for step in &campaign.trace {
+            let context = &step.context;
+            let options = format!(
+                "{}/{} offered/viable",
+                step.considered_candidates, step.viable_candidates
+            );
+            let action_text = match &step.selected_command {
+                Some(kind) => {
+                    let description = step
+                        .command_description
+                        .as_deref()
+                        .unwrap_or("(no description)");
+                    let outcome = step
+                        .outcome
+                        .as_deref()
+                        .map(|text| truncate_label(text, 72))
+                        .unwrap_or_default();
+                    format!(
+                        "{:<18} \"{}\"{}",
+                        kind.label(),
+                        truncate_label(description, 64),
+                        if outcome.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" | result: {outcome}")
+                        }
+                    )
+                }
+                None => format!(
+                    "NO ACTION ({options}) => {}",
+                    step.no_action_reason
+                        .as_deref()
+                        .unwrap_or("no reason recorded")
+                ),
+            };
+            let _ = writeln!(
+                output,
+                "  day {:>4} {:<19} | treasury {:>9} | biz {:>9} | businesses {}{} | offices {} | crises {} | {}",
+                step.day,
+                phase_label_at_day(&campaign.fantasy_arc, step.day),
+                context.player_treasury,
+                context.player_business_cash,
+                context.active_businesses,
+                if context.distressed_businesses > 0 {
+                    format!(" ({} distressed)", context.distressed_businesses)
+                } else {
+                    String::new()
+                },
+                context.offices_held,
+                context.active_crises,
+                action_text,
+            );
+            let _ = writeln!(
+                output,
+                "             {} now [{}] later [{}] signals [{}]",
+                options,
+                domain_labels(&step.immediate_domains),
+                domain_labels(&step.delayed_domains),
+                trace_signal_labels(&step.signals),
+            );
+        }
+        let _ = writeln!(output);
     }
 }
 
-fn history_suffix(changed: bool) -> &'static str {
-    if changed { "+history" } else { "" }
+fn decision_log_campaigns(
+    report: &GameplayHarnessReport,
+    limit: usize,
+) -> Vec<&GameplayCampaignReport> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut campaigns: Vec<_> = report.campaigns.iter().collect();
+    campaigns.sort_by(|left, right| {
+        let left_no_action = left.quiet_cycles + left.blocked_cycles;
+        let right_no_action = right.quiet_cycles + right.blocked_cycles;
+        (
+            std::cmp::Reverse(left.fantasy_arc.first_city_shaping_action_day.is_some()),
+            std::cmp::Reverse(left.fantasy_arc.first_succession_day.is_some()),
+            std::cmp::Reverse(left_no_action),
+            std::cmp::Reverse(left.total_viable_command_kinds),
+            left.seed,
+            left.persona,
+            format!("{:?}", left.background),
+        )
+            .cmp(&(
+                std::cmp::Reverse(right.fantasy_arc.first_city_shaping_action_day.is_some()),
+                std::cmp::Reverse(right.fantasy_arc.first_succession_day.is_some()),
+                std::cmp::Reverse(right_no_action),
+                std::cmp::Reverse(right.total_viable_command_kinds),
+                right.seed,
+                right.persona,
+                format!("{:?}", right.background),
+            ))
+    });
+    campaigns.truncate(limit);
+    campaigns
+}
+
+fn phase_label_at_day(arc: &GameplayFantasyArc, day: i64) -> &'static str {
+    if arc
+        .first_succession_day
+        .is_some_and(|succession| day >= succession)
+    {
+        GameplayPhase::SuccessionLegacy.label()
+    } else if arc
+        .first_city_shaping_action_day
+        .is_some_and(|shaping| day >= shaping)
+    {
+        GameplayPhase::DynasticGovernance.label()
+    } else if arc
+        .first_commercial_standing_day
+        .is_some_and(|standing| day >= standing)
+    {
+        GameplayPhase::InstitutionalAscent.label()
+    } else if arc
+        .first_reputation_standing_day
+        .is_some_and(|standing| day >= standing)
+    {
+        GameplayPhase::Establishment.label()
+    } else {
+        GameplayPhase::Foundation.label()
+    }
+}
+
+fn truncate_label(text: &str, max_chars: usize) -> String {
+    let characters = text.chars();
+    let total = characters.clone().count();
+    if total <= max_chars {
+        return text.to_owned();
+    }
+    let prefix: String = characters.take(max_chars.saturating_sub(1)).collect();
+    format!("{prefix}…")
 }
 
 fn trace_signal_labels(signals: &BTreeSet<GameplayTraceSignal>) -> String {

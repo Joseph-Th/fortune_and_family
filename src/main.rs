@@ -361,6 +361,9 @@ struct PlaytestArgs {
     /// Representative decisions retained per campaign.
     #[arg(long, default_value_t = 40)]
     trace_limit: u16,
+    /// Campaigns whose retained decision trace is rendered in the human-readable report. 0 disables the decision log.
+    #[arg(long, default_value_t = 3)]
+    decision_log: u8,
     /// Player personas to run; repeat to select several. Omit to run all.
     #[arg(long, value_enum)]
     persona: Vec<GameplayPersonaArg>,
@@ -404,6 +407,7 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
         max_candidate_probes: args.max_probes,
         max_consequence_horizon_days: args.consequence_horizon,
         trace_limit_per_campaign: args.trace_limit,
+        decision_log_campaigns: args.decision_log,
         personas,
         backgrounds,
     };

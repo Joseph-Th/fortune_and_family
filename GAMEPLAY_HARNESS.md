@@ -78,6 +78,7 @@ bash scripts/test.sh gameplay-audit
 | `--max-probes` | Maximum candidate commands validated per decision | `16` |
 | `--consequence-horizon` | Maximum delayed-attribution horizon in days | `360` |
 | `--trace-limit` | Representative trace steps retained per campaign | `40` |
+| `--decision-log` | Campaigns whose full retained trace renders in the human report; `0` disables | `3` |
 | `--persona` | Repeatable persona filter; omit for all | All |
 | `--background` | Repeatable background filter; omit for all | All |
 | `--json` | Emit structured report | Human text |
@@ -166,8 +167,11 @@ A no-action cycle happens when the agent has no viable substantive choice. The r
 | Generator gap | An activation opportunity existed but no candidate was built |
 | Policy gate | Candidates were built but the persona's spending filters declined every one of them |
 | Validation gate | Candidates were built and probed but canonical validation rejected every one of them |
+| Dormant | No candidate was built and no activation opportunity fired; the game world offered no detected action |
 
-Quiet cycles with no recorded cause are dormant state: the game world offered no detected opportunity. The diagnosis is recorded per campaign and summed in the aggregate and persona aggregates.
+Quiet cycles with no recorded cause are dormant state: the game world offered no detected opportunity, no candidate was built, and no activation predicate fired. Every quiet cycle either resolves into a cause or is logged as dormant, so no-action play is never silent by accident.
+
+The diagnosis is recorded per campaign and summed in the aggregate and persona aggregates. Each trace step that took no substantive action also carries a human-readable `no_action_reason`, so a chronological decision log explains *why* each quiet gap happened.
 
 Activation opportunities are recorded for every command kind. Commands with a dedicated world-state predicate (crisis, labor, legal, settlement, property liquidation, institution withdrawal, credit extension, and business-cash transfer) use that predicate; every other command kind records an activation whenever its generator built a candidate. This keeps the `triggers` column and the generator-gap diagnosis meaningful for all command families.
 
@@ -183,9 +187,10 @@ Reports contain:
 - Command generation, viability, selection, and consequence statistics
 - Phase-level activity and choice metrics
 - Immediate, persistent, delayed, and ambient domain attribution
-- Quiet-cycle diagnosis separating generator gaps, agent-policy gates, and validation gates
+- Quiet-cycle diagnosis separating generator gaps, agent-policy gates, validation gates, and dormant waiting
 - Economic, civic, family, institutional, legal, crisis, and information snapshots
 - Representative decision traces
+- A chronological decision log for a configured number of campaigns, each retained step showing context, the selected command and outcome, and the reason no action was taken on quiet cycles
 - Findings and stated limitations
 
 The report should preserve enough seed, persona, background, phase, entity, and trace context to reproduce a material finding.

@@ -521,6 +521,48 @@ mod harness {
     }
 
     #[test]
+    fn trace_steps_record_no_action_causes_and_render_a_decision_log() {
+        let registry = rivergate_registry_for_test();
+        let report = run_gameplay_harness(registry, focused_config(180))
+            .expect("gameplay harness must complete");
+        let campaign = report.campaigns.first().expect("one campaign must run");
+
+        for step in &campaign.trace {
+            if step.selected_command.is_none() {
+                assert!(
+                    step.no_action_reason.is_some(),
+                    "no-action trace steps must explain why the agent could not act"
+                );
+            } else {
+                assert_eq!(
+                    step.no_action_reason, None,
+                    "action trace steps must not carry a no-action reason"
+                );
+            }
+        }
+        let rendered = render_gameplay_report(&report);
+        assert!(
+            rendered.contains("Decision log") && rendered.contains("campaign seed"),
+            "the rendered report must include the chronological decision log"
+        );
+        if campaign
+            .trace
+            .iter()
+            .any(|step| step.selected_command.is_none())
+        {
+            assert!(
+                rendered.contains("NO ACTION"),
+                "the decision log must expose no-action cycles with their cause"
+            );
+            assert!(
+                rendered.contains("dormant")
+                    || rendered.contains("opportunities without candidates"),
+                "the rendered report must expose the quiet diagnosis when no action occurs"
+            );
+        }
+    }
+
+    #[test]
     fn candidate_scenarios_cover_every_command_family() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_candidate_coverage_state(registry);
@@ -743,13 +785,17 @@ mod harness {
             "Strongest observed command consequences",
             "Findings",
             "Harness limits",
-            "Representative decisions",
+            "Decision log",
         ] {
             assert!(rendered.contains(heading), "report must contain {heading}");
         }
         assert!(
             rendered.contains("civic | laws") && rendered.contains("| works"),
             "campaign summaries must expose readable civic identity instead of only checksums"
+        );
+        assert!(
+            rendered.contains("NO ACTION") || rendered.contains("day"),
+            "the decision log must expose chronological per-cycle play"
         );
         serde_json::to_string(&report).expect("report must serialize to JSON");
         assert!(
@@ -4633,8 +4679,108 @@ mod metrics {
             for (kind, count) in &campaign.quiet_diagnostic.validation_gates {
                 *expected.validation_gates.entry(*kind).or_default() += *count;
             }
+            expected.dormant_cycles += campaign.quiet_diagnostic.dormant_cycles;
         }
         assert_eq!(report.aggregate.quiet_diagnostic, expected);
+    }
+
+    #[test]
+    fn quiet_diagnostic_counts_dormant_cycles_and_describes_them() {
+        let mut accumulator = CampaignAccumulator::new();
+        let probe = ProbeResult {
+            selected: None,
+            viable_count: 0,
+            substantive_viable_count: 0,
+            viable_command_kinds: BTreeSet::new(),
+            viable_options: Vec::new(),
+            close_choice_score_gap: None,
+            distinct_immediate_choice_profiles: 0,
+            distinct_projected_choice_profiles: 0,
+            family_close_choice_score_gap: None,
+            distinct_immediate_family_profiles: 0,
+            distinct_projected_family_profiles: 0,
+            rejections: Vec::new(),
+        };
+
+        let reason = record_quiet_diagnostic(
+            &mut accumulator,
+            &probe,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(accumulator.quiet_diagnostic.dormant_cycles, 1);
+        let reason = reason.expect("dormant cycles must report a reason");
+        assert!(
+            reason.contains("dormant"),
+            "dormant reason must identify the waiting state, got {reason:?}"
+        );
+        assert_eq!(accumulator.quiet_diagnostic.generator_gaps.len(), 0);
+        assert_eq!(accumulator.quiet_diagnostic.policy_gates.len(), 0);
+        assert_eq!(accumulator.quiet_diagnostic.validation_gates.len(), 0);
+
+        let actionable_probe = ProbeResult {
+            selected: None,
+            viable_count: 1,
+            substantive_viable_count: 1,
+            ..probe
+        };
+        let actionable_reason = record_quiet_diagnostic(
+            &mut accumulator,
+            &actionable_probe,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            actionable_reason, None,
+            "actionable cycles must not record a no-action reason"
+        );
+        assert_eq!(
+            accumulator.quiet_diagnostic.dormant_cycles, 1,
+            "actionable cycles must not add dormant cycles"
+        );
+    }
+
+    #[test]
+    fn quiet_diagnostic_reason_joins_gap_and_gate_causes() {
+        let mut accumulator = CampaignAccumulator::new();
+        let activation_delta = BTreeMap::from([(GameplayCommandKind::SellProperty, 1_u32)]);
+        let raw_generated_kinds = BTreeSet::from([GameplayCommandKind::BuyProperty]);
+        let retained_kinds = BTreeSet::new();
+        let probed_kinds = BTreeSet::from([GameplayCommandKind::EnactLaw]);
+        let probe = ProbeResult {
+            selected: None,
+            viable_count: 0,
+            substantive_viable_count: 0,
+            viable_command_kinds: BTreeSet::new(),
+            viable_options: Vec::new(),
+            close_choice_score_gap: None,
+            distinct_immediate_choice_profiles: 0,
+            distinct_projected_choice_profiles: 0,
+            family_close_choice_score_gap: None,
+            distinct_immediate_family_profiles: 0,
+            distinct_projected_family_profiles: 0,
+            rejections: Vec::new(),
+        };
+
+        let reason = record_quiet_diagnostic(
+            &mut accumulator,
+            &probe,
+            &raw_generated_kinds,
+            &retained_kinds,
+            &probed_kinds,
+            &activation_delta,
+        )
+        .expect("a caused quiet cycle must report a reason");
+
+        assert!(reason.contains("activation without candidate [sell-property]"));
+        assert!(reason.contains("declined by agent policy [buy-property]"));
+        assert!(reason.contains("rejected by validation [enact-law]"));
+        assert_eq!(accumulator.quiet_diagnostic.dormant_cycles, 0);
     }
 
     #[test]
@@ -4711,7 +4857,7 @@ mod metrics {
     }
 
     #[test]
-    fn property_candidates_require_persona_appropriate_investment_yield() {
+    fn property_candidates_filter_yield_below_every_persona_hurdle() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         state
@@ -4731,8 +4877,8 @@ mod metrics {
         assert!(
             steward_candidates
                 .iter()
-                .all(|candidate| candidate.kind != GameplayCommandKind::BuyProperty),
-            "ordinary passive warehouse yield must not become automatic Steward progression"
+                .any(|candidate| candidate.kind == GameplayCommandKind::BuyProperty),
+            "a dynasty with idle capital must be able to engage the property market"
         );
 
         let mut entrepreneur_candidates = Vec::new();
@@ -4746,8 +4892,33 @@ mod metrics {
             entrepreneur_candidates
                 .iter()
                 .any(|candidate| candidate.kind == GameplayCommandKind::BuyProperty),
-            "a commercially oriented persona should still see sufficiently productive property"
+            "a commercially oriented persona should also see sufficiently productive property"
         );
+
+        for property_id in state
+            .properties
+            .values()
+            .filter(|property| property.owner_dynasty_id.is_none())
+            .map(|property| property.id)
+            .collect::<Vec<_>>()
+        {
+            state
+                .properties
+                .get_mut(&property_id)
+                .expect("unowned property must exist")
+                .weekly_rent = Money::from_copper(100);
+        }
+
+        for persona in [GameplayPersona::Steward, GameplayPersona::Entrepreneur] {
+            let mut candidates = Vec::new();
+            generate_finance_candidates(registry, &state, persona, &mut candidates);
+            assert!(
+                candidates
+                    .iter()
+                    .all(|candidate| candidate.kind != GameplayCommandKind::BuyProperty),
+                "property yield below every persona hurdle must not generate a purchase for {persona:?}"
+            );
+        }
     }
 
     #[test]
