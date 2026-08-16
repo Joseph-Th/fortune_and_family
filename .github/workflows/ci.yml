@@ -15,7 +15,6 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.1
           components: rustfmt, clippy
       - name: Shell syntax
         run: bash -n scripts/test.sh scripts/verify_cli.sh

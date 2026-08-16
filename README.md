@@ -55,7 +55,10 @@ Given the same registry, state, seed, command sequence, and day count, the simul
 
 ## Requirements
 
-- Rust 1.97 or newer
+- Rust 1.97 or newer — the single authoritative owner of the minimum supported
+  version is `Cargo.toml` (`rust-version`), pinned for local and CI development by
+  `rust-toolchain.toml` and the CI workflow. Do not duplicate the version value in
+  other current documents.
 - Bash for repository scripts
 - Python for documentation and CLI structured-output checks
 - `cargo-audit` for the complete security gate
