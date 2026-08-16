@@ -58,9 +58,29 @@ case "$mode" in
   *) usage ;;
 esac
 
-cargo build --quiet --locked --bin civic-dynasty || fail 'CLI binary build failed'
+profile=${CIVIC_DYNASTY_PROFILE:-debug}
+case "$profile" in
+  debug)
+    cargo_profile_args=()
+    ;;
+  release)
+    cargo_profile_args=(--release)
+    ;;
+  *)
+    fail "unsupported CIVIC_DYNASTY_PROFILE '$profile' (expected debug or release)"
+    ;;
+esac
 
-binary="target/debug/civic-dynasty"
+binary=${CIVIC_DYNASTY_BINARY:-target/$profile/civic-dynasty}
+if [[ -z "${CIVIC_DYNASTY_BINARY:-}" ]]; then
+  cargo build --quiet --locked "${cargo_profile_args[@]}" --bin civic-dynasty \
+    || fail "CLI $profile binary build failed"
+fi
+if [[ ! -x "$binary" && -x "${binary}.exe" ]]; then
+  binary="${binary}.exe"
+fi
+test -x "$binary" || fail "CLI binary '$binary' was not found"
+
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/civic-dynasty-cli.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT
 python_command=$(resolve_python)

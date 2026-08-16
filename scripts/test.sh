@@ -54,6 +54,14 @@ run_cli_gameplay() {
   run_step 'Gameplay CLI smoke tests' bash scripts/verify_cli.sh gameplay
 }
 
+run_playtest() {
+  if [[ -n "${CIVIC_DYNASTY_BINARY:-}" ]]; then
+    "$CIVIC_DYNASTY_BINARY" playtest "$@"
+  else
+    cargo run --release --quiet --locked -- playtest "$@"
+  fi
+}
+
 run_standard() {
   run_shell_syntax
   run_fast
@@ -199,7 +207,7 @@ run_docs() {
 
 run_gameplay() {
   run_step 'Gameplay quality gate' \
-    cargo run --release --quiet --locked -- playtest \
+    run_playtest \
       --minimum-overall 75 \
       --fail-on-critical \
       --json \
@@ -210,7 +218,7 @@ run_generation_gameplay() {
   local python_command
   python_command=$(resolve_python) || return
   run_step 'Generation-length gameplay gate' \
-    cargo run --release --quiet --locked -- playtest \
+    run_playtest \
       --days 7200 \
       --persona steward \
       --background baker \
@@ -237,7 +245,7 @@ run_gameplay_audit() {
   local python_command
   python_command=$(resolve_python) || return
   run_step 'Mature multi-seed gameplay audit' \
-    cargo run --release --quiet --locked -- playtest \
+    run_playtest \
       --days 3600 \
       --start-seed 1 \
       --seeds 2 \
@@ -247,7 +255,7 @@ run_gameplay_audit() {
       --json \
       --output target/gameplay-deep-audit.json
   run_step 'Generation-length persona audit' \
-    cargo run --release --quiet --locked -- playtest \
+    run_playtest \
       --days 7200 \
       --persona steward \
       --persona entrepreneur \
@@ -260,7 +268,7 @@ run_gameplay_audit() {
       --json \
       --output target/gameplay-generation-matrix.json
   run_step 'Opportunist credit stress audit' \
-    cargo run --release --quiet --locked -- playtest \
+    run_playtest \
       --days 7200 \
       --start-seed 1 \
       --seeds 2 \

@@ -24,6 +24,11 @@ This document defines test tiers, suite organization, assertion standards, and c
 
 Successful `fast` and `exact` runs print concise summaries. Failures print complete Cargo output. A filter matching no executable library test exits with code 2.
 
+The CLI smoke runner accepts `CIVIC_DYNASTY_PROFILE=release` when a release
+binary is desired, or `CIVIC_DYNASTY_BINARY` when a caller has already built
+the exact binary to exercise. CI uses the latter so adapter and gameplay
+gates share one release build instead of compiling a debug CLI first.
+
 ## Test tiers
 
 | Tier | Purpose | Expected use |
@@ -132,4 +137,4 @@ git diff --check
 
 Cross-cutting changes include persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and gameplay-report schemas.
 
-CI runs the equivalent full gate on every push to `main` and on every pull request via `.github/workflows/ci.yml`. The workflow splits the gate into two parallel jobs: a fast `verify` job (syntax, format, check, Clippy, fast library tests, documentation checks) and a deeper `gates` job (soak, all CLI smoke groups, release library tests, gameplay quality gates, and the dependency audit). Both jobs must pass.
+CI runs the equivalent full gate on every push to `main` and on every pull request via `.github/workflows/ci.yml`. The workflow splits the gate into two parallel jobs: a fast `verify` job (syntax, format, check, Clippy, fast library tests, documentation checks) and a deeper `gates` job (soak, release library tests, one shared release CLI build for all adapter/gameplay gates, and the dependency audit). Both jobs must pass.
