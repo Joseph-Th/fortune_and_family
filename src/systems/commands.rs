@@ -1590,7 +1590,8 @@ fn deploy_non_player_financing_package(
             matches!(
                 business.status(),
                 BusinessStatus::Distressed | BusinessStatus::Insolvent
-            )
+            ) || (private_loan_borrower_financing_pressure(state, terms.borrower_dynasty_id) > 0
+                && business.cash() < business_recapitalization_target(registry, state, business))
         })
         .min_by_key(|business| {
             (

@@ -103,7 +103,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 53;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 54;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -344,6 +344,19 @@ pub enum GameplayCommandKind {
     CommissionInformation,
     LeverageInformation,
     AcknowledgeNotification,
+}
+
+/// Returns whether a command represents a strategic player commitment.
+///
+/// Cash rebalancing keeps a portfolio alive, but it is operational support
+/// rather than a meaningful change in dynasty direction.  Keeping it out of
+/// substantive-action metrics prevents routine liquidity plumbing from
+/// disguising a narrow decision loop.
+const fn is_substantive_command_kind(kind: GameplayCommandKind) -> bool {
+    !matches!(
+        kind,
+        GameplayCommandKind::TransferBusinessCash | GameplayCommandKind::AcknowledgeNotification
+    )
 }
 
 impl GameplayCommandKind {
@@ -1765,12 +1778,22 @@ pub enum GameplayMeasure {
     PlayerBusinessCash,
     ActiveBusinesses,
     DistressedBusinesses,
+    PlayerActiveContracts,
+    PlayerFulfilledContracts,
+    PlayerBreachedContracts,
+    CurrentLoans,
+    PlayerCurrentLending,
+    PlayerCurrentBorrowing,
     PlayerProperties,
+    PlayerPledgedProperties,
     Legitimacy,
     FamilyUnity,
     OfficesHeld,
+    InstitutionMemberships,
     InstitutionRepresentation,
+    Generation,
     ActiveLaws,
+    BuildingPublicWorks,
     CompletedPublicWorks,
     AverageFoodSatisfaction,
     AverageDistrictUnrest,
@@ -1828,12 +1851,22 @@ impl GameplayConsequenceProfile {
         record!(PlayerBusinessCash, player_business_cash, money);
         record!(ActiveBusinesses, active_businesses);
         record!(DistressedBusinesses, distressed_businesses);
+        record!(PlayerActiveContracts, player_active_contracts);
+        record!(PlayerFulfilledContracts, player_fulfilled_contracts);
+        record!(PlayerBreachedContracts, player_breached_contracts);
+        record!(CurrentLoans, current_loans);
+        record!(PlayerCurrentLending, player_current_lending);
+        record!(PlayerCurrentBorrowing, player_current_borrowing);
         record!(PlayerProperties, player_properties);
+        record!(PlayerPledgedProperties, player_pledged_properties);
         record!(Legitimacy, legitimacy);
         record!(FamilyUnity, family_unity);
         record!(OfficesHeld, offices_held);
+        record!(InstitutionMemberships, institution_memberships);
         record!(InstitutionRepresentation, player_institutions_represented);
+        record!(Generation, generation);
         record!(ActiveLaws, active_laws);
+        record!(BuildingPublicWorks, building_public_works);
         record!(CompletedPublicWorks, completed_public_works);
         record!(AverageFoodSatisfaction, average_food_satisfaction);
         record!(AverageDistrictUnrest, average_district_unrest);
@@ -1978,6 +2011,12 @@ pub struct GameplayTraceStep {
     /// world offered no viable choice, separating dormant cycles from
     /// generator-gap, spending-policy, and validation-gate causes.
     pub no_action_reason: Option<String>,
+    /// Measures changed by the command at commit time.
+    pub immediate_consequences: GameplayConsequenceProfile,
+    /// Measures that differ from the no-action branch at the attribution horizon.
+    pub attributed_consequences: GameplayConsequenceProfile,
+    /// Measures that changed in the no-action branch during the same horizon.
+    pub ambient_consequences: GameplayConsequenceProfile,
     pub immediate_domains: BTreeSet<GameplayDomain>,
     pub delayed_domains: BTreeSet<GameplayDomain>,
     pub persistent_domains: BTreeSet<GameplayDomain>,
@@ -2554,7 +2593,7 @@ impl CampaignAccumulator {
 
     fn record_executed_command(&mut self, kind: GameplayCommandKind, day: i64) {
         self.last_command = Some(kind);
-        if kind == GameplayCommandKind::AcknowledgeNotification {
+        if !is_substantive_command_kind(kind) {
             return;
         }
         if kind == GameplayCommandKind::NominateForOffice {
@@ -2679,7 +2718,7 @@ impl CampaignAccumulator {
         step_days: u32,
         snapshot: &GameplaySnapshot,
     ) {
-        if action.is_some_and(|kind| kind != GameplayCommandKind::AcknowledgeNotification) {
+        if action.is_some_and(is_substantive_command_kind) {
             self.current_substantive_action_gap_days = 0;
             self.current_asset_rich_quiet_gap_days = 0;
             return;
@@ -2733,8 +2772,7 @@ impl CampaignAccumulator {
             choices,
             ambient_change,
         } = observation;
-        let quiet_cycle = action
-            .is_none_or(|kind| kind == GameplayCommandKind::AcknowledgeNotification)
+        let quiet_cycle = action.is_none_or(|kind| !is_substantive_command_kind(kind))
             && choices.substantive_viable_count == 0
             && choices.substantive_candidate_count == 0;
         let current_quiet_streak = self
@@ -2757,7 +2795,7 @@ impl CampaignAccumulator {
         stats.total_viable_choices = stats
             .total_viable_choices
             .saturating_add(usize_to_u32(choices.substantive_viable_count));
-        if action.is_some_and(|kind| kind != GameplayCommandKind::AcknowledgeNotification) {
+        if action.is_some_and(is_substantive_command_kind) {
             stats.substantive_actions = stats.substantive_actions.saturating_add(1);
             let kind = action.expect("substantive action must have a command kind");
             let count = stats.executed_commands.entry(kind).or_default();
@@ -3350,7 +3388,7 @@ fn run_decision_cycle_internal(
     let ranked_candidates = summarize_ranked_candidates(&candidates);
     let substantive_candidate_count = candidates
         .iter()
-        .filter(|candidate| candidate.kind != GameplayCommandKind::AcknowledgeNotification)
+        .filter(|candidate| is_substantive_command_kind(candidate.kind))
         .count();
     record_offered_command_kinds(&candidates, accumulator);
     record_generated_candidates(&candidates, accumulator);
@@ -3801,6 +3839,7 @@ fn record_activation_opportunities(
                 .businesses
                 .get(agreement.business_id)
                 .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+            && preferred_labor_response(state, agreement, persona).is_some()
     });
     let legal_opportunity = state
         .dynasties
@@ -3910,6 +3949,16 @@ fn record_quiet_diagnostic(
     let actionable = probe.substantive_viable_count > 0;
     if actionable {
         return None;
+    }
+    if raw_generated_kinds.contains(&GameplayCommandKind::TransferBusinessCash)
+        && raw_generated_kinds
+            .iter()
+            .all(|kind| !is_substantive_command_kind(*kind))
+    {
+        return Some(
+            "operational-only: portfolio liquidity support was available, but no strategic commitment was viable"
+                .to_owned(),
+        );
     }
     let mut gap_kinds = Vec::new();
     for (kind, delta) in activation_delta {
@@ -4043,7 +4092,8 @@ fn probe_candidates(
     let mut projected_baseline_state = state.clone();
     advance_days(registry, &mut projected_baseline_state, projection_days)?;
     let projected_baseline = GameplaySnapshot::capture(&projected_baseline_state);
-    let mut selected = None;
+    let mut selected_substantive = None;
+    let mut selected_operational = None;
     let mut housekeeping_fallback = None;
     let mut viable_count = 0_usize;
     let mut substantive_viable_count = 0_usize;
@@ -4067,7 +4117,7 @@ fn probe_candidates(
             Ok(_) => {
                 command_stats.viable = command_stats.viable.saturating_add(1);
                 viable_count = viable_count.saturating_add(1);
-                if candidate.kind != GameplayCommandKind::AcknowledgeNotification {
+                if is_substantive_command_kind(candidate.kind) {
                     substantive_viable_count = substantive_viable_count.saturating_add(1);
                     let evaluated = evaluate_viable_option(
                         registry,
@@ -4088,8 +4138,12 @@ fn probe_candidates(
                         family_scores.push(candidate.score);
                     }
                     viable_options.push(evaluated.option);
-                    if selected.is_none() {
-                        selected = Some(candidate);
+                    if selected_substantive.is_none() {
+                        selected_substantive = Some(candidate);
+                    }
+                } else if candidate.kind == GameplayCommandKind::TransferBusinessCash {
+                    if selected_operational.is_none() {
+                        selected_operational = Some(candidate);
                     }
                 } else if housekeeping_fallback.is_none() {
                     housekeeping_fallback = Some(candidate);
@@ -4113,7 +4167,9 @@ fn probe_candidates(
     let close_choice_score_gap = score_gap(&option_scores);
     let family_close_choice_score_gap = score_gap(&family_scores);
     Ok(ProbeResult {
-        selected: selected.or(housekeeping_fallback),
+        selected: selected_substantive
+            .or(selected_operational)
+            .or(housekeeping_fallback),
         viable_count,
         substantive_viable_count,
         viable_command_kinds,
@@ -4267,6 +4323,10 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         baseline_after_time,
         persistent_history_change,
     );
+    let immediate_consequences = GameplayConsequenceProfile::between(before, after_command);
+    let attributed_consequences =
+        GameplayConsequenceProfile::between(baseline_after_time, after_time);
+    let ambient_consequences = GameplayConsequenceProfile::between(before, baseline_after_time);
     let observed_domains: BTreeSet<_> = immediate_domains
         .union(&delayed_domains)
         .copied()
@@ -4308,6 +4368,9 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         outcome: action.map(|action| action.outcome),
         rejection_summary: rejections,
         no_action_reason,
+        immediate_consequences,
+        attributed_consequences,
+        ambient_consequences,
         immediate_domains,
         delayed_domains,
         persistent_domains,
@@ -10040,7 +10103,7 @@ fn score_campaign(
     let executed: u32 = accumulator
         .commands
         .iter()
-        .filter(|(kind, _)| **kind != GameplayCommandKind::AcknowledgeNotification)
+        .filter(|(kind, _)| is_substantive_command_kind(**kind))
         .map(|(_, stats)| stats.executed)
         .sum();
     let opportunity_cycles = accumulator
@@ -10060,9 +10123,7 @@ fn score_campaign(
         accumulator
             .commands
             .iter()
-            .filter(|(kind, stats)| {
-                **kind != GameplayCommandKind::AcknowledgeNotification && stats.executed > 0
-            })
+            .filter(|(kind, stats)| is_substantive_command_kind(**kind) && stats.executed > 0)
             .count(),
     );
     let coverage_score = ratio_score(
@@ -10135,13 +10196,13 @@ fn campaign_feedback_score(accumulator: &CampaignAccumulator, executed: u32) -> 
     let feedback_actions: u32 = accumulator
         .commands
         .iter()
-        .filter(|(kind, _)| **kind != GameplayCommandKind::AcknowledgeNotification)
+        .filter(|(kind, _)| is_substantive_command_kind(**kind))
         .map(|(_, stats)| stats.actions_with_feedback)
         .sum();
     let delayed_actions: u32 = accumulator
         .commands
         .iter()
-        .filter(|(kind, _)| **kind != GameplayCommandKind::AcknowledgeNotification)
+        .filter(|(kind, _)| is_substantive_command_kind(**kind))
         .map(|(_, stats)| stats.actions_with_delayed_consequences)
         .sum();
     let visible_feedback = ratio_score(feedback_actions, executed);
@@ -10363,7 +10424,7 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
         .sum();
     let substantive_actions = commands
         .iter()
-        .filter(|(kind, _)| **kind != GameplayCommandKind::AcknowledgeNotification)
+        .filter(|(kind, _)| is_substantive_command_kind(**kind))
         .map(|(_, stats)| u64::from(stats.executed))
         .sum();
     let candidate_probes = commands
@@ -10633,6 +10694,7 @@ fn derive_findings(
     add_command_findings(aggregate, &mut findings);
     add_domain_findings(aggregate, &mut findings);
     add_action_concentration_finding(aggregate, &mut findings);
+    add_operational_rebalancing_finding(aggregate, &mut findings);
     add_institutional_campaign_concentration_finding(aggregate, &mut findings);
     add_phase_institutional_campaign_concentration_finding(aggregate, &mut findings);
     add_repetitive_command_streak_finding(campaigns, &mut findings);
@@ -10689,9 +10751,7 @@ fn add_persona_variety_findings(
         let mut executed = aggregate
             .commands
             .iter()
-            .filter(|(kind, stats)| {
-                **kind != GameplayCommandKind::AcknowledgeNotification && stats.executed > 0
-            })
+            .filter(|(kind, stats)| is_substantive_command_kind(**kind) && stats.executed > 0)
             .map(|(kind, stats)| (*kind, stats.executed))
             .collect::<Vec<_>>();
         executed.sort_by_key(|(kind, count)| (std::cmp::Reverse(*count), *kind));
@@ -11312,7 +11372,7 @@ fn add_individual_action_concentration_finding(
             let substantive_actions = campaign
                 .commands
                 .iter()
-                .filter(|(kind, _)| **kind != GameplayCommandKind::AcknowledgeNotification)
+                .filter(|(kind, _)| is_substantive_command_kind(**kind))
                 .fold(0_u32, |total, (_, stats)| {
                     total.saturating_add(stats.executed)
                 });
@@ -11322,7 +11382,7 @@ fn add_individual_action_concentration_finding(
             let (kind, stats) = campaign
                 .commands
                 .iter()
-                .filter(|(kind, _)| **kind != GameplayCommandKind::AcknowledgeNotification)
+                .filter(|(kind, _)| is_substantive_command_kind(**kind))
                 .max_by_key(|(kind, stats)| (stats.executed, std::cmp::Reverse(**kind)))?;
             let share = scaled_ratio_u64(
                 u64::from(stats.executed),
@@ -12519,7 +12579,7 @@ fn add_action_concentration_finding(
     let Some((kind, stats)) = aggregate
         .commands
         .iter()
-        .filter(|(kind, _)| **kind != GameplayCommandKind::AcknowledgeNotification)
+        .filter(|(kind, _)| is_substantive_command_kind(**kind))
         .max_by_key(|(_, stats)| stats.executed)
     else {
         return;
@@ -12545,6 +12605,41 @@ fn add_action_concentration_finding(
         evidence: format!(
             "It accounted for {share}% of {} executed actions.",
             aggregate.substantive_actions
+        ),
+    });
+}
+
+fn add_operational_rebalancing_finding(
+    aggregate: &GameplayAggregate,
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let operational = aggregate
+        .commands
+        .get(&GameplayCommandKind::TransferBusinessCash)
+        .map_or(0, |stats| stats.executed);
+    let housekeeping = aggregate
+        .commands
+        .get(&GameplayCommandKind::AcknowledgeNotification)
+        .map_or(0, |stats| stats.executed);
+    let player_actions = aggregate
+        .successful_actions
+        .saturating_sub(u64::from(housekeeping));
+    if operational < 12 || player_actions == 0 {
+        return;
+    }
+    let share = scaled_ratio_u64(u64::from(operational), player_actions, 100);
+    if share < 25 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: if share >= 40 {
+            GameplayFindingSeverity::Warning
+        } else {
+            GameplayFindingSeverity::Info
+        },
+        title: "Operational liquidity management dominates player decisions".to_owned(),
+        evidence: format!(
+            "Portfolio cash rebalancing accounted for {operational} of {player_actions} non-notification actions ({share}%). It keeps businesses alive, but is operational support rather than a strategic commitment; the harness excludes it from substantive-action scores and reports it separately so treasury plumbing cannot masquerade as dynasty direction."
         ),
     });
 }
@@ -14353,9 +14448,7 @@ fn render_persona_summary(report: &GameplayHarnessReport, output: &mut String) {
         let mut top_commands: Vec<_> = aggregate
             .commands
             .iter()
-            .filter(|(kind, stats)| {
-                **kind != GameplayCommandKind::AcknowledgeNotification && stats.executed > 0
-            })
+            .filter(|(kind, stats)| is_substantive_command_kind(**kind) && stats.executed > 0)
             .map(|(kind, stats)| (*kind, stats.executed))
             .collect();
         top_commands.sort_by_key(|(kind, executed)| (std::cmp::Reverse(*executed), *kind));
@@ -15191,9 +15284,20 @@ fn render_decision_log(report: &GameplayHarnessReport, output: &mut String) {
                 domain_labels(&step.delayed_domains),
                 trace_signal_labels(&step.signals),
             );
+            render_trace_deltas(step, output);
         }
         let _ = writeln!(output);
     }
+}
+
+fn render_trace_deltas(step: &GameplayTraceStep, output: &mut String) {
+    let _ = writeln!(
+        output,
+        "             deltas | immediate [{}] attributable [{}] ambient [{}]",
+        format_measure_changes(&step.immediate_consequences),
+        format_measure_changes(&step.attributed_consequences),
+        format_measure_changes(&step.ambient_consequences),
+    );
 }
 
 fn decision_log_campaigns(
@@ -15291,6 +15395,80 @@ fn domain_labels(domains: &BTreeSet<GameplayDomain>) -> String {
         .map(|domain| domain.label())
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn measure_label(measure: GameplayMeasure) -> &'static str {
+    match measure {
+        GameplayMeasure::PlayerTreasury => "treasury",
+        GameplayMeasure::PlayerBusinessCash => "business-cash",
+        GameplayMeasure::ActiveBusinesses => "active-businesses",
+        GameplayMeasure::DistressedBusinesses => "distressed-businesses",
+        GameplayMeasure::PlayerActiveContracts => "active-contracts",
+        GameplayMeasure::PlayerFulfilledContracts => "fulfilled-contracts",
+        GameplayMeasure::PlayerBreachedContracts => "breached-contracts",
+        GameplayMeasure::CurrentLoans => "current-loans",
+        GameplayMeasure::PlayerCurrentLending => "current-lending",
+        GameplayMeasure::PlayerCurrentBorrowing => "current-borrowing",
+        GameplayMeasure::PlayerProperties => "properties",
+        GameplayMeasure::PlayerPledgedProperties => "pledged-properties",
+        GameplayMeasure::Legitimacy => "legitimacy",
+        GameplayMeasure::FamilyUnity => "family-unity",
+        GameplayMeasure::OfficesHeld => "offices",
+        GameplayMeasure::InstitutionMemberships => "institution-memberships",
+        GameplayMeasure::InstitutionRepresentation => "represented-institutions",
+        GameplayMeasure::Generation => "generation",
+        GameplayMeasure::ActiveLaws => "active-laws",
+        GameplayMeasure::BuildingPublicWorks => "building-works",
+        GameplayMeasure::CompletedPublicWorks => "completed-works",
+        GameplayMeasure::AverageFoodSatisfaction => "food",
+        GameplayMeasure::AverageDistrictUnrest => "district-unrest",
+        GameplayMeasure::AverageDistrictEmployment => "district-employment",
+        GameplayMeasure::AverageDistrictSanitation => "district-sanitation",
+        GameplayMeasure::AverageDistrictSafety => "district-safety",
+        GameplayMeasure::ActiveCrises => "active-crises",
+        GameplayMeasure::ContractRelationshipPressure => "contract-pressure",
+        GameplayMeasure::PlayerDisputedEmployment => "player-disputed-labor",
+        GameplayMeasure::DefaultedLoans => "defaulted-loans",
+        GameplayMeasure::PlayerDelinquentBorrowing => "delinquent-borrowing",
+        GameplayMeasure::PlayerDefaultedBorrowing => "defaulted-borrowing",
+        GameplayMeasure::UnmetOfficeDuties => "unmet-office-duties",
+        GameplayMeasure::PlayerOpenLegalCasesAsDefendant => "open-legal-cases",
+        GameplayMeasure::InformationReports => "information-reports",
+    }
+}
+
+fn format_measure_change(measure: GameplayMeasure, change: GameplayMeasureChange) -> String {
+    let values = if matches!(
+        measure,
+        GameplayMeasure::PlayerTreasury | GameplayMeasure::PlayerBusinessCash
+    ) {
+        format!(
+            "{}->{}",
+            Money::from_copper(change.before),
+            Money::from_copper(change.after)
+        )
+    } else {
+        format!("{}->{}", change.before, change.after)
+    };
+    format!("{} {values}", measure_label(measure))
+}
+
+fn format_measure_changes(profile: &GameplayConsequenceProfile) -> String {
+    if profile.changes.is_empty() {
+        return "none".to_owned();
+    }
+    let mut changes = profile
+        .changes
+        .iter()
+        .map(|(measure, change)| format_measure_change(*measure, *change))
+        .collect::<Vec<_>>();
+    let omitted = changes.len().saturating_sub(5);
+    changes.truncate(5);
+    let mut rendered = changes.join(", ");
+    if omitted > 0 {
+        let _ = write!(rendered, " (+{omitted} more)");
+    }
+    rendered
 }
 
 struct StableChecksumWriter(u64);

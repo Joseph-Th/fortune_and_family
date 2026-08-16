@@ -545,6 +545,10 @@ mod harness {
             rendered.contains("Decision log") && rendered.contains("campaign seed"),
             "the rendered report must include the chronological decision log"
         );
+        assert!(
+            rendered.contains("deltas | immediate ["),
+            "the decision log must expose measured immediate, attributed, and ambient consequences"
+        );
         if campaign
             .trace
             .iter()
@@ -5333,6 +5337,9 @@ mod metrics {
             .checked_add(Money::from_copper(123))
             .expect("fixture treasury change must fit");
         later.player_defaulted_borrowing = 1;
+        later.player_active_contracts = earlier.player_active_contracts.saturating_add(1);
+        later.player_current_lending = earlier.player_current_lending.saturating_add(1);
+        later.building_public_works = earlier.building_public_works.saturating_add(1);
 
         let profile = GameplayConsequenceProfile::between(&earlier, &later);
 
@@ -5351,6 +5358,23 @@ mod metrics {
                 before: 0,
                 after: 1,
             })
+        );
+        assert_eq!(
+            profile.changes.get(&GameplayMeasure::PlayerActiveContracts),
+            Some(&GameplayMeasureChange {
+                before: i64::from(earlier.player_active_contracts),
+                after: i64::from(later.player_active_contracts),
+            })
+        );
+        assert!(
+            profile
+                .changes
+                .contains_key(&GameplayMeasure::PlayerCurrentLending)
+        );
+        assert!(
+            profile
+                .changes
+                .contains_key(&GameplayMeasure::BuildingPublicWorks)
         );
     }
 
@@ -5826,11 +5850,8 @@ mod metrics {
         accumulator.record_executed_command(GameplayCommandKind::AcknowledgeNotification, 56);
         accumulator.record_executed_command(GameplayCommandKind::TransferBusinessCash, 63);
 
-        assert_eq!(accumulator.longest_substantive_command_streak, 9);
-        assert_eq!(
-            accumulator.longest_substantive_streak_command,
-            Some(GameplayCommandKind::TransferBusinessCash)
-        );
+        assert_eq!(accumulator.longest_substantive_command_streak, 0);
+        assert_eq!(accumulator.longest_substantive_streak_command, None);
 
         accumulator.record_executed_command(GameplayCommandKind::ExtendCredit, 70);
         assert_eq!(accumulator.current_substantive_command_streak, 1);
@@ -5846,8 +5867,8 @@ mod metrics {
             7 + SUBSTANTIVE_STREAK_MAX_GAP_DAYS + 1,
         );
 
-        assert_eq!(accumulator.longest_substantive_command_streak, 2);
-        assert_eq!(accumulator.current_substantive_command_streak, 1);
+        assert_eq!(accumulator.longest_substantive_command_streak, 0);
+        assert_eq!(accumulator.current_substantive_command_streak, 0);
     }
 
     #[test]
@@ -6945,6 +6966,31 @@ mod findings {
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
         finding_with_title(&findings, "Owned wealth can become decision-poor");
+    }
+
+    #[test]
+    fn findings_surface_operational_liquidity_dominance_separately_from_strategy() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.successful_actions = 40;
+        report
+            .aggregate
+            .commands
+            .entry(GameplayCommandKind::TransferBusinessCash)
+            .or_default()
+            .executed = 12;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+
+        let finding = finding_with_title(
+            &findings,
+            "Operational liquidity management dominates player decisions",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+        assert!(
+            finding
+                .evidence
+                .contains("Portfolio cash rebalancing accounted for 12 of")
+        );
     }
 
     #[test]

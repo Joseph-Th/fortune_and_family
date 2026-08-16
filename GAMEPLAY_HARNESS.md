@@ -193,6 +193,15 @@ Reports contain:
 - A chronological decision log for a configured number of campaigns, each retained step showing context, the selected command and outcome, and the reason no action was taken on quiet cycles
 - Findings and stated limitations
 
+Each retained trace step includes three measured consequence profiles: immediate
+changes at command commit, changes attributable to the selected command at the
+configured horizon versus a no-action branch, and ambient changes from that
+no-action branch. This makes a trace answer both “what did the command do?” and
+“what would have happened anyway?” with concrete before/after values, not only
+domain labels. Portfolio cash transfers are retained as observable operational
+actions but excluded from substantive-action and strategic-streak metrics; a
+separate finding reports when they dominate the agent's activity.
+
 The report should preserve enough seed, persona, background, phase, entity, and trace context to reproduce a material finding.
 
 ## Scores

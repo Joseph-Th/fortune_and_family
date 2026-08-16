@@ -1313,6 +1313,63 @@ mod validation {
     }
 
     #[test]
+    fn non_player_borrower_deploys_liquidity_credit_into_a_cash_short_business() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let borrower_dynasty_id = non_player_credit_counterparty(&state, true);
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() == borrower_dynasty_id)
+            .expect("selected borrower must own a business")
+            .id();
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("selected business must exist")
+            .finance
+            .cash = Money::ZERO;
+        state
+            .dynasties
+            .get_mut(&borrower_dynasty_id)
+            .expect("selected borrower must exist")
+            .resources
+            .treasury = Money::from_copper(10_000);
+        let before_cash = state
+            .businesses
+            .get(business_id)
+            .expect("selected business must exist")
+            .cash();
+        let player_id = state.player_dynasty_id;
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::IssueLoan {
+                terms: LoanTerms {
+                    lender_dynasty_id: player_id,
+                    borrower_dynasty_id,
+                    principal: Money::from_copper(5_000),
+                    weekly_payment: ceil_positive_money_div(Money::from_copper(5_000), 26),
+                    interest_basis_points: 900,
+                    collateral_property_id: None,
+                },
+            },
+        )
+        .expect("credit for a cash-short active business must be accepted");
+
+        assert!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("selected business must exist")
+                .cash()
+                > before_cash,
+            "ordinary liquidity credit should reach the productive business that needs it"
+        );
+    }
+
+    #[test]
     fn non_player_lender_keeps_a_household_credit_reserve() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
