@@ -8,43 +8,57 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - uses: actions/checkout@v7
+      - name: Resolve pinned Rust toolchain
+        run: rustc --version
+      - uses: Swatinem/rust-cache@v2
       - name: Shell syntax
         run: bash -n scripts/test.sh scripts/verify_cli.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
         run: cargo check --all-targets --all-features --locked
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Fast tests
         run: bash scripts/test.sh fast
       - name: Documentation consistency
         run: python3 scripts/check_docs.py
       - name: Documentation tests
         run: cargo test --quiet --locked --doc
-      - name: Soak tests
-        run: bash scripts/test.sh soak
-      - name: CLI smoke test
-        run: bash scripts/verify_cli.sh
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Documentation
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --locked
+      - name: Whitespace errors
+        run: git diff-tree --check --no-commit-id --root -r -m HEAD
+
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve pinned Rust toolchain
+        run: rustc --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Soak tests
+        run: bash scripts/test.sh soak
+      - name: CLI smoke tests
+        run: bash scripts/test.sh adapters
       - name: Release tests
         run: cargo test --release --quiet --locked --lib
-      - name: Gameplay quality gate
+      - name: Gameplay quality gates
         run: bash scripts/test.sh gameplay
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked --version 0.22.2
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
       - name: Dependency audit
         run: cargo audit
-      - name: Whitespace errors
-        run: git diff-tree --check --no-commit-id --root -r HEAD

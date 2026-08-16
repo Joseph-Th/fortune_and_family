@@ -113,8 +113,15 @@ run_test_step() {
 
   if [[ -n "$match_description" ]] \
     && grep -Eq 'test result: ok\. 0 passed; 0 failed;' "$output_file"; then
+    local ignored_count
+    ignored_count=$(grep -Eo '[0-9]+ ignored' "$output_file" | head -n1 | grep -Eo '^[0-9]+' || printf '0')
     rm -f "$output_file"
-    printf 'no executable library tests matched %q\n' "$match_description" >&2
+    if [[ "$ignored_count" =~ ^[1-9][0-9]*$ ]]; then
+      printf 'filter %q matched only %s ignored test(s); use `soak`, `exact`, or `debug` to include them\n' \
+        "$match_description" "$ignored_count" >&2
+    else
+      printf 'no executable library tests matched %q\n' "$match_description" >&2
+    fi
     printf '<== %s FAILED in %s\n' "$label" "$(format_duration "$((SECONDS - started))")" >&2
     return 2
   fi

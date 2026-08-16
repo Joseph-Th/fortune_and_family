@@ -132,4 +132,4 @@ git diff --check
 
 Cross-cutting changes include persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and gameplay-report schemas.
 
-CI runs the equivalent full gate on every push to `main` and on every pull request via `.github/workflows/ci.yml`.
+CI runs the equivalent full gate on every push to `main` and on every pull request via `.github/workflows/ci.yml`. The workflow splits the gate into two parallel jobs: a fast `verify` job (syntax, format, check, Clippy, fast library tests, documentation checks) and a deeper `gates` job (soak, all CLI smoke groups, release library tests, gameplay quality gates, and the dependency audit). Both jobs must pass.
