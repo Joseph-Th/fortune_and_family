@@ -891,7 +891,7 @@ mod harness {
 
 mod candidates {
     use super::*;
-    use crate::core::CharacterCapabilities;
+    use crate::core::{CharacterCapabilities, PropertyKind};
 
     fn establish_player_contract_market(state: &mut AppState) -> crate::ids::GoodId {
         for _ in 0..180 {
@@ -2831,6 +2831,67 @@ mod candidates {
     }
 
     #[test]
+    fn legal_funding_with_existing_treasury_withdraws_only_the_remaining_shortfall() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        make_legal_settlement_available_for_test(&mut state);
+        let player_id = state.player_dynasty_id;
+        let treasury = Money::from_copper(1_000);
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = treasury;
+        let funding_target = legal_settlement_funding_target(&state)
+            .expect("grounded case must create a legal funding target");
+        let expected_shortfall = funding_target.saturating_sub(treasury);
+        assert!(
+            expected_shortfall >= AGENT_STRATEGIC_WITHDRAWAL_TRIGGER,
+            "fixture must require a strategic withdrawal"
+        );
+        let business_id = *state
+            .businesses
+            .ids_for_owner(player_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let reserve = business_owner_distribution_reserve(
+            registry,
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        );
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist")
+            .finance
+            .cash = reserve.saturating_add(expected_shortfall);
+        let businesses = vec![
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        ];
+        let mut candidates = Vec::new();
+
+        generate_owner_distribution_candidate(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &businesses,
+            &mut candidates,
+        );
+
+        let candidate = single_candidate(&candidates, "remaining legal funding shortfall");
+        assert!(matches!(
+            candidate.command,
+            PlayerCommand::WithdrawBusinessCash { amount, .. } if amount == expected_shortfall
+        ));
+    }
+
+    #[test]
     fn pending_legal_settlement_reserve_blocks_discretionary_spending() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -2875,6 +2936,225 @@ mod candidates {
             &state,
             &settlement
         ));
+    }
+
+    #[test]
+    fn world_state_predicates_reveal_activation_for_non_reactive_families() {
+        // A campaign that can afford family education and buy a qualifying
+        // property must register activation opportunities for those families
+        // even though they have no dedicated reactive predicate -- so a quiet
+        // cycle is diagnosed as a generator gap, not as a dormant world.
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(200_000);
+        let mut accumulator = CampaignAccumulator::new();
+        let generated = BTreeSet::new();
+
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut accumulator,
+            &generated,
+        );
+
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::EducateFamilyMember)
+                .expect("education statistics must exist")
+                .activation_opportunities,
+            1,
+            "the world offers family education for an affordable dynasty"
+        );
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::BuyProperty)
+                .expect("buy-property statistics must exist")
+                .activation_opportunities,
+            1,
+            "the world offers an affordable property purchase"
+        );
+    }
+
+    #[test]
+    fn insolvent_businesses_remain_investment_activation_opportunities() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let business_id = *state
+            .businesses
+            .ids_for_owner(player_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist")
+            .operations
+            .status = BusinessStatus::Insolvent;
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist")
+            .finance
+            .cash = Money::ZERO;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(20_000);
+        let mut accumulator = CampaignAccumulator::new();
+
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut accumulator,
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::InvestInBusiness)
+                .expect("investment statistics must exist")
+                .activation_opportunities,
+            1,
+            "an insolvent player business can still be rehabilitated"
+        );
+    }
+
+    #[test]
+    fn property_repositioning_excludes_the_dynasty_residence() {
+        let state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let residence = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(player_id)
+                    && property.kind == PropertyKind::Residence
+            })
+            .expect("campaign must start with a dynasty residence");
+        assert!(
+            !property_underperforms_investment_hurdle(&state, residence),
+            "the dynasty residence must never be flagged for repositioning"
+        );
+    }
+
+    #[test]
+    fn strategic_withdrawal_capitalizes_an_endowment_commitment() {
+        // A dynasty that is represented in an institution and holds business
+        // surplus above the operating reserve must be offered a withdrawal to
+        // capitalize an endowment, even before its family treasury is poor.
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let character_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        // Establish membership by holding office (the immediate membership
+        // route, which needs no support-establishment wait).
+        let institution_id = state
+            .institutions
+            .iter()
+            .find(|(_, institution)| {
+                institution.members.iter().any(|member_id| {
+                    state
+                        .characters
+                        .get(*member_id)
+                        .is_some_and(|character| character.dynasty_id() == player_id)
+                })
+            })
+            .map(|(id, _)| *id)
+            .or_else(|| state.institutions.keys().next().copied())
+            .expect("campaign must contain an institution");
+        // Establish membership via a matured patronage record (no office duty,
+        // so the endowment is the dominant strategic treasury need).
+        let supply_subject = format!("institution:{institution_id}:character:{character_id}");
+        state.audit_log.push(AuditRecord {
+            day: state
+                .clock
+                .day()
+                .saturating_sub(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS),
+            kind: AuditKind::InstitutionPatronage,
+            subject: supply_subject.into(),
+            detail: "support_established".to_owned(),
+        });
+        {
+            let institution = state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("institution must exist");
+            if !institution.members.contains(&character_id) {
+                institution.members.insert(character_id);
+            }
+        }
+        // A modest family treasury below the endowment commitment: the dynasty
+        // must pull business surplus to fund the endowment.
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(1_000);
+        let business_id = *state
+            .businesses
+            .ids_for_owner(player_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        let reserve = business_owner_distribution_reserve(
+            registry,
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        );
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owned business must exist")
+            .finance
+            .cash = reserve.saturating_add(Money::from_copper(30_000));
+        let businesses = vec![
+            state
+                .businesses
+                .get(business_id)
+                .expect("owned business must exist"),
+        ];
+        let mut candidates = Vec::new();
+
+        generate_owner_distribution_candidate(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &businesses,
+            &mut candidates,
+        );
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::WithdrawBusinessCash)
+            .unwrap_or_else(|| {
+                panic!(
+                    "represented wealthy dynasty must be offered an endowment withdrawal: {candidates:#?}"
+                )
+            });
+        assert!(
+            candidate.description.contains("endowment"),
+            "the strategic withdrawal should name its endowment purpose: {}",
+            candidate.description
+        );
     }
 
     #[test]

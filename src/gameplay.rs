@@ -104,7 +104,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 59;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 60;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -164,10 +164,20 @@ const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_000);
 /// Monthly maintenance copper per resident family member the agent reserves
 /// before committing treasury to property acquisitions.
 const FAMILY_MAINTENANCE_MONTHLY_COPPER: i64 = 250;
-const AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER: Money = Money::from_copper(80_000);
+const AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER: Money = Money::from_copper(30_000);
 const AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION: Money = Money::from_copper(12_000);
-const AGENT_ENDOWMENT_LIQUIDITY_FLOOR: Money = Money::from_copper(80_000);
-const AGENT_ENDOWMENT_OFFICE_BUFFER: Money = Money::from_copper(50_000);
+const AGENT_ENDOWMENT_LIQUIDITY_FLOOR: Money = Money::from_copper(20_000);
+const AGENT_ENDOWMENT_OFFICE_BUFFER: Money = Money::from_copper(10_000);
+/// Minimum business-cash surplus above the operating target that justifies a
+/// strategic owner withdrawal to meet a dynasty-level treasury commitment.
+const AGENT_STRATEGIC_WITHDRAWAL_TRIGGER: Money = Money::from_copper(1_000);
+/// An annual institution-patronage ceiling the strategic withdrawal path keeps
+/// below the protected family floor so a single endowment never decapitalizes
+/// the household.
+const AGENT_STRATEGIC_WITHDRAWAL_MAX: Money = Money::from_copper(50_000);
+/// Annual yield below which an owned property is considered underperforming and
+/// candidates to reposition (sell) it for better capital use are considered.
+const PROPERTY_PORTFOLIO_REPOSITIONING_YIELD_BASIS_POINTS: u16 = 800;
 const AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 720;
 const AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS: u16 = 1_500;
 const AGENT_INFORMATION_POLITICAL_VULNERABILITY_LEGITIMACY: u16 = 2_500;
@@ -4123,8 +4133,801 @@ fn record_activation_opportunities(
                 | GameplayCommandKind::WithdrawBusinessCash
         )
     }) {
-        record_activation_opportunity(accumulator, kind, generated_kinds.contains(&kind));
+        let available = has_world_opportunity(registry, state, persona, kind)
+            || generated_kinds.contains(&kind);
+        record_activation_opportunity(accumulator, kind, available);
     }
+}
+
+/// World-state activation predicate for every command family that does not have
+/// a dedicated reactive predicate above. Each branch is an independent read-only
+/// check of whether the canonical game would accept some concrete action of that
+/// kind -- so a quiet cycle is labelled a generator gap when the world offers an
+/// action the candidate generator failed to build, rather than being misread as
+/// a dormant world with nothing to do.
+fn has_world_opportunity(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    kind: GameplayCommandKind,
+) -> bool {
+    match kind {
+        GameplayCommandKind::SecureSupply => has_secure_supply_opportunity(registry, state),
+        GameplayCommandKind::SellOutput => has_sell_output_opportunity(registry, state),
+        GameplayCommandKind::BuyProperty => has_buy_property_opportunity(state, persona),
+        GameplayCommandKind::EnactLaw => has_enact_law_opportunity(registry, state),
+        GameplayCommandKind::StartPublicWork => has_start_public_work_opportunity(registry, state),
+        GameplayCommandKind::FundPublicWork => has_fund_public_work_opportunity(state),
+        GameplayCommandKind::SetHouseGovernance => has_governance_opportunity(state, persona),
+        GameplayCommandKind::ConveneFamilyCouncil => has_family_council_opportunity(state),
+        GameplayCommandKind::DesignateHeir => has_heir_designation_opportunity(state),
+        GameplayCommandKind::AdoptWard => has_ward_adoption_opportunity(state),
+        GameplayCommandKind::EducateFamilyMember => has_family_education_opportunity(state),
+        GameplayCommandKind::CultivateInstitutionSupport => {
+            has_institution_support_opportunity(registry, state, persona)
+        }
+        GameplayCommandKind::EndowInstitution => has_institution_endowment_opportunity(state),
+        GameplayCommandKind::NominateForOffice => {
+            has_office_nomination_opportunity(registry, state)
+        }
+        GameplayCommandKind::ExerciseOfficePower => has_office_power_opportunity(state),
+        GameplayCommandKind::CommissionInformation => {
+            has_information_commission_opportunity(registry, state, persona)
+        }
+        GameplayCommandKind::LeverageInformation => has_information_leverage_opportunity(state),
+        GameplayCommandKind::BorrowFunds => has_borrow_opportunity(state, persona),
+        GameplayCommandKind::AcknowledgeNotification => {
+            has_notification_acknowledgement_opportunity(state)
+        }
+        GameplayCommandKind::RespondToCrisis
+        | GameplayCommandKind::ResolveLaborDispute
+        | GameplayCommandKind::FileLegalCase
+        | GameplayCommandKind::SettleLegalCase
+        | GameplayCommandKind::SellProperty
+        | GameplayCommandKind::WithdrawFromInstitution
+        | GameplayCommandKind::ExtendCredit
+        | GameplayCommandKind::TransferBusinessCash
+        | GameplayCommandKind::WithdrawBusinessCash => false,
+        GameplayCommandKind::AcquireBusiness
+        | GameplayCommandKind::InvestInBusiness
+        | GameplayCommandKind::SetBusinessPolicy => {
+            has_business_opportunity(registry, state, persona, kind)
+        }
+    }
+}
+
+fn is_open_business(business: &crate::core::Business) -> bool {
+    !matches!(
+        business.status(),
+        BusinessStatus::Closed | BusinessStatus::Insolvent
+    )
+}
+
+fn has_secure_supply_opportunity(registry: &Registry, state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    state
+        .businesses
+        .iter()
+        .filter(|business| business.owner_dynasty_id() == player_id && is_open_business(business))
+        .any(|business| {
+            let recipe = registry
+                .get_recipe(business.recipe_id())
+                .expect("business recipe must resolve");
+            recipe.inputs().iter().any(|input| {
+                let Some(quote) = state.market.quotes.get(&input.good_id()) else {
+                    return false;
+                };
+                contract_sellers(registry, state, input.good_id(), player_id).any(|seller| {
+                    if state.contracts.values().any(|contract| {
+                        contract.status == ContractStatus::Active
+                            && contract.buyer_business_id == business.id()
+                            && contract.seller_business_id == seller
+                            && contract.good_id == input.good_id()
+                    }) {
+                        return false;
+                    }
+                    let unit_price =
+                        contract_candidate_unit_price(state, business.id(), seller, quote.price);
+                    can_support_contract_terms(
+                        registry,
+                        state,
+                        business.id(),
+                        seller,
+                        input.good_id(),
+                        input.quantity(),
+                        unit_price,
+                    )
+                })
+            })
+        })
+}
+
+fn has_sell_output_opportunity(registry: &Registry, state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    state
+        .businesses
+        .iter()
+        .filter(|business| business.owner_dynasty_id() == player_id && is_open_business(business))
+        .any(|business| {
+            let recipe = registry
+                .get_recipe(business.recipe_id())
+                .expect("business recipe must resolve");
+            let Some(quote) = state.market.quotes.get(&recipe.output_good_id()) else {
+                return false;
+            };
+            contract_buyers(registry, state, recipe.output_good_id(), player_id).any(|buyer| {
+                let unit_price =
+                    contract_candidate_unit_price(state, buyer, business.id(), quote.price);
+                can_support_contract_terms(
+                    registry,
+                    state,
+                    buyer,
+                    business.id(),
+                    recipe.output_good_id(),
+                    recipe.output_quantity(),
+                    unit_price,
+                )
+            })
+        })
+}
+
+fn has_buy_property_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
+    let player_id = state.player_dynasty_id;
+    let Some(player) = state.dynasties.get(&player_id) else {
+        return false;
+    };
+    let affordability_cap = player
+        .treasury()
+        .saturating_sub(property_purchase_liquidity_floor(state, player_id));
+    if affordability_cap == Money::ZERO {
+        return false;
+    }
+    let minimum_yield_basis_points = match persona {
+        GameplayPersona::Entrepreneur => 1_000,
+        GameplayPersona::Opportunist => 1_100,
+        GameplayPersona::PowerBroker | GameplayPersona::Steward => 1_200,
+    };
+    state.properties.values().any(|property| {
+        property.owner_dynasty_id.is_none()
+            && property.value <= affordability_cap
+            && property_meets_investment_hurdle(state, property, minimum_yield_basis_points)
+    })
+}
+
+fn has_enact_law_opportunity(registry: &Registry, state: &AppState) -> bool {
+    if !has_player_office(state) {
+        return false;
+    }
+    let player_id = state.player_dynasty_id;
+    let sponsorship_available = state
+        .laws
+        .values()
+        .filter(|law| law.sponsor_dynasty_id == Some(player_id))
+        .map(|law| law.enacted_day)
+        .max()
+        .is_none_or(|day| state.clock.day() >= day.saturating_add(LAW_SPONSORSHIP_INTERVAL_DAYS));
+    let has_legitimacy = state.dynasties.get(&player_id).is_some_and(|dynasty| {
+        dynasty.resources.legitimacy_basis_points >= LAW_LEGITIMACY_REQUIREMENT
+    });
+    let treasury_ok = state
+        .dynasties
+        .get(&player_id)
+        .is_some_and(|dynasty| dynasty.treasury() >= Money::from_copper(2_000));
+    if !sponsorship_available || !has_legitimacy || !treasury_ok {
+        return false;
+    }
+    law_candidates(registry, state).iter().any(|(kind, value)| {
+        has_established_player_office_power(state, required_office_power_for_law(*kind))
+            && !state
+                .laws
+                .values()
+                .any(|law| law.active && law.kind == *kind && law.value == *value)
+    })
+}
+
+fn has_start_public_work_opportunity(registry: &Registry, state: &AppState) -> bool {
+    if !has_established_player_office_power(state, OfficePower::PublicWorks) {
+        return false;
+    }
+    let player_id = state.player_dynasty_id;
+    let active_sponsored = state
+        .public_works
+        .values()
+        .filter(|work| work.sponsor_dynasty_id == Some(player_id) && work.status.is_unfinished())
+        .count();
+    if active_sponsored >= MAX_ACTIVE_SPONSORED_PUBLIC_WORKS {
+        return false;
+    }
+    let work_kinds = [
+        PublicWorkKind::Road,
+        PublicWorkKind::Bridge,
+        PublicWorkKind::Market,
+        PublicWorkKind::Granary,
+        PublicWorkKind::Drainage,
+        PublicWorkKind::WatchStation,
+        PublicWorkKind::Hospital,
+        PublicWorkKind::School,
+    ];
+    let has_open_slot = registry.districts().iter().any(|district| {
+        work_kinds.iter().any(|kind| {
+            !state.public_works.values().any(|work| {
+                work.district_id == district.id()
+                    && work.kind == *kind
+                    && work.status.is_unfinished()
+            })
+        })
+    });
+    if !has_open_slot {
+        return false;
+    }
+    let subject = format!("dynasty:{player_id}");
+    let sponsorship_available = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == AuditKind::PublicWorkStarted && record.subject() == subject)
+        .is_none_or(|record| {
+            state.clock.day()
+                >= record
+                    .day()
+                    .saturating_add(PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS)
+        });
+    sponsorship_available
+        && state
+            .dynasties
+            .get(&player_id)
+            .is_some_and(|dynasty| dynasty.treasury() >= Money::from_copper(1_200))
+}
+
+fn has_fund_public_work_opportunity(state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    let treasury = state
+        .dynasties
+        .get(&player_id)
+        .map_or(Money::ZERO, crate::core::Dynasty::treasury);
+    let office_reserve = player_office_duty_reserve(state, 0);
+    let discretionary_surplus = treasury
+        .saturating_sub(office_reserve)
+        .saturating_sub(AGENT_OFFICE_LIQUIDITY_BUFFER);
+    let wealthy_acceleration = treasury >= AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER
+        && discretionary_surplus > Money::ZERO
+        && treasury >= AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION;
+    state.public_works.values().any(|work| {
+        work.sponsor_dynasty_id == Some(player_id)
+            && work.status.is_unfinished()
+            && ((work.status == PublicWorkStatus::Suspended && treasury > Money::ZERO)
+                || wealthy_acceleration)
+            && work.budget.saturating_sub(work.spent) > Money::ZERO
+    })
+}
+
+fn has_governance_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
+    let Some(council) = state.family_councils.get(&state.player_dynasty_id) else {
+        return false;
+    };
+    let governance_subject = format!("dynasty:{}", state.player_dynasty_id);
+    let governance_available = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::HouseGovernanceChange
+                && record.subject() == governance_subject
+        })
+        .is_none_or(|record| {
+            record
+                .day()
+                .saturating_add(HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS)
+                <= state.clock.day()
+        });
+    governance_available
+        && preferred_house_governance(state, persona)
+            .is_some_and(|governance| governance != council.governance)
+}
+
+fn has_family_council_opportunity(state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    let Some(council) = state.family_councils.get(&player_id) else {
+        return false;
+    };
+    if council.unity_basis_points >= FAMILY_COUNCIL_INTERVENTION_UNITY_THRESHOLD
+        || state
+            .dynasties
+            .get(&player_id)
+            .is_none_or(|dynasty| dynasty.treasury() < FAMILY_COUNCIL_MEETING_COST)
+    {
+        return false;
+    }
+    let subject = format!("dynasty:{player_id};council-meeting");
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::HouseGovernanceChange && record.subject() == subject
+        })
+        .is_none_or(|record| {
+            record
+                .day()
+                .saturating_add(FAMILY_COUNCIL_MEETING_INTERVAL_DAYS)
+                <= state.clock.day()
+        })
+}
+
+fn has_heir_designation_opportunity(state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    let Some(dynasty) = state.dynasties.get(&player_id) else {
+        return false;
+    };
+    if dynasty.resources.legitimacy_basis_points < HEIR_DESIGNATION_LEGITIMACY_COST
+        || dynasty.heir_id().is_none()
+    {
+        return false;
+    }
+    let designation_subject = format!("dynasty:{player_id}");
+    let designation_available = state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::HeirDesignation && record.subject() == designation_subject
+        })
+        .map(AuditRecord::day)
+        .is_none_or(|last_day| {
+            state.clock.day() >= last_day.saturating_add(HEIR_DESIGNATION_INTERVAL_DAYS)
+        });
+    if !designation_available {
+        return false;
+    }
+    let (head_age, _) = character_age_and_health(state, dynasty.head_id());
+    head_age >= HEIR_CONFIRMATION_HEAD_AGE_YEARS
+        || dynasty.runtime.succession_risk_basis_points >= 2_000
+}
+
+fn has_ward_adoption_opportunity(state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    let Some(player) = state.dynasties.get(&player_id) else {
+        return false;
+    };
+    player.treasury() >= WARD_ADOPTION_COST
+        && player.resources.legitimacy_basis_points >= WARD_ADOPTION_LEGITIMACY_REQUIREMENT
+        && player
+            .resources
+            .reputation_quality_basis_points
+            .max(player.resources.reputation_reliability_basis_points)
+            >= WARD_ADOPTION_REPUTATION_REQUIREMENT
+        && player_contract_deliveries(state) >= WARD_ADOPTION_DELIVERY_REQUIREMENT
+        && usize::from(count_active_player_wards(state, player_id)) < MAX_ACTIVE_WARDS
+        && state
+            .audit_log
+            .iter()
+            .rev()
+            .find(|record| record.kind() == AuditKind::WardAdoption)
+            .is_none_or(|record| {
+                state.clock.day() >= record.day().saturating_add(WARD_ADOPTION_INTERVAL_DAYS)
+            })
+}
+
+fn has_family_education_opportunity(state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    let affordable = state
+        .dynasties
+        .get(&player_id)
+        .is_some_and(|player| player.treasury() >= FAMILY_EDUCATION_COST);
+    if !affordable {
+        return false;
+    }
+    state
+        .characters
+        .iter()
+        .filter(|character| {
+            character.dynasty_id() == player_id && character.status() == CharacterStatus::Active
+        })
+        .any(|character| {
+            education_focus_order(GameplayPersona::Steward)
+                .into_iter()
+                .any(|focus| {
+                    character_focus_value(character, focus) < 100
+                        && family_education_next_day(state, character.id())
+                            .is_none_or(|day| state.clock.day() >= day)
+                })
+        })
+}
+
+fn has_institution_support_opportunity(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+) -> bool {
+    let characters = eligible_office_characters(state);
+    let controlled_powers = player_controlled_office_powers(state);
+    let player_has_institutional_foothold = has_player_institutional_foothold(state);
+    state.institutions.values().any(|institution| {
+        if !institution_is_strategic_target(
+            state,
+            institution,
+            &controlled_powers,
+            player_has_institutional_foothold,
+            persona,
+        ) {
+            return false;
+        }
+        let institution_kind = registry
+            .get_institution(institution.institution_id)
+            .expect("runtime institution must have a registry definition")
+            .kind();
+        strongest_institution_support_candidate(
+            registry,
+            state,
+            institution,
+            &characters,
+            institution_kind,
+        )
+        .is_some()
+    })
+}
+
+fn has_institution_endowment_opportunity(state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    let affordable = state
+        .dynasties
+        .get(&player_id)
+        .is_some_and(|player| player.treasury() >= INSTITUTION_ENDOWMENT_MIN);
+    if !affordable {
+        return false;
+    }
+    let has_membership = state.institutions.values().any(|institution| {
+        has_established_player_institution_membership(state, institution.institution_id)
+    });
+    has_membership
+        && institution_endowment_next_day(state).is_none_or(|day| state.clock.day() >= day)
+}
+
+fn has_office_nomination_opportunity(registry: &Registry, state: &AppState) -> bool {
+    let characters = eligible_office_characters(state);
+    state.institutions.values().any(|institution| {
+        let institution_kind = registry
+            .get_institution(institution.institution_id)
+            .expect("runtime institution must have a registry definition")
+            .kind();
+        strongest_office_nominee(registry, state, institution, &characters, institution_kind)
+            .is_some()
+    })
+}
+
+fn has_office_power_opportunity(state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    let has_legitimacy = state.dynasties.get(&player_id).is_some_and(|player| {
+        player.resources.legitimacy_basis_points >= OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST
+    });
+    if !has_legitimacy {
+        return false;
+    }
+    state.institutions.values().any(|institution| {
+        let held_by_player = institution.office_holder_id.is_some_and(|character_id| {
+            state.characters.get(character_id).is_some_and(|character| {
+                character.status() == CharacterStatus::Active && character.dynasty_id() == player_id
+            })
+        });
+        held_by_player
+            && office_power_directive_available(state, institution.institution_id)
+            && state.clock.day()
+                >= institution
+                    .term_started_day
+                    .saturating_add(OFFICE_POWER_ESTABLISHMENT_DAYS)
+    })
+}
+
+fn has_information_commission_opportunity(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+) -> bool {
+    let player_id = state.player_dynasty_id;
+    let affordable = state
+        .dynasties
+        .get(&player_id)
+        .is_some_and(|player| player.treasury() >= INFORMATION_COMMISSION_COST);
+    if !affordable || state.clock.day() < 180 {
+        return false;
+    }
+    let report_commission_day = state
+        .information_reports
+        .values()
+        .filter(|report| {
+            report.owner_dynasty_id == player_id && report.source == COMMISSIONED_INFORMATION_SOURCE
+        })
+        .map(|report| report.created_day)
+        .max();
+    let audit_commission_day = state
+        .audit_log
+        .iter()
+        .filter(|record| {
+            record.kind() == AuditKind::InformationCommission
+                && record
+                    .subject()
+                    .starts_with(&format!("dynasty:{player_id}"))
+        })
+        .map(AuditRecord::day)
+        .max();
+    let commission_interval =
+        if matches!(
+            persona,
+            GameplayPersona::PowerBroker | GameplayPersona::Opportunist
+        ) && maximum_player_contract_relationship_pressure_basis_points(state, player_id)
+            >= AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS
+        {
+            INFORMATION_COMMISSION_INTERVAL_DAYS
+        } else {
+            AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS
+        };
+    let available = report_commission_day
+        .max(audit_commission_day)
+        .is_none_or(|day| state.clock.day() >= day.saturating_add(commission_interval));
+    available && preferred_information_focus(registry, state, persona).is_some()
+}
+
+fn has_information_leverage_opportunity(state: &AppState) -> bool {
+    state.information_reports.values().any(|report| {
+        report.owner_dynasty_id == state.player_dynasty_id
+            && report.source == COMMISSIONED_INFORMATION_SOURCE
+            && state.clock.day()
+                >= report
+                    .created_day
+                    .saturating_add(AGENT_INFORMATION_LEVERAGE_DELAY_DAYS)
+    })
+}
+
+fn has_borrow_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
+    let player_id = state.player_dynasty_id;
+    let Some(player) = state.dynasties.get(&player_id) else {
+        return false;
+    };
+    let base_borrowing_trigger = match persona {
+        GameplayPersona::Steward => Money::from_copper(4_000),
+        GameplayPersona::Entrepreneur => Money::from_copper(12_000),
+        GameplayPersona::PowerBroker | GameplayPersona::Opportunist => Money::from_copper(8_000),
+    };
+    let office_reserve = player_office_duty_reserve(state, 0);
+    let legal_requirement = active_legal_settlement_requirement(state).unwrap_or(Money::ZERO);
+    let borrowing_trigger = office_reserve
+        .max(base_borrowing_trigger)
+        .max(legal_requirement);
+    if player.treasury() >= borrowing_trigger
+        || state
+            .loans
+            .values()
+            .any(|loan| loan.borrower_dynasty_id == player_id && loan.status.is_repayment_active())
+    {
+        return false;
+    }
+    state.dynasties.values().any(|dynasty| {
+        dynasty.id() != player_id
+            && !same_pair_credit_blocks_new_loan(state, dynasty.id(), player_id)
+            && dynasty
+                .treasury()
+                .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+                .is_some_and(|available| available >= Money::from_copper(1_000))
+    })
+}
+
+fn has_notification_acknowledgement_opportunity(state: &AppState) -> bool {
+    state
+        .outbox
+        .iter()
+        .filter(|message| !message.acknowledged)
+        .count()
+        >= NOTIFICATION_BATCH_THRESHOLD
+}
+
+fn has_business_opportunity(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    kind: GameplayCommandKind,
+) -> bool {
+    match kind {
+        GameplayCommandKind::InvestInBusiness => {
+            has_business_investment_opportunity(registry, state, persona)
+        }
+        GameplayCommandKind::SetBusinessPolicy => has_business_policy_opportunity(state, persona),
+        GameplayCommandKind::AcquireBusiness => {
+            has_business_acquisition_opportunity(registry, state, persona)
+        }
+        _ => false,
+    }
+}
+
+fn has_business_investment_opportunity(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+) -> bool {
+    let player_id = state.player_dynasty_id;
+    state
+        .businesses
+        .iter()
+        .filter(|business| {
+            business.owner_dynasty_id() == player_id && business.status() != BusinessStatus::Closed
+        })
+        .any(|business| {
+            if business.status() == BusinessStatus::Active {
+                return has_modernization_opportunity(state, persona, business);
+            }
+            matches!(
+                business.status(),
+                BusinessStatus::Distressed | BusinessStatus::Insolvent
+            ) && !has_internal_cash_recovery(registry, state, business)
+                && has_recapitalization_opportunity(registry, state, persona, business)
+        })
+}
+
+fn has_modernization_opportunity(
+    state: &AppState,
+    persona: GameplayPersona,
+    business: &crate::core::Business,
+) -> bool {
+    if persona != GameplayPersona::Entrepreneur
+        || (business.finance.lifetime_revenue == Money::ZERO
+            && business.finance.lifetime_costs == Money::ZERO)
+    {
+        return false;
+    }
+    let subject = format!("business:{}", business.id());
+    if state.audit_log.iter().rev().any(|record| {
+        record.kind() == AuditKind::BusinessCapitalization
+            && record.subject() == subject
+            && state.clock.day().saturating_sub(record.day())
+                < AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS
+    }) {
+        return false;
+    }
+    let target_condition = 9_000_u16;
+    let target_quality = business.policy.quality_target_basis_points.max(7_500);
+    let condition_investment =
+        i64::from(target_condition.saturating_sub(business.operations.condition_basis_points))
+            .saturating_mul(2);
+    let quality_investment =
+        i64::from(target_quality.saturating_sub(business.operations.quality_basis_points))
+            .saturating_mul(4);
+    let desired = Money::from_copper(condition_investment.max(quality_investment));
+    if desired < Money::from_copper(1_000) {
+        return false;
+    }
+    let treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    let spendable = treasury.saturating_sub(recapitalization_dynasty_reserve(persona, false));
+    desired.min(AGENT_PLANNED_CAPITALIZATION_MAX).min(spendable) >= Money::from_copper(1_000)
+}
+
+fn has_recapitalization_opportunity(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    business: &crate::core::Business,
+) -> bool {
+    let player = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("business recipe must exist");
+    let staple_emergency = registry
+        .get_good(recipe.output_good_id())
+        .is_some_and(|good| {
+            good.category() == GoodCategory::Staple
+                && average_household_food_satisfaction(state) < 5_000
+        });
+    let severe_rehabilitation = business.operations.condition_basis_points < 2_000;
+    let dynasty_reserve = if player_has_no_active_business(state) {
+        Money::ZERO
+    } else if severe_rehabilitation {
+        Money::from_copper(2_000)
+    } else {
+        recapitalization_dynasty_reserve(persona, staple_emergency)
+    };
+    let spendable = player.treasury().saturating_sub(dynasty_reserve);
+    if spendable == Money::ZERO {
+        return false;
+    }
+    let target_cash = business_recapitalization_target(registry, state, business);
+    let shortfall = target_cash.saturating_sub(business.cash());
+    let amount = shortfall.min(spendable);
+    let minimum_meaningful = recipe.daily_operating_cost().saturating_mul(7);
+    amount > Money::ZERO
+        && (staple_emergency || amount >= minimum_meaningful || amount >= shortfall)
+}
+
+fn has_business_policy_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
+    state
+        .businesses
+        .iter()
+        .filter(|business| {
+            business.owner_dynasty_id() == state.player_dynasty_id && is_open_business(business)
+        })
+        .any(|business| {
+            let policy_subject = format!("business:{}", business.id());
+            let policy_change_available = state
+                .audit_log
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.kind() == AuditKind::BusinessPolicyChange
+                        && record.subject() == policy_subject
+                })
+                .is_none_or(|record| {
+                    state.clock.day()
+                        >= record
+                            .day()
+                            .saturating_add(BUSINESS_POLICY_CHANGE_INTERVAL_DAYS)
+                });
+            policy_change_available
+                && policy_templates(persona).into_iter().any(|template| {
+                    template.label == preferred_policy_label(persona, business)
+                        && (business.policy.target_input_days != template.target_input_days
+                            || business.policy.target_output_days != template.target_output_days
+                            || business.policy.minimum_cash_reserve
+                                != template.minimum_cash_reserve
+                            || business.policy.maintenance_basis_points
+                                != template.maintenance_basis_points
+                            || business.policy.quality_target_basis_points
+                                != template.quality_target_basis_points)
+                })
+        })
+}
+
+fn has_business_acquisition_opportunity(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+) -> bool {
+    let portfolio_limit = match persona {
+        GameplayPersona::Entrepreneur | GameplayPersona::Opportunist => 3,
+        GameplayPersona::Steward | GameplayPersona::PowerBroker => 2,
+    };
+    let player_id = state.player_dynasty_id;
+    let player_businesses: Vec<_> = state
+        .businesses
+        .ids_for_owner(player_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.businesses.get(*id))
+        .collect();
+    if player_businesses.len() >= portfolio_limit
+        || !portfolio_ready_for_acquisition(state, &player_businesses)
+    {
+        return false;
+    }
+    let has_financially_stressed_business = player_businesses.iter().any(|business| {
+        matches!(
+            business.status(),
+            BusinessStatus::Distressed | BusinessStatus::Insolvent
+        )
+    });
+    let operating_businesses = player_businesses
+        .iter()
+        .filter(|business| {
+            matches!(
+                business.status(),
+                BusinessStatus::Active | BusinessStatus::Distressed
+            )
+        })
+        .count();
+    if operating_businesses > 0 && has_financially_stressed_business {
+        return false;
+    }
+    state.businesses.iter().any(|business| {
+        business.owner_dynasty_id() != player_id
+            && matches!(
+                business.status(),
+                BusinessStatus::Distressed | BusinessStatus::Insolvent | BusinessStatus::Closed
+            )
+            && quote_business_acquisition(registry, state, player_id, business.id()).is_ok()
+    })
 }
 
 fn record_activation_opportunity(
@@ -5690,16 +6493,114 @@ fn generate_owner_distribution_candidate(
     player_businesses: &[&crate::core::Business],
     candidates: &mut Vec<Candidate>,
 ) {
+    if generate_strategic_withdrawal_candidate(
+        registry,
+        state,
+        persona,
+        player_businesses,
+        candidates,
+    ) {
+        return;
+    }
+
+    generate_ordinary_distribution_candidate(
+        registry,
+        state,
+        persona,
+        player_businesses,
+        candidates,
+    );
+}
+
+/// Offer an owner withdrawal when business surplus can fund a known dynasty
+/// commitment without violating the business operating reserve.
+fn generate_strategic_withdrawal_candidate(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    player_businesses: &[&crate::core::Business],
+    candidates: &mut Vec<Candidate>,
+) -> bool {
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist");
+    let office_reserve = player_office_duty_reserve(state, 0);
+    let legal_commitment = legal_settlement_funding_target(state).unwrap_or(Money::ZERO);
+    let endowment_commitment = if state.institutions.values().any(|institution| {
+        has_established_player_institution_membership(state, institution.institution_id)
+    }) {
+        INSTITUTION_ENDOWMENT_MIN
+    } else {
+        Money::ZERO
+    };
+    let strategic_need = office_reserve
+        .max(legal_commitment)
+        .max(endowment_commitment);
+    let strategic_shortfall = strategic_need.saturating_sub(player.treasury());
+    let Some((source, surplus)) = player_businesses
+        .iter()
+        .filter(|business| business.status() == BusinessStatus::Active)
+        .filter_map(|business| {
+            let reserve = business_owner_distribution_reserve(registry, business);
+            let surplus = business.cash().saturating_sub(reserve);
+            (surplus >= AGENT_STRATEGIC_WITHDRAWAL_TRIGGER).then_some((*business, surplus))
+        })
+        .max_by_key(|(business, surplus)| (*surplus, business.id()))
+    else {
+        return false;
+    };
+    let amount = surplus
+        .min(strategic_shortfall)
+        .min(AGENT_STRATEGIC_WITHDRAWAL_MAX);
+    if amount < AGENT_STRATEGIC_WITHDRAWAL_TRIGGER {
+        return false;
+    }
+    let intent = if office_reserve >= legal_commitment.max(endowment_commitment) {
+        "cover projected office duties"
+    } else if legal_commitment >= endowment_commitment && legal_commitment > Money::ZERO {
+        "fund the pending legal settlement"
+    } else if endowment_commitment > Money::ZERO {
+        "capitalize an institution endowment"
+    } else {
+        "restore dynasty liquidity"
+    };
+    push_candidate(
+        candidates,
+        GameplayCommandKind::WithdrawBusinessCash,
+        PlayerCommand::WithdrawBusinessCash {
+            business_id: source.id(),
+            amount,
+        },
+        format!(
+            "withdraw {amount} of surplus from business {} to {intent}",
+            source.id()
+        ),
+        2_400_i64
+            .saturating_add(amount.copper() / 20)
+            .saturating_add(persona_distribution_bonus(persona)),
+    );
+    true
+}
+
+fn generate_ordinary_distribution_candidate(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    player_businesses: &[&crate::core::Business],
+    candidates: &mut Vec<Candidate>,
+) {
+    let player = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    let legal_requirement = active_legal_settlement_requirement(state);
+
     let ordinary_liquidity_target = match persona {
         GameplayPersona::Entrepreneur => Money::from_copper(3_500),
         GameplayPersona::Steward | GameplayPersona::PowerBroker => Money::from_copper(3_000),
         GameplayPersona::Opportunist => Money::from_copper(2_500),
     };
-    let legal_requirement = active_legal_settlement_requirement(state);
     let liquidity_target = ordinary_liquidity_target.max(legal_requirement.unwrap_or(Money::ZERO));
     if player.treasury() >= liquidity_target {
         return;
@@ -5745,16 +6646,10 @@ fn generate_owner_distribution_candidate(
     if amount < AGENT_OWNER_DISTRIBUTION_TRIGGER {
         return;
     }
-    let bonus: i64 = match persona {
-        GameplayPersona::Steward => 1_450,
-        GameplayPersona::Entrepreneur => 1_550,
-        GameplayPersona::PowerBroker => 1_500,
-        GameplayPersona::Opportunist => 1_650,
-    };
     let bonus = if legal_requirement.is_some() {
-        bonus.saturating_add(2_500)
+        persona_distribution_bonus(persona).saturating_add(2_500)
     } else {
-        bonus
+        persona_distribution_bonus(persona)
     };
     push_candidate(
         candidates,
@@ -5769,6 +6664,15 @@ fn generate_owner_distribution_candidate(
         ),
         bonus,
     );
+}
+
+const fn persona_distribution_bonus(persona: GameplayPersona) -> i64 {
+    match persona {
+        GameplayPersona::Steward => 1_450,
+        GameplayPersona::Entrepreneur => 1_550,
+        GameplayPersona::PowerBroker => 1_500,
+        GameplayPersona::Opportunist => 1_650,
+    }
 }
 
 fn business_cash_target(
@@ -6412,15 +7316,8 @@ fn add_contract_candidate(
         seller_business_id,
         quote.price,
     );
-    let buyer_is_player = state
-        .businesses
-        .get(buyer_business_id)
-        .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id);
-    let unit_price = if buyer_is_player {
-        quote.price.max(price_bounds.minimum_seller_price)
-    } else {
-        quote.price.min(price_bounds.maximum_buyer_price)
-    };
+    let unit_price =
+        contract_candidate_unit_price(state, buyer_business_id, seller_business_id, quote.price);
     if !can_support_contract_terms(
         registry,
         state,
@@ -6468,6 +7365,29 @@ fn add_contract_candidate(
         ),
         bonus,
     );
+}
+
+fn contract_candidate_unit_price(
+    state: &AppState,
+    buyer_business_id: BusinessId,
+    seller_business_id: BusinessId,
+    market_price: Money,
+) -> Money {
+    let price_bounds = contract_counterparty_price_bounds(
+        state,
+        buyer_business_id,
+        seller_business_id,
+        market_price,
+    );
+    let buyer_is_player = state
+        .businesses
+        .get(buyer_business_id)
+        .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id);
+    if buyer_is_player {
+        market_price.max(price_bounds.minimum_seller_price)
+    } else {
+        market_price.min(price_bounds.maximum_buyer_price)
+    }
 }
 
 fn can_support_contract_terms(
@@ -6654,17 +7574,23 @@ fn add_property_liquidation_candidates(
     candidates: &mut Vec<Candidate>,
 ) {
     let player_id = state.player_dynasty_id;
-    if !player_needs_property_liquidation(state) {
+    let distress_liquidation = player_needs_property_liquidation(state);
+    if !distress_liquidation && !player_holds_underperforming_property(state) {
         return;
     }
+    let force_repositioning = !distress_liquidation;
     let mut properties: Vec<_> = state
         .properties
         .values()
         .filter(|property| property.owner_dynasty_id == Some(player_id))
+        .filter(|property| {
+            distress_liquidation || property_underperforms_investment_hurdle(state, property)
+        })
         .collect();
     properties.sort_by_key(|property| {
         (
             property.occupant_business_id.is_some(),
+            std::cmp::Reverse(effective_property_annual_rent(state, property)),
             property.value,
             property.id,
         )
@@ -6674,11 +7600,15 @@ fn add_property_liquidation_candidates(
         .values()
         .filter(|dynasty| dynasty.id() != player_id)
         .collect();
-    let persona_bonus = match persona {
-        GameplayPersona::Steward => 6_000,
-        GameplayPersona::Entrepreneur => 5_600,
-        GameplayPersona::PowerBroker => 5_200,
-        GameplayPersona::Opportunist => 6_400,
+    let persona_bonus = if force_repositioning {
+        1_800
+    } else {
+        match persona {
+            GameplayPersona::Steward => 6_000,
+            GameplayPersona::Entrepreneur => 5_600,
+            GameplayPersona::PowerBroker => 5_200,
+            GameplayPersona::Opportunist => 6_400,
+        }
     };
     for property in properties.into_iter().take(2) {
         let buyer = buyers
@@ -6691,6 +7621,8 @@ fn add_property_liquidation_candidates(
         let Some((buyer, quote)) = buyer else {
             continue;
         };
+        let reposition =
+            force_repositioning && property_underperforms_investment_hurdle(state, property);
         push_candidate(
             candidates,
             GameplayCommandKind::SellProperty,
@@ -6698,19 +7630,58 @@ fn add_property_liquidation_candidates(
                 property_id: property.id,
                 buyer_dynasty_id: buyer.id(),
             },
-            format!(
-                "liquidate {:?} property {} to dynasty {} for {} net {}; lien payoff {}; civic guarantee {}",
-                property.kind,
-                property.id,
-                buyer.id(),
-                quote.price,
-                quote.seller_proceeds,
-                quote.lien_payoff,
-                quote.civic_guarantee
-            ),
+            if reposition {
+                format!(
+                    "reposition underperforming {:?} property {} to dynasty {} for {} net {}",
+                    property.kind,
+                    property.id,
+                    buyer.id(),
+                    quote.price,
+                    quote.seller_proceeds
+                )
+            } else {
+                format!(
+                    "liquidate {:?} property {} to dynasty {} for {} net {}; lien payoff {}; civic guarantee {}",
+                    property.kind,
+                    property.id,
+                    buyer.id(),
+                    quote.price,
+                    quote.seller_proceeds,
+                    quote.lien_payoff,
+                    quote.civic_guarantee
+                )
+            },
             persona_bonus,
         );
     }
+}
+
+/// Whether the dynasty holds a property whose effective annual yield is below
+/// the minimum hurdle the agent requires before buying property, meaning the
+/// capital would earn a better return elsewhere (a repositioning opportunity).
+fn player_holds_underperforming_property(state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    state.properties.values().any(|property| {
+        property.owner_dynasty_id == Some(player_id)
+            && property_underperforms_investment_hurdle(state, property)
+    })
+}
+
+fn property_underperforms_investment_hurdle(
+    state: &AppState,
+    property: &crate::core::Property,
+) -> bool {
+    // The dynasty residence serves the family rather than rental income; it is
+    // not treated as an investment to reposition. (Distress liquidation uses a
+    // separate path and may still shed it as a last resort.)
+    if property.kind == crate::core::PropertyKind::Residence {
+        return false;
+    }
+    let minimum_annual_return = property.value.saturating_mul_ratio(
+        i64::from(PROPERTY_PORTFOLIO_REPOSITIONING_YIELD_BASIS_POINTS),
+        10_000,
+    );
+    effective_property_annual_rent(state, property) < minimum_annual_return
 }
 
 fn player_needs_property_liquidation(state: &AppState) -> bool {
@@ -6778,14 +7749,18 @@ fn accepted_property_liquidation_quote(
 }
 
 fn has_property_liquidation_opportunity(registry: &Registry, state: &AppState) -> bool {
-    if !player_needs_property_liquidation(state) {
+    if !player_needs_property_liquidation(state) && !player_holds_underperforming_property(state) {
         return false;
     }
     let player_id = state.player_dynasty_id;
     state
         .properties
         .values()
-        .filter(|property| property.owner_dynasty_id == Some(player_id))
+        .filter(|property| {
+            property.owner_dynasty_id == Some(player_id)
+                && (player_needs_property_liquidation(state)
+                    || property_underperforms_investment_hurdle(state, property))
+        })
         .any(|property| {
             state
                 .dynasties
@@ -9209,13 +10184,15 @@ fn generate_family_education_candidates(
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist");
-    let education_available = player.treasury() >= FAMILY_EDUCATION_COST
-        && player
-            .resources
-            .reputation_quality_basis_points
-            .max(player.resources.reputation_reliability_basis_points)
-            >= INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT
-        && player_contract_deliveries(state) >= MIN_TARGETED_PREPARATION_DELIVERIES;
+    // Education has no reputation or commercial-record requirement in the
+    // canonical validation: a dynasty that can afford the tutor may train any
+    // active family member below mastery. Requiring a reputation or a contract-
+    // delivery record here produced dead foundation periods where the world
+    // offered the command and the game accepted it but the agent declined it.
+    // The targeted-institution preparation bonus below still rewards an
+    // established commercial record; eligibility itself is governed by cost,
+    // focus headroom, and cooldowns.
+    let education_available = player.treasury() >= FAMILY_EDUCATION_COST;
     if !education_available {
         return;
     }

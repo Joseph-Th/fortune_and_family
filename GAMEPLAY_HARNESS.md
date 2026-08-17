@@ -179,7 +179,22 @@ Quiet cycles with no recorded cause are dormant state: the game world offered no
 
 The diagnosis is recorded per campaign and summed in the aggregate and persona aggregates. Each trace step that took no substantive action also carries a human-readable `no_action_reason`, so a chronological decision log explains *why* each quiet gap happened.
 
-Activation opportunities are recorded for every command kind. Commands with a dedicated world-state predicate (crisis, labor, legal, settlement, property liquidation, institution withdrawal, credit extension, business-cash transfer, and business-cash withdrawal) use that predicate, including the command's executable resource and cooldown gates; every other command kind records an activation whenever its generator built a candidate.
+Activation opportunities are recorded for every command kind. Commands with a
+reactive world-state predicate (crisis, labor, legal filing, legal settlement,
+property liquidation, institution withdrawal, credit extension, business-cash
+transfer, and business-cash withdrawal) use that predicate, including the
+command's executable resource and cooldown gates. Every other command kind also
+has an independent world-state predicate -- SecureSupply, SellOutput,
+BuyProperty, EnactLaw, StartPublicWork, FundPublicWork, SetHouseGovernance,
+ConveneFamilyCouncil, DesignateHeir, AdoptWard, EducateFamilyMember,
+CultivateInstitutionSupport, EndowInstitution, NominateForOffice,
+ExerciseOfficePower, CommissionInformation, LeverageInformation, BorrowFunds,
+AcknowledgeNotification, and the business families -- so that an activation is
+recorded whenever the canonical game would accept some concrete action of that
+kind, regardless of whether the candidate generator built it. The diagnosis
+records an activation even when no candidate is generated, so a quiet cycle is
+never misread as dormant just because the agent's generator declined an action
+the world offered.
 
 This keeps the `triggers` column and the generator-gap diagnosis meaningful for all command families without treating unaffordable or cooling-down work as a generator gap.
 
