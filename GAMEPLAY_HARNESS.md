@@ -179,7 +179,9 @@ Quiet cycles with no recorded cause are dormant state: the game world offered no
 
 The diagnosis is recorded per campaign and summed in the aggregate and persona aggregates. Each trace step that took no substantive action also carries a human-readable `no_action_reason`, so a chronological decision log explains *why* each quiet gap happened.
 
-Activation opportunities are recorded for every command kind. Commands with a dedicated world-state predicate (crisis, labor, legal, settlement, property liquidation, institution withdrawal, credit extension, business-cash transfer, and business-cash withdrawal) use that predicate, including the command's executable resource and cooldown gates; every other command kind records an activation whenever its generator built a candidate. This keeps the `triggers` column and the generator-gap diagnosis meaningful for all command families without treating unaffordable or cooling-down work as a generator gap.
+Activation opportunities are recorded for every command kind. Commands with a dedicated world-state predicate (crisis, labor, legal, settlement, property liquidation, institution withdrawal, credit extension, business-cash transfer, and business-cash withdrawal) use that predicate, including the command's executable resource and cooldown gates; every other command kind records an activation whenever its generator built a candidate.
+
+This keeps the `triggers` column and the generator-gap diagnosis meaningful for all command families without treating unaffordable or cooling-down work as a generator gap.
 
 ## Report contract
 

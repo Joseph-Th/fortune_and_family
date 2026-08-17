@@ -51,40 +51,61 @@ resolve_python() {
 }
 
 ensure_cli_binary() {
-  if [[ -n "${CIVIC_DYNASTY_BINARY:-}" ]]; then
+  local requested_profile=${1:-debug}
+  if [[ -n "${CIVIC_DYNASTY_BINARY_OVERRIDE:-}" ]]; then
+    # An explicit CIVIC_DYNASTY_BINARY_OVERRIDE wins over every profile choice,
+    # including the release contract that gameplay gates rely on.
+    export CIVIC_DYNASTY_BINARY="$CIVIC_DYNASTY_BINARY_OVERRIDE"
     if [[ ! -x "$CIVIC_DYNASTY_BINARY" && -x "${CIVIC_DYNASTY_BINARY}.exe" ]]; then
       export CIVIC_DYNASTY_BINARY="${CIVIC_DYNASTY_BINARY}.exe"
     fi
     if [[ ! -x "$CIVIC_DYNASTY_BINARY" ]]; then
-      printf 'CIVIC_DYNASTY_BINARY is not executable: %q\n' "$CIVIC_DYNASTY_BINARY" >&2
+      printf 'CIVIC_DYNASTY_BINARY_OVERRIDE is not executable: %q\n' "$CIVIC_DYNASTY_BINARY" >&2
       return 1
     fi
     return 0
   fi
 
-  local profile=${1:-debug}
+  if [[ -n "${CIVIC_DYNASTY_BINARY:-}" ]]; then
+    # A caller-provided CIVIC_DYNASTY_BINARY is honored, but the gameplay gates
+    # must never inherit a debug binary: simulation throughput drops an order of
+    # magnitude, so they rebuild the optimized CLI instead.
+    if [[ "$requested_profile" != release || "$CIVIC_DYNASTY_BINARY" == *"/release/civic-dynasty"* || "$CIVIC_DYNASTY_BINARY" == *"/release/civic-dynasty.exe"* ]]; then
+      if [[ ! -x "$CIVIC_DYNASTY_BINARY" && -x "${CIVIC_DYNASTY_BINARY}.exe" ]]; then
+        export CIVIC_DYNASTY_BINARY="${CIVIC_DYNASTY_BINARY}.exe"
+      fi
+      if [[ ! -x "$CIVIC_DYNASTY_BINARY" ]]; then
+        printf 'CIVIC_DYNASTY_BINARY is not executable: %q\n' "$CIVIC_DYNASTY_BINARY" >&2
+        return 1
+      fi
+      return 0
+    fi
+    printf 'CIVIC_DYNASTY_BINARY %q is not a release binary; rebuilding the release CLI for gameplay gates\n' \
+      "$CIVIC_DYNASTY_BINARY" >&2
+  fi
+
   local profile_args=()
-  case "$profile" in
+  case "$requested_profile" in
     debug)
       ;;
     release)
       profile_args=(--release)
       ;;
     *)
-      printf 'unsupported CLI profile %q (expected debug or release)\n' "$profile" >&2
+      printf 'unsupported CLI profile %q (expected debug or release)\n' "$requested_profile" >&2
       return 2
       ;;
   esac
 
-  run_step "Build $profile CLI once" \
+  run_step "Build $requested_profile CLI once" \
     cargo build --quiet --locked "${profile_args[@]}" --bin civic-dynasty
 
-  local binary="target/$profile/civic-dynasty"
+  local binary="target/$requested_profile/civic-dynasty"
   if [[ ! -x "$binary" && -x "${binary}.exe" ]]; then
     binary="${binary}.exe"
   fi
   if [[ ! -x "$binary" ]]; then
-    printf 'CLI binary %q was not produced by the %s build\n' "$binary" "$profile" >&2
+    printf 'CLI binary %q was not produced by the %s build\n' "$binary" "$requested_profile" >&2
     return 1
   fi
   export CIVIC_DYNASTY_BINARY="$binary"

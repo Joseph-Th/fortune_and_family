@@ -20,6 +20,8 @@ This document defines test tiers, suite organization, assertion standards, and c
 | All adapter smoke groups | `bash scripts/test.sh adapters` |
 | Release gameplay gates | `bash scripts/test.sh gameplay` |
 | Deep gameplay design audit | `bash scripts/test.sh gameplay-audit` |
+| Fast CI verification lane | `bash scripts/test.sh ci-verify` |
+| Deep CI gates lane | `bash scripts/test.sh ci-gates` |
 | Complete scripted test tier | `bash scripts/test.sh all` |
 
 Successful test and smoke steps print concise summaries with elapsed time. Failures print the complete command output, including compiler diagnostics when a CLI build fails. A filter matching no executable library test exits with code 2.
@@ -28,6 +30,10 @@ The CLI smoke runner accepts `CIVIC_DYNASTY_PROFILE=release` when a release
 binary is desired, or `CIVIC_DYNASTY_BINARY` when a caller has already built
 the exact binary to exercise. CI uses the latter so adapter and gameplay
 gates share one release build instead of compiling a debug CLI first.
+`CIVIC_DYNASTY_BINARY_OVERRIDE` takes precedence over every profile choice and
+is intended for tooling that must pin an exact binary; the gameplay gates
+always rebuild the release CLI when a debug binary selected by an earlier
+smoke group would otherwise leak into the optimized gate run.
 The `adapters` and `gameplay` modes also build their local CLI once and reuse
 it across all sub-gates. Python-backed checks use `python3`, `python`, or
 Windows `py` automatically; set `CIVIC_DYNASTY_PYTHON` to select an explicit
@@ -146,4 +152,6 @@ git diff --check
 
 Cross-cutting changes include persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and gameplay-report schemas.
 
-CI runs the equivalent full gate on every push to `main` and on every pull request via `.github/workflows/ci.yml`. The workflow splits the gate into two parallel jobs: `ci-verify` (syntax, format, Clippy's all-target compile/lint check, fast library tests, documentation checks, rustdoc warnings, and whitespace) and `ci-gates` (soak, release library tests, one shared release CLI build for all adapter/gameplay gates, gameplay quality gates, and the dependency audit). Both jobs must pass. Clippy is intentionally the single all-target compile gate in CI; a separate `cargo check` would repeat the same compilation without adding coverage. The runner owns both lanes so local reproduction and CI cannot drift. The `all` tier also reuses one debug CLI build across all adapter smoke groups.
+CI runs the equivalent full gate on every push to `main` and on every pull request via `.github/workflows/ci.yml`. The workflow splits the gate into two parallel jobs: `ci-verify` (syntax, format, Clippy's all-target compile/lint check, fast library tests, documentation checks, rustdoc warnings, and whitespace) and `ci-gates` (soak, release library tests, one shared release CLI build for all adapter/gameplay gates, gameplay quality gates, and the dependency audit). Both jobs must pass.
+
+Clippy is intentionally the single all-target compile gate in CI; a separate `cargo check` would repeat the same compilation without adding coverage. The runner owns both lanes so local reproduction and CI cannot drift. The `all` tier also reuses one debug CLI build across all adapter smoke groups.
