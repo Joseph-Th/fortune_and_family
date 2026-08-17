@@ -56,9 +56,9 @@ Given the same registry, state, seed, command sequence, and day count, the simul
 ## Requirements
 
 - Rust 1.97 or newer — the single authoritative owner of the minimum supported
-  version is `Cargo.toml` (`rust-version`), pinned for local and CI development by
-  `rust-toolchain.toml` and the CI workflow. Do not duplicate the version value in
-  other current documents.
+  version is `Cargo.toml` (`rust-version`), pinned for local development by
+  `rust-toolchain.toml`. Local validation commands use that pinned toolchain. Do
+  not duplicate the version value in other current documents.
 - Bash for repository scripts
 - Python for documentation and CLI structured-output checks
 - `cargo-audit` for the complete security gate
@@ -148,8 +148,6 @@ scripts/
   check_docs.py       Documentation consistency checks
   test.sh             Test tier runner
   verify_cli.sh       CLI smoke groups
-.github/
-  workflows/ci.yml    CI gate for pushes to main and pull requests
 ```
 
 ## Supported library entry points

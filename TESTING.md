@@ -156,6 +156,6 @@ git diff --check
 
 Cross-cutting changes include persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and gameplay-report schemas.
 
-CI runs the equivalent full gate on every push to `main` and on every pull request via `.github/workflows/ci.yml`. The workflow splits the gate into two parallel jobs: `ci-verify` (syntax, format, Clippy's all-target compile/lint check, fast library tests, documentation checks, rustdoc warnings, and whitespace) and `ci-gates` (soak, release library tests, one shared release CLI build for all adapter/gameplay gates, gameplay quality gates, and the dependency audit). Both jobs must pass.
+The commands above are the authoritative local full gate for cross-cutting changes. Ordinary changes use `bash scripts/test.sh standard`; cross-cutting changes run the complete command set above. GitHub Actions and hosted runners are not part of the verification path.
 
-Clippy is intentionally the single all-target compile gate in CI; a separate `cargo check` would repeat the same compilation without adding coverage. The runner owns both lanes so local reproduction and CI cannot drift. The `all` tier also reuses one debug CLI build across all adapter smoke groups.
+Clippy is intentionally the single all-target compile/lint gate in the full validation path; an additional duplicate compile pass should not be added without coverage value. The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier also reuses one debug CLI build across all adapter smoke groups.
