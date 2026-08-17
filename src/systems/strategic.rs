@@ -4186,7 +4186,12 @@ pub(crate) fn effective_property_weekly_rent(state: &AppState, property: &Proper
         let annual_cap = property
             .value
             .saturating_mul_ratio(limit.clamp(0, 10_000), 10_000);
-        indexed_rent.min(Money::from_copper(annual_cap.copper() / 52))
+        let weekly_cap = if annual_cap.copper() > 0 {
+            Money::from_copper((annual_cap.copper() + 51) / 52)
+        } else {
+            Money::ZERO
+        };
+        indexed_rent.min(weekly_cap)
     })
 }
 
@@ -5120,11 +5125,15 @@ pub(crate) fn try_record_counterparty_information(
         .get(&pair)
         .expect("counterparty relationship must exist");
     let summary = format!(
-        "Reliability {:.1}%; trust {:.1}%; respect {:.1}%; resentment {:.1}%; obligation {}.",
-        f64::from(reliability) / 100.0,
-        f64::from(relationship.trust_basis_points) / 100.0,
-        f64::from(relationship.respect_basis_points) / 100.0,
-        f64::from(relationship.resentment_basis_points) / 100.0,
+        "Reliability {}.{}%; trust {}.{}%; respect {}.{}%; resentment {}.{}%; obligation {}.",
+        reliability / 100,
+        (reliability % 100) / 10,
+        relationship.trust_basis_points / 100,
+        (relationship.trust_basis_points % 100) / 10,
+        relationship.respect_basis_points / 100,
+        (relationship.respect_basis_points % 100) / 10,
+        relationship.resentment_basis_points / 100,
+        (relationship.resentment_basis_points % 100) / 10,
         relationship.obligation
     );
     let day = state.clock.day();

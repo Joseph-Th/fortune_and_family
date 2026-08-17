@@ -6713,8 +6713,8 @@ fn generate_strategic_withdrawal_candidate(
         Money::ZERO
     };
     let strategic_need = office_reserve
-        .max(legal_commitment)
-        .max(endowment_commitment);
+        .saturating_add(legal_commitment)
+        .saturating_add(endowment_commitment);
     let strategic_shortfall = strategic_need.saturating_sub(player.treasury());
     let Some((source, surplus)) = player_businesses
         .iter()
@@ -9690,7 +9690,7 @@ fn character_age_and_health(state: &AppState, character_id: CharacterId) -> (i64
         })
 }
 
-const fn successor_primary_capability(
+fn successor_primary_capability(
     character: &crate::core::Character,
     persona: GameplayPersona,
 ) -> u16 {
@@ -9698,7 +9698,12 @@ const fn successor_primary_capability(
         GameplayPersona::Steward => character.capabilities.administration,
         GameplayPersona::Entrepreneur => character.capabilities.commerce,
         GameplayPersona::PowerBroker => character.capabilities.social,
-        GameplayPersona::Opportunist => character.capabilities.craft,
+        GameplayPersona::Opportunist => character
+            .capabilities
+            .administration
+            .max(character.capabilities.commerce)
+            .max(character.capabilities.social)
+            .max(character.capabilities.craft),
     }
 }
 

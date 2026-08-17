@@ -136,6 +136,7 @@ run_standard() {
   run_shell_syntax
   run_fast
   run_docs
+  ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
   run_cli_core
 }
 
