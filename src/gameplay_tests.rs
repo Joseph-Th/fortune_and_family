@@ -561,6 +561,42 @@ mod harness {
     }
 
     #[test]
+    fn urgent_world_state_shortens_the_next_observation_window() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_candidate_coverage_state(registry);
+        add_active_crisis(&mut state);
+
+        assert_eq!(
+            next_campaign_step_days(&state, 30),
+            7,
+            "an uncontained crisis must be observed before the normal monthly cadence elapses"
+        );
+    }
+
+    #[test]
+    fn trace_retains_feedback_and_explicit_phase_context() {
+        let registry = rivergate_registry_for_test();
+        let report = run_gameplay_harness(registry, focused_config(180))
+            .expect("gameplay harness must complete");
+        let campaign = report.campaigns.first().expect("one campaign must run");
+
+        assert!(
+            campaign.trace.iter().any(|step| {
+                !step.command_feedback.is_empty()
+                    || !step.simulation_feedback.is_empty()
+                    || !step.ambient_feedback.is_empty()
+            }),
+            "trace must retain durable feedback that explains at least one state transition"
+        );
+        assert!(
+            campaign.trace.iter().all(|step| {
+                step.phase.label() == phase_label_at_day(&campaign.fantasy_arc, step.day)
+            }),
+            "trace phase must agree with the campaign fantasy arc"
+        );
+    }
+
+    #[test]
     fn trace_steps_record_no_action_causes_and_render_a_decision_log() {
         let registry = rivergate_registry_for_test();
         let report = run_gameplay_harness(registry, focused_config(180))
@@ -4765,6 +4801,7 @@ mod metrics {
                 option_quality: AlternativeQuality::default(),
             },
             ambient_change: true,
+            quiet_cause: None,
         };
 
         accumulator.record_phase_cycle(GameplayPhase::InstitutionalAscent, quiet);
@@ -4781,6 +4818,7 @@ mod metrics {
                     option_quality: AlternativeQuality::default(),
                 },
                 ambient_change: true,
+                quiet_cause: None,
             },
         );
         accumulator.record_phase_cycle(GameplayPhase::InstitutionalAscent, quiet);
@@ -7308,6 +7346,7 @@ mod findings {
                 total_viable_choices: 80,
                 total_viable_command_kinds: 80,
                 executed_commands: BTreeMap::new(),
+                ..GameplayPhaseStats::default()
             },
         );
         report.aggregate.phase_stats.insert(
@@ -7331,6 +7370,7 @@ mod findings {
                 total_viable_choices: 110,
                 total_viable_command_kinds: 110,
                 executed_commands: BTreeMap::new(),
+                ..GameplayPhaseStats::default()
             },
         );
 
@@ -7367,6 +7407,7 @@ mod findings {
                 total_viable_choices: 324,
                 total_viable_command_kinds: 150,
                 executed_commands: BTreeMap::new(),
+                ..GameplayPhaseStats::default()
             },
         );
 
@@ -7402,6 +7443,7 @@ mod findings {
                 total_viable_choices: 360,
                 total_viable_command_kinds: 110,
                 executed_commands: BTreeMap::new(),
+                ..GameplayPhaseStats::default()
             },
         );
 
@@ -7444,6 +7486,7 @@ mod findings {
                 total_viable_choices: 300,
                 total_viable_command_kinds: 160,
                 executed_commands: BTreeMap::new(),
+                ..GameplayPhaseStats::default()
             },
         );
         report
@@ -7583,6 +7626,7 @@ mod findings {
                 total_viable_choices: 120,
                 total_viable_command_kinds: 70,
                 executed_commands: BTreeMap::new(),
+                ..GameplayPhaseStats::default()
             },
         );
 
@@ -8360,6 +8404,7 @@ mod findings {
                 total_viable_choices: 300,
                 total_viable_command_kinds: 160,
                 executed_commands: BTreeMap::new(),
+                ..GameplayPhaseStats::default()
             },
         );
 

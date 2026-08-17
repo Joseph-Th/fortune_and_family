@@ -12,7 +12,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Save schema | 21 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 58 |
+| Gameplay report schema | 59 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -52,7 +52,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 | Information | Source, confidence, subject, summary, creation, expiry, passive reports, and paid market/district/counterparty intelligence. |
 | AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; monthly household upkeep for family and portfolio; recapitalization only for lifetime-profitable businesses; grounded legal filing; and institution selection. |
 | Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, response, recovery, effects, and resolution. |
-| Observability | State summary, campaign projection, HTML dashboard, outbox, chronicle, audit history, validation, campaign progression, gameplay reports, and art review reports. |
+| Observability | State summary, campaign projection, HTML dashboard, outbox, chronicle, audit history, validation, campaign progression, gameplay reports with causal feedback traces, and art review reports. |
 
 ## Player command surface
 

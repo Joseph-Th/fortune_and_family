@@ -31,12 +31,12 @@ pub use core::{AppState, NewGameConfig};
 pub use gameplay::{
     GAMEPLAY_REPORT_SCHEMA_VERSION, GameplayAggregate, GameplayCampaignReport,
     GameplayCandidateRanking, GameplayCommandKind, GameplayCommandStats,
-    GameplayConsequenceProfile, GameplayDomain, GameplayFantasyArc, GameplayFinding,
-    GameplayFindingSeverity, GameplayHarnessConfig, GameplayHarnessError, GameplayHarnessReport,
-    GameplayInteractionEdge, GameplayMeasure, GameplayMeasureChange, GameplayPersona,
-    GameplayPhase, GameplayPhaseStats, GameplayQuietDiagnostic, GameplayScores, GameplaySnapshot,
-    GameplaySuccessionTransition, GameplayTraceStep, GameplayViableOption, render_gameplay_report,
-    run_gameplay_harness,
+    GameplayConsequenceProfile, GameplayDomain, GameplayFantasyArc, GameplayFeedbackEvent,
+    GameplayFeedbackSource, GameplayFinding, GameplayFindingSeverity, GameplayHarnessConfig,
+    GameplayHarnessError, GameplayHarnessReport, GameplayInteractionEdge, GameplayMeasure,
+    GameplayMeasureChange, GameplayPersona, GameplayPhase, GameplayPhaseStats,
+    GameplayQuietDiagnostic, GameplayScores, GameplaySnapshot, GameplaySuccessionTransition,
+    GameplayTraceStep, GameplayViableOption, render_gameplay_report, run_gameplay_harness,
 };
 pub use persistence::{PersistenceError, StateValidationKind, load_state, save_state};
 pub use projection::{

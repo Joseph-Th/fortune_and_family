@@ -104,7 +104,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 58;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 59;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -2010,6 +2010,7 @@ pub enum GameplayTraceSignal {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameplayTraceStep {
     pub day: i64,
+    pub phase: GameplayPhase,
     pub context: GameplayDecisionContext,
     pub considered_candidates: u16,
     pub viable_candidates: u16,
@@ -2034,11 +2035,38 @@ pub struct GameplayTraceStep {
     pub attributed_consequences: GameplayConsequenceProfile,
     /// Measures that changed in the no-action branch during the same horizon.
     pub ambient_consequences: GameplayConsequenceProfile,
+    /// Durable notices and chronicle entries emitted by the selected action's
+    /// command path, limited to the first few stable entries for readability.
+    pub command_feedback: Vec<GameplayFeedbackEvent>,
+    /// Durable notices and chronicle entries emitted while the campaign branch
+    /// advanced to the next decision point.
+    pub simulation_feedback: Vec<GameplayFeedbackEvent>,
+    /// Durable notices and chronicle entries emitted by the no-action branch at
+    /// the attribution horizon. This makes ambient change explainable rather
+    /// than leaving it as a checksum-only difference.
+    pub ambient_feedback: Vec<GameplayFeedbackEvent>,
     pub immediate_domains: BTreeSet<GameplayDomain>,
     pub delayed_domains: BTreeSet<GameplayDomain>,
     pub persistent_domains: BTreeSet<GameplayDomain>,
     pub ambient_domains: BTreeSet<GameplayDomain>,
     pub signals: BTreeSet<GameplayTraceSignal>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GameplayFeedbackSource {
+    Command,
+    Simulation,
+    Ambient,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameplayFeedbackEvent {
+    pub source: GameplayFeedbackSource,
+    pub day: i64,
+    pub channel: String,
+    pub kind: String,
+    pub subject: String,
+    pub text: String,
 }
 
 impl GameplayTraceStep {
@@ -2115,6 +2143,10 @@ pub struct GameplayPhaseStats {
     pub quiet_cycles_with_ambient_change: u32,
     pub longest_quiet_streak_cycles: u32,
     pub blocked_cycles: u32,
+    pub generator_gap_cycles: u32,
+    pub policy_gate_cycles: u32,
+    pub validation_gate_cycles: u32,
+    pub dormant_cycles: u32,
     pub cycles_with_multiple_viable_command_kinds: u32,
     pub cycles_with_close_viable_command_kinds: u32,
     pub cycles_with_distinct_immediate_consequences: u32,
@@ -2471,6 +2503,15 @@ struct PhaseCycleObservation {
     action: Option<GameplayCommandKind>,
     choices: ChoiceCycleMetrics,
     ambient_change: bool,
+    quiet_cause: Option<QuietCause>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum QuietCause {
+    GeneratorGap,
+    PolicyGate,
+    ValidationGate,
+    Dormant,
 }
 
 #[derive(Debug)]
@@ -2516,6 +2557,7 @@ struct CampaignAccumulator {
     maximum_offices_held: u16,
     maximum_unfinished_public_works: u16,
     maximum_active_crises: u16,
+    observed_crisis_kinds: BTreeSet<CrisisKind>,
     maximum_unread_notifications: u16,
     maximum_contract_relationship_pressure_basis_points: u16,
     minimum_post_succession_family_unity: Option<u16>,
@@ -2585,6 +2627,7 @@ impl CampaignAccumulator {
             maximum_offices_held: 0,
             maximum_unfinished_public_works: 0,
             maximum_active_crises: 0,
+            observed_crisis_kinds: BTreeSet::new(),
             maximum_unread_notifications: 0,
             maximum_contract_relationship_pressure_basis_points: 0,
             minimum_post_succession_family_unity: None,
@@ -2791,6 +2834,7 @@ impl CampaignAccumulator {
             action,
             choices,
             ambient_change,
+            quiet_cause,
         } = observation;
         let quiet_cycle = action.is_none_or(|kind| !is_substantive_command_kind(kind))
             && choices.substantive_viable_count == 0
@@ -2831,6 +2875,21 @@ impl CampaignAccumulator {
                     stats.institutional_campaign_actions.saturating_add(1);
             }
         } else if choices.substantive_viable_count == 0 {
+            match quiet_cause {
+                Some(QuietCause::GeneratorGap) => {
+                    stats.generator_gap_cycles = stats.generator_gap_cycles.saturating_add(1);
+                }
+                Some(QuietCause::PolicyGate) => {
+                    stats.policy_gate_cycles = stats.policy_gate_cycles.saturating_add(1);
+                }
+                Some(QuietCause::ValidationGate) => {
+                    stats.validation_gate_cycles = stats.validation_gate_cycles.saturating_add(1);
+                }
+                Some(QuietCause::Dormant) => {
+                    stats.dormant_cycles = stats.dormant_cycles.saturating_add(1);
+                }
+                None => {}
+            }
             if choices.substantive_candidate_count == 0 {
                 stats.quiet_cycles = stats.quiet_cycles.saturating_add(1);
                 stats.longest_quiet_streak_cycles =
@@ -2853,6 +2912,11 @@ impl CampaignAccumulator {
         self.observe_fantasy_arc(snapshot);
         self.observe_non_food_snapshot(snapshot);
         self.last_observed_snapshot = Some(snapshot.clone());
+    }
+
+    fn observe_crisis_kinds(&mut self, state: &AppState) {
+        self.observed_crisis_kinds
+            .extend(state.crises.values().map(|crisis| crisis.kind));
     }
 
     fn observe_snapshot(&mut self, snapshot: &GameplaySnapshot) {
@@ -3182,6 +3246,7 @@ fn run_campaign(
     let start = GameplaySnapshot::capture(&state);
     let mut accumulator = CampaignAccumulator::new();
     accumulator.observe_initial_snapshot(&start);
+    accumulator.observe_crisis_kinds(&state);
     let mut remaining = config.days_per_campaign;
     while remaining > 0 {
         let configured_step = u32::from(config.decision_interval_days).min(remaining);
@@ -3227,14 +3292,23 @@ fn next_campaign_step_days(state: &AppState, configured_step: u32) -> u32 {
             (days_to_hearing > 1).then_some(days_to_hearing)
         })
         .min();
-    let Some(days_to_hearing) = urgent_funding_window else {
-        return configured_step.max(1);
-    };
-    let half_window = u32::try_from(days_to_hearing)
-        .unwrap_or(u32::MAX)
-        .div_ceil(2)
-        .max(1);
-    configured_step.min(half_window).max(1)
+    let legal_step = urgent_funding_window.map_or(u32::MAX, |days_to_hearing| {
+        u32::try_from(days_to_hearing)
+            .unwrap_or(u32::MAX)
+            .div_ceil(2)
+            .max(1)
+    });
+    let urgent_crisis_or_labor = state.crises.values().any(|crisis| {
+        crisis.status.is_active() && !crisis_has_containment_response(state, crisis.id)
+    }) || state.employment.values().any(|agreement| {
+        agreement.status == EmploymentStatus::Disputed
+            && state
+                .businesses
+                .get(agreement.business_id)
+                .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+    });
+    let urgent_step = if urgent_crisis_or_labor { 7 } else { u32::MAX };
+    configured_step.min(legal_step).min(urgent_step).max(1)
 }
 
 fn finish_campaign_report(
@@ -3305,7 +3379,7 @@ fn finish_campaign_report(
         maximum_offices_held: accumulator.maximum_offices_held,
         maximum_unfinished_public_works: accumulator.maximum_unfinished_public_works,
         maximum_active_crises: accumulator.maximum_active_crises,
-        observed_crisis_kinds: state.crises.values().map(|crisis| crisis.kind).collect(),
+        observed_crisis_kinds: accumulator.observed_crisis_kinds,
         maximum_unread_notifications: accumulator.maximum_unread_notifications,
         maximum_contract_relationship_pressure_basis_points: accumulator
             .maximum_contract_relationship_pressure_basis_points,
@@ -3386,6 +3460,10 @@ fn run_decision_cycle(
     )
 }
 
+// This is the intentionally linear harness pipeline: observe, generate, probe,
+// commit, advance, attribute, and record. Keeping it visible preserves the
+// canonical gameplay order while feedback capture adds a few bookkeeping lines.
+#[allow(clippy::too_many_lines)]
 fn run_decision_cycle_internal(
     registry: &Registry,
     config: &GameplayHarnessConfig,
@@ -3399,6 +3477,7 @@ fn run_decision_cycle_internal(
     let phase = gameplay_phase(&accumulator.fantasy_arc);
     let baseline_state = state.clone();
     let before = GameplaySnapshot::capture(state);
+    let feedback_before = feedback_cursor(state);
     let (candidates, raw_generated_kinds) =
         ranked_candidates(registry, state, persona, accumulator);
     validate_candidate_classifications(state, &candidates)?;
@@ -3444,6 +3523,9 @@ fn run_decision_cycle_internal(
         record_choice_cycle_metrics(accumulator, substantive_candidate_count, &probe);
     let action = apply_selected_candidate(registry, state, probe.selected.clone(), accumulator)?;
     let action_kind = action.as_ref().map(|action| action.kind);
+    let command_feedback =
+        collect_feedback(state, feedback_before, GameplayFeedbackSource::Command);
+    let feedback_after_command = feedback_cursor(state);
     let action_gap_days = match mode {
         DecisionCycleMode::AdvanceCampaign { step_days } => step_days,
         DecisionCycleMode::Terminal => 0,
@@ -3455,15 +3537,16 @@ fn run_decision_cycle_internal(
         projection_step_days,
         config.max_consequence_horizon_days,
     );
-    let after_time = advance_decision_time(
+    let (after_time, simulation_feedback) = advance_and_collect_feedback(
         registry,
         state,
         mode,
         consequence_horizon,
         &after_command,
+        feedback_after_command,
         accumulator,
     )?;
-    let (baseline_after_time, ambient_change) = baseline_observation(
+    let (baseline_after_time, ambient_change, baseline_feedback) = baseline_observation(
         registry,
         action.as_ref(),
         consequence_horizon,
@@ -3477,6 +3560,7 @@ fn run_decision_cycle_internal(
             action: action_kind,
             choices: choice_metrics,
             ambient_change,
+            quiet_cause: quiet_cause(no_action_reason.as_deref()),
         },
     );
     record_decision_cycle(
@@ -3486,11 +3570,17 @@ fn run_decision_cycle_internal(
             after_time: &after_time,
             baseline_after_time: &baseline_after_time,
         },
-        probe_limit,
-        &probe,
-        ranked_candidates,
-        action,
-        no_action_reason,
+        DecisionCycleRecord {
+            considered: probe_limit,
+            probe: &probe,
+            ranked_candidates,
+            phase,
+            action,
+            no_action_reason,
+            command_feedback,
+            simulation_feedback,
+            ambient_feedback: baseline_feedback,
+        },
         accumulator,
     );
     Ok(())
@@ -3504,15 +3594,34 @@ struct DecisionCycleSnapshots<'a> {
     baseline_after_time: &'a GameplaySnapshot,
 }
 
-fn record_decision_cycle(
-    snapshots: DecisionCycleSnapshots<'_>,
+struct DecisionCycleRecord<'a> {
     considered: usize,
-    probe: &ProbeResult,
+    probe: &'a ProbeResult,
     ranked_candidates: Vec<GameplayCandidateRanking>,
+    phase: GameplayPhase,
     action: Option<ExecutedAction>,
     no_action_reason: Option<String>,
+    command_feedback: Vec<GameplayFeedbackEvent>,
+    simulation_feedback: Vec<GameplayFeedbackEvent>,
+    ambient_feedback: Vec<GameplayFeedbackEvent>,
+}
+
+fn record_decision_cycle(
+    snapshots: DecisionCycleSnapshots<'_>,
+    record: DecisionCycleRecord<'_>,
     accumulator: &mut CampaignAccumulator,
 ) {
+    let DecisionCycleRecord {
+        considered,
+        probe,
+        ranked_candidates,
+        phase,
+        action,
+        no_action_reason,
+        command_feedback,
+        simulation_feedback,
+        ambient_feedback,
+    } = record;
     record_cycle(
         CycleObservation {
             before: snapshots.before,
@@ -3524,6 +3633,7 @@ fn record_decision_cycle(
             substantive_viable: probe.substantive_viable_count,
             viable_command_kinds: probe.viable_command_kinds.clone(),
             ranked_candidates,
+            phase,
             viable_options: probe.viable_options.clone(),
             close_choice_score_gap: probe.close_choice_score_gap,
             distinct_immediate_choice_profiles: probe.distinct_immediate_choice_profiles,
@@ -3531,6 +3641,9 @@ fn record_decision_cycle(
             rejections: probe.rejections.clone(),
             action,
             no_action_reason,
+            command_feedback,
+            simulation_feedback,
+            ambient_feedback,
         },
         accumulator,
     );
@@ -3574,7 +3687,8 @@ fn baseline_observation(
     after_time: GameplaySnapshot,
     mut baseline_state: AppState,
     before: &GameplaySnapshot,
-) -> Result<(GameplaySnapshot, bool), GameplayHarnessError> {
+) -> Result<(GameplaySnapshot, bool, Vec<GameplayFeedbackEvent>), GameplayHarnessError> {
+    let feedback_before = feedback_cursor(&baseline_state);
     let baseline_after_time = if action.is_none() {
         after_time
     } else {
@@ -3584,7 +3698,104 @@ fn baseline_observation(
     let ambient_change = !before.changed_domains(&baseline_after_time).is_empty()
         || baseline_after_time.outbox_messages > before.outbox_messages
         || baseline_after_time.chronicle_entries > before.chronicle_entries;
-    Ok((baseline_after_time, ambient_change))
+    let feedback = collect_feedback(
+        &baseline_state,
+        feedback_before,
+        GameplayFeedbackSource::Ambient,
+    );
+    Ok((baseline_after_time, ambient_change, feedback))
+}
+
+fn advance_and_collect_feedback(
+    registry: &Registry,
+    state: &mut AppState,
+    mode: DecisionCycleMode,
+    consequence_horizon: u32,
+    after_command: &GameplaySnapshot,
+    feedback_after_command: FeedbackCursor,
+    accumulator: &mut CampaignAccumulator,
+) -> Result<(GameplaySnapshot, Vec<GameplayFeedbackEvent>), GameplayHarnessError> {
+    let after_time = advance_decision_time(
+        registry,
+        state,
+        mode,
+        consequence_horizon,
+        after_command,
+        accumulator,
+    )?;
+    accumulator.observe_crisis_kinds(state);
+    let feedback = collect_feedback(
+        state,
+        feedback_after_command,
+        GameplayFeedbackSource::Simulation,
+    );
+    Ok((after_time, feedback))
+}
+
+#[derive(Clone, Copy)]
+struct FeedbackCursor {
+    outbox_len: usize,
+    chronicle_len: usize,
+}
+
+fn feedback_cursor(state: &AppState) -> FeedbackCursor {
+    FeedbackCursor {
+        outbox_len: state.outbox.len(),
+        chronicle_len: state.chronicle.len(),
+    }
+}
+
+fn collect_feedback(
+    state: &AppState,
+    cursor: FeedbackCursor,
+    source: GameplayFeedbackSource,
+) -> Vec<GameplayFeedbackEvent> {
+    const MAX_EVENTS: usize = 6;
+    let mut events = state
+        .outbox
+        .iter()
+        .skip(cursor.outbox_len)
+        .map(|message| GameplayFeedbackEvent {
+            source,
+            day: message.day,
+            channel: "outbox".to_owned(),
+            kind: format!("{:?}", message.kind),
+            subject: message.subject.clone(),
+            text: message.body.clone(),
+        })
+        .chain(
+            state
+                .chronicle
+                .iter()
+                .skip(cursor.chronicle_len)
+                .map(|entry| GameplayFeedbackEvent {
+                    source,
+                    day: entry.day,
+                    channel: "chronicle".to_owned(),
+                    kind: format!("{:?}", entry.kind),
+                    subject: String::new(),
+                    text: entry.summary.clone(),
+                }),
+        )
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        (
+            left.day,
+            &left.channel,
+            &left.kind,
+            &left.subject,
+            &left.text,
+        )
+            .cmp(&(
+                right.day,
+                &right.channel,
+                &right.kind,
+                &right.subject,
+                &right.text,
+            ))
+    });
+    events.truncate(MAX_EVENTS);
+    events
 }
 
 fn record_choice_cycle_metrics(
@@ -3851,9 +4062,10 @@ fn record_activation_opportunities(
     let crisis_opportunity = state.crises.values().any(|crisis| {
         crisis.status.is_active()
             && !crisis_has_containment_response(state, crisis.id)
-            && crisis_responses(persona)
-                .into_iter()
-                .any(|response| can_afford_crisis_response(state, crisis, response))
+            && crisis_responses(persona).into_iter().any(|response| {
+                (response != CrisisResponse::Exploit || !crisis_was_exploited(state, crisis.id))
+                    && can_afford_crisis_response(state, crisis, response)
+            })
     });
     let labor_opportunity = state.employment.values().any(|agreement| {
         agreement.status == EmploymentStatus::Disputed
@@ -4051,6 +4263,21 @@ fn record_quiet_diagnostic(
         ));
     }
     Some(causes.join("; "))
+}
+
+fn quiet_cause(reason: Option<&str>) -> Option<QuietCause> {
+    let reason = reason?;
+    if reason.contains("activation without candidate") {
+        Some(QuietCause::GeneratorGap)
+    } else if reason.contains("declined by agent policy") {
+        Some(QuietCause::PolicyGate)
+    } else if reason.contains("rejected by validation") {
+        Some(QuietCause::ValidationGate)
+    } else if reason.starts_with("dormant:") {
+        Some(QuietCause::Dormant)
+    } else {
+        None
+    }
 }
 
 fn kind_labels(kinds: &[GameplayCommandKind]) -> String {
@@ -4324,6 +4551,7 @@ struct CycleObservation<'a> {
     substantive_viable: usize,
     viable_command_kinds: BTreeSet<GameplayCommandKind>,
     ranked_candidates: Vec<GameplayCandidateRanking>,
+    phase: GameplayPhase,
     viable_options: Vec<GameplayViableOption>,
     close_choice_score_gap: Option<i64>,
     distinct_immediate_choice_profiles: usize,
@@ -4331,8 +4559,14 @@ struct CycleObservation<'a> {
     rejections: Vec<String>,
     action: Option<ExecutedAction>,
     no_action_reason: Option<String>,
+    command_feedback: Vec<GameplayFeedbackEvent>,
+    simulation_feedback: Vec<GameplayFeedbackEvent>,
+    ambient_feedback: Vec<GameplayFeedbackEvent>,
 }
 
+// Consequence attribution and trace assembly are kept together so every
+// reported domain and feedback event comes from the same pair of branches.
+#[allow(clippy::too_many_lines)]
 fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAccumulator) {
     let CycleObservation {
         before,
@@ -4344,6 +4578,7 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         substantive_viable,
         viable_command_kinds,
         ranked_candidates,
+        phase,
         viable_options,
         close_choice_score_gap,
         distinct_immediate_choice_profiles,
@@ -4351,6 +4586,9 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         rejections,
         action,
         no_action_reason,
+        command_feedback,
+        simulation_feedback,
+        ambient_feedback,
     } = observation;
     let immediate_domains = before.changed_domains(after_command);
     let total_causal_domains = baseline_after_time.changed_domains(after_time);
@@ -4404,6 +4642,7 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
     }
     accumulator.trace.push(GameplayTraceStep {
         day: before.day,
+        phase,
         context: GameplayDecisionContext::from(before),
         considered_candidates: usize_to_u16(considered),
         viable_candidates: usize_to_u16(viable),
@@ -4422,6 +4661,9 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         immediate_consequences,
         attributed_consequences,
         ambient_consequences,
+        command_feedback,
+        simulation_feedback,
+        ambient_feedback,
         immediate_domains,
         delayed_domains,
         persistent_domains,
@@ -6196,6 +6438,9 @@ fn add_contract_candidate(
     let Some(penalty) = weekly_payment.checked_mul_ratio(2, 1) else {
         return;
     };
+    let total_scheduled_value = weekly_payment
+        .checked_mul_ratio(i64::from(AGENT_CONTRACT_DURATION_WEEKS), 1)
+        .unwrap_or(Money::from_copper(i64::MAX));
     let relationship_note = if price_bounds.relationship_pressure_basis_points > 0 {
         format!(
             " under {} bp of counterparty pressure",
@@ -6219,7 +6464,7 @@ fn add_contract_candidate(
             },
         },
         format!(
-            "contract good {good_id} from business {seller_business_id} to {buyer_business_id} at {unit_price}{relationship_note}"
+            "contract good {good_id} from business {seller_business_id} to {buyer_business_id} at {unit_price}; {AGENT_CONTRACT_DURATION_WEEKS}-week term, {weekly_payment}/week ({total_scheduled_value} scheduled value){relationship_note}",
         ),
         bonus,
     );
@@ -10793,6 +11038,16 @@ fn merge_phase_stats(
             .longest_quiet_streak_cycles
             .max(source.longest_quiet_streak_cycles);
         target.blocked_cycles = target.blocked_cycles.saturating_add(source.blocked_cycles);
+        target.generator_gap_cycles = target
+            .generator_gap_cycles
+            .saturating_add(source.generator_gap_cycles);
+        target.policy_gate_cycles = target
+            .policy_gate_cycles
+            .saturating_add(source.policy_gate_cycles);
+        target.validation_gate_cycles = target
+            .validation_gate_cycles
+            .saturating_add(source.validation_gate_cycles);
+        target.dormant_cycles = target.dormant_cycles.saturating_add(source.dormant_cycles);
         target.cycles_with_multiple_viable_command_kinds = target
             .cycles_with_multiple_viable_command_kinds
             .saturating_add(source.cycles_with_multiple_viable_command_kinds);
@@ -11687,7 +11942,7 @@ fn add_phase_quality_finding(
         severity: GameplayFindingSeverity::Warning,
         title: title.to_owned(),
         evidence: format!(
-            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}% of actionable cycles, and actionable cycles averaged {} viable choices across {} families. Thresholds missed: {threshold_evidence}.{worst_streak_evidence}",
+            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}% of actionable cycles, and actionable cycles averaged {} viable choices across {} families. Quiet causes: policy gates {}, dormant {}, generator gaps {}, validation gates {}. Thresholds missed: {threshold_evidence}.{worst_streak_evidence}",
             stats.decision_cycles,
             scaled_ratio_u64(
                 u64::from(stats.quiet_cycles_with_ambient_change),
@@ -11696,7 +11951,11 @@ fn add_phase_quality_finding(
             ),
             stats.longest_quiet_streak_cycles,
             format_tenths(average_choices_tenths),
-            format_tenths(average_families_tenths)
+            format_tenths(average_families_tenths),
+            stats.policy_gate_cycles,
+            stats.dormant_cycles,
+            stats.generator_gap_cycles,
+            stats.validation_gate_cycles
         ),
     });
 }
@@ -14786,7 +15045,7 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             );
         let _ = writeln!(
             output,
-            "  {:<22} cycles {:>5} | action {:>3}% | top {:<24} | campaign admin {:>3}% | multi {:>3}% | close {:>3}% | distinct now {:>3}% / next {:>3}% | choices {}.{} / families {}.{} | quiet {:>5} (ambient {:>5}, longest {:>2}) | blocked {:>5}",
+            "  {:<22} cycles {:>5} | action {:>3}% | top {:<24} | campaign admin {:>3}% | multi {:>3}% | close {:>3}% | distinct now {:>3}% / next {:>3}% | choices {}.{} / families {}.{} | quiet {:>5} (ambient {:>5}, longest {:>2}) | blocked {:>5} | causes policy {} / dormant {} / gaps {} / validation {}",
             phase.label(),
             stats.decision_cycles,
             action_share,
@@ -14803,7 +15062,11 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             stats.quiet_cycles,
             stats.quiet_cycles_with_ambient_change,
             stats.longest_quiet_streak_cycles,
-            stats.blocked_cycles
+            stats.blocked_cycles,
+            stats.policy_gate_cycles,
+            stats.dormant_cycles,
+            stats.generator_gap_cycles,
+            stats.validation_gate_cycles
         );
     }
     let _ = writeln!(output);
@@ -15556,6 +15819,40 @@ fn render_trace_deltas(step: &GameplayTraceStep, output: &mut String) {
         format_measure_changes(&step.attributed_consequences),
         format_measure_changes(&step.ambient_consequences),
     );
+    render_feedback_group("command feedback", &step.command_feedback, output);
+    render_feedback_group("simulation feedback", &step.simulation_feedback, output);
+    render_feedback_group("ambient feedback", &step.ambient_feedback, output);
+}
+
+fn render_feedback_group(label: &str, feedback: &[GameplayFeedbackEvent], output: &mut String) {
+    if feedback.is_empty() {
+        return;
+    }
+    let summaries = feedback
+        .iter()
+        .take(3)
+        .map(|event| {
+            let subject = if event.subject.is_empty() {
+                String::new()
+            } else {
+                format!(" {}:", event.subject)
+            };
+            format!(
+                "{}{} {}",
+                event.kind,
+                subject,
+                truncate_label(&event.text, 120)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let omitted = feedback.len().saturating_sub(3);
+    let suffix = if omitted > 0 {
+        format!(" (+{omitted} more)")
+    } else {
+        String::new()
+    };
+    let _ = writeln!(output, "             {label}: {summaries}{suffix}");
 }
 
 fn decision_log_campaigns(

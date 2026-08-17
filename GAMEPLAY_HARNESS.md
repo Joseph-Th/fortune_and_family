@@ -192,6 +192,8 @@ Reports contain:
 - Per-campaign endpoints and milestone timing
 - Command generation, viability, selection, and consequence statistics
 - Phase-level activity and choice metrics
+- Phase-level quiet-cause counts, separating agent policy gates from dormant
+  world state and generator or validation gaps
 - Immediate, persistent, delayed, and ambient domain attribution
 - Quiet-cycle diagnosis separating generator gaps, agent-policy gates, validation gates, and dormant waiting
 - Economic, civic, family, institutional, legal, crisis, and information snapshots
@@ -199,12 +201,15 @@ Reports contain:
 - A chronological decision log for a configured number of campaigns, each retained step showing context, the selected command and outcome, and the reason no action was taken on quiet cycles
 - Findings and stated limitations
 
-Each retained trace step includes three measured consequence profiles: immediate
+Each retained trace step includes its phase, three measured consequence profiles: immediate
 changes at command commit, changes attributable to the selected command at the
 configured horizon versus a no-action branch, and ambient changes from that
 no-action branch. This makes a trace answer both “what did the command do?” and
 “what would have happened anyway?” with concrete before/after values, not only
-domain labels. Portfolio cash transfers and business-cash withdrawals are
+domain labels. It also retains bounded command, simulation, and ambient feedback
+events from the outbox and chronicle, so a state transition can be read with the
+durable explanation the game produced rather than only through checksums.
+Portfolio cash transfers and business-cash withdrawals are
 retained as separate observable operational actions but excluded from
 substantive-action and strategic-streak metrics; a separate finding reports
 when their combined activity dominates the agent's activity.
@@ -225,6 +230,12 @@ individual counts.
 `ExtendCredit` command statistics separately count accepted loans that changed
 business state immediately and loans that remained treasury-only, so lending
 quality is not inferred from a generic domain checksum.
+
+The normal cadence is 30 days, but the harness shortens the next observation
+window to seven days while an uncontained crisis or player labor dispute is
+active, and narrows an underfunded legal case toward its hearing. This preserves
+monthly strategic pacing while giving urgent player-facing problems a chance to
+be recognized and answered before the next ordinary decision.
 
 ## Scores
 
