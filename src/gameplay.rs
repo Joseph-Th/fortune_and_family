@@ -104,7 +104,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 57;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 58;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -3850,10 +3850,7 @@ fn record_activation_opportunities(
 ) {
     let crisis_opportunity = state.crises.values().any(|crisis| {
         crisis.status.is_active()
-            && !state.audit_log.iter().any(|record| {
-                record.kind() == AuditKind::CrisisResponse
-                    && record.subject() == format!("crisis:{}", crisis.id)
-            })
+            && !crisis_has_containment_response(state, crisis.id)
             && crisis_responses(persona)
                 .into_iter()
                 .any(|response| can_afford_crisis_response(state, crisis, response))
@@ -3866,11 +3863,7 @@ fn record_activation_opportunities(
                 .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
             && preferred_labor_response(state, agreement, persona).is_some()
     });
-    let legal_opportunity = state
-        .dynasties
-        .values()
-        .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
-        .any(|dynasty| legal_grievance_kind(state, dynasty.id()).is_some());
+    let legal_opportunity = has_legal_filing_opportunity(state);
     let property_liquidation_opportunity = has_property_liquidation_opportunity(registry, state);
     let institution_withdrawal_opportunity = has_institution_withdrawal_opportunity(state);
     let extend_credit_opportunity = has_extend_credit_opportunity(registry, state, persona);
@@ -5072,10 +5065,17 @@ fn generate_reactive_candidates(
 }
 
 fn has_legal_settlement_opportunity(state: &AppState) -> bool {
-    state
-        .legal_cases
-        .values()
-        .any(|legal_case| quote_player_legal_settlement(state, legal_case.id).is_ok())
+    let Some(player_treasury) = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .map(crate::core::Dynasty::treasury)
+    else {
+        return false;
+    };
+    state.legal_cases.values().any(|legal_case| {
+        quote_player_legal_settlement(state, legal_case.id)
+            .is_ok_and(|quote| player_treasury >= quote.amount)
+    })
 }
 
 fn generate_legal_settlement_candidates(
@@ -7865,23 +7865,7 @@ fn generate_legal_candidates(
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) {
-    if state
-        .dynasties
-        .get(&state.player_dynasty_id)
-        .is_none_or(|dynasty| dynasty.treasury() < LEGAL_CASE_FILING_COST)
-    {
-        return;
-    }
-    let filing_available = state
-        .legal_cases
-        .values()
-        .filter(|legal_case| legal_case.plaintiff_dynasty_id == state.player_dynasty_id)
-        .map(|legal_case| legal_case.filed_day)
-        .max()
-        .is_none_or(|last_filing_day| {
-            state.clock.day() >= last_filing_day.saturating_add(LEGAL_CASE_FILING_INTERVAL_DAYS)
-        });
-    if !filing_available {
+    if !legal_filing_is_available(state) {
         return;
     }
     let bonus = match persona {
@@ -7924,6 +7908,42 @@ fn generate_legal_candidates(
             bonus,
         );
     }
+}
+
+fn legal_filing_is_available(state: &AppState) -> bool {
+    state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .is_some_and(|dynasty| dynasty.treasury() >= LEGAL_CASE_FILING_COST)
+        && state
+            .legal_cases
+            .values()
+            .filter(|legal_case| legal_case.plaintiff_dynasty_id == state.player_dynasty_id)
+            .map(|legal_case| legal_case.filed_day)
+            .max()
+            .is_none_or(|last_filing_day| {
+                state.clock.day() >= last_filing_day.saturating_add(LEGAL_CASE_FILING_INTERVAL_DAYS)
+            })
+}
+
+fn has_legal_filing_opportunity(state: &AppState) -> bool {
+    legal_filing_is_available(state)
+        && state
+            .dynasties
+            .values()
+            .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
+            .filter_map(|defendant| next_player_legal_claim(state, defendant.id()))
+            .any(|claim| {
+                !state.legal_cases.values().any(|case| {
+                    case.plaintiff_dynasty_id == state.player_dynasty_id
+                        && case.defendant_dynasty_id == claim.defendant_dynasty_id
+                        && case.kind == claim.kind
+                        && matches!(
+                            case.status,
+                            LegalCaseStatus::Filed | LegalCaseStatus::Hearing
+                        )
+                })
+            })
 }
 
 fn legal_grievance_kind(state: &AppState, defendant_id: DynastyId) -> Option<LegalCaseKind> {

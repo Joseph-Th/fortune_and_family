@@ -2997,6 +2997,7 @@ mod candidates {
 
     #[test]
     fn reactive_agents_can_contain_a_crisis_after_exploiting_it() {
+        let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         add_active_crisis(&mut state);
         let crisis_id = *state
@@ -3029,6 +3030,26 @@ mod candidates {
             )
         }));
 
+        let mut accumulator = CampaignAccumulator::new();
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::Opportunist, &accumulator).1;
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::Opportunist,
+            &mut accumulator,
+            &generated_kinds,
+        );
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::RespondToCrisis)
+                .expect("crisis-response statistics must exist")
+                .activation_opportunities,
+            1,
+            "an exploited but not contained crisis remains an active recovery opportunity"
+        );
+
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
@@ -3041,6 +3062,25 @@ mod candidates {
             candidates
                 .iter()
                 .all(|candidate| candidate.kind != GameplayCommandKind::RespondToCrisis)
+        );
+
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::Opportunist, &accumulator).1;
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::Opportunist,
+            &mut accumulator,
+            &generated_kinds,
+        );
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::RespondToCrisis)
+                .expect("crisis-response statistics must exist")
+                .activation_opportunities,
+            1,
+            "a contained crisis must not create another crisis-response opportunity"
         );
     }
 
@@ -3801,6 +3841,7 @@ mod candidates {
 
     #[test]
     fn legal_candidates_require_filing_funds() {
+        let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         state.legal_cases.clear();
         for _ in 0..LEGAL_CASE_FILING_INTERVAL_DAYS {
@@ -3820,6 +3861,25 @@ mod candidates {
             candidates.is_empty(),
             "the agent must not repeatedly offer a lawsuit the dynasty cannot fund"
         );
+        let mut accumulator = CampaignAccumulator::new();
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::PowerBroker, &accumulator).1;
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut accumulator,
+            &generated_kinds,
+        );
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::FileLegalCase)
+                .expect("legal-case statistics must exist")
+                .activation_opportunities,
+            0,
+            "an unaffordable grievance is not an executable filing opportunity"
+        );
 
         state
             .dynasties
@@ -3833,6 +3893,89 @@ mod candidates {
                 .iter()
                 .any(|candidate| candidate.kind == GameplayCommandKind::FileLegalCase),
             "the filing route should become available at the exact cost boundary"
+        );
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::PowerBroker, &accumulator).1;
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut accumulator,
+            &generated_kinds,
+        );
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::FileLegalCase)
+                .expect("legal-case statistics must exist")
+                .activation_opportunities,
+            1,
+            "the exact filing-fee boundary must activate the legal route"
+        );
+    }
+
+    #[test]
+    fn settlement_activation_requires_an_affordable_grounded_quote() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        make_legal_settlement_available_for_test(&mut state);
+        let case_id = *state
+            .legal_cases
+            .keys()
+            .next_back()
+            .expect("settlement fixture must create a legal case");
+        let quote = quote_player_legal_settlement(&state, case_id)
+            .expect("settlement fixture must produce a grounded quote");
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = quote.amount.saturating_sub(Money::from_copper(1));
+
+        let mut accumulator = CampaignAccumulator::new();
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::Steward, &accumulator).1;
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut accumulator,
+            &generated_kinds,
+        );
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::SettleLegalCase)
+                .expect("legal-settlement statistics must exist")
+                .activation_opportunities,
+            0,
+            "an unaffordable settlement must not be reported as an executable opportunity"
+        );
+
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = quote.amount;
+        let generated_kinds =
+            ranked_candidates(registry, &state, GameplayPersona::Steward, &accumulator).1;
+        record_activation_opportunities(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut accumulator,
+            &generated_kinds,
+        );
+        assert_eq!(
+            accumulator
+                .commands
+                .get(&GameplayCommandKind::SettleLegalCase)
+                .expect("legal-settlement statistics must exist")
+                .activation_opportunities,
+            1,
+            "the exact settlement quote must activate the legal route"
         );
     }
 
