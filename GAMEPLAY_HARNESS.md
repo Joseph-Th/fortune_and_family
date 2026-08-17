@@ -202,7 +202,17 @@ domain labels. Portfolio cash transfers are retained as observable operational
 actions but excluded from substantive-action and strategic-streak metrics; a
 separate finding reports when they dominate the agent's activity.
 
+Viable alternatives retain a `projected_horizon_days` value and are compared
+over a shared horizon of three decision intervals, bounded by
+`max_consequence_horizon_days`. The human report renders the top alternatives
+with their projected measures so a decision log explains the tradeoff, not just
+the selected command.
+
 The report should preserve enough seed, persona, background, phase, entity, and trace context to reproduce a material finding.
+
+`ExtendCredit` command statistics separately count accepted loans that changed
+business state immediately and loans that remained treasury-only, so lending
+quality is not inferred from a generic domain checksum.
 
 ## Scores
 

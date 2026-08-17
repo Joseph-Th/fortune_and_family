@@ -103,7 +103,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 54;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 56;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -521,6 +521,12 @@ pub struct GameplayCommandStats {
     pub actions_with_feedback: u32,
     pub actions_with_persistent_consequences: u32,
     pub actions_with_delayed_consequences: u32,
+    /// For `ExtendCredit`, the accepted loan immediately reached a business
+    /// record rather than remaining only in the borrower's dynasty treasury.
+    pub productive_financing_actions: u32,
+    /// For `ExtendCredit`, the accepted loan did not immediately reach a
+    /// business record and therefore needs separate interpretation.
+    pub nonproductive_financing_actions: u32,
     pub changed_domains: BTreeSet<GameplayDomain>,
 }
 
@@ -1764,6 +1770,9 @@ pub struct GameplayViableOption {
     pub command: GameplayCommandKind,
     pub score: i64,
     pub description: String,
+    /// All alternatives in a decision cycle are projected over the same
+    /// horizon so their delayed consequences are comparable.
+    pub projected_horizon_days: u16,
     pub immediate_domains: BTreeSet<GameplayDomain>,
     pub projected_domains: BTreeSet<GameplayDomain>,
     pub immediate_history_change: bool,
@@ -3072,7 +3081,7 @@ fn gameplay_harness_limitations() -> Vec<String> {
         "Automated agents measure reachability and systemic outcomes, not whether a human understands the interface or enjoys the decisions.".to_owned(),
         "The report cannot measure emotional investment, narrative quality, or the cognitive burden of comparing choices.".to_owned(),
         "Agents inspect authoritative simulation state when choosing what to investigate; commissioned reports can unlock traceable follow-up actions, but the harness does not measure whether a human can interpret the report or identify the best use.".to_owned(),
-        "Alternative-choice profiles retain every successfully probed concrete target and distinguish measured impact from persistent target identity, but they compare only immediate effects and one decision interval of projected divergence; the harness does not advance every unchosen branch through its full delayed consequence horizon.".to_owned(),
+        "Alternative-choice profiles retain every successfully probed concrete target and distinguish measured impact from persistent target identity. Every viable option is projected over a shared horizon of three decision intervals (bounded by max_consequence_horizon_days), so delayed tradeoffs are compared consistently; this remains a bounded counterfactual rather than a full alternate campaign.".to_owned(),
         "A distinct target fingerprint proves that two branches preserve different strategic state, not that a human will value the difference or that the difference becomes important within the campaign.".to_owned(),
         "Deterministic personas follow fixed priorities and do not model experimentation, misunderstanding, changing preferences, or interface friction.".to_owned(),
         "Choice breadth measures the options emitted by the configured persona policy, not every legal command a human could discover in the same state. Cross-persona matrices are required before treating a narrow candidate set as a hard game-system ceiling.".to_owned(),
@@ -3409,6 +3418,7 @@ fn run_decision_cycle_internal(
         state,
         candidates_to_probe.into_iter(),
         projection_step_days,
+        config.max_consequence_horizon_days,
         accumulator,
     )?;
     let no_action_reason = record_quiet_diagnostic(
@@ -3848,7 +3858,7 @@ fn record_activation_opportunities(
         .any(|dynasty| legal_grievance_kind(state, dynasty.id()).is_some());
     let property_liquidation_opportunity = has_property_liquidation_opportunity(registry, state);
     let institution_withdrawal_opportunity = has_institution_withdrawal_opportunity(state);
-    let extend_credit_opportunity = has_extend_credit_opportunity(state, persona);
+    let extend_credit_opportunity = has_extend_credit_opportunity(registry, state, persona);
     let transfer_cash_opportunity = has_transfer_cash_opportunity(registry, state, persona);
     for (kind, available) in [
         (GameplayCommandKind::RespondToCrisis, crisis_opportunity),
@@ -4081,16 +4091,35 @@ fn apply_selected_candidate(
     }))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "candidate probing keeps validation, counterfactual projection, and selection accounting in one auditable path"
+)]
 fn probe_candidates(
     registry: &Registry,
     state: &AppState,
     candidates: impl Iterator<Item = Candidate>,
     projection_days: u32,
+    max_consequence_horizon_days: u16,
     accumulator: &mut CampaignAccumulator,
 ) -> Result<ProbeResult, GameplayHarnessError> {
     let baseline = GameplaySnapshot::capture(state);
+    let candidates: Vec<_> = candidates.collect();
+    // Alternative branches are the hot path: project three decision
+    // intervals so delayed tradeoffs are visible, while leaving the more
+    // expensive command-specific horizon for the selected action below.
+    // Keeping one shared horizon is important because profiles must be
+    // comparable across command families.
+    let shared_projection_days = projection_days
+        .saturating_mul(3)
+        .min(u32::from(max_consequence_horizon_days))
+        .max(projection_days);
     let mut projected_baseline_state = state.clone();
-    advance_days(registry, &mut projected_baseline_state, projection_days)?;
+    advance_days(
+        registry,
+        &mut projected_baseline_state,
+        shared_projection_days,
+    )?;
     let projected_baseline = GameplaySnapshot::capture(&projected_baseline_state);
     let mut selected_substantive = None;
     let mut selected_operational = None;
@@ -4125,7 +4154,7 @@ fn probe_candidates(
                         &projected_baseline,
                         &probe,
                         &candidate,
-                        projection_days,
+                        shared_projection_days,
                     )?;
                     let immediate_choice_profile = evaluated.immediate_profile_key.clone();
                     let projected_choice_profile = evaluated.projected_profile_key.clone();
@@ -4234,6 +4263,7 @@ fn evaluate_viable_option(
             command: candidate.kind,
             score: candidate.score,
             description: candidate.description.clone(),
+            projected_horizon_days: u16::try_from(projection_days).unwrap_or(u16::MAX),
             immediate_domains,
             projected_domains,
             immediate_history_change,
@@ -4347,6 +4377,8 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
                 persistent: &persistent_domains,
                 delayed: &delayed_domains,
                 signals: &signals,
+                productive_business_change: before.business_state_checksum
+                    != after_command.business_state_checksum,
             },
             accumulator,
         );
@@ -4444,6 +4476,7 @@ struct ActionConsequenceObservation<'a> {
     persistent: &'a BTreeSet<GameplayDomain>,
     delayed: &'a BTreeSet<GameplayDomain>,
     signals: &'a BTreeSet<GameplayTraceSignal>,
+    productive_business_change: bool,
 }
 
 fn record_action_consequences(
@@ -4456,6 +4489,7 @@ fn record_action_consequences(
         persistent,
         delayed,
         signals,
+        productive_business_change,
     } = observation;
     let immediate_feedback = signals.contains(&GameplayTraceSignal::ImmediateWorldFeedback);
     let delayed_feedback = signals.contains(&GameplayTraceSignal::DelayedWorldFeedback);
@@ -4484,6 +4518,16 @@ fn record_action_consequences(
         command_stats.actions_with_delayed_consequences = command_stats
             .actions_with_delayed_consequences
             .saturating_add(1);
+    }
+    if kind == GameplayCommandKind::ExtendCredit {
+        if productive_business_change {
+            command_stats.productive_financing_actions =
+                command_stats.productive_financing_actions.saturating_add(1);
+        } else {
+            command_stats.nonproductive_financing_actions = command_stats
+                .nonproductive_financing_actions
+                .saturating_add(1);
+        }
     }
     for domain in immediate.union(delayed) {
         command_stats.changed_domains.insert(*domain);
@@ -6157,7 +6201,7 @@ fn generate_finance_candidates(
     candidates: &mut Vec<Candidate>,
 ) {
     add_borrow_candidate(state, persona, candidates);
-    add_lend_candidate(state, persona, candidates);
+    add_lend_candidate(registry, state, persona, candidates);
     add_property_liquidation_candidates(registry, state, persona, candidates);
     let treasury = state
         .dynasties
@@ -6604,11 +6648,15 @@ fn active_player_lending(state: &AppState) -> usize {
         .count()
 }
 
-fn eligible_lending_borrower(state: &AppState) -> Option<&crate::core::Dynasty> {
+fn eligible_lending_borrower<'a>(
+    registry: &Registry,
+    state: &'a AppState,
+) -> Option<&'a crate::core::Dynasty> {
     let eligible: Vec<_> = state
         .dynasties
         .values()
         .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
+        .filter(|dynasty| borrower_has_productive_financing_need(registry, state, dynasty.id()))
         .filter(|dynasty| {
             !same_pair_credit_blocks_new_loan(state, state.player_dynasty_id, dynasty.id())
         })
@@ -6630,6 +6678,21 @@ fn lending_pressure(state: &AppState, dynasty_id: DynastyId) -> u8 {
     private_loan_borrower_financing_pressure(state, dynasty_id)
 }
 
+/// Player-issued credit is a strategic investment, not a generic way to move
+/// money between dynasty treasuries. Keep the agent's lending route tied to a
+/// business with an identifiable working-capital problem; the command system
+/// then deploys the accepted financing package into that business.
+fn borrower_has_productive_financing_need(
+    registry: &Registry,
+    state: &AppState,
+    dynasty_id: DynastyId,
+) -> bool {
+    state.businesses.iter().any(|business| {
+        business.owner_dynasty_id() == dynasty_id
+            && business.cash() < business_recapitalization_target(registry, state, business)
+    })
+}
+
 fn eligible_lending_restructuring_borrower(state: &AppState) -> Option<&crate::core::Dynasty> {
     state
         .dynasties
@@ -6648,7 +6711,11 @@ fn eligible_lending_restructuring_borrower(state: &AppState) -> Option<&crate::c
         .min_by_key(|dynasty| dynasty.treasury())
 }
 
-fn has_extend_credit_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
+fn has_extend_credit_opportunity(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+) -> bool {
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
@@ -6659,10 +6726,15 @@ fn has_extend_credit_opportunity(state: &AppState, persona: GameplayPersona) -> 
     can_restructure
         || (player.treasury() >= lending_reserve
             && active_player_lending(state) < lending_limit
-            && eligible_lending_borrower(state).is_some())
+            && eligible_lending_borrower(registry, state).is_some())
 }
 
-fn add_lend_candidate(state: &AppState, persona: GameplayPersona, candidates: &mut Vec<Candidate>) {
+fn add_lend_candidate(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) {
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
@@ -6678,7 +6750,7 @@ fn add_lend_candidate(state: &AppState, persona: GameplayPersona, candidates: &m
         if player.treasury() < lending_reserve || active_player_lending(state) >= lending_limit {
             return;
         }
-        let Some(borrower) = eligible_lending_borrower(state) else {
+        let Some(borrower) = eligible_lending_borrower(registry, state) else {
             return;
         };
         borrower
@@ -9327,9 +9399,62 @@ fn rank_adjustment(
     persona_weight(persona, kind)
         .saturating_add(coverage)
         .saturating_add(urgency_weight(state, kind))
+        .saturating_add(institutional_conversion_priority(state, persona, kind))
         .saturating_add(recovery_priority_adjustment(state, kind))
         .saturating_sub(repetition)
         .saturating_sub(repeat_last)
+}
+
+/// Once the dynasty has earned office, the diagnostic agent should actually
+/// convert that access into a civic commitment. Otherwise a profitable credit
+/// or property candidate can indefinitely crowd out the game's political
+/// endpoint even though law and public-work candidates are valid.
+fn institutional_conversion_priority(
+    state: &AppState,
+    persona: GameplayPersona,
+    kind: GameplayCommandKind,
+) -> i64 {
+    if !has_player_office(state) {
+        return 0;
+    }
+    let bonus = match persona {
+        GameplayPersona::Steward => 900,
+        GameplayPersona::Entrepreneur => 700,
+        GameplayPersona::PowerBroker => 1_000,
+        GameplayPersona::Opportunist => 500,
+    };
+    match kind {
+        GameplayCommandKind::EnactLaw
+        | GameplayCommandKind::StartPublicWork
+        | GameplayCommandKind::FundPublicWork
+        | GameplayCommandKind::ExerciseOfficePower => bonus,
+        GameplayCommandKind::TransferBusinessCash
+        | GameplayCommandKind::AcquireBusiness
+        | GameplayCommandKind::InvestInBusiness
+        | GameplayCommandKind::SetBusinessPolicy
+        | GameplayCommandKind::SecureSupply
+        | GameplayCommandKind::SellOutput
+        | GameplayCommandKind::BorrowFunds
+        | GameplayCommandKind::ExtendCredit
+        | GameplayCommandKind::BuyProperty
+        | GameplayCommandKind::SellProperty
+        | GameplayCommandKind::FileLegalCase
+        | GameplayCommandKind::SettleLegalCase
+        | GameplayCommandKind::SetHouseGovernance
+        | GameplayCommandKind::ConveneFamilyCouncil
+        | GameplayCommandKind::DesignateHeir
+        | GameplayCommandKind::AdoptWard
+        | GameplayCommandKind::EducateFamilyMember
+        | GameplayCommandKind::CultivateInstitutionSupport
+        | GameplayCommandKind::EndowInstitution
+        | GameplayCommandKind::NominateForOffice
+        | GameplayCommandKind::WithdrawFromInstitution
+        | GameplayCommandKind::RespondToCrisis
+        | GameplayCommandKind::ResolveLaborDispute
+        | GameplayCommandKind::CommissionInformation
+        | GameplayCommandKind::LeverageInformation
+        | GameplayCommandKind::AcknowledgeNotification => 0,
+    }
 }
 
 fn player_has_no_active_business(state: &AppState) -> bool {
@@ -10637,6 +10762,12 @@ fn merge_campaign(
         target.actions_with_delayed_consequences = target
             .actions_with_delayed_consequences
             .saturating_add(source.actions_with_delayed_consequences);
+        target.productive_financing_actions = target
+            .productive_financing_actions
+            .saturating_add(source.productive_financing_actions);
+        target.nonproductive_financing_actions = target
+            .nonproductive_financing_actions
+            .saturating_add(source.nonproductive_financing_actions);
         target.changed_domains.extend(&source.changed_domains);
     }
     for (reason, count) in &campaign.rejection_reasons {
@@ -11957,29 +12088,23 @@ fn add_credit_productive_link_finding(
     aggregate: &GameplayAggregate,
     findings: &mut Vec<GameplayFinding>,
 ) {
-    let credit_actions = aggregate
-        .commands
-        .get(&GameplayCommandKind::ExtendCredit)
-        .map_or(0, |stats| stats.executed);
+    let Some(credit_stats) = aggregate.commands.get(&GameplayCommandKind::ExtendCredit) else {
+        return;
+    };
+    let credit_actions = credit_stats.executed;
     if credit_actions < 10 {
         return;
     }
-    let business_links = aggregate
-        .interactions
-        .iter()
-        .find(|edge| {
-            edge.command == GameplayCommandKind::ExtendCredit
-                && edge.domain == GameplayDomain::Business
-        })
-        .map_or(0, |edge| edge.observations);
-    if business_links.saturating_mul(2) >= credit_actions {
+    if credit_stats.productive_financing_actions.saturating_mul(2) >= credit_actions {
         return;
     }
     findings.push(GameplayFinding {
         severity: GameplayFindingSeverity::Warning,
         title: "Player lending is detached from productive financing".to_owned(),
         evidence: format!(
-            "Agents extended player credit {credit_actions} times, but only {business_links} action-attributable observations changed a borrower business. Credit should usually finance a real commercial pressure rather than behave like an idle treasury transfer whose principal can fund its own repayment."
+            "Agents extended player credit {credit_actions} times, but only {} accepted loans immediately changed business state; {} remained treasury-only at command commit. Credit should usually finance a real commercial pressure rather than behave like an idle treasury transfer whose principal can fund its own repayment.",
+            credit_stats.productive_financing_actions,
+            credit_stats.nonproductive_financing_actions,
         ),
     });
 }
@@ -12881,9 +13006,9 @@ fn add_choice_tradeoff_findings(
     if projected_share < 50 {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
-            title: "Strategic alternatives converge after one decision interval".to_owned(),
+            title: "Strategic alternatives converge at the shared projected horizon".to_owned(),
             evidence: format!(
-                "Only {} of {} multi-family cycles produced at least two distinct projected domain-change profiles after one decision interval ({projected_share}%). Immediate feedback may differ while the simulated trajectories still converge.",
+                "Only {} of {} multi-family cycles produced at least two distinct projected domain-change profiles at the shared projected horizon ({projected_share}%). Immediate feedback may differ while the simulated trajectories still converge.",
                 aggregate.cycles_with_distinct_projected_consequences,
                 denominator
             ),
@@ -12916,7 +13041,7 @@ fn add_option_tradeoff_findings(
             severity: GameplayFindingSeverity::Warning,
             title: "Concrete alternatives converge despite different targets".to_owned(),
             evidence: format!(
-                "Only {} of {denominator} cycles with at least two viable concrete options produced distinct projected consequence profiles after one decision interval ({projected_share}%). The harness compares targets and templates inside the same command family as well as different families, including whether observed strategic measures rise or fall. A low share means apparent target choice often changes labels more than trajectory.",
+                "Only {} of {denominator} cycles with at least two viable concrete options produced distinct projected consequence profiles at the shared projected horizon ({projected_share}%). The harness compares targets and templates inside the same command family as well as different families, including whether observed strategic measures rise or fall. A low share means apparent target choice often changes labels more than trajectory.",
                 aggregate.cycles_with_distinct_projected_option_consequences,
             ),
         });
@@ -12925,7 +13050,7 @@ fn add_option_tradeoff_findings(
             severity: GameplayFindingSeverity::Info,
             title: "Concrete alternatives differentiate mainly through delayed effects".to_owned(),
             evidence: format!(
-                "{immediate_share}% of multi-option cycles had distinct immediate consequence profiles, while {projected_share}% diverged after one decision interval. Target-level choices are systemic, but much of their identity emerges through simulation rather than at commit time."
+                "{immediate_share}% of multi-option cycles had distinct immediate consequence profiles, while {projected_share}% diverged at the shared projected horizon. Target-level choices are systemic, but much of their identity emerges through simulation rather than at commit time."
             ),
         });
     }
@@ -15284,9 +15409,31 @@ fn render_decision_log(report: &GameplayHarnessReport, output: &mut String) {
                 domain_labels(&step.delayed_domains),
                 trace_signal_labels(&step.signals),
             );
+            render_trace_alternatives(step, output);
             render_trace_deltas(step, output);
         }
         let _ = writeln!(output);
+    }
+}
+
+fn render_trace_alternatives(step: &GameplayTraceStep, output: &mut String) {
+    if step.viable_options.len() < 2 {
+        return;
+    }
+    let _ = writeln!(
+        output,
+        "             alternatives (shared projected horizon):"
+    );
+    for option in step.viable_options.iter().take(3) {
+        let _ = writeln!(
+            output,
+            "               {:<18} score {:>5} | {}d later [{}] | changes [{}]",
+            option.command.label(),
+            option.score,
+            option.projected_horizon_days,
+            domain_labels(&option.projected_domains),
+            format_measure_changes(&option.projected_profile),
+        );
     }
 }
 

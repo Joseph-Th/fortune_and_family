@@ -2174,6 +2174,10 @@ mod candidates {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "this test verifies the complete restructuring command contract end to end"
+    )]
     fn player_lender_can_offer_an_aged_default_restructuring() {
         let registry = rivergate_registry_for_test();
         let (mut state, borrower_id, loan_id, principal_before, balance_before) =
@@ -2186,6 +2190,7 @@ mod candidates {
             .expect("player dynasty must exist")
             .treasury();
         assert!(has_extend_credit_opportunity(
+            registry,
             &state,
             GameplayPersona::PowerBroker
         ));
@@ -4227,6 +4232,7 @@ mod candidates {
 
     #[test]
     fn power_broker_preserves_political_reserves_before_extending_credit() {
+        let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
         state
@@ -4237,7 +4243,12 @@ mod candidates {
             .treasury = Money::from_copper(49_999);
         let mut candidates = Vec::new();
 
-        add_lend_candidate(&state, GameplayPersona::PowerBroker, &mut candidates);
+        add_lend_candidate(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut candidates,
+        );
 
         assert!(
             candidates.is_empty(),
@@ -4247,6 +4258,7 @@ mod candidates {
 
     #[test]
     fn opportunist_credit_uses_short_term_high_yield_terms() {
+        let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
         state
@@ -4258,7 +4270,12 @@ mod candidates {
         make_external_credit_need_available_for_test(&mut state);
         let mut candidates = Vec::new();
 
-        add_lend_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+        add_lend_candidate(
+            registry,
+            &state,
+            GameplayPersona::Opportunist,
+            &mut candidates,
+        );
 
         let candidate = candidates
             .iter()
@@ -4280,6 +4297,7 @@ mod candidates {
 
     #[test]
     fn opportunist_does_not_offer_credit_without_a_real_financing_pressure() {
+        let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
         state
@@ -4311,6 +4329,7 @@ mod candidates {
 
         let mut opportunist_candidates = Vec::new();
         add_lend_candidate(
+            registry,
             &state,
             GameplayPersona::Opportunist,
             &mut opportunist_candidates,
@@ -4323,7 +4342,12 @@ mod candidates {
         );
 
         let mut steward_candidates = Vec::new();
-        add_lend_candidate(&state, GameplayPersona::Steward, &mut steward_candidates);
+        add_lend_candidate(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut steward_candidates,
+        );
         assert!(
             steward_candidates
                 .iter()
@@ -4334,10 +4358,11 @@ mod candidates {
 
     #[test]
     fn opportunist_uses_more_aggressive_terms_for_a_distressed_borrower() {
+        let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         make_external_credit_need_available_for_test(&mut state);
         let player_id = state.player_dynasty_id;
-        let borrower_id = eligible_lending_borrower(&state)
+        let borrower_id = eligible_lending_borrower(registry, &state)
             .expect("fixture must expose a financing-pressure borrower")
             .id();
         state
@@ -4356,7 +4381,12 @@ mod candidates {
             .treasury = Money::from_copper(120_000);
         let mut candidates = Vec::new();
 
-        add_lend_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+        add_lend_candidate(
+            registry,
+            &state,
+            GameplayPersona::Opportunist,
+            &mut candidates,
+        );
 
         let candidate = candidates
             .iter()
@@ -4829,12 +4859,19 @@ mod metrics {
             &state,
             property_candidates.into_iter(),
             30,
+            360,
             &mut accumulator,
         )
         .expect("property alternatives must be probeable");
 
         assert_eq!(probe.viable_command_kinds.len(), 1);
         assert_eq!(probe.viable_options.len(), 2);
+        assert!(
+            probe
+                .viable_options
+                .iter()
+                .all(|option| option.projected_horizon_days == 90)
+        );
         assert_eq!(
             probe.distinct_immediate_choice_profiles, 1,
             "equivalent warehouse purchases must not be counted as different consequence profiles solely because the property IDs differ"
@@ -5745,6 +5782,7 @@ mod metrics {
             &state,
             [acknowledgement, governance].into_iter(),
             30,
+            360,
             &mut accumulator,
         )
         .expect("candidate projection must remain representable");
@@ -6763,11 +6801,12 @@ mod findings {
             "Player lending is detached from productive financing",
         );
 
-        report.aggregate.interactions.push(GameplayInteractionEdge {
-            command: GameplayCommandKind::ExtendCredit,
-            domain: GameplayDomain::Business,
-            observations: 20,
-        });
+        report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::ExtendCredit)
+            .expect("credit statistics must exist")
+            .productive_financing_actions = 20;
         let findings = derive_findings(&report.aggregate, &report.campaigns);
         assert_finding_absent(
             &findings,
@@ -7817,7 +7856,7 @@ mod findings {
 
         finding_with_title(
             &findings,
-            "Strategic alternatives converge after one decision interval",
+            "Strategic alternatives converge at the shared projected horizon",
         );
     }
 
@@ -9152,6 +9191,13 @@ fn make_external_credit_need_available_for_test(state: &mut AppState) {
         .expect("selected borrower must exist")
         .resources
         .treasury = Money::from_copper(20_000);
+    state
+        .businesses
+        .iter_mut()
+        .find(|business| business.owner_dynasty_id() == borrower_id)
+        .expect("selected borrower must own a business")
+        .finance
+        .cash = Money::ZERO;
 }
 
 fn add_second_player_business(state: &mut AppState) {

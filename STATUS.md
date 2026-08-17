@@ -12,7 +12,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Save schema | 21 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 54 |
+| Gameplay report schema | 56 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |

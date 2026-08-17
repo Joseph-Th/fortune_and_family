@@ -1266,12 +1266,7 @@ mod validation {
             .expect("selected borrower must exist")
             .treasury();
         let player_id = state.player_dynasty_id;
-        let expected_deployment = target_cash.min(
-            borrower_treasury_before
-                .checked_add(principal)
-                .expect("fixture borrower treasury must fit after borrowing")
-                .saturating_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE),
-        );
+        let expected_deployment = target_cash.min(principal);
 
         apply_player_command(
             registry,
@@ -1296,7 +1291,7 @@ mod validation {
                 .expect("selected business must exist")
                 .cash(),
             expected_deployment,
-            "new credit should unlock a borrower co-investment while preserving its protected household reserve"
+            "new credit should deploy its principal into the productive business while preserving the borrower's existing household reserve"
         );
         assert_eq!(
             state

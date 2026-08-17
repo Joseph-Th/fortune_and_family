@@ -1587,11 +1587,7 @@ fn deploy_non_player_financing_package(
         .iter()
         .filter(|business| business.owner_dynasty_id() == terms.borrower_dynasty_id)
         .filter(|business| {
-            matches!(
-                business.status(),
-                BusinessStatus::Distressed | BusinessStatus::Insolvent
-            ) || (private_loan_borrower_financing_pressure(state, terms.borrower_dynasty_id) > 0
-                && business.cash() < business_recapitalization_target(registry, state, business))
+            business.cash() < business_recapitalization_target(registry, state, business)
         })
         .min_by_key(|business| {
             (
@@ -1614,13 +1610,11 @@ fn deploy_non_player_financing_package(
         .expect("selected borrower business must exist");
     let target_cash = business_recapitalization_target(registry, state, business);
     let shortfall = target_cash.saturating_sub(business.cash());
-    let treasury = state
-        .dynasties
-        .get(&terms.borrower_dynasty_id)
-        .expect("validated loan borrower must exist")
-        .treasury();
-    let deployable = treasury.saturating_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE);
-    let amount = shortfall.min(deployable);
+    // The new principal is the financing package being deployed. The
+    // borrower's existing treasury remains its household reserve; requiring
+    // the post-loan treasury to clear that reserve would make small, valid
+    // rescue loans inert before they can reach the business.
+    let amount = shortfall.min(terms.principal);
     if amount > Money::ZERO {
         capitalize_owned_business(state, terms.borrower_dynasty_id, business_id, amount)?;
     }
