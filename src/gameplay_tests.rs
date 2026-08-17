@@ -348,6 +348,36 @@ mod harness {
     }
 
     #[test]
+    fn parallel_counterfactual_probes_match_serial_results() {
+        let registry = rivergate_registry_for_test();
+        let config = focused_config(90);
+
+        let parallel = run_campaign(
+            registry,
+            &config,
+            config.start_seed,
+            StartingBackground::Baker,
+            GameplayPersona::Steward,
+            true,
+        )
+        .expect("parallel campaign must succeed");
+        let serial = run_campaign(
+            registry,
+            &config,
+            config.start_seed,
+            StartingBackground::Baker,
+            GameplayPersona::Steward,
+            false,
+        )
+        .expect("serial campaign must succeed");
+
+        assert_eq!(
+            parallel, serial,
+            "parallel probes must preserve report semantics"
+        );
+    }
+
+    #[test]
     fn organic_candidate_variation_is_bounded_reproducible_and_non_mutating() {
         let mut state = make_test_campaign();
         let original = state.clone();

@@ -41,6 +41,10 @@ interpreter.
 Long-running gameplay JSON assertions are centralized in
 `scripts/check_gameplay.py`, which derives expected persona coverage from the
 report configuration and prints a compact validation summary.
+The harness parallelizes independent counterfactual probes for a single
+campaign with a bounded worker count; campaign matrices parallelize campaigns
+instead to keep memory use predictable. Probe results retain deterministic
+candidate ordering.
 
 ## Test tiers
 

@@ -90,6 +90,12 @@ The normal decision interval is an observation cadence, not a gameplay rule limi
 
 Independent campaigns in a matrix run in parallel using the machine's available parallelism. Each campaign builds and advances its own `AppState` from the shared immutable registry, so parallelism never changes the state of another campaign. Report ordering is fixed by seed, background, and persona regardless of scheduling; a matrix with one campaign remains serial.
 
+When the matrix contains one campaign, its independent counterfactual probes
+run in a small bounded worker set. Matrix runs use campaign-level parallelism
+instead, avoiding nested workers and excess memory from cloning a full campaign
+state. Probe results are merged in candidate order, so parallel execution does
+not change report ordering or deterministic selection.
+
 ## Personas
 
 Personas are deterministic diagnostic policies, not optimal strategies.

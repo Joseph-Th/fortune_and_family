@@ -2343,6 +2343,10 @@ pub enum GameplayHarnessError {
         declared: GameplayCommandKind,
         actual: GameplayCommandKind,
     },
+    #[error("gameplay harness counterfactual worker panicked")]
+    CounterfactualWorkerPanicked,
+    #[error("gameplay harness campaign worker panicked")]
+    CampaignWorkerPanicked,
 }
 
 #[derive(Clone, Debug)]
@@ -3120,45 +3124,57 @@ fn execute_campaigns(
     if work.len() <= 1 {
         return work
             .iter()
-            .map(|item| run_campaign(registry, config, item.seed, item.background, item.persona))
+            .map(|item| {
+                run_campaign(
+                    registry,
+                    config,
+                    item.seed,
+                    item.background,
+                    item.persona,
+                    true,
+                )
+            })
             .collect();
     }
     let parallelism = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(work.len());
     let chunks: Vec<&[CampaignWorkItem]> = work.chunks(work.len().div_ceil(parallelism)).collect();
-    let results: Vec<Result<GameplayCampaignReport, GameplayHarnessError>> =
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = chunks
-                .into_iter()
-                .map(|chunk| {
-                    scope.spawn(move || {
-                        chunk
-                            .iter()
-                            .map(|item| {
-                                run_campaign(
-                                    registry,
-                                    config,
-                                    item.seed,
-                                    item.background,
-                                    item.persona,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
+    let results: Result<
+        Vec<Result<GameplayCampaignReport, GameplayHarnessError>>,
+        GameplayHarnessError,
+    > = std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|item| {
+                            run_campaign(
+                                registry,
+                                config,
+                                item.seed,
+                                item.background,
+                                item.persona,
+                                false,
+                            )
+                        })
+                        .collect::<Vec<_>>()
                 })
-                .collect();
-            let mut campaigns = Vec::with_capacity(work.len());
-            for handle in handles {
-                campaigns.extend(
-                    handle
-                        .join()
-                        .expect("gameplay harness worker must not panic"),
-                );
-            }
-            campaigns
-        });
-    results.into_iter().collect()
+            })
+            .collect();
+        let mut campaigns = Vec::with_capacity(work.len());
+        for handle in handles {
+            campaigns.extend(
+                handle
+                    .join()
+                    .map_err(|_| GameplayHarnessError::CampaignWorkerPanicked)?,
+            );
+        }
+        Ok(campaigns)
+    });
+    results?.into_iter().collect()
 }
 
 fn gameplay_harness_limitations() -> Vec<String> {
@@ -3243,6 +3259,7 @@ fn run_campaign(
     seed: u64,
     background: StartingBackground,
     persona: GameplayPersona,
+    parallel_counterfactuals: bool,
 ) -> Result<GameplayCampaignReport, GameplayHarnessError> {
     let mut state = build_new_game(
         registry,
@@ -3267,11 +3284,19 @@ fn run_campaign(
             persona,
             &mut state,
             step_days,
+            parallel_counterfactuals,
             &mut accumulator,
         )?;
         remaining = remaining.saturating_sub(step_days);
     }
-    run_terminal_phase_if_needed(registry, config, persona, &mut state, &mut accumulator)?;
+    run_terminal_phase_if_needed(
+        registry,
+        config,
+        persona,
+        &mut state,
+        parallel_counterfactuals,
+        &mut accumulator,
+    )?;
     validate_invariants(registry, &state);
     Ok(finish_campaign_report(
         config,
@@ -3414,10 +3439,18 @@ fn run_terminal_phase_if_needed(
     config: &GameplayHarnessConfig,
     persona: GameplayPersona,
     state: &mut AppState,
+    parallel_counterfactuals: bool,
     accumulator: &mut CampaignAccumulator,
 ) -> Result<(), GameplayHarnessError> {
     if terminal_phase_needs_decision(accumulator) {
-        run_terminal_decision_cycle(registry, config, persona, state, accumulator)?;
+        run_terminal_decision_cycle(
+            registry,
+            config,
+            persona,
+            state,
+            parallel_counterfactuals,
+            accumulator,
+        )?;
     }
     Ok(())
 }
@@ -3440,6 +3473,7 @@ fn run_terminal_decision_cycle(
     config: &GameplayHarnessConfig,
     persona: GameplayPersona,
     state: &mut AppState,
+    parallel_counterfactuals: bool,
     accumulator: &mut CampaignAccumulator,
 ) -> Result<(), GameplayHarnessError> {
     run_decision_cycle_internal(
@@ -3448,6 +3482,7 @@ fn run_terminal_decision_cycle(
         persona,
         state,
         DecisionCycleMode::Terminal,
+        parallel_counterfactuals,
         accumulator,
     )
 }
@@ -3458,6 +3493,7 @@ fn run_decision_cycle(
     persona: GameplayPersona,
     state: &mut AppState,
     step_days: u32,
+    parallel_counterfactuals: bool,
     accumulator: &mut CampaignAccumulator,
 ) -> Result<(), GameplayHarnessError> {
     run_decision_cycle_internal(
@@ -3466,6 +3502,7 @@ fn run_decision_cycle(
         persona,
         state,
         DecisionCycleMode::AdvanceCampaign { step_days },
+        parallel_counterfactuals,
         accumulator,
     )
 }
@@ -3480,6 +3517,7 @@ fn run_decision_cycle_internal(
     persona: GameplayPersona,
     state: &mut AppState,
     mode: DecisionCycleMode,
+    parallel_counterfactuals: bool,
     accumulator: &mut CampaignAccumulator,
 ) -> Result<(), GameplayHarnessError> {
     accumulator.decision_cycles = accumulator.decision_cycles.saturating_add(1);
@@ -3513,12 +3551,13 @@ fn run_decision_cycle_internal(
         DecisionCycleMode::AdvanceCampaign { step_days } => step_days,
         DecisionCycleMode::Terminal => u32::from(config.decision_interval_days),
     };
-    let probe = probe_candidates(
+    let probe = probe_candidates_with_parallelism(
         registry,
         state,
         candidates_to_probe.into_iter(),
         projection_step_days,
         config.max_consequence_horizon_days,
+        parallel_counterfactuals,
         accumulator,
     )?;
     let no_action_reason = record_quiet_diagnostic(
@@ -5136,16 +5175,37 @@ fn apply_selected_candidate(
     }))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "candidate probing keeps validation, counterfactual projection, and selection accounting in one auditable path"
-)]
+#[cfg(test)]
 fn probe_candidates(
     registry: &Registry,
     state: &AppState,
     candidates: impl Iterator<Item = Candidate>,
     projection_days: u32,
     max_consequence_horizon_days: u16,
+    accumulator: &mut CampaignAccumulator,
+) -> Result<ProbeResult, GameplayHarnessError> {
+    probe_candidates_with_parallelism(
+        registry,
+        state,
+        candidates,
+        projection_days,
+        max_consequence_horizon_days,
+        false,
+        accumulator,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "candidate probing keeps validation, counterfactual projection, and selection accounting in one auditable path"
+)]
+fn probe_candidates_with_parallelism(
+    registry: &Registry,
+    state: &AppState,
+    candidates: impl Iterator<Item = Candidate>,
+    projection_days: u32,
+    max_consequence_horizon_days: u16,
+    parallel_counterfactuals: bool,
     accumulator: &mut CampaignAccumulator,
 ) -> Result<ProbeResult, GameplayHarnessError> {
     let baseline = GameplaySnapshot::capture(state);
@@ -5166,6 +5226,15 @@ fn probe_candidates(
         shared_projection_days,
     )?;
     let projected_baseline = GameplaySnapshot::capture(&projected_baseline_state);
+    let outcomes = probe_candidate_outcomes(
+        registry,
+        state,
+        &baseline,
+        &projected_baseline,
+        candidates,
+        shared_projection_days,
+        parallel_counterfactuals,
+    )?;
     let mut selected_substantive = None;
     let mut selected_operational = None;
     let mut housekeeping_fallback = None;
@@ -5180,27 +5249,22 @@ fn probe_candidates(
     let mut option_scores = Vec::new();
     let mut family_scores = Vec::new();
     let mut rejections = Vec::new();
-    for candidate in candidates {
+    for outcome in outcomes {
+        let candidate = outcome.candidate();
         let command_stats = accumulator
             .commands
             .get_mut(&candidate.kind)
             .expect("every command kind must have statistics");
         command_stats.considered = command_stats.considered.saturating_add(1);
-        let mut probe = state.clone();
-        match apply_player_command(registry, &mut probe, candidate.command.clone()) {
-            Ok(_) => {
+        match outcome {
+            CandidateProbeOutcome::Viable {
+                candidate,
+                evaluated,
+            } => {
                 command_stats.viable = command_stats.viable.saturating_add(1);
                 viable_count = viable_count.saturating_add(1);
                 if is_substantive_command_kind(candidate.kind) {
                     substantive_viable_count = substantive_viable_count.saturating_add(1);
-                    let evaluated = evaluate_viable_option(
-                        registry,
-                        &baseline,
-                        &projected_baseline,
-                        &probe,
-                        &candidate,
-                        shared_projection_days,
-                    )?;
                     let immediate_choice_profile = evaluated.immediate_profile_key.clone();
                     let projected_choice_profile = evaluated.projected_profile_key.clone();
                     immediate_profiles.insert(immediate_choice_profile.clone());
@@ -5227,9 +5291,8 @@ fn probe_candidates(
                     housekeeping_fallback = Some(candidate);
                 }
             }
-            Err(error) => {
+            CandidateProbeOutcome::Rejected { category, .. } => {
                 command_stats.rejected = command_stats.rejected.saturating_add(1);
-                let category = command_error_category(&error).to_owned();
                 *accumulator
                     .rejection_reasons
                     .entry(category.clone())
@@ -5260,6 +5323,121 @@ fn probe_candidates(
         distinct_projected_family_profiles: projected_family_profiles.len(),
         rejections,
     })
+}
+
+enum CandidateProbeOutcome {
+    Viable {
+        candidate: Candidate,
+        evaluated: Box<EvaluatedViableOption>,
+    },
+    Rejected {
+        candidate: Candidate,
+        category: String,
+    },
+}
+
+impl CandidateProbeOutcome {
+    fn candidate(&self) -> &Candidate {
+        match self {
+            Self::Viable { candidate, .. } | Self::Rejected { candidate, .. } => candidate,
+        }
+    }
+}
+
+fn probe_candidate(
+    registry: &Registry,
+    state: &AppState,
+    baseline: &GameplaySnapshot,
+    projected_baseline: &GameplaySnapshot,
+    candidate: Candidate,
+    projection_days: u32,
+) -> Result<CandidateProbeOutcome, GameplayHarnessError> {
+    let mut probe = state.clone();
+    match apply_player_command(registry, &mut probe, candidate.command.clone()) {
+        Ok(_) => Ok(CandidateProbeOutcome::Viable {
+            evaluated: Box::new(evaluate_viable_option(
+                registry,
+                baseline,
+                projected_baseline,
+                &probe,
+                &candidate,
+                projection_days,
+            )?),
+            candidate,
+        }),
+        Err(error) => Ok(CandidateProbeOutcome::Rejected {
+            candidate,
+            category: command_error_category(&error).to_owned(),
+        }),
+    }
+}
+
+fn probe_candidate_outcomes(
+    registry: &Registry,
+    state: &AppState,
+    baseline: &GameplaySnapshot,
+    projected_baseline: &GameplaySnapshot,
+    candidates: Vec<Candidate>,
+    projection_days: u32,
+    parallel_counterfactuals: bool,
+) -> Result<Vec<CandidateProbeOutcome>, GameplayHarnessError> {
+    if !parallel_counterfactuals || candidates.len() <= 1 {
+        return candidates
+            .into_iter()
+            .map(|candidate| {
+                probe_candidate(
+                    registry,
+                    state,
+                    baseline,
+                    projected_baseline,
+                    candidate,
+                    projection_days,
+                )
+            })
+            .collect();
+    }
+
+    // A campaign clone is intentionally self-contained but comparatively large. Cap nested
+    // workers so a high-core developer machine does not trade throughput for clone-memory churn.
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(4)
+        .min(candidates.len());
+    let chunk_size = candidates.len().div_ceil(worker_count);
+    let chunks: Vec<&[Candidate]> = candidates.chunks(chunk_size).collect();
+    let results = std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .cloned()
+                        .map(|candidate| {
+                            probe_candidate(
+                                registry,
+                                state,
+                                baseline,
+                                projected_baseline,
+                                candidate,
+                                projection_days,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| GameplayHarnessError::CounterfactualWorkerPanicked)?
+            })
+            .collect::<Result<Vec<_>, GameplayHarnessError>>()
+    })?;
+
+    Ok(results.into_iter().flatten().collect())
 }
 
 type ConsequenceProfileKey = (
