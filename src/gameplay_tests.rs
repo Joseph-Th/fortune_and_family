@@ -348,6 +348,46 @@ mod harness {
     }
 
     #[test]
+    fn organic_candidate_variation_is_bounded_reproducible_and_non_mutating() {
+        let mut state = make_test_campaign();
+        let original = state.clone();
+        let candidate = Candidate {
+            kind: GameplayCommandKind::SetHouseGovernance,
+            command: PlayerCommand::ConveneFamilyCouncil,
+            description: "sample nearby choice".to_owned(),
+            score: 0,
+        };
+        let accumulator = CampaignAccumulator::new();
+        let first =
+            organic_candidate_variation(&state, GameplayPersona::Steward, &accumulator, &candidate);
+        let second =
+            organic_candidate_variation(&state, GameplayPersona::Steward, &accumulator, &candidate);
+
+        assert_eq!(first, second, "variation must be reproducible");
+        assert!(
+            (-ORGANIC_CANDIDATE_VARIATION_RANGE..=ORGANIC_CANDIDATE_VARIATION_RANGE)
+                .contains(&first),
+            "variation must remain bounded: {first}"
+        );
+        assert_eq!(state, original, "variation must not consume the game RNG");
+
+        let mut samples = BTreeSet::new();
+        for _ in 0..12 {
+            state.clock.advance_one_day();
+            samples.insert(organic_candidate_variation(
+                &state,
+                GameplayPersona::Steward,
+                &accumulator,
+                &candidate,
+            ));
+        }
+        assert!(
+            samples.len() >= 3,
+            "variation should sample nearby choices across campaign time: {samples:?}"
+        );
+    }
+
+    #[test]
     fn multi_campaign_reports_are_deterministic_across_parallel_runs() {
         let registry = rivergate_registry_for_test();
         let mut config = focused_config(90);
@@ -2659,7 +2699,7 @@ mod candidates {
         );
 
         let candidate = single_candidate(&candidates, "owner distribution");
-        assert_eq!(candidate.kind, GameplayCommandKind::TransferBusinessCash);
+        assert_eq!(candidate.kind, GameplayCommandKind::WithdrawBusinessCash);
         let PlayerCommand::WithdrawBusinessCash {
             business_id: candidate_business_id,
             amount,
@@ -2684,8 +2724,8 @@ mod candidates {
         assert_eq!(
             accumulator
                 .commands
-                .get(&GameplayCommandKind::TransferBusinessCash)
-                .expect("cash-transfer stats must exist")
+                .get(&GameplayCommandKind::WithdrawBusinessCash)
+                .expect("cash-withdrawal stats must exist")
                 .activation_opportunities,
             1,
             "activation metrics must include safe owner distributions"

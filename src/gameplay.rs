@@ -49,8 +49,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use thiserror::Error;
 
-const ALL_COMMAND_KINDS: [GameplayCommandKind; 30] = [
+const ALL_COMMAND_KINDS: [GameplayCommandKind; 31] = [
     GameplayCommandKind::TransferBusinessCash,
+    GameplayCommandKind::WithdrawBusinessCash,
     GameplayCommandKind::AcquireBusiness,
     GameplayCommandKind::InvestInBusiness,
     GameplayCommandKind::SetBusinessPolicy,
@@ -103,7 +104,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 56;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 57;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -180,6 +181,7 @@ const AGENT_INFORMATION_DISTRICT_UNREST_THRESHOLD: u16 = 3_500;
 const AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD: u16 = 4_000;
 const AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD: u16 = 2_500;
 const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 14;
+const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GameplayPersona {
@@ -315,6 +317,7 @@ impl GameplayHarnessConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GameplayCommandKind {
     TransferBusinessCash,
+    WithdrawBusinessCash,
     AcquireBusiness,
     InvestInBusiness,
     SetBusinessPolicy,
@@ -355,7 +358,9 @@ pub enum GameplayCommandKind {
 const fn is_substantive_command_kind(kind: GameplayCommandKind) -> bool {
     !matches!(
         kind,
-        GameplayCommandKind::TransferBusinessCash | GameplayCommandKind::AcknowledgeNotification
+        GameplayCommandKind::TransferBusinessCash
+            | GameplayCommandKind::WithdrawBusinessCash
+            | GameplayCommandKind::AcknowledgeNotification
     )
 }
 
@@ -364,6 +369,7 @@ impl GameplayCommandKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::TransferBusinessCash => "transfer-cash",
+            Self::WithdrawBusinessCash => "withdraw-cash",
             Self::AcquireBusiness => "acquire-business",
             Self::InvestInBusiness => "invest-business",
             Self::SetBusinessPolicy => "set-policy",
@@ -399,6 +405,7 @@ impl GameplayCommandKind {
     const fn expected_activation_days(self) -> u32 {
         match self {
             Self::TransferBusinessCash
+            | Self::WithdrawBusinessCash
             | Self::AcquireBusiness
             | Self::InvestInBusiness
             | Self::SecureSupply
@@ -435,6 +442,7 @@ impl GameplayCommandKind {
         matches!(
             self,
             Self::TransferBusinessCash
+                | Self::WithdrawBusinessCash
                 | Self::AcquireBusiness
                 | Self::InvestInBusiness
                 | Self::SecureSupply
@@ -2309,8 +2317,11 @@ fn classify_player_command(
 ) -> Option<GameplayCommandKind> {
     let player_id = state.player_dynasty_id;
     match command {
-        PlayerCommand::TransferBusinessCash { .. } | PlayerCommand::WithdrawBusinessCash { .. } => {
+        PlayerCommand::TransferBusinessCash { .. } => {
             Some(GameplayCommandKind::TransferBusinessCash)
+        }
+        PlayerCommand::WithdrawBusinessCash { .. } => {
+            Some(GameplayCommandKind::WithdrawBusinessCash)
         }
         PlayerCommand::AcquireBusiness { .. } => Some(GameplayCommandKind::AcquireBusiness),
         PlayerCommand::InvestInBusiness { .. } => Some(GameplayCommandKind::InvestInBusiness),
@@ -3083,7 +3094,7 @@ fn gameplay_harness_limitations() -> Vec<String> {
         "Agents inspect authoritative simulation state when choosing what to investigate; commissioned reports can unlock traceable follow-up actions, but the harness does not measure whether a human can interpret the report or identify the best use.".to_owned(),
         "Alternative-choice profiles retain every successfully probed concrete target and distinguish measured impact from persistent target identity. Every viable option is projected over a shared horizon of three decision intervals (bounded by max_consequence_horizon_days), so delayed tradeoffs are compared consistently; this remains a bounded counterfactual rather than a full alternate campaign.".to_owned(),
         "A distinct target fingerprint proves that two branches preserve different strategic state, not that a human will value the difference or that the difference becomes important within the campaign.".to_owned(),
-        "Deterministic personas follow fixed priorities and do not model experimentation, misunderstanding, changing preferences, or interface friction.".to_owned(),
+        "Deterministic personas follow fixed priorities with a small state-derived exploration variation. The variation is reproducible, cannot consume the game RNG, and only changes close calls; it does not model misunderstanding, changing preferences, or interface friction.".to_owned(),
         "Choice breadth measures the options emitted by the configured persona policy, not every legal command a human could discover in the same state. Cross-persona matrices are required before treating a narrow candidate set as a hard game-system ceiling.".to_owned(),
         "Stress personas can prove that risky legal, labor, and financial routes exist, but they cannot prove that those risks are legible or attractive to a human player.".to_owned(),
         "AI-objective progress measures rival activity, but the harness cannot prove that a human recognizes which house caused a setback or understands that rival's intent.".to_owned(),
@@ -3757,6 +3768,7 @@ fn consequence_horizon_days(
         ) => 180,
         Some(
             GameplayCommandKind::TransferBusinessCash
+            | GameplayCommandKind::WithdrawBusinessCash
             | GameplayCommandKind::AcquireBusiness
             | GameplayCommandKind::InvestInBusiness
             | GameplayCommandKind::SetBusinessPolicy
@@ -3842,6 +3854,9 @@ fn record_activation_opportunities(
                 record.kind() == AuditKind::CrisisResponse
                     && record.subject() == format!("crisis:{}", crisis.id)
             })
+            && crisis_responses(persona)
+                .into_iter()
+                .any(|response| can_afford_crisis_response(state, crisis, response))
     });
     let labor_opportunity = state.employment.values().any(|agreement| {
         agreement.status == EmploymentStatus::Disputed
@@ -3859,7 +3874,8 @@ fn record_activation_opportunities(
     let property_liquidation_opportunity = has_property_liquidation_opportunity(registry, state);
     let institution_withdrawal_opportunity = has_institution_withdrawal_opportunity(state);
     let extend_credit_opportunity = has_extend_credit_opportunity(registry, state, persona);
-    let transfer_cash_opportunity = has_transfer_cash_opportunity(registry, state, persona);
+    let transfer_cash_opportunity = has_transfer_cash_opportunity(registry, state);
+    let withdrawal_cash_opportunity = has_withdrawal_cash_opportunity(registry, state, persona);
     for (kind, available) in [
         (GameplayCommandKind::RespondToCrisis, crisis_opportunity),
         (GameplayCommandKind::ResolveLaborDispute, labor_opportunity),
@@ -3881,6 +3897,10 @@ fn record_activation_opportunities(
             GameplayCommandKind::TransferBusinessCash,
             transfer_cash_opportunity,
         ),
+        (
+            GameplayCommandKind::WithdrawBusinessCash,
+            withdrawal_cash_opportunity,
+        ),
     ] {
         record_activation_opportunity(accumulator, kind, available);
     }
@@ -3895,6 +3915,7 @@ fn record_activation_opportunities(
                 | GameplayCommandKind::WithdrawFromInstitution
                 | GameplayCommandKind::ExtendCredit
                 | GameplayCommandKind::TransferBusinessCash
+                | GameplayCommandKind::WithdrawBusinessCash
         )
     }) {
         record_activation_opportunity(accumulator, kind, generated_kinds.contains(&kind));
@@ -3960,7 +3981,8 @@ fn record_quiet_diagnostic(
     if actionable {
         return None;
     }
-    if raw_generated_kinds.contains(&GameplayCommandKind::TransferBusinessCash)
+    if (raw_generated_kinds.contains(&GameplayCommandKind::TransferBusinessCash)
+        || raw_generated_kinds.contains(&GameplayCommandKind::WithdrawBusinessCash))
         && raw_generated_kinds
             .iter()
             .all(|kind| !is_substantive_command_kind(*kind))
@@ -4170,7 +4192,11 @@ fn probe_candidates(
                     if selected_substantive.is_none() {
                         selected_substantive = Some(candidate);
                     }
-                } else if candidate.kind == GameplayCommandKind::TransferBusinessCash {
+                } else if matches!(
+                    candidate.kind,
+                    GameplayCommandKind::TransferBusinessCash
+                        | GameplayCommandKind::WithdrawBusinessCash
+                ) {
                     if selected_operational.is_none() {
                         selected_operational = Some(candidate);
                     }
@@ -4556,7 +4582,13 @@ fn ranked_candidates(
         candidate.score = candidate
             .score
             .saturating_add(rank_adjustment(candidate.kind, state, persona, accumulator))
-            .saturating_add(legal_funding_candidate_adjustment(state, candidate));
+            .saturating_add(legal_funding_candidate_adjustment(state, candidate))
+            .saturating_add(organic_candidate_variation(
+                state,
+                persona,
+                accumulator,
+                candidate,
+            ));
     }
     candidates.sort_by(|left, right| {
         right
@@ -4566,6 +4598,39 @@ fn ranked_candidates(
             .then_with(|| left.description.cmp(&right.description))
     });
     (candidates, generated_kinds)
+}
+
+/// Adds bounded, state-derived exploration noise to otherwise deterministic policy scores.
+///
+/// The harness must sample nearby legal choices instead of replaying one rigid policy path in
+/// every campaign. The variation is derived from a copy of the campaign RNG, so it is fully
+/// reproducible and cannot consume or perturb the simulation's random stream. Its small range
+/// only changes close calls; urgency, safety reserves, and persona priorities remain dominant.
+fn organic_candidate_variation(
+    state: &AppState,
+    persona: GameplayPersona,
+    accumulator: &CampaignAccumulator,
+    candidate: &Candidate,
+) -> i64 {
+    let mut variation_rng = state.rng;
+    let mut value = variation_rng.next_u64();
+    value = value.wrapping_add(state.clock.day().cast_unsigned());
+    value = value.wrapping_add(u64::from(accumulator.decision_cycles));
+    for byte in persona
+        .label()
+        .bytes()
+        .chain(candidate.kind.label().bytes())
+        .chain(candidate.description.bytes())
+    {
+        value ^= u64::from(byte);
+        value = value.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(17);
+    }
+    let span = ORGANIC_CANDIDATE_VARIATION_RANGE
+        .saturating_mul(2)
+        .saturating_add(1);
+    i64::try_from(value % u64::try_from(span).expect("variation span must fit u64"))
+        .expect("variation sample must fit i64")
+        - ORGANIC_CANDIDATE_VARIATION_RANGE
 }
 
 fn legal_funding_candidate_adjustment(state: &AppState, candidate: &Candidate) -> i64 {
@@ -5163,7 +5228,20 @@ fn generate_business_candidates(
     generate_owner_distribution_candidate(registry, state, persona, &player_businesses, candidates);
 }
 
-fn has_transfer_cash_opportunity(
+fn has_transfer_cash_opportunity(registry: &Registry, state: &AppState) -> bool {
+    let player_businesses: Vec<_> = state
+        .businesses
+        .ids_for_owner(state.player_dynasty_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.businesses.get(*id))
+        .collect();
+    let mut candidates = Vec::new();
+    generate_cash_rebalance_candidate(registry, state, &player_businesses, &mut candidates);
+    !candidates.is_empty()
+}
+
+fn has_withdrawal_cash_opportunity(
     registry: &Registry,
     state: &AppState,
     persona: GameplayPersona,
@@ -5176,7 +5254,6 @@ fn has_transfer_cash_opportunity(
         .filter_map(|id| state.businesses.get(*id))
         .collect();
     let mut candidates = Vec::new();
-    generate_cash_rebalance_candidate(registry, state, &player_businesses, &mut candidates);
     generate_owner_distribution_candidate(
         registry,
         state,
@@ -5439,7 +5516,7 @@ fn generate_owner_distribution_candidate(
     };
     push_candidate(
         candidates,
-        GameplayCommandKind::TransferBusinessCash,
+        GameplayCommandKind::WithdrawBusinessCash,
         PlayerCommand::WithdrawBusinessCash {
             business_id: source.id(),
             amount,
@@ -9429,6 +9506,7 @@ fn institutional_conversion_priority(
         | GameplayCommandKind::FundPublicWork
         | GameplayCommandKind::ExerciseOfficePower => bonus,
         GameplayCommandKind::TransferBusinessCash
+        | GameplayCommandKind::WithdrawBusinessCash
         | GameplayCommandKind::AcquireBusiness
         | GameplayCommandKind::InvestInBusiness
         | GameplayCommandKind::SetBusinessPolicy
@@ -9482,6 +9560,7 @@ fn recovery_priority_adjustment(state: &AppState, kind: GameplayCommandKind) -> 
     }
     match kind {
         GameplayCommandKind::TransferBusinessCash
+        | GameplayCommandKind::WithdrawBusinessCash
         | GameplayCommandKind::InvestInBusiness
         | GameplayCommandKind::BorrowFunds
         | GameplayCommandKind::AcquireBusiness
@@ -9529,6 +9608,7 @@ fn steward_weight(kind: GameplayCommandKind) -> i64 {
         GameplayCommandKind::AcknowledgeNotification
         | GameplayCommandKind::WithdrawFromInstitution => 300,
         GameplayCommandKind::TransferBusinessCash
+        | GameplayCommandKind::WithdrawBusinessCash
         | GameplayCommandKind::AcquireBusiness
         | GameplayCommandKind::SellOutput
         | GameplayCommandKind::BorrowFunds
@@ -9554,7 +9634,8 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::SetBusinessPolicy
             | GameplayCommandKind::BuyProperty
             | GameplayCommandKind::SellProperty
-            | GameplayCommandKind::TransferBusinessCash => 850,
+            | GameplayCommandKind::TransferBusinessCash
+            | GameplayCommandKind::WithdrawBusinessCash => 850,
             GameplayCommandKind::BorrowFunds
             | GameplayCommandKind::CommissionInformation
             | GameplayCommandKind::DesignateHeir => 700,
@@ -9596,6 +9677,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             GameplayCommandKind::ConveneFamilyCouncil => 800,
             GameplayCommandKind::SetHouseGovernance => 700,
             GameplayCommandKind::TransferBusinessCash
+            | GameplayCommandKind::WithdrawBusinessCash
             | GameplayCommandKind::AcquireBusiness
             | GameplayCommandKind::InvestInBusiness
             | GameplayCommandKind::SetBusinessPolicy
@@ -9628,6 +9710,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             GameplayCommandKind::EducateFamilyMember => 420,
             GameplayCommandKind::ConveneFamilyCouncil => 350,
             GameplayCommandKind::TransferBusinessCash
+            | GameplayCommandKind::WithdrawBusinessCash
             | GameplayCommandKind::InvestInBusiness
             | GameplayCommandKind::SetBusinessPolicy
             | GameplayCommandKind::SecureSupply
@@ -9664,7 +9747,9 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         GameplayCommandKind::AcknowledgeNotification => notification_urgency(state),
         GameplayCommandKind::BorrowFunds => borrowing_urgency(state),
         GameplayCommandKind::SellProperty => 3_500,
-        GameplayCommandKind::TransferBusinessCash => impaired_business_urgency(state, 2_800),
+        GameplayCommandKind::TransferBusinessCash | GameplayCommandKind::WithdrawBusinessCash => {
+            impaired_business_urgency(state, 2_800)
+        }
         GameplayCommandKind::LeverageInformation => 600,
         GameplayCommandKind::WithdrawFromInstitution => institution_withdrawal_urgency(state),
         GameplayCommandKind::FileLegalCase => legal_case_urgency(state),
@@ -12570,6 +12655,7 @@ const fn commercial_domain_player_commands(
     match domain {
         GameplayDomain::Economy => &[
             GameplayCommandKind::TransferBusinessCash,
+            GameplayCommandKind::WithdrawBusinessCash,
             GameplayCommandKind::AcquireBusiness,
             GameplayCommandKind::InvestInBusiness,
             GameplayCommandKind::BorrowFunds,
@@ -12738,10 +12824,15 @@ fn add_operational_rebalancing_finding(
     aggregate: &GameplayAggregate,
     findings: &mut Vec<GameplayFinding>,
 ) {
-    let operational = aggregate
+    let transfers = aggregate
         .commands
         .get(&GameplayCommandKind::TransferBusinessCash)
         .map_or(0, |stats| stats.executed);
+    let withdrawals = aggregate
+        .commands
+        .get(&GameplayCommandKind::WithdrawBusinessCash)
+        .map_or(0, |stats| stats.executed);
+    let operational = transfers.saturating_add(withdrawals);
     let housekeeping = aggregate
         .commands
         .get(&GameplayCommandKind::AcknowledgeNotification)
@@ -12764,7 +12855,7 @@ fn add_operational_rebalancing_finding(
         },
         title: "Operational liquidity management dominates player decisions".to_owned(),
         evidence: format!(
-            "Portfolio cash rebalancing accounted for {operational} of {player_actions} non-notification actions ({share}%). It keeps businesses alive, but is operational support rather than a strategic commitment; the harness excludes it from substantive-action scores and reports it separately so treasury plumbing cannot masquerade as dynasty direction."
+            "Portfolio cash rebalancing accounted for {operational} of {player_actions} non-notification actions ({share}%): {transfers} inter-business transfers and {withdrawals} business-cash withdrawals. These actions keep the portfolio liquid, but are operational support rather than a strategic commitment; the harness excludes them from substantive-action scores and reports them separately so treasury plumbing cannot masquerade as dynasty direction."
         ),
     });
 }

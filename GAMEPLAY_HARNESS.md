@@ -103,6 +103,12 @@ Personas are deterministic diagnostic policies, not optimal strategies.
 
 The personas should expose different viable routes through the same canonical systems. Candidate generation may use persona-specific ranking and risk tolerances, but it must not create domain state or bypass canonical validation.
 
+Within a persona, candidate scores include a small reproducible exploration
+variation derived from the current campaign state. It can change a close call
+or target selection without overriding urgency, reserve protection, or persona
+priorities, so repeated matrices sample organic nearby play while remaining
+replayable.
+
 ## Decision cycle
 
 Each decision cycle:
@@ -173,7 +179,7 @@ Quiet cycles with no recorded cause are dormant state: the game world offered no
 
 The diagnosis is recorded per campaign and summed in the aggregate and persona aggregates. Each trace step that took no substantive action also carries a human-readable `no_action_reason`, so a chronological decision log explains *why* each quiet gap happened.
 
-Activation opportunities are recorded for every command kind. Commands with a dedicated world-state predicate (crisis, labor, legal, settlement, property liquidation, institution withdrawal, credit extension, and business-cash transfer) use that predicate; every other command kind records an activation whenever its generator built a candidate. This keeps the `triggers` column and the generator-gap diagnosis meaningful for all command families.
+Activation opportunities are recorded for every command kind. Commands with a dedicated world-state predicate (crisis, labor, legal, settlement, property liquidation, institution withdrawal, credit extension, business-cash transfer, and business-cash withdrawal) use that predicate; every other command kind records an activation whenever its generator built a candidate. This keeps the `triggers` column and the generator-gap diagnosis meaningful for all command families.
 
 ## Report contract
 
@@ -198,9 +204,10 @@ changes at command commit, changes attributable to the selected command at the
 configured horizon versus a no-action branch, and ambient changes from that
 no-action branch. This makes a trace answer both “what did the command do?” and
 “what would have happened anyway?” with concrete before/after values, not only
-domain labels. Portfolio cash transfers are retained as observable operational
-actions but excluded from substantive-action and strategic-streak metrics; a
-separate finding reports when they dominate the agent's activity.
+domain labels. Portfolio cash transfers and business-cash withdrawals are
+retained as separate observable operational actions but excluded from
+substantive-action and strategic-streak metrics; a separate finding reports
+when their combined activity dominates the agent's activity.
 
 Viable alternatives retain a `projected_horizon_days` value and are compared
 over a shared horizon of three decision intervals, bounded by
@@ -209,6 +216,11 @@ with their projected measures so a decision log explains the tradeoff, not just
 the selected command.
 
 The report should preserve enough seed, persona, background, phase, entity, and trace context to reproduce a material finding.
+
+`TransferBusinessCash` and `WithdrawBusinessCash` are separate report routes
+because the game exposes them as separate commands. Both remain outside
+substantive-action scores, while operational-liquidity findings retain their
+individual counts.
 
 `ExtendCredit` command statistics separately count accepted loans that changed
 business state immediately and loans that remained treasury-only, so lending
