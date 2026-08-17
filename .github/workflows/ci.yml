@@ -26,9 +26,7 @@ jobs:
         run: bash -n scripts/test.sh scripts/verify_cli.sh
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Check
-        run: cargo check --all-targets --all-features --locked
-      - name: Clippy
+      - name: Compile and lint
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Fast tests
         run: bash scripts/test.sh fast

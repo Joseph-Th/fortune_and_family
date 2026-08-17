@@ -44,12 +44,21 @@ run_to_file() {
 }
 
 resolve_python() {
+  if [[ -n "${CIVIC_DYNASTY_PYTHON:-}" ]]; then
+    if command -v "$CIVIC_DYNASTY_PYTHON" >/dev/null 2>&1; then
+      printf '%s' "$CIVIC_DYNASTY_PYTHON"
+      return 0
+    fi
+    fail "CIVIC_DYNASTY_PYTHON is not executable: $CIVIC_DYNASTY_PYTHON"
+  fi
   if python3 --version >/dev/null 2>&1; then
     printf 'python3'
   elif python --version >/dev/null 2>&1; then
     printf 'python'
+  elif py --version >/dev/null 2>&1; then
+    printf 'py'
   else
-    fail 'Python is required to validate CLI structured output'
+    fail 'Python is required to validate CLI structured output; install Python or set CIVIC_DYNASTY_PYTHON'
   fi
 }
 
@@ -73,8 +82,17 @@ esac
 
 binary=${CIVIC_DYNASTY_BINARY:-target/$profile/civic-dynasty}
 if [[ -z "${CIVIC_DYNASTY_BINARY:-}" ]]; then
-  cargo build --quiet --locked "${cargo_profile_args[@]}" --bin civic-dynasty \
-    || fail "CLI $profile binary build failed"
+  build_log=$(mktemp)
+  trap 'rm -f "$build_log"' EXIT
+  if ! cargo build --quiet --locked "${cargo_profile_args[@]}" --bin civic-dynasty \
+    >"$build_log" 2>&1; then
+    cat "$build_log" >&2
+    rm -f "$build_log"
+    trap - EXIT
+    fail "CLI $profile binary build failed; compiler diagnostics are above"
+  fi
+  rm -f "$build_log"
+  trap - EXIT
 fi
 if [[ ! -x "$binary" && -x "${binary}.exe" ]]; then
   binary="${binary}.exe"

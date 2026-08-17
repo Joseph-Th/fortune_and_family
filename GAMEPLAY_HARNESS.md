@@ -77,7 +77,7 @@ bash scripts/test.sh gameplay-audit
 | `--decision-interval` | Normal days advanced after a player decision | `30` |
 | `--max-probes` | Maximum candidate commands validated per decision | `16` |
 | `--consequence-horizon` | Maximum delayed-attribution horizon in days | `360` |
-| `--trace-limit` | Representative trace steps retained per campaign | `40` |
+| `--trace-limit` | Chronological decision-trace steps retained per campaign | `40` |
 | `--decision-log` | Campaigns whose full retained trace renders in the human report; `0` disables | `3` |
 | `--persona` | Repeatable persona filter; omit for all | All |
 | `--background` | Repeatable background filter; omit for all | All |

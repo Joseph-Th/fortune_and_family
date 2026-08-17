@@ -28,14 +28,64 @@ EOF
 }
 
 resolve_python() {
+  if [[ -n "${CIVIC_DYNASTY_PYTHON:-}" ]]; then
+    if command -v "$CIVIC_DYNASTY_PYTHON" >/dev/null 2>&1; then
+      printf '%s' "$CIVIC_DYNASTY_PYTHON"
+      return 0
+    fi
+    printf 'CIVIC_DYNASTY_PYTHON is not executable: %s\n' "$CIVIC_DYNASTY_PYTHON" >&2
+    return 1
+  fi
   if python3 --version >/dev/null 2>&1; then
     printf 'python3'
   elif python --version >/dev/null 2>&1; then
     printf 'python'
+  elif py --version >/dev/null 2>&1; then
+    printf 'py'
   else
-    printf 'Python is required for repository validation\n' >&2
+    printf 'Python is required for repository validation; install Python or set CIVIC_DYNASTY_PYTHON\n' >&2
     return 1
   fi
+}
+
+ensure_cli_binary() {
+  if [[ -n "${CIVIC_DYNASTY_BINARY:-}" ]]; then
+    if [[ ! -x "$CIVIC_DYNASTY_BINARY" && -x "${CIVIC_DYNASTY_BINARY}.exe" ]]; then
+      export CIVIC_DYNASTY_BINARY="${CIVIC_DYNASTY_BINARY}.exe"
+    fi
+    if [[ ! -x "$CIVIC_DYNASTY_BINARY" ]]; then
+      printf 'CIVIC_DYNASTY_BINARY is not executable: %q\n' "$CIVIC_DYNASTY_BINARY" >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  local profile=${1:-debug}
+  local profile_args=()
+  case "$profile" in
+    debug)
+      ;;
+    release)
+      profile_args=(--release)
+      ;;
+    *)
+      printf 'unsupported CLI profile %q (expected debug or release)\n' "$profile" >&2
+      return 2
+      ;;
+  esac
+
+  run_step "Build $profile CLI once" \
+    cargo build --quiet --locked "${profile_args[@]}" --bin civic-dynasty
+
+  local binary="target/$profile/civic-dynasty"
+  if [[ ! -x "$binary" && -x "${binary}.exe" ]]; then
+    binary="${binary}.exe"
+  fi
+  if [[ ! -x "$binary" ]]; then
+    printf 'CLI binary %q was not produced by the %s build\n' "$binary" "$profile" >&2
+    return 1
+  fi
+  export CIVIC_DYNASTY_BINARY="$binary"
 }
 
 run_shell_syntax() {
@@ -55,11 +105,8 @@ run_cli_gameplay() {
 }
 
 run_playtest() {
-  if [[ -n "${CIVIC_DYNASTY_BINARY:-}" ]]; then
-    "$CIVIC_DYNASTY_BINARY" playtest "$@"
-  else
-    cargo run --release --quiet --locked -- playtest "$@"
-  fi
+  ensure_cli_binary release
+  "$CIVIC_DYNASTY_BINARY" playtest "$@"
 }
 
 run_standard() {
@@ -393,6 +440,7 @@ case "$mode" in
     ;;
   adapters)
     [[ $# -eq 1 ]] || usage
+    ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
     run_cli_core
     run_cli_art
     run_cli_gameplay
