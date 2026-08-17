@@ -22,24 +22,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
-      - name: Shell syntax
-        run: bash -n scripts/test.sh scripts/verify_cli.sh
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Compile and lint
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings
-      - name: Fast tests
-        run: bash scripts/test.sh fast
-      - name: Documentation consistency
-        run: python3 scripts/check_docs.py
-      - name: Documentation tests
-        run: cargo test --quiet --locked --doc
-      - name: Documentation
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps --locked
-      - name: Whitespace errors
-        run: git diff-tree --check --no-commit-id --root -r -m HEAD
+      - name: Fast verification lane
+        run: bash scripts/test.sh ci-verify
 
   gates:
     runs-on: ubuntu-latest
@@ -50,23 +34,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
-      - name: Soak tests
-        run: bash scripts/test.sh soak
-      - name: Release tests
-        run: cargo test --release --quiet --locked --lib
-      - name: Build release CLI once
-        run: cargo build --release --quiet --locked --bin civic-dynasty
-      - name: CLI smoke tests
-        env:
-          CIVIC_DYNASTY_BINARY: target/release/civic-dynasty
-        run: bash scripts/test.sh adapters
-      - name: Gameplay quality gates
-        env:
-          CIVIC_DYNASTY_BINARY: target/release/civic-dynasty
-        run: bash scripts/test.sh gameplay
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit@0.22.2
-      - name: Dependency audit
-        run: cargo audit
+      - name: Deep gates lane
+        run: bash scripts/test.sh ci-gates

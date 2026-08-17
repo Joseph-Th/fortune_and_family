@@ -46,6 +46,7 @@ def check_status_contracts() -> None:
     state = read("src/core/state.rs")
     gameplay = read("src/gameplay.rs")
     art_harness = read("src/art/harness.rs")
+    read("scripts/check_gameplay.py")
     status = read("STATUS.md")
 
     crate_version = capture(r'^version\s*=\s*"([^"]+)"', cargo, "Cargo.toml")

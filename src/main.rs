@@ -436,8 +436,13 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
     let days_per_second =
         u128::from(report.aggregate.simulated_days).saturating_mul(1_000_000) / elapsed_micros;
     eprintln!(
-        "playtest completed in {:.3}s ({days_per_second} simulated days/s)",
+        "playtest completed in {:.3}s ({} campaigns, {} simulated days, {} actions, score {}/100, {} findings, {days_per_second} simulated days/s)",
         elapsed.as_secs_f64(),
+        report.aggregate.campaigns,
+        report.aggregate.simulated_days,
+        report.aggregate.successful_actions,
+        report.aggregate.scores.overall,
+        report.findings.len(),
     );
     if let Some(minimum) = args.minimum_overall
         && report.aggregate.scores.overall < minimum

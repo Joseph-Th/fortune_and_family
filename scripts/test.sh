@@ -22,6 +22,8 @@ usage:
   $0 adapters            run all CLI smoke groups
   $0 gameplay            run release gameplay and generation-length quality gates
   $0 gameplay-audit      run mature multi-seed, generation, and credit-stress design audits
+  $0 ci-verify            run the fast CI verification lane
+  $0 ci-gates             run the deep CI gates after cargo-audit is installed
   $0 all                 run syntax, library, doc, soak, CLI, and gameplay tests
 EOF
   exit 2
@@ -274,18 +276,8 @@ run_generation_gameplay() {
       --fail-on-critical \
       --json \
       --output target/gameplay-generation-gate.json
-  run_step 'Generation-length fantasy validation' "$python_command" -c '
-import json
-from pathlib import Path
-
-report = json.loads(Path("target/gameplay-generation-gate.json").read_text(encoding="utf-8"))
-campaigns = report["campaigns"]
-if not campaigns or campaigns[0]["fantasy_arc"]["first_succession_day"] is None:
-    raise SystemExit("generation-length gameplay gate did not reach succession")
-phase = report["aggregate"]["phase_stats"].get("SuccessionLegacy", {})
-if phase.get("decision_cycles", 0) == 0:
-    raise SystemExit("generation-length gameplay gate did not observe succession-and-legacy decisions")
-'
+  run_step 'Generation-length fantasy validation' "$python_command" scripts/check_gameplay.py generation \
+    target/gameplay-generation-gate.json
 }
 
 run_gameplay_audit() {
@@ -325,76 +317,31 @@ run_gameplay_audit() {
       --fail-on-critical \
       --json \
       --output target/gameplay-credit-stress.json
-  run_step 'Credit stress validation' "$python_command" -c '
-import json
-from pathlib import Path
+  run_step 'Credit stress validation' "$python_command" scripts/check_gameplay.py credit-stress \
+    target/gameplay-credit-stress.json
+  run_step 'Deep gameplay fantasy validation' "$python_command" scripts/check_gameplay.py generation-matrix \
+    target/gameplay-generation-matrix.json
+}
 
-report = json.loads(Path("target/gameplay-credit-stress.json").read_text(encoding="utf-8"))
-campaigns = report["campaigns"]
-credit_actions = sum(
-    campaign["commands"]["ExtendCredit"]["executed"] for campaign in campaigns
-)
-minimum_credit_sample = len(campaigns) * 2
-if credit_actions < minimum_credit_sample:
-    raise SystemExit(
-        f"credit stress audit observed only {credit_actions} player loans; "
-        f"requires at least {minimum_credit_sample}"
-    )
-distressed = [
-    campaign
-    for campaign in campaigns
-    if campaign["maximum_player_delinquent_lending"] > 0
-    or campaign["maximum_player_defaulted_lending"] > 0
-]
-if not distressed:
-    raise SystemExit("credit stress audit observed no distress on player-issued loans")
-enforcement_cases = sum(campaign["player_debt_enforcement_cases"] for campaign in campaigns)
-if enforcement_cases == 0:
-    raise SystemExit("credit stress audit observed player lending distress but no debt enforcement")
-'
-  run_step 'Deep gameplay fantasy validation' "$python_command" -c '
-import json
-from pathlib import Path
+run_ci_verify() {
+  run_shell_syntax
+  run_step 'Format' cargo fmt --all -- --check
+  run_step 'Compile and lint' cargo clippy --all-targets --all-features --locked -- -D warnings
+  run_fast
+  run_docs
+  run_step 'Documentation warnings' env RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+  run_step 'Whitespace errors' git diff-tree --check --no-commit-id --root -r -m HEAD
+}
 
-report = json.loads(Path("target/gameplay-generation-matrix.json").read_text(encoding="utf-8"))
-campaigns = report["campaigns"]
-expected_personas = {"Steward", "Entrepreneur", "PowerBroker", "Opportunist"}
-observed_personas = {campaign["persona"] for campaign in campaigns}
-if observed_personas != expected_personas:
-    raise SystemExit(f"generation audit personas differ: {sorted(observed_personas)}")
-missing = [campaign["persona"] for campaign in campaigns if campaign["fantasy_arc"]["first_succession_day"] is None]
-if missing:
-    raise SystemExit(f"generation audit did not reach succession for: {missing}")
-missing_transitions = [
-    campaign["persona"]
-    for campaign in campaigns
-    if campaign.get("succession_transition") is None
-]
-if missing_transitions:
-    raise SystemExit(
-        f"generation audit did not capture succession transitions for: {missing_transitions}"
-    )
-for campaign in campaigns:
-    transition = campaign["succession_transition"]
-    succession_day = campaign["fantasy_arc"]["first_succession_day"]
-    if transition["day"] != succession_day:
-        persona = campaign["persona"]
-        transition_day = transition["day"]
-        raise SystemExit(
-            f"{persona} succession transition day {transition_day} "
-            f"did not match fantasy milestone day {succession_day}"
-        )
-stranded = [
-    finding
-    for finding in report["findings"]
-    if finding["title"] == "Political succession can strand institutional recovery"
-]
-if stranded:
-    raise SystemExit(stranded[0]["evidence"])
-phase = report["aggregate"]["phase_stats"].get("SuccessionLegacy", {})
-if phase.get("decision_cycles", 0) == 0 or phase.get("substantive_actions", 0) == 0:
-    raise SystemExit("generation audit did not observe substantive succession-and-legacy play")
-'
+run_ci_gates() {
+  run_soak
+  run_step 'Release library tests' cargo test --release --quiet --locked --lib
+  ensure_cli_binary release
+  run_cli_core
+  run_cli_art
+  run_cli_gameplay
+  run_gameplay
+  run_step 'Dependency audit' cargo audit
 }
 
 case "$mode" in
@@ -454,10 +401,19 @@ case "$mode" in
     [[ $# -eq 1 ]] || usage
     run_gameplay_audit
     ;;
+  ci-verify)
+    [[ $# -eq 1 ]] || usage
+    run_ci_verify
+    ;;
+  ci-gates)
+    [[ $# -eq 1 ]] || usage
+    run_ci_gates
+    ;;
   all)
     [[ $# -eq 1 ]] || usage
     run_standard
     run_soak
+    ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
     run_cli_art
     run_cli_gameplay
     run_gameplay

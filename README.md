@@ -144,6 +144,7 @@ src/
   *_tests.rs          Large sibling test suites
   test_support.rs     Shared deterministic fixtures and diagnostics
 scripts/
+  check_gameplay.py    Structured validation for long-running gameplay gate reports
   check_docs.py       Documentation consistency checks
   test.sh             Test tier runner
   verify_cli.sh       CLI smoke groups
