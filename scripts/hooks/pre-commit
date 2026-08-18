@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Fast local pre-commit gate: formatting, shell syntax, and whitespace.
+# The heavier standard lane runs on push; use `git commit --no-verify` to skip
+# this gate entirely when iterating quickly.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+cargo fmt --all -- --check
+bash -n scripts/test.sh scripts/verify_cli.sh
+git diff --cached --check

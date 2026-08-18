@@ -2,9 +2,10 @@
 
 use crate::core::{
     AppState, AuditKind, AuditRecord, AuditSubject, BusinessStatus, CharacterStatus,
-    CivicDebtStatus, ContractStatus, CrisisKind, CrisisStatus, EmploymentStatus, FamilyLinkKind,
-    HouseGovernance, LawKind, LegalCaseKind, LegalCaseStatus, LoanStatus, NewGameConfig,
-    ObjectiveStatus, OfficePower, PublicWorkKind, PublicWorkStatus, StartingBackground,
+    CivicDebtStatus, ContractStatus, CrisisKind, CrisisStatus, DynastyPair, EmploymentStatus,
+    FamilyLinkKind, HouseGovernance, LawKind, LegalCaseKind, LegalCaseStatus, LoanStatus,
+    NewGameConfig, ObjectiveStatus, OfficePower, PublicWorkKind, PublicWorkStatus,
+    StartingBackground,
 };
 use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, InstitutionId};
 use crate::money::{Money, Quantity, checked_cost_for};
@@ -178,14 +179,14 @@ const AGENT_STRATEGIC_WITHDRAWAL_MAX: Money = Money::from_copper(50_000);
 /// Annual yield below which an owned property is considered underperforming and
 /// candidates to reposition (sell) it for better capital use are considered.
 const PROPERTY_PORTFOLIO_REPOSITIONING_YIELD_BASIS_POINTS: u16 = 800;
-const AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 720;
 const AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS: u16 = 1_500;
 const AGENT_INFORMATION_POLITICAL_VULNERABILITY_LEGITIMACY: u16 = 2_500;
 const AGENT_INFORMATION_LEVERAGE_DELAY_DAYS: i64 = 90;
+const AGENT_ROUTINE_COMMISSION_INTERVAL_DAYS: i64 = 720;
 const INFORMATION_ROUTINE_PAIR_WINDOW_DAYS: i64 = 180;
-const AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS: u64 = 1_000;
-const AGENT_INFORMATION_MARKET_SHORTAGE_BASIS_POINTS: u64 = 2_500;
-const AGENT_INFORMATION_MARKET_CONTRACT_GAP_BASIS_POINTS: u64 = 500;
+const AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS: u64 = 2_000;
+const AGENT_INFORMATION_MARKET_SHORTAGE_BASIS_POINTS: u64 = 4_000;
+const AGENT_INFORMATION_MARKET_CONTRACT_GAP_BASIS_POINTS: u64 = 1_000;
 const AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD: u16 = 4_500;
 const AGENT_INFORMATION_DISTRICT_UNREST_THRESHOLD: u16 = 3_500;
 const AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD: u16 = 4_000;
@@ -4128,8 +4129,8 @@ fn record_activation_opportunities(
     let property_liquidation_opportunity = has_property_liquidation_opportunity(registry, state);
     let institution_withdrawal_opportunity = has_institution_withdrawal_opportunity(state);
     let extend_credit_opportunity = has_extend_credit_opportunity(registry, state, persona);
-    let transfer_cash_opportunity = has_transfer_cash_opportunity(registry, state);
-    let withdrawal_cash_opportunity = has_withdrawal_cash_opportunity(registry, state, persona);
+    let transfer_cash_opportunity = has_transfer_cash_opportunity(state);
+    let withdrawal_cash_opportunity = has_withdrawal_cash_opportunity(registry, state);
     for (kind, available) in [
         (GameplayCommandKind::RespondToCrisis, crisis_opportunity),
         (GameplayCommandKind::ResolveLaborDispute, labor_opportunity),
@@ -4193,7 +4194,7 @@ fn has_world_opportunity(
     match kind {
         GameplayCommandKind::SecureSupply => has_secure_supply_opportunity(registry, state),
         GameplayCommandKind::SellOutput => has_sell_output_opportunity(registry, state),
-        GameplayCommandKind::BuyProperty => has_buy_property_opportunity(state, persona),
+        GameplayCommandKind::BuyProperty => has_buy_property_opportunity(state),
         GameplayCommandKind::EnactLaw => has_enact_law_opportunity(registry, state),
         GameplayCommandKind::StartPublicWork => has_start_public_work_opportunity(registry, state),
         GameplayCommandKind::FundPublicWork => has_fund_public_work_opportunity(state),
@@ -4213,7 +4214,9 @@ fn has_world_opportunity(
         GameplayCommandKind::CommissionInformation => {
             has_information_commission_opportunity(registry, state, persona)
         }
-        GameplayCommandKind::LeverageInformation => has_information_leverage_opportunity(state),
+        GameplayCommandKind::LeverageInformation => {
+            has_information_leverage_opportunity(registry, state)
+        }
         GameplayCommandKind::BorrowFunds => has_borrow_opportunity(state, persona),
         GameplayCommandKind::AcknowledgeNotification => {
             has_notification_acknowledgement_opportunity(state)
@@ -4257,17 +4260,9 @@ fn has_secure_supply_opportunity(registry: &Registry, state: &AppState) -> bool 
                     return false;
                 };
                 contract_sellers(registry, state, input.good_id(), player_id).any(|seller| {
-                    if state.contracts.values().any(|contract| {
-                        contract.status == ContractStatus::Active
-                            && contract.buyer_business_id == business.id()
-                            && contract.seller_business_id == seller
-                            && contract.good_id == input.good_id()
-                    }) {
-                        return false;
-                    }
                     let unit_price =
                         contract_candidate_unit_price(state, business.id(), seller, quote.price);
-                    can_support_contract_terms(
+                    game_accepts_contract_terms(
                         registry,
                         state,
                         business.id(),
@@ -4297,7 +4292,7 @@ fn has_sell_output_opportunity(registry: &Registry, state: &AppState) -> bool {
             contract_buyers(registry, state, recipe.output_good_id(), player_id).any(|buyer| {
                 let unit_price =
                     contract_candidate_unit_price(state, buyer, business.id(), quote.price);
-                can_support_contract_terms(
+                game_accepts_contract_terms(
                     registry,
                     state,
                     buyer,
@@ -4310,27 +4305,22 @@ fn has_sell_output_opportunity(registry: &Registry, state: &AppState) -> bool {
         })
 }
 
-fn has_buy_property_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
+fn has_buy_property_opportunity(state: &AppState) -> bool {
     let player_id = state.player_dynasty_id;
     let Some(player) = state.dynasties.get(&player_id) else {
         return false;
     };
-    let affordability_cap = player
-        .treasury()
-        .saturating_sub(property_purchase_liquidity_floor(state, player_id));
-    if affordability_cap == Money::ZERO {
-        return false;
-    }
-    let minimum_yield_basis_points = match persona {
-        GameplayPersona::Entrepreneur => 1_000,
-        GameplayPersona::Opportunist => 1_100,
-        GameplayPersona::PowerBroker | GameplayPersona::Steward => 1_200,
-    };
-    state.properties.values().any(|property| {
-        property.owner_dynasty_id.is_none()
-            && property.value <= affordability_cap
-            && property_meets_investment_hurdle(state, property, minimum_yield_basis_points)
-    })
+    // The canonical route (`buy_unowned_property`) accepts the purchase of any
+    // unowned property the treasury can cover; the yield hurdle and liquidity
+    // floor are the agent's investment policy and live in the generator. The
+    // activation predicate mirrors the game so an affordable property is never
+    // misread as dormant just because the persona declined a low-yield asset.
+    let treasury = player.treasury();
+    treasury > Money::ZERO
+        && state
+            .properties
+            .values()
+            .any(|property| property.owner_dynasty_id.is_none() && property.value <= treasury)
 }
 
 fn has_enact_law_opportunity(registry: &Registry, state: &AppState) -> bool {
@@ -4419,24 +4409,21 @@ fn has_start_public_work_opportunity(registry: &Registry, state: &AppState) -> b
 }
 
 fn has_fund_public_work_opportunity(state: &AppState) -> bool {
-    let player_id = state.player_dynasty_id;
+    // The canonical funding route (`quote_public_work_funding`) accepts any
+    // positive contribution to a player-sponsored, unfinished public work up to
+    // its remaining budget when the dynasty can afford it. Whether the agent
+    // *chooses* to accelerate or rescue a work is a policy decision kept in the
+    // candidate generator; the activation predicate must not hide a world in
+    // which the game accepts funding.
     let treasury = state
         .dynasties
-        .get(&player_id)
+        .get(&state.player_dynasty_id)
         .map_or(Money::ZERO, crate::core::Dynasty::treasury);
-    let office_reserve = player_office_duty_reserve(state, 0);
-    let discretionary_surplus = treasury
-        .saturating_sub(office_reserve)
-        .saturating_sub(AGENT_OFFICE_LIQUIDITY_BUFFER);
-    let wealthy_acceleration = treasury >= AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER
-        && discretionary_surplus > Money::ZERO
-        && treasury >= AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION;
     state.public_works.values().any(|work| {
-        work.sponsor_dynasty_id == Some(player_id)
+        work.sponsor_dynasty_id == Some(state.player_dynasty_id)
             && work.status.is_unfinished()
-            && ((work.status == PublicWorkStatus::Suspended && treasury > Money::ZERO)
-                || wealthy_acceleration)
             && work.budget.saturating_sub(work.spent) > Money::ZERO
+            && treasury > Money::ZERO
     })
 }
 
@@ -4465,15 +4452,19 @@ fn has_governance_opportunity(state: &AppState, persona: GameplayPersona) -> boo
 }
 
 fn has_family_council_opportunity(state: &AppState) -> bool {
+    // The canonical route (`apply_family_council_meeting`) accepts a meeting
+    // whenever the dynasty can pay and is off the council cooldown; it has no
+    // unity gate. The agent's low-unity intervention policy lives in the
+    // candidate generator; the activation predicate mirrors the game so a
+    // healthy but affordable council is never misread as dormant.
     let player_id = state.player_dynasty_id;
-    let Some(council) = state.family_councils.get(&player_id) else {
+    if !state.family_councils.contains_key(&player_id) {
         return false;
-    };
-    if council.unity_basis_points >= FAMILY_COUNCIL_INTERVENTION_UNITY_THRESHOLD
-        || state
-            .dynasties
-            .get(&player_id)
-            .is_none_or(|dynasty| dynasty.treasury() < FAMILY_COUNCIL_MEETING_COST)
+    }
+    if state
+        .dynasties
+        .get(&player_id)
+        .is_none_or(|dynasty| dynasty.treasury() < FAMILY_COUNCIL_MEETING_COST)
     {
         return false;
     }
@@ -4498,9 +4489,7 @@ fn has_heir_designation_opportunity(state: &AppState) -> bool {
     let Some(dynasty) = state.dynasties.get(&player_id) else {
         return false;
     };
-    if dynasty.resources.legitimacy_basis_points < HEIR_DESIGNATION_LEGITIMACY_COST
-        || dynasty.heir_id().is_none()
-    {
+    if dynasty.resources.legitimacy_basis_points < HEIR_DESIGNATION_LEGITIMACY_COST {
         return false;
     }
     let designation_subject = format!("dynasty:{player_id}");
@@ -4518,9 +4507,28 @@ fn has_heir_designation_opportunity(state: &AppState) -> bool {
     if !designation_available {
         return false;
     }
-    let (head_age, _) = character_age_and_health(state, dynasty.head_id());
-    head_age >= HEIR_CONFIRMATION_HEAD_AGE_YEARS
-        || dynasty.runtime.succession_risk_basis_points >= 2_000
+    let council = state
+        .family_councils
+        .get(&player_id)
+        .expect("player dynasty must own a family council");
+    let head_id = dynasty.head_id();
+    // Mirror the canonical route (`validate_heir_designation`): an eligible
+    // council member who is not the head, is active, and is at least eighteen
+    // can be designated. Confirming the existing heir is only possible once,
+    // so a prior designation removes the confirmation route but not a genuine
+    // replacement designation; the agent's head-age and succession-risk gates
+    // are policy and live in the candidate generator.
+    council.members.iter().any(|character_id| {
+        state
+            .characters
+            .get(*character_id)
+            .is_some_and(|character| {
+                *character_id != head_id
+                    && character.dynasty_id() == player_id
+                    && character.status() == CharacterStatus::Active
+                    && state.clock.day().saturating_sub(character.birth_day()) >= 18 * 360
+            })
+    })
 }
 
 fn has_ward_adoption_opportunity(state: &AppState) -> bool {
@@ -4648,7 +4656,11 @@ fn has_office_power_opportunity(state: &AppState) -> bool {
                 character.status() == CharacterStatus::Active && character.dynasty_id() == player_id
             })
         });
+        // The canonical route (`validate_office_power_directive`) requires the
+        // exercised power to belong to the institution, so an office with no
+        // powers cannot offer a directive.
         held_by_player
+            && !institution.powers.is_empty()
             && office_power_directive_available(state, institution.institution_id)
             && state.clock.day()
                 >= institution
@@ -4663,11 +4675,16 @@ fn has_information_commission_opportunity(
     persona: GameplayPersona,
 ) -> bool {
     let player_id = state.player_dynasty_id;
+    // The canonical commission route (`resolve_information_commission`) gates
+    // on affordability and the fixed `INFORMATION_COMMISSION_INTERVAL_DAYS`
+    // cooldown only; it does not require an agent information thesis or an
+    // early-campaign delay. The activation predicate mirrors the game so an
+    // affordable, off-cooldown commission is never mislabelled dormant.
     let affordable = state
         .dynasties
         .get(&player_id)
         .is_some_and(|player| player.treasury() >= INFORMATION_COMMISSION_COST);
-    if !affordable || state.clock.day() < 180 {
+    if !affordable {
         return false;
     }
     let report_commission_day = state
@@ -4678,42 +4695,45 @@ fn has_information_commission_opportunity(
         })
         .map(|report| report.created_day)
         .max();
+    let audit_subject = format!("dynasty:{player_id}");
     let audit_commission_day = state
         .audit_log
         .iter()
         .filter(|record| {
-            record.kind() == AuditKind::InformationCommission
-                && record
-                    .subject()
-                    .starts_with(&format!("dynasty:{player_id}"))
+            record.kind() == AuditKind::InformationCommission && record.subject() == audit_subject
         })
         .map(AuditRecord::day)
         .max();
-    let commission_interval =
-        if matches!(
-            persona,
-            GameplayPersona::PowerBroker | GameplayPersona::Opportunist
-        ) && maximum_player_contract_relationship_pressure_basis_points(state, player_id)
-            >= AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS
-        {
-            INFORMATION_COMMISSION_INTERVAL_DAYS
-        } else {
-            AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS
-        };
     let available = report_commission_day
         .max(audit_commission_day)
-        .is_none_or(|day| state.clock.day() >= day.saturating_add(commission_interval));
+        .is_none_or(|day| {
+            state.clock.day() >= day.saturating_add(INFORMATION_COMMISSION_INTERVAL_DAYS)
+        });
+    // The candidate generator still applies the agent's materiality thesis and
+    // the persona-specific commission cadence; the activation predicate only
+    // needs a focus the canonical game can resolve so a ready world is never
+    // misread as dormant because the agent declined to build a brief.
     available && preferred_information_focus(registry, state, persona).is_some()
 }
 
-fn has_information_leverage_opportunity(state: &AppState) -> bool {
+fn has_information_leverage_opportunity(registry: &Registry, state: &AppState) -> bool {
+    // Mirror the canonical leverage route (`resolve_information_leverage`): the
+    // report must be owned, commissioned, confirmed, and unexpired, the dynasty
+    // must afford the leverage cost, and the leverage plan must actually resolve
+    // (an active market contract, a counterparty brief, or a district initiative).
+    let affordable = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .is_some_and(|player| player.treasury() >= INFORMATION_LEVERAGE_COST);
+    if !affordable {
+        return false;
+    }
     state.information_reports.values().any(|report| {
         report.owner_dynasty_id == state.player_dynasty_id
             && report.source == COMMISSIONED_INFORMATION_SOURCE
-            && state.clock.day()
-                >= report
-                    .created_day
-                    .saturating_add(AGENT_INFORMATION_LEVERAGE_DELAY_DAYS)
+            && report.confidence == crate::core::InformationConfidence::Confirmed
+            && state.clock.day() <= report.expires_day
+            && quote_information_leverage(registry, state, report.id()).is_ok()
     })
 }
 
@@ -4740,6 +4760,13 @@ fn has_borrow_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
     {
         return false;
     }
+    // The canonical borrow route (`apply_loan`) also requires the non-player
+    // lender to accept the terms: a post-loan reserve, interest at least the
+    // counterparty minimum (400 bp), and a weekly payment covering the exposure
+    // over the maximum amortization. The player, as borrower, is never subject
+    // to a financing-pressure gate, and can always offer in-band terms; the
+    // predicate therefore only needs a solvent, unblocked lender to confirm the
+    // world accepts a borrow.
     state.dynasties.values().any(|dynasty| {
         dynasty.id() != player_id
             && !same_pair_credit_blocks_new_loan(state, dynasty.id(), player_id)
@@ -4751,12 +4778,11 @@ fn has_borrow_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
 }
 
 fn has_notification_acknowledgement_opportunity(state: &AppState) -> bool {
-    state
-        .outbox
-        .iter()
-        .filter(|message| !message.acknowledged)
-        .count()
-        >= NOTIFICATION_BATCH_THRESHOLD
+    // The canonical route (`acknowledge`) accepts acknowledgement of any
+    // existing message; the batch threshold is the agent's housekeeping policy
+    // in the generator. The activation predicate mirrors the game so an unread
+    // notification is never misread as dormant.
+    state.outbox.iter().any(|message| !message.acknowledged)
 }
 
 fn has_business_opportunity(
@@ -4766,9 +4792,7 @@ fn has_business_opportunity(
     kind: GameplayCommandKind,
 ) -> bool {
     match kind {
-        GameplayCommandKind::InvestInBusiness => {
-            has_business_investment_opportunity(registry, state, persona)
-        }
+        GameplayCommandKind::InvestInBusiness => has_business_investment_opportunity(state),
         GameplayCommandKind::SetBusinessPolicy => has_business_policy_opportunity(state, persona),
         GameplayCommandKind::AcquireBusiness => {
             has_business_acquisition_opportunity(registry, state, persona)
@@ -4777,108 +4801,24 @@ fn has_business_opportunity(
     }
 }
 
-fn has_business_investment_opportunity(
-    registry: &Registry,
-    state: &AppState,
-    persona: GameplayPersona,
-) -> bool {
+fn has_business_investment_opportunity(state: &AppState) -> bool {
     let player_id = state.player_dynasty_id;
-    state
-        .businesses
-        .iter()
-        .filter(|business| {
-            business.owner_dynasty_id() == player_id && business.status() != BusinessStatus::Closed
-        })
-        .any(|business| {
-            if business.status() == BusinessStatus::Active {
-                return has_modernization_opportunity(state, persona, business);
-            }
-            matches!(
-                business.status(),
-                BusinessStatus::Distressed | BusinessStatus::Insolvent
-            ) && !has_internal_cash_recovery(registry, state, business)
-                && has_recapitalization_opportunity(registry, state, persona, business)
-        })
-}
-
-fn has_modernization_opportunity(
-    state: &AppState,
-    persona: GameplayPersona,
-    business: &crate::core::Business,
-) -> bool {
-    if persona != GameplayPersona::Entrepreneur
-        || (business.finance.lifetime_revenue == Money::ZERO
-            && business.finance.lifetime_costs == Money::ZERO)
-    {
-        return false;
-    }
-    let subject = format!("business:{}", business.id());
-    if state.audit_log.iter().rev().any(|record| {
-        record.kind() == AuditKind::BusinessCapitalization
-            && record.subject() == subject
-            && state.clock.day().saturating_sub(record.day())
-                < AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS
-    }) {
-        return false;
-    }
-    let target_condition = 9_000_u16;
-    let target_quality = business.policy.quality_target_basis_points.max(7_500);
-    let condition_investment =
-        i64::from(target_condition.saturating_sub(business.operations.condition_basis_points))
-            .saturating_mul(2);
-    let quality_investment =
-        i64::from(target_quality.saturating_sub(business.operations.quality_basis_points))
-            .saturating_mul(4);
-    let desired = Money::from_copper(condition_investment.max(quality_investment));
-    if desired < Money::from_copper(1_000) {
-        return false;
-    }
     let treasury = state
         .dynasties
-        .get(&state.player_dynasty_id)
-        .expect("player dynasty must exist")
-        .treasury();
-    let spendable = treasury.saturating_sub(recapitalization_dynasty_reserve(persona, false));
-    desired.min(AGENT_PLANNED_CAPITALIZATION_MAX).min(spendable) >= Money::from_copper(1_000)
-}
-
-fn has_recapitalization_opportunity(
-    registry: &Registry,
-    state: &AppState,
-    persona: GameplayPersona,
-    business: &crate::core::Business,
-) -> bool {
-    let player = state
-        .dynasties
-        .get(&state.player_dynasty_id)
-        .expect("player dynasty must exist");
-    let recipe = registry
-        .get_recipe(business.recipe_id())
-        .expect("business recipe must exist");
-    let staple_emergency = registry
-        .get_good(recipe.output_good_id())
-        .is_some_and(|good| {
-            good.category() == GoodCategory::Staple
-                && average_household_food_satisfaction(state) < 5_000
-        });
-    let severe_rehabilitation = business.operations.condition_basis_points < 2_000;
-    let dynasty_reserve = if player_has_no_active_business(state) {
-        Money::ZERO
-    } else if severe_rehabilitation {
-        Money::from_copper(2_000)
-    } else {
-        recapitalization_dynasty_reserve(persona, staple_emergency)
-    };
-    let spendable = player.treasury().saturating_sub(dynasty_reserve);
-    if spendable == Money::ZERO {
-        return false;
-    }
-    let target_cash = business_recapitalization_target(registry, state, business);
-    let shortfall = target_cash.saturating_sub(business.cash());
-    let amount = shortfall.min(spendable);
-    let minimum_meaningful = recipe.daily_operating_cost().saturating_mul(7);
-    amount > Money::ZERO
-        && (staple_emergency || amount >= minimum_meaningful || amount >= shortfall)
+        .get(&player_id)
+        .map_or(Money::ZERO, crate::core::Dynasty::treasury);
+    // The canonical route (`apply_business_investment`) accepts a positive
+    // investment into any player-owned, non-closed business that the treasury
+    // can cover, for every persona. Whether the agent *chooses* to modernize or
+    // recapitalize is a policy decision in the candidate generator; the
+    // activation predicate mirrors the game so an investable business is never
+    // misread as dormant just because the persona did not build a candidate.
+    treasury > Money::ZERO
+        && state.businesses.iter().any(|business| {
+            business.owner_dynasty_id() == player_id
+                && business.status() != BusinessStatus::Closed
+                && business.cash().checked_add(treasury).is_some()
+        })
 }
 
 fn has_business_policy_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
@@ -6451,40 +6391,51 @@ fn generate_business_candidates(
     generate_owner_distribution_candidate(registry, state, persona, &player_businesses, candidates);
 }
 
-fn has_transfer_cash_opportunity(registry: &Registry, state: &AppState) -> bool {
+fn has_transfer_cash_opportunity(state: &AppState) -> bool {
+    // The canonical route (`apply_cash_transfer`) accepts a positive transfer
+    // between two distinct player-owned, non-insolvent, non-closed businesses
+    // when the source covers the amount. The agent's rebalancing cadence and
+    // minimum amounts are policy; the activation predicate mirrors the game so
+    // an idle portfolio with transferable cash is never misread as dormant.
     let player_businesses: Vec<_> = state
         .businesses
         .ids_for_owner(state.player_dynasty_id)
         .into_iter()
         .flatten()
         .filter_map(|id| state.businesses.get(*id))
+        .filter(|business| is_open_business(business))
         .collect();
-    let mut candidates = Vec::new();
-    generate_cash_rebalance_candidate(registry, state, &player_businesses, &mut candidates);
-    !candidates.is_empty()
+    if player_businesses.len() < 2 {
+        return false;
+    }
+    let Some(source) = player_businesses
+        .iter()
+        .max_by_key(|business| business.cash())
+    else {
+        return false;
+    };
+    source.cash() > Money::ZERO
+        && player_businesses.iter().any(|business| {
+            business.id() != source.id() && business.cash().checked_add(source.cash()).is_some()
+        })
 }
 
-fn has_withdrawal_cash_opportunity(
-    registry: &Registry,
-    state: &AppState,
-    persona: GameplayPersona,
-) -> bool {
-    let player_businesses: Vec<_> = state
+fn has_withdrawal_cash_opportunity(registry: &Registry, state: &AppState) -> bool {
+    // The canonical route (`apply_business_cash_withdrawal`) accepts a positive
+    // withdrawal from any Active player-owned business up to its surplus over
+    // the owner-distribution reserve. The agent's distribution cadence and
+    // thresholds are policy; the activation predicate mirrors the game so an
+    // Active business with distributable surplus is never misread as dormant.
+    state
         .businesses
         .ids_for_owner(state.player_dynasty_id)
         .into_iter()
         .flatten()
         .filter_map(|id| state.businesses.get(*id))
-        .collect();
-    let mut candidates = Vec::new();
-    generate_owner_distribution_candidate(
-        registry,
-        state,
-        persona,
-        &player_businesses,
-        &mut candidates,
-    );
-    !candidates.is_empty()
+        .any(|business| {
+            business.status() == BusinessStatus::Active
+                && business.cash() > business_owner_distribution_reserve(registry, business)
+        })
 }
 
 fn generate_business_policy_candidates(
@@ -7614,6 +7565,66 @@ fn can_support_contract_terms(
         || seller.cash() >= seller_recipe.daily_operating_cost().saturating_mul(7)
 }
 
+/// Whether the canonical game would accept a contract between these parties,
+/// mirroring `ensure_non_player_contract_counterparty_accepts`: a resolvable
+/// market quote, an in-band unit price for the non-player side, and capacity
+/// for the non-player side. The buyer working-cash cushion and seller liquidity
+/// cushion are agent policy and stay in `can_support_contract_terms`.
+fn game_accepts_contract_terms(
+    registry: &Registry,
+    state: &AppState,
+    buyer_business_id: BusinessId,
+    seller_business_id: BusinessId,
+    good_id: crate::ids::GoodId,
+    quantity_per_week: Quantity,
+    unit_price: Money,
+) -> bool {
+    let Some(market_price) = state
+        .market
+        .get_quote(good_id)
+        .map(crate::core::MarketQuote::price)
+    else {
+        return false;
+    };
+    let price_bounds = contract_counterparty_price_bounds(
+        state,
+        buyer_business_id,
+        seller_business_id,
+        market_price,
+    );
+    let player_id = state.player_dynasty_id;
+    let seller_is_player = state
+        .businesses
+        .get(seller_business_id)
+        .is_some_and(|business| business.owner_dynasty_id() == player_id);
+    let buyer_is_player = state
+        .businesses
+        .get(buyer_business_id)
+        .is_some_and(|business| business.owner_dynasty_id() == player_id);
+    if !seller_is_player && unit_price < price_bounds.minimum_seller_price {
+        return false;
+    }
+    if !buyer_is_player && unit_price > price_bounds.maximum_buyer_price {
+        return false;
+    }
+    let Some(capacity) = available_supply_contract_capacity(
+        registry,
+        state,
+        buyer_business_id,
+        seller_business_id,
+        good_id,
+    ) else {
+        return false;
+    };
+    if !seller_is_player && quantity_per_week > capacity.seller {
+        return false;
+    }
+    if !buyer_is_player && quantity_per_week > capacity.buyer {
+        return false;
+    }
+    true
+}
+
 fn generate_finance_candidates(
     registry: &Registry,
     state: &AppState,
@@ -7927,18 +7938,16 @@ fn accepted_property_liquidation_quote(
 }
 
 fn has_property_liquidation_opportunity(registry: &Registry, state: &AppState) -> bool {
-    if !player_needs_property_liquidation(state) && !player_holds_underperforming_property(state) {
-        return false;
-    }
     let player_id = state.player_dynasty_id;
+    // The canonical route (`apply_property_sale`) accepts the sale of any
+    // player-owned property to a distinct dynasty whose post-purchase treasury
+    // keeps the buyer reserve. The agent's distress/repositioning policy lives
+    // in the generator; the activation predicate mirrors the game so an owned
+    // property with a solvent buyer is never misread as dormant.
     state
         .properties
         .values()
-        .filter(|property| {
-            property.owner_dynasty_id == Some(player_id)
-                && (player_needs_property_liquidation(state)
-                    || property_underperforms_investment_hurdle(state, property))
-        })
+        .filter(|property| property.owner_dynasty_id == Some(player_id))
         .any(|property| {
             state
                 .dynasties
@@ -8309,12 +8318,15 @@ fn add_lend_candidate(
     );
 }
 
-fn generate_information_candidates(
+/// Generates leverage candidates for commissioned reports whose subject is still
+/// material. Returns whether at least one leverage option was offered; when it was,
+/// the agent holds the report instead of commissioning a fresh one.
+fn generate_information_leverage_candidates(
     registry: &Registry,
     state: &AppState,
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
-) {
+) -> bool {
     let mut leverage_available = false;
     for report in state.information_reports.values().filter(|report| {
         report.owner_dynasty_id == state.player_dynasty_id
@@ -8324,6 +8336,14 @@ fn generate_information_candidates(
                     .created_day
                     .saturating_add(AGENT_INFORMATION_LEVERAGE_DELAY_DAYS)
     }) {
+        // Leverage is a response to a still-material situation, not an automatic
+        // follow-up for every report. If the commissioned subject has resolved --
+        // the market moved back or the counterparty relationship repaired -- the
+        // agent holds the report rather than spending 600 cr to act on stale
+        // intelligence.
+        if !commissioned_report_still_material(state, report) {
+            continue;
+        }
         let Ok(quote) = quote_information_leverage(registry, state, report.id()) else {
             continue;
         };
@@ -8344,14 +8364,23 @@ fn generate_information_candidates(
             bonus,
         );
     }
-    if leverage_available {
+    leverage_available
+}
+
+fn generate_information_candidates(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) {
+    if generate_information_leverage_candidates(registry, state, persona, candidates) {
         return;
     }
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist");
-    if state.clock.day() < 180 || player.treasury() < INFORMATION_COMMISSION_COST {
+    if player.treasury() < INFORMATION_COMMISSION_COST {
         return;
     }
     let report_commission_day = state
@@ -8372,22 +8401,23 @@ fn generate_information_candidates(
         })
         .map(AuditRecord::day)
         .max();
-    let commission_interval = if matches!(
-        persona,
-        GameplayPersona::PowerBroker | GameplayPersona::Opportunist
-    ) && maximum_player_contract_relationship_pressure_basis_points(
-        state,
-        state.player_dynasty_id,
-    )
-        >= AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS
-    {
+    // The canonical game floor is `INFORMATION_COMMISSION_INTERVAL_DAYS`. Routine
+    // commissions respond to sustained material uncertainty, so the agent paces
+    // them at two years unless severe counterparty pressure or material political
+    // strain exists -- that acceleration is the agent's explicit response to
+    // exposure, mirroring the design thesis that intelligence is strategic, not
+    // scheduled maintenance. The activation predicate still mirrors the game
+    // floor, so a calm campaign is never misread as dormant because the agent
+    // chose not to commission.
+    let severe_counterparty_pressure = information_commission_has_severe_pressure(state, persona);
+    let agent_commission_interval = if severe_counterparty_pressure {
         INFORMATION_COMMISSION_INTERVAL_DAYS
     } else {
-        AGENT_INFORMATION_COMMISSION_INTERVAL_DAYS
+        AGENT_ROUTINE_COMMISSION_INTERVAL_DAYS
     };
     let available = report_commission_day
         .max(audit_commission_day)
-        .is_none_or(|day| state.clock.day() >= day.saturating_add(commission_interval));
+        .is_none_or(|day| state.clock.day() >= day.saturating_add(agent_commission_interval));
     if !available {
         return;
     }
@@ -8407,6 +8437,75 @@ fn generate_information_candidates(
         description,
         bonus,
     );
+}
+
+/// Whether the agent should accelerate commission cadence because the counterparty
+/// situation is materially exposed: contract-relationship pressure above the severe
+/// threshold, or for the political personas a strained relationship with a rival house.
+fn information_commission_has_severe_pressure(state: &AppState, persona: GameplayPersona) -> bool {
+    let player_id = state.player_dynasty_id;
+    let contract_pressure =
+        maximum_player_contract_relationship_pressure_basis_points(state, player_id)
+            >= AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS;
+    if contract_pressure {
+        return true;
+    }
+    matches!(
+        persona,
+        GameplayPersona::PowerBroker | GameplayPersona::Opportunist
+    ) && state.relationships.values().any(|relationship| {
+        (relationship.pair.first == player_id || relationship.pair.second == player_id)
+            && (relationship.trust_basis_points <= AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD
+                || relationship.resentment_basis_points
+                    >= AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD)
+    })
+}
+
+/// Whether a commissioned report's subject is still material enough to act on at
+/// leverage time. The agent holds or lets a report expire when the underlying
+/// uncertainty has resolved, so intelligence is a response to a live situation
+/// rather than an automatic two-step ritual.
+fn commissioned_report_still_material(
+    state: &AppState,
+    report: &crate::core::InformationReport,
+) -> bool {
+    let Some(target) = report.target else {
+        return false;
+    };
+    match target {
+        crate::core::InformationTarget::Market { good_id } => {
+            // A market brief is worth leveraging while the player still has a live
+            // external contract on that good; the canonical leverage quote then
+            // renegotiates that contract at a better price. If the contract ended,
+            // the report has no remaining leverage and the canonical quote fails.
+            state.contracts.values().any(|contract| {
+                contract.status == ContractStatus::Active
+                    && contract.good_id == good_id
+                    && player_external_contract(state, contract)
+            })
+        }
+        crate::core::InformationTarget::Counterparty { dynasty_id } => state
+            .relationships
+            .get(&DynastyPair::new(state.player_dynasty_id, dynasty_id))
+            .is_some_and(|relationship| {
+                relationship.trust_basis_points <= AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD
+                    || relationship.resentment_basis_points
+                        >= AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD
+            }),
+        crate::core::InformationTarget::District { district_id } => {
+            state.districts.get(&district_id).is_some_and(|district| {
+                district_information_is_material(district)
+                    && (district.employment_basis_points
+                        < AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD
+                        || district.sanitation_basis_points
+                            < AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD
+                        || district.safety_basis_points
+                            < AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD
+                        || district.unrest_basis_points
+                            >= AGENT_INFORMATION_DISTRICT_UNREST_THRESHOLD)
+            })
+        }
+    }
 }
 
 fn preferred_information_focus(
@@ -10174,7 +10273,7 @@ fn generate_institution_withdrawal_candidates(
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) {
-    if !has_institution_withdrawal_opportunity(state) {
+    if !has_institution_withdrawal_pressure(state) {
         return;
     }
     let recent_shortfall = has_recent_player_office_duty_shortfall(state);
@@ -10279,6 +10378,30 @@ fn has_recent_player_office_duty_shortfall(state: &AppState) -> bool {
 }
 
 fn has_institution_withdrawal_opportunity(state: &AppState) -> bool {
+    // The canonical route (`apply_institution_withdrawal`) accepts withdrawal of
+    // any player character who is an institution member; there is no game-side
+    // treasury, distress, or duty gate for the first withdrawal. The agent's
+    // distress-only generator is policy; the activation predicate must not hide
+    // a world in which the game accepts a withdrawal.
+    state.institutions.values().any(|institution| {
+        institution.members.iter().any(|character_id| {
+            state
+                .characters
+                .get(*character_id)
+                .is_some_and(|character| {
+                    character.dynasty_id() == state.player_dynasty_id
+                        && character.status() == CharacterStatus::Active
+                })
+        })
+    })
+}
+
+/// The agent's office-retreat policy: a withdrawal candidate is surfaced only
+/// when the dynasty faces a recent duty shortfall, political overextension,
+/// committed-reserve pressure, or severe business distress. The canonical game
+/// accepts a withdrawal without any of these; this gate keeps the agent from
+/// treating a routine membership as a strategic retreat.
+fn has_institution_withdrawal_pressure(state: &AppState) -> bool {
     let office_cost = player_current_office_duty_cost(state);
     if office_cost == Money::ZERO {
         return false;
@@ -11333,7 +11456,7 @@ fn borrowing_urgency(state: &AppState) -> i64 {
 }
 
 fn institution_withdrawal_urgency(state: &AppState) -> i64 {
-    if has_institution_withdrawal_opportunity(state) {
+    if has_institution_withdrawal_pressure(state) {
         1_500
     } else {
         0
@@ -13903,6 +14026,27 @@ fn add_score_findings(aggregate: &GameplayAggregate, findings: &mut Vec<Gameplay
     }
 }
 
+/// Commands whose candidate generators deliberately narrow the canonical
+/// game's offer to distress, repositioning, or strategic-need conditions.
+///
+/// For these routes the canonical game accepts the command broadly, but the
+/// agent's portfolio or political policy intentionally avoids routine use. When
+/// such a route shows `generated == 0` despite world activation, the signal is
+/// agent restraint (a coverage gap the design review should weigh), not a broken
+/// or unreachable game route, so the finding is a Warning rather than Critical.
+const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> bool {
+    matches!(
+        kind,
+        GameplayCommandKind::SellProperty
+            | GameplayCommandKind::ExerciseOfficePower
+            | GameplayCommandKind::SecureSupply
+            | GameplayCommandKind::SellOutput
+            | GameplayCommandKind::InvestInBusiness
+            | GameplayCommandKind::WithdrawFromInstitution
+            | GameplayCommandKind::FundPublicWork
+    )
+}
+
 fn add_command_findings(aggregate: &GameplayAggregate, findings: &mut Vec<GameplayFinding>) {
     let campaign_days = average_campaign_days(aggregate);
     for kind in ALL_COMMAND_KINDS {
@@ -13913,10 +14057,17 @@ fn add_command_findings(aggregate: &GameplayAggregate, findings: &mut Vec<Gamepl
         if stats.executed == 0 {
             let (severity, title) = if stats.generated == 0 {
                 if command_route_expected(aggregate, kind, campaign_days) {
-                    (
-                        GameplayFindingSeverity::Critical,
-                        format!("{} had no reachable candidate", kind.label()),
-                    )
+                    if is_policy_gated_command_route(kind) {
+                        (
+                            GameplayFindingSeverity::Warning,
+                            format!("{} had no reachable candidate", kind.label()),
+                        )
+                    } else {
+                        (
+                            GameplayFindingSeverity::Critical,
+                            format!("{} had no reachable candidate", kind.label()),
+                        )
+                    }
                 } else {
                     (
                         GameplayFindingSeverity::Info,
@@ -17618,13 +17769,22 @@ fn count_active_player_wards(state: &AppState, player_id: DynastyId) -> u16 {
             .values()
             .filter(|link| link.active && link.kind == FamilyLinkKind::Ward)
             .filter(|link| {
-                state
+                // Mirror the canonical ward-capacity count
+                // (`active_player_ward_count`): a ward occupies a slot only
+                // while both its guardian and the ward are active.
+                let guardian_active = state
                     .characters
-                    .get(link.second_character_id)
-                    .is_some_and(|character| {
-                        character.dynasty_id() == player_id
-                            && character.status() == CharacterStatus::Active
-                    })
+                    .get(link.first_character_id)
+                    .is_some_and(|character| character.status() == CharacterStatus::Active);
+                let ward_active =
+                    state
+                        .characters
+                        .get(link.second_character_id)
+                        .is_some_and(|character| {
+                            character.dynasty_id() == player_id
+                                && character.status() == CharacterStatus::Active
+                        });
+                guardian_active && ward_active
             })
             .count(),
     )

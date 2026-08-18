@@ -63,7 +63,9 @@ bash scripts/test.sh gameplay
 bash scripts/test.sh gameplay-audit
 ```
 
-`gameplay` runs the normal release quality and generation-length gates. `gameplay-audit` runs larger mature, generation, and credit-stress matrices for design review. `bash scripts/test.sh all` includes the normal release gameplay gates.
+`gameplay` runs the normal release quality and generation-length gates. `gameplay-audit` runs larger mature, generation, and credit-stress matrices for design review. `bash scripts/test.sh all` includes the normal release gameplay gates. `bash scripts/test.sh slow` runs the same heavy release gates without the security audit, and `bash scripts/test.sh deep` adds the full design audit.
+
+The CLI prints a concise progress line to stderr on every run: elapsed time, campaign count, simulated days, actions, overall score, finding count, and simulated days per second. A quality-gate failure reports the exact score reason in the error output.
 
 ## Configuration
 
@@ -203,6 +205,29 @@ never misread as dormant just because the agent's generator declined an action
 the world offered.
 
 This keeps the `triggers` column and the generator-gap diagnosis meaningful for all command families without treating unaffordable or cooling-down work as a generator gap.
+
+Activation predicates answer one question: *would the canonical game accept a concrete
+command of this kind in this state?* They mirror the game's own validation routes
+(resources, cooldowns, party eligibility, capacity, and resolvable targets) and do not
+encode the agent's portfolio or spending policy. When the agent deliberately narrows a
+broadly-valid route -- for example, selling property only under distress, exercising
+office power only on material need, or funding public works only when a work is stalled
+-- that restraint belongs in the candidate generator and in the command findings, which
+classify such routes as `Warning` ("had no reachable candidate") rather than `Critical`,
+so a design review can tell a deliberately unused route apart from a broken game route.
+
+The quiet-cycle diagnosis still records an activation whenever the canonical game would
+accept an action, so a cycle where the world offers a sale or a directive the agent's
+policy declines is labelled as a generator gap or policy gate rather than as dormant
+world state.
+
+The intelligence generator paces routine commissions at a two-year agent cadence and
+accelerates to the canonical 360-day floor only under severe counterparty pressure or
+material political strain, and only leverages a commissioned report while its subject
+is still material. The activation predicate continues to mirror the canonical game
+floor, so a calm campaign is never misread as dormant because the agent declined a
+routine commission. This keeps intelligence a response to sustained uncertainty rather
+than scheduled maintenance while preserving the game's own commission cooldown.
 
 ## Report contract
 

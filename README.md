@@ -65,6 +65,12 @@ Given the same registry, state, seed, command sequence, and day count, the simul
 
 The crate uses Rust 2024 and has no runtime service dependency.
 
+Verification is local-only. There are no hosted CI runners; the scripted lanes
+in `scripts/test.sh` are the authoritative gate. Optionally install the
+version-controlled local git hooks with `bash scripts/install_hooks.sh` — a fast
+pre-commit check (format, shell syntax, whitespace) and a `standard` lane on
+push.
+
 ## Common commands
 
 Fast edit-test loop:
@@ -148,6 +154,8 @@ scripts/
   check_docs.py       Documentation consistency checks
   test.sh             Test tier runner
   verify_cli.sh       CLI smoke groups
+  install_hooks.sh    Install version-controlled local git hooks
+  hooks/              Local pre-commit/pre-push gates
 ```
 
 ## Supported library entry points

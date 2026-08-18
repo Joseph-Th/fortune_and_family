@@ -258,8 +258,10 @@ run_gameplay_smoke() {
     --trace-limit 3 \
     --json \
     --output "$playtest" \
-    >"$work_dir/playtest.txt" || fail 'gameplay harness command failed'
+    >"$work_dir/playtest.txt" 2>"$work_dir/playtest-progress.txt" || fail 'gameplay harness command failed'
   require_nonempty_file "$playtest" 'gameplay harness JSON report'
+  grep -Eq 'playtest [0-9]+\.[0-9]{3}s \(' "$work_dir/playtest-progress.txt" \
+    || fail 'playtest progress line did not report concise timing'
 
   "$python_command" - "$playtest" <<'PY'
 import json
@@ -304,6 +306,8 @@ PY
   fi
   require_nonempty_file "$work_dir/gated-playtest.txt" 'gated gameplay report'
   require_nonempty_file "$work_dir/gated-playtest-stderr.txt" 'gameplay quality gate error output'
+  grep -Fq 'overall score' "$work_dir/gated-playtest-stderr.txt" \
+    || fail 'gameplay quality gate failure must report the score reason'
 }
 
 case "$mode" in

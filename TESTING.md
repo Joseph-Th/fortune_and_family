@@ -22,9 +22,13 @@ This document defines test tiers, suite organization, assertion standards, and c
 | Deep gameplay design audit | `bash scripts/test.sh gameplay-audit` |
 | Fast CI verification lane | `bash scripts/test.sh ci-verify` |
 | Deep CI gates lane | `bash scripts/test.sh ci-gates` |
+| Heavy release gates without audit | `bash scripts/test.sh slow` |
+| Full deep design gate | `bash scripts/test.sh deep` |
 | Complete scripted test tier | `bash scripts/test.sh all` |
 
 Successful test and smoke steps print concise summaries with elapsed time. Failures print the complete command output, including compiler diagnostics when a CLI build fails. A filter matching no executable library test exits with code 2.
+
+Pass `CIVIC_DYNASTY_JOBS=<n>` to forward `--jobs <n>` to every `cargo test` or `cargo build` the runner invokes. The default is Cargo's own parallelism, which already uses the machine's cores; lowering it can keep a heavily used development machine responsive.
 
 The CLI smoke runner accepts `CIVIC_DYNASTY_PROFILE=release` when a release
 binary is desired, or `CIVIC_DYNASTY_BINARY` when a caller has already built
@@ -56,11 +60,15 @@ candidate ordering.
 | Soak | Long deterministic invariant and multi-generation behavior | Accumulating simulation changes |
 | Gameplay | Release-mode systemic quality and succession gates | Cross-domain gameplay changes |
 | Gameplay audit | Larger matrices for rare and mature behavior | Design review |
-| CI verify | The exact fast CI verification lane | Reproducing the required PR checks locally |
-| CI gates | The exact deep CI lane; requires `cargo-audit` | Reproducing release, adapter, gameplay, and security gates |
+| CI verify | The exact fast CI verification lane | Reproducing the fast lane locally |
+| CI gates | The deep CI lane; requires `cargo-audit` | Reproducing release, adapter, gameplay, and security gates |
+| Slow | Release gates without the security audit or design audit | Deep verification without the audit dependency |
+| Deep | The complete design gate: slow gates plus gameplay audit | Design review and deepest verification |
 | All | Standard + soak + adapters + gameplay gates | Cross-cutting test coverage |
 
 Fast tests must not use sleeps, wall-clock time, external services, or environment-dependent behavior.
+
+Soak tests always run in release mode: the multi-thousand-day simulations finish in seconds instead of tens of seconds, while the assertions stay identical.
 
 ## Suite organization
 
@@ -145,7 +153,6 @@ For cross-cutting changes, run:
 
 ```bash
 cargo fmt --all -- --check
-cargo check --all-targets --all-features --locked
 bash scripts/test.sh all
 cargo clippy --all-targets --all-features --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
@@ -156,6 +163,8 @@ git diff --check
 
 Cross-cutting changes include persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and gameplay-report schemas.
 
-The commands above are the authoritative local full gate for cross-cutting changes. Ordinary changes use `bash scripts/test.sh standard`; cross-cutting changes run the complete command set above. GitHub Actions and hosted runners are not part of the verification path.
+The commands above are the authoritative local full gate for cross-cutting changes. Ordinary changes use `bash scripts/test.sh standard`; cross-cutting changes run the complete command set above. GitHub Actions and hosted runners are not part of the verification path. The `all` tier runs the complete library suite in debug plus the soak and gameplay gates in release; the separate release library-test line covers the full suite under the release profile.
+
+Optional local git hooks provide a fast safety net: `bash scripts/install_hooks.sh` installs a pre-commit gate (format, shell syntax, whitespace) and a pre-push gate that runs `standard`. Use `git commit --no-verify` to skip the pre-commit gate during focused iteration.
 
 Clippy is intentionally the single all-target compile/lint gate in the full validation path; an additional duplicate compile pass should not be added without coverage value. The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier also reuses one debug CLI build across all adapter smoke groups.

@@ -108,6 +108,16 @@ mod harness {
             .expect("counterparty dynasty must exist")
             .name()
             .to_owned();
+        // Strain the counterparty relationship so the commissioned brief is still
+        // material at leverage time; otherwise the agent would hold the report
+        // rather than spend to act on resolved intelligence.
+        let player_id = state.player_dynasty_id;
+        if let Some(relationship) = state.relationships.values_mut().find(|relationship| {
+            relationship.pair.first == player_id || relationship.pair.second == player_id
+        }) {
+            relationship.trust_basis_points = 3_500;
+            relationship.resentment_basis_points = 3_000;
+        }
         let report_id = state.next_ids.information_report();
         state.information_reports.insert(
             report_id,
@@ -1753,15 +1763,29 @@ mod candidates {
         assert_eq!(reserve, player_office_duty_reserve(&state, 0));
         assert!(reserve > AGENT_OFFICE_LIQUIDITY_BUFFER);
 
+        // The activation predicate mirrors the canonical withdrawal route, which
+        // accepts any player character who is an institution member; the reserve
+        // is the agent's retreat policy in the candidate generator. Meeting the
+        // reserve must keep the *candidate* list retreat-free while the world
+        // still accepts a withdrawal.
         state
             .dynasties
             .get_mut(&player_id)
             .expect("player dynasty must exist")
             .resources
             .treasury = reserve;
+        let mut candidates = Vec::new();
+        generate_family_candidates(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Steward,
+            &mut candidates,
+        );
         assert!(
-            !has_institution_withdrawal_opportunity(&state),
-            "meeting the full forward reserve should not force an office retreat"
+            !candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::WithdrawFromInstitution),
+            "meeting the full forward reserve should not offer an office retreat"
         );
 
         state
@@ -1770,8 +1794,17 @@ mod candidates {
             .expect("player dynasty must exist")
             .resources
             .treasury = reserve.saturating_sub(Money::from_copper(1));
+        let mut candidates = Vec::new();
+        generate_family_candidates(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Steward,
+            &mut candidates,
+        );
         assert!(
-            has_institution_withdrawal_opportunity(&state),
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::WithdrawFromInstitution),
             "falling below the same reserve used to block discretionary spending should surface a retreat option"
         );
     }
@@ -1967,9 +2000,27 @@ mod candidates {
     fn distressed_asset_owner_is_offered_executable_property_liquidation() {
         let registry = rivergate_registry_for_test();
         let healthy_state = make_test_campaign();
+        // The activation predicate mirrors the canonical sale route, which
+        // accepts any owned property with a solvent buyer even for a healthy
+        // dynasty. The agent's *generator* reserves liquidation candidates for
+        // distress and repositioning windows; the finding layer treats that
+        // restraint as a policy-gated route (Warning) rather than a game gap
+        // (Critical).
+        let healthy_candidates = {
+            let accumulator = CampaignAccumulator::new();
+            ranked_candidates(
+                registry,
+                &healthy_state,
+                GameplayPersona::Steward,
+                &accumulator,
+            )
+            .0
+        };
         assert!(
-            !has_property_liquidation_opportunity(registry, &healthy_state),
-            "liquidation must not be considered active for a healthy campaign"
+            !healthy_candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::SellProperty),
+            "a healthy campaign must not offer a liquidation candidate to the agent"
         );
         let mut state = make_test_campaign();
         make_property_liquidation_available_for_test(&mut state);
@@ -4583,6 +4634,10 @@ mod candidates {
         }
         let mut candidates = Vec::new();
 
+        // Routine commissions are paced at the report lifetime (540 days) unless
+        // severe contract-relationship pressure exists; the agent's acceleration
+        // under exposure is what uses the canonical 360-day game floor. A calm
+        // counterparty with material trust strain must wait for the routine window.
         generate_information_candidates(
             registry,
             &state,
@@ -4590,35 +4645,42 @@ mod candidates {
             &mut candidates,
         );
         assert!(
-            candidates.is_empty(),
-            "material but sub-threshold relationship strain should still use the two-year agent cadence"
+            candidates.iter().any(|candidate| {
+                candidate.kind == GameplayCommandKind::CommissionInformation
+                    && matches!(
+                        candidate.command,
+                        PlayerCommand::CommissionInformation {
+                            focus: InformationFocus::Counterparty { .. }
+                        }
+                    )
+            }),
+            "material relationship strain must be committable once the routine commission window elapses"
         );
 
-        let relationship = state
-            .relationships
-            .values_mut()
-            .find(|relationship| {
-                relationship.pair.first == player_id || relationship.pair.second == player_id
-            })
-            .expect("campaign must contain the pressured counterparty relationship");
-        relationship.trust_basis_points = 1_000;
+        // The cooldown still prevents a second commission before the interval
+        // elapses, so pressure never becomes a routine every-cycle ritual.
         candidates.clear();
+        for _ in 0..INFORMATION_COMMISSION_INTERVAL_DAYS {
+            state.clock.advance_one_day();
+        }
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InformationCommission,
+            subject: format!("dynasty:{player_id}").into(),
+            detail: "fresh commission".to_owned(),
+        });
         generate_information_candidates(
             registry,
             &state,
             GameplayPersona::Opportunist,
             &mut candidates,
         );
-
-        assert!(candidates.iter().any(|candidate| {
-            candidate.kind == GameplayCommandKind::CommissionInformation
-                && matches!(
-                    candidate.command,
-                    PlayerCommand::CommissionInformation {
-                        focus: InformationFocus::Counterparty { .. }
-                    }
-                )
-        }));
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| { candidate.kind == GameplayCommandKind::CommissionInformation }),
+            "a fresh commission must restart the accelerated commission window"
+        );
     }
 
     #[test]
@@ -8602,6 +8664,17 @@ mod findings {
             .ambient_domain_changes
             .get_mut(&GameplayDomain::Information)
             .expect("information domain statistics must exist") = 20;
+        // Commissioning is canonically available whenever the dynasty can pay
+        // and is off cooldown, so the focused report records real commission
+        // opportunities. Isolate the passive-only scenario by clearing the
+        // activation count: ambient information change alone must not imply a
+        // missing player route.
+        report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::CommissionInformation)
+            .expect("commission statistics must exist")
+            .activation_opportunities = 0;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
@@ -9162,9 +9235,14 @@ mod findings {
             &report.findings,
             "crisis-response was not exercised in this horizon",
         );
+        // Contract supply routes are canonically available whenever an open
+        // player business has an external counterparty with capacity, so a
+        // short horizon that leaves contracts ambient now reports the route as
+        // player-responsive-but-unused rather than as a route that had not yet
+        // become available.
         let contract_finding = finding_with_title(
             &report.findings,
-            "contracts domain changed before a player route became available",
+            "contracts domain is autonomous but not player-responsive",
         );
         let legal_finding = finding_with_title(
             &report.findings,
@@ -9176,7 +9254,7 @@ mod findings {
         );
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Info);
-        assert_eq!(contract_finding.severity, GameplayFindingSeverity::Info);
+        assert_eq!(contract_finding.severity, GameplayFindingSeverity::Warning);
         assert_eq!(legal_finding.severity, GameplayFindingSeverity::Info);
         assert_eq!(
             crisis_domain_finding.severity,
@@ -9227,9 +9305,14 @@ mod findings {
         report.aggregate.simulated_days = 7_200;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
+        // Commissioning is canonically available whenever the dynasty can pay
+        // and is off cooldown, so a focused horizon now records real commission
+        // opportunities. When the agent builds but never executes them, the
+        // report surfaces the unselected route as informational rather than
+        // implying a systemic generator gap.
         let commission = finding_with_title(
             &findings,
-            "commission-intelligence was not exercised in this horizon",
+            "commission-intelligence appeared only as a rare unselected alternative",
         );
         let leverage = finding_with_title(
             &findings,
@@ -9244,12 +9327,19 @@ mod findings {
     fn triggered_information_route_without_a_candidate_is_critical() {
         let mut report = cached_focused_report(30);
         report.aggregate.simulated_days = 7_200;
-        report
+        let stats = report
             .aggregate
             .commands
             .get_mut(&GameplayCommandKind::CommissionInformation)
-            .expect("all command statistics must exist")
-            .activation_opportunities = 1;
+            .expect("all command statistics must exist");
+        stats.activation_opportunities = 1;
+        // Commissioning is canonically available in the focused horizon, so
+        // isolate the generator-gap scenario explicitly: the world offered the
+        // route but no candidate was ever built.
+        stats.generated = 0;
+        stats.offered_cycles = 0;
+        stats.considered = 0;
+        stats.viable = 0;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
         let finding = finding_with_title(

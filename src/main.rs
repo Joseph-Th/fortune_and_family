@@ -246,6 +246,16 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), CliError> {
     let registry = build_rivergate_registry();
+    let started = Instant::now();
+    let result = run_cli(cli, &registry);
+    eprintln!(
+        "civic-dynasty finished in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
+    result
+}
+
+fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
     match cli.command {
         Command::New {
             output,
@@ -261,12 +271,12 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 founder_name: founder,
                 background: background.into(),
             };
-            let mut state = build_new_game(&registry, config)?;
+            let mut state = build_new_game(registry, config)?;
             if advance > 0 {
-                advance_days(&registry, &mut state, advance)?;
+                advance_days(registry, &mut state, advance)?;
             }
             save_state(&output, &state)?;
-            print_human_summary(&registry, &state);
+            print_human_summary(registry, &state);
             println!("Saved {}", output.display());
         }
         Command::Simulate {
@@ -275,34 +285,34 @@ fn run(cli: Cli) -> Result<(), CliError> {
             days,
         } => {
             let mut state = load_state(&input)?;
-            validate_invariants(&registry, &state);
-            advance_days(&registry, &mut state, days)?;
+            validate_invariants(registry, &state);
+            advance_days(registry, &mut state, days)?;
             let output = output.unwrap_or(input);
             save_state(&output, &state)?;
-            print_human_summary(&registry, &state);
+            print_human_summary(registry, &state);
             println!("Saved {}", output.display());
         }
         Command::Summary { input, json } => {
             let state = load_state(input)?;
-            validate_invariants(&registry, &state);
+            validate_invariants(registry, &state);
             if json {
-                let summary = serde_json::to_string_pretty(&build_state_summary(&registry, &state))
+                let summary = serde_json::to_string_pretty(&build_state_summary(registry, &state))
                     .map_err(|source| CliError::SummarySerialization { source })?;
                 println!("{summary}");
             } else {
-                print_human_summary(&registry, &state);
+                print_human_summary(registry, &state);
             }
         }
         Command::Inspect { input } => {
             let state = load_state(input)?;
-            validate_invariants(&registry, &state);
-            let projection = build_campaign_projection(&registry, &state);
+            validate_invariants(registry, &state);
+            let projection = build_campaign_projection(registry, &state);
             let json = serde_json::to_string_pretty(&projection)
                 .map_err(|source| CliError::ProjectionSerialization { source })?;
             println!("{json}");
         }
         Command::Dashboard { input, output } => {
-            write_dashboard(&registry, input, &output)?;
+            write_dashboard(registry, input, &output)?;
             println!("Wrote {}", output.display());
         }
         Command::Execute {
@@ -311,20 +321,20 @@ fn run(cli: Cli) -> Result<(), CliError> {
             output,
         } => {
             let mut state = load_state(&input)?;
-            validate_invariants(&registry, &state);
+            validate_invariants(registry, &state);
             let command: PlayerCommand = serde_json::from_str(&command)
                 .map_err(|source| CliError::CommandParse { source })?;
-            let outcome = apply_player_command(&registry, &mut state, command)?;
-            validate_invariants(&registry, &state);
+            let outcome = apply_player_command(registry, &mut state, command)?;
+            validate_invariants(registry, &state);
             let output = output.unwrap_or(input);
             save_state(&output, &state)?;
             println!("{}", outcome.summary);
-            print_human_summary(&registry, &state);
+            print_human_summary(registry, &state);
             println!("Saved {}", output.display());
         }
         Command::Validate { input } => {
             let state = load_state(&input)?;
-            validate_invariants(&registry, &state);
+            validate_invariants(registry, &state);
             println!(
                 "Validated {} at simulation day {} with schema version {}",
                 input.display(),
@@ -332,7 +342,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 state.schema_version()
             );
         }
-        Command::Playtest(args) => run_playtest(&registry, args)?,
+        Command::Playtest(args) => run_playtest(registry, args)?,
         Command::Art(args) => run_art(args)?,
     }
     Ok(())
@@ -436,7 +446,7 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
     let days_per_second =
         u128::from(report.aggregate.simulated_days).saturating_mul(1_000_000) / elapsed_micros;
     eprintln!(
-        "playtest completed in {:.3}s ({} campaigns, {} simulated days, {} actions, score {}/100, {} findings, {days_per_second} simulated days/s)",
+        "playtest {:.3}s ({} campaigns, {} simulated days, {} actions, score {}/100, {} findings, {days_per_second} simulated days/s)",
         elapsed.as_secs_f64(),
         report.aggregate.campaigns,
         report.aggregate.simulated_days,

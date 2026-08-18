@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Local pre-push gate: the normal pre-commit loop for every pushed change.
+# This is the equivalent of a lightweight CI lane without hosted runners.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+bash scripts/test.sh standard

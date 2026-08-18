@@ -5193,6 +5193,7 @@ pub(crate) fn run_monthly_strategic_systems(
     apply_active_office_directives(registry, state)?;
     advance_ai_objectives(registry, state)?;
     apply_ai_dynasty_upkeep(state)?;
+    advance_ai_credit_participation(registry, state);
     update_information_reports(registry, state)?;
     file_grounded_ai_legal_cases(state)?;
     advance_legal_case_hearings(state)?;
@@ -5280,6 +5281,219 @@ fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> 
         });
     }
     Ok(())
+}
+
+/// Monthly AI credit-market participation so rival houses borrow and lend through the
+/// same canonical loan machinery the player uses.
+///
+/// Without dynamic credit activity the private-credit economy is static: bootstrap loans
+/// amortize to repayment and the player's `BorrowFunds`/`ExtendCredit` routes have nothing
+/// to respond to, which starves grounded debt-enforcement legal claims. This function makes
+/// rival houses (a) lend a portion of idle treasury to a house whose businesses need
+/// working capital, and (b) borrow when their own businesses need capital and their
+/// treasury is thin, mirroring `ensure_non_player_loan_counterparty_accepts`.
+fn advance_ai_credit_participation(registry: &Registry, state: &mut AppState) {
+    advance_ai_credit_lending(registry, state);
+    advance_ai_credit_borrowing(registry, state);
+}
+
+/// The lending half of AI credit participation: a liquid house may fund a borrower's
+/// working-capital shortfall through the canonical loan machinery.
+fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
+    let player_id = state.player_dynasty_id;
+    let dynasties: Vec<_> = state.dynasties.keys().copied().collect();
+
+    // Lending: a liquid house may fund a borrower's working-capital shortfall.
+    for lender_id in dynasties.iter().copied().filter(|id| *id != player_id) {
+        let lender_available = state
+            .dynasties
+            .get(&lender_id)
+            .and_then(|lender| {
+                lender
+                    .treasury()
+                    .checked_sub(super::PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+            })
+            .unwrap_or(Money::ZERO);
+        if lender_available < Money::from_copper(2_000) {
+            continue;
+        }
+        let Some((borrower_id, business_id, shortfall)) = state
+            .dynasties
+            .keys()
+            .copied()
+            .filter(|id| *id != lender_id && *id != player_id)
+            .filter_map(|candidate_id| {
+                if dynasty_has_active_ai_borrowing(state, candidate_id)
+                    || same_ai_pair_credit_blocks_new_loan(state, lender_id, candidate_id)
+                {
+                    return None;
+                }
+                state
+                    .businesses
+                    .ids_for_owner(candidate_id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|business_id| state.businesses.get(*business_id))
+                    .filter(|business| {
+                        !matches!(
+                            business.status(),
+                            BusinessStatus::Insolvent | BusinessStatus::Closed
+                        )
+                    })
+                    .filter_map(|business| {
+                        let target = business_recapitalization_target(registry, state, business);
+                        let shortfall = target.saturating_sub(business.cash());
+                        (shortfall >= Money::from_copper(1_000))
+                            .then_some((business.id(), shortfall))
+                    })
+                    .max_by_key(|(_, shortfall)| *shortfall)
+                    .map(|(business_id, shortfall)| (candidate_id, business_id, shortfall))
+            })
+            .max_by_key(|(_, _, shortfall)| *shortfall)
+        else {
+            continue;
+        };
+        let principal = lender_available
+            .min(shortfall)
+            .min(Money::from_copper(12_000));
+        if principal < Money::from_copper(1_000) {
+            continue;
+        }
+        let terms = LoanTerms {
+            lender_dynasty_id: lender_id,
+            borrower_dynasty_id: borrower_id,
+            principal,
+            weekly_payment: ai_loan_weekly_payment(principal, 104_i64),
+            interest_basis_points: 700_u16,
+            collateral_property_id: None,
+        };
+        // `validate_loan(...).commit(...)` uses the canonical loan machinery and records
+        // outbox feedback; a failed offer is simply skipped. The loan then capitalizes
+        // the borrower's short business so the financing need actually resolves.
+        let Ok(_) = validate_loan(state, terms.clone()).and_then(|token| token.commit(state))
+        else {
+            continue;
+        };
+        if let Some(business) = state.businesses.get_mut(business_id)
+            && business.owner_dynasty_id() == borrower_id
+            && business.status() != BusinessStatus::Closed
+        {
+            let _ = capitalize_owned_business(
+                state,
+                borrower_id,
+                business_id,
+                principal.min(shortfall),
+            );
+        }
+    }
+}
+
+/// The borrowing half of AI credit participation: a house whose businesses need capital
+/// and whose treasury is thin seeks a working-capital loan from a liquid house or the
+/// player.
+fn advance_ai_credit_borrowing(registry: &Registry, state: &mut AppState) {
+    let player_id = state.player_dynasty_id;
+    let dynasties: Vec<_> = state.dynasties.keys().copied().collect();
+    for borrower_id in dynasties.iter().copied().filter(|id| *id != player_id) {
+        let Some(borrower) = state.dynasties.get(&borrower_id) else {
+            continue;
+        };
+        let portfolio_needs_capital = state
+            .businesses
+            .ids_for_owner(borrower_id)
+            .into_iter()
+            .flatten()
+            .any(|business_id| {
+                state.businesses.get(*business_id).is_some_and(|business| {
+                    !matches!(
+                        business.status(),
+                        BusinessStatus::Insolvent | BusinessStatus::Closed
+                    ) && business.cash()
+                        < business_recapitalization_target(registry, state, business)
+                })
+            });
+        if !portfolio_needs_capital || borrower.treasury() >= Money::from_copper(20_000) {
+            continue;
+        }
+        if state.loans.values().any(|loan| {
+            loan.borrower_dynasty_id == borrower_id && loan.status.is_repayment_active()
+        }) {
+            continue;
+        }
+        let Some((lender_id, available)) = state
+            .dynasties
+            .keys()
+            .copied()
+            .filter(|id| *id != borrower_id && *id != player_id)
+            .filter_map(|candidate_id| {
+                if same_ai_pair_credit_blocks_new_loan(state, candidate_id, borrower_id) {
+                    return None;
+                }
+                let available = state
+                    .dynasties
+                    .get(&candidate_id)
+                    .and_then(|lender| {
+                        lender
+                            .treasury()
+                            .checked_sub(super::PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+                    })
+                    .unwrap_or(Money::ZERO);
+                (available >= Money::from_copper(2_000)).then_some((candidate_id, available))
+            })
+            .max_by_key(|(candidate_id, available)| (*available, *candidate_id))
+        else {
+            continue;
+        };
+        let principal = available.min(Money::from_copper(10_000));
+        if principal < Money::from_copper(1_000) {
+            continue;
+        }
+        let terms = LoanTerms {
+            lender_dynasty_id: lender_id,
+            borrower_dynasty_id: borrower_id,
+            principal,
+            weekly_payment: ai_loan_weekly_payment(principal, 156_i64),
+            interest_basis_points: 800_u16,
+            collateral_property_id: state
+                .properties
+                .values()
+                .find(|property| {
+                    property.owner_dynasty_id == Some(borrower_id)
+                        && property.collateral_loan_id.is_none()
+                })
+                .map(|property| property.id),
+        };
+        let _ = ai_strategic_attempt(
+            &validate_loan(state, terms).and_then(|token| token.commit(state)),
+        );
+    }
+}
+
+/// Ceil-divides a money amount into a per-week payment without overflow.
+fn ai_loan_weekly_payment(principal: Money, weeks: i64) -> Money {
+    debug_assert!(principal > Money::ZERO);
+    debug_assert!(weeks > 0);
+    let copper = principal.copper();
+    Money::from_copper(copper / weeks + i64::from(copper % weeks != 0))
+}
+
+fn dynasty_has_active_ai_borrowing(state: &AppState, dynasty_id: DynastyId) -> bool {
+    state
+        .loans
+        .values()
+        .any(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status.is_repayment_active())
+}
+
+fn same_ai_pair_credit_blocks_new_loan(
+    state: &AppState,
+    lender_id: DynastyId,
+    borrower_id: DynastyId,
+) -> bool {
+    state.loans.values().any(|loan| {
+        loan.lender_dynasty_id == lender_id
+            && loan.borrower_dynasty_id == borrower_id
+            && loan.status.is_repayment_active()
+    })
 }
 
 fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
@@ -6115,20 +6329,67 @@ fn update_district_conditions(state: &mut AppState) {
         )
         .unwrap_or(5_000);
         let employment = district_employment_basis_points(state, district_id);
-        let district = state
-            .districts
-            .get_mut(&district_id)
-            .expect("district runtime must exist");
-        district.employment_basis_points = employment;
-        district.unrest_basis_points = district_unrest_next_basis_points(district, satisfaction);
-        let desirability = u32::from(district.safety_basis_points)
-            .saturating_add(u32::from(district.sanitation_basis_points));
-        district.rent_index_basis_points = u16::try_from(
-            u32::from(super::MIN_DISTRICT_RENT_INDEX_BASIS_POINTS)
-                .saturating_add(desirability / 3)
-                .min(u32::from(super::MAX_DISTRICT_RENT_INDEX_BASIS_POINTS)),
-        )
-        .expect("bounded district rent index must fit u16");
+        let rent_index = {
+            let district = state
+                .districts
+                .get_mut(&district_id)
+                .expect("district runtime must exist");
+            district.employment_basis_points = employment;
+            district.unrest_basis_points =
+                district_unrest_next_basis_points(district, satisfaction);
+            let desirability = u32::from(district.safety_basis_points)
+                .saturating_add(u32::from(district.sanitation_basis_points));
+            district.rent_index_basis_points = u16::try_from(
+                u32::from(super::MIN_DISTRICT_RENT_INDEX_BASIS_POINTS)
+                    .saturating_add(desirability / 3)
+                    .min(u32::from(super::MAX_DISTRICT_RENT_INDEX_BASIS_POINTS)),
+            )
+            .expect("bounded district rent index must fit u16");
+            district.rent_index_basis_points
+        };
+        revalue_district_properties(state, district_id, rent_index);
+    }
+}
+
+/// Drifts property values toward the district's current desirability so real estate is
+/// a two-way asset: buildings in a decaying district lose value, and a prosperous
+/// district appreciates them. The anchor is the district rent index: a property whose
+/// rent has dropped is worth proportionally less to a buyer.
+fn revalue_district_properties(state: &mut AppState, district_id: DistrictId, rent_index: u16) {
+    for property in state
+        .properties
+        .values_mut()
+        .filter(|property| property.district_id == district_id)
+    {
+        if property.kind == PropertyKind::Residence {
+            continue;
+        }
+        let target_value = property
+            .value
+            .saturating_mul_ratio(i64::from(rent_index), 10_000);
+        // A small monthly step toward the target prevents wild swings while still
+        // letting sustained district decay pull values down. Cap the step so a
+        // sudden extreme gap cannot move a property by more than 5% of its value
+        // in a single month.
+        let gap = target_value.copper().abs_diff(property.value.copper());
+        let raw_step = gap / 12;
+        let cap = property
+            .value
+            .saturating_mul_ratio(500, 10_000)
+            .copper()
+            .unsigned_abs();
+        let step = Money::from_copper(i64::try_from(raw_step.min(cap)).unwrap_or(i64::MAX));
+        if step == Money::ZERO {
+            continue;
+        }
+        property.value = if target_value > property.value {
+            property.value.saturating_add(step)
+        } else {
+            property
+                .value
+                .saturating_sub(step)
+                .max(Money::from_copper(1))
+        };
     }
 }
 

@@ -5,26 +5,43 @@ project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$project_root"
 
 mode=${1:-fast}
+test_jobs=${CIVIC_DYNASTY_JOBS:-}
+if [[ -n "$test_jobs" ]] && ! [[ "$test_jobs" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'CIVIC_DYNASTY_JOBS must be a positive integer, got %q\n' "$test_jobs" >&2
+  exit 2
+fi
+job_args=()
+if [[ -n "$test_jobs" ]]; then
+  job_args=(--jobs "$test_jobs")
+fi
 
 usage() {
   cat >&2 <<EOF
 usage:
-  $0 fast [filter]       run non-ignored library tests
-  $0 standard            run the normal pre-commit loop: syntax, library, docs, and core CLI
+  $0 fast [filter]       run non-ignored library tests (default loop)
+  $0 standard            pre-commit loop: syntax, library, docs, core CLI smoke
   $0 exact <test-name>   run one fully qualified library test
-  $0 debug <test-name>   run one exact test with captured output disabled
+  $0 debug <test-name>   run one exact test with captured output enabled
   $0 list [filter]       list matching library tests
-  $0 soak                run ignored deterministic soak tests
+  $0 soak                run soak tests in release mode
   $0 docs                run documentation consistency and doctests
   $0 cli                 run core campaign/projection/dashboard CLI smoke tests
   $0 art-cli             run procedural-art CLI smoke tests
   $0 gameplay-cli        run gameplay-harness CLI smoke tests
   $0 adapters            run all CLI smoke groups
   $0 gameplay            run release gameplay and generation-length quality gates
-  $0 gameplay-audit      run mature multi-seed, generation, and credit-stress design audits
-  $0 ci-verify            run the fast CI verification lane
-  $0 ci-gates             run the deep CI gates after cargo-audit is installed
-  $0 all                 run syntax, library, doc, soak, CLI, and gameplay tests
+  $0 gameplay-audit      run mature multi-seed, generation, and credit-stress audits
+  $0 ci-verify           fast CI lane: format, clippy, library, docs
+  $0 ci-gates            deep CI lane: release tests, soaks, adapters, gameplay, audit
+  $0 all                 everything: standard + soak + adapters + gameplay
+  $0 slow                heavy release gates (ci-gates minus audit)
+  $0 deep                deepest design gates (slow + gameplay-audit)
+
+environment:
+  CIVIC_DYNASTY_JOBS      pass --jobs N to cargo test/build commands
+  CIVIC_DYNASTY_PROFILE   debug (default) or release for adapter smoke builds
+  CIVIC_DYNASTY_BINARY    reuse a prebuilt CLI binary for adapter smoke groups
+  CIVIC_DYNASTY_PYTHON    select an explicit Python interpreter
 EOF
   exit 2
 }
@@ -98,7 +115,7 @@ ensure_cli_binary() {
   esac
 
   run_step "Build $requested_profile CLI once" \
-    cargo build --quiet --locked "${profile_args[@]}" --bin civic-dynasty
+    cargo build --quiet --locked "${job_args[@]}" "${profile_args[@]}" --bin civic-dynasty
 
   local binary="target/$requested_profile/civic-dynasty"
   if [[ ! -x "$binary" && -x "${binary}.exe" ]]; then
@@ -218,13 +235,13 @@ matching_tests() {
   local filter=$1
   shift
   local output
-  output=$(cargo test --quiet --locked --lib "$filter" -- --list "$@") || return
+  output=$(cargo test --quiet --locked "${job_args[@]}" --lib "$filter" -- --list "$@") || return
   printf '%s\n' "$output" | grep ': test$' || true
 }
 
 run_fast() {
   local filter=${1:-}
-  local command=(cargo test --quiet --locked --lib)
+  local command=(cargo test --quiet --locked --lib "${job_args[@]}")
   local label='Library tests'
   local match_description=''
   if [[ -n "$filter" ]]; then
@@ -237,14 +254,24 @@ run_fast() {
 
 run_exact() {
   local test_name=$1
+  local profile_args=()
+  if [[ "$test_name" == *::soak::* ]]; then
+    profile_args=(--release)
+  fi
   run_test_step "Library test '$test_name'" "$test_name" \
-    cargo test --quiet --locked --lib "$test_name" -- --exact --include-ignored
+    cargo test --quiet --locked "${job_args[@]}" "${profile_args[@]}" --lib "$test_name" \
+    -- --exact --include-ignored
 }
 
 run_debug() {
   local test_name=$1
+  local profile_args=()
+  if [[ "$test_name" == *::soak::* ]]; then
+    profile_args=(--release)
+  fi
   run_step "Debug library test '$test_name'" \
-    cargo test --locked --lib "$test_name" -- --exact --include-ignored --nocapture
+    cargo test --locked "${job_args[@]}" "${profile_args[@]}" --lib "$test_name" \
+    -- --exact --include-ignored --nocapture
 }
 
 list_tests() {
@@ -254,7 +281,7 @@ list_tests() {
   if [[ -n "$filter" ]]; then
     matches=$(matching_tests "$filter") || return
   else
-    output=$(cargo test --quiet --locked --lib -- --list) || return
+    output=$(cargo test --quiet --locked "${job_args[@]}" --lib -- --list) || return
     matches=$(printf '%s\n' "$output" | grep ': test$' || true)
   fi
   if [[ -z "$matches" ]]; then
@@ -265,15 +292,17 @@ list_tests() {
 }
 
 run_soak() {
-  run_step 'Deterministic soak tests' \
-    cargo test --quiet --locked --lib '::soak::' -- --ignored
+  # Soak tests simulate thousands of days; release mode runs them ~100x faster
+  # than the debug test profile with the same deterministic assertions.
+  run_step 'Deterministic soak tests (release)' \
+    cargo test --release --quiet --locked "${job_args[@]}" --lib '::soak::' -- --ignored
 }
 
 run_docs() {
   local python_command
   python_command=$(resolve_python) || return
   run_step 'Documentation consistency' "$python_command" scripts/check_docs.py
-  run_step 'Documentation tests' cargo test --quiet --locked --doc
+  run_step 'Documentation tests' cargo test --quiet --locked "${job_args[@]}" --doc
 }
 
 run_gameplay() {
@@ -357,13 +386,34 @@ run_ci_verify() {
 
 run_ci_gates() {
   run_soak
-  run_step 'Release library tests' cargo test --release --quiet --locked --lib
+  run_step 'Release library tests' cargo test --release --quiet --locked "${job_args[@]}" --lib
   ensure_cli_binary release
   run_cli_core
   run_cli_art
   run_cli_gameplay
   run_gameplay
   run_step 'Dependency audit' cargo audit
+}
+
+run_slow_gates() {
+  run_soak
+  run_step 'Release library tests' cargo test --release --quiet --locked "${job_args[@]}" --lib
+  ensure_cli_binary release
+  run_cli_core
+  run_cli_art
+  run_cli_gameplay
+  run_gameplay
+  run_generation_gameplay
+}
+
+run_all() {
+  run_standard
+  run_soak
+  ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
+  run_cli_art
+  run_cli_gameplay
+  run_gameplay
+  run_generation_gameplay
 }
 
 case "$mode" in
@@ -431,15 +481,18 @@ case "$mode" in
     [[ $# -eq 1 ]] || usage
     run_ci_gates
     ;;
+  slow)
+    [[ $# -eq 1 ]] || usage
+    run_slow_gates
+    ;;
+  deep)
+    [[ $# -eq 1 ]] || usage
+    run_slow_gates
+    run_gameplay_audit
+    ;;
   all)
     [[ $# -eq 1 ]] || usage
-    run_standard
-    run_soak
-    ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
-    run_cli_art
-    run_cli_gameplay
-    run_gameplay
-    run_generation_gameplay
+    run_all
     ;;
   *)
     usage

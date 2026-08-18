@@ -17,6 +17,18 @@ REQUIRED_DOCS = (
     "TESTING.md",
     "GAMEPLAY_HARNESS.md",
 )
+RETROSPECTIVE_PHRASES = (
+    "Verified on",
+    "tests pass",
+    "repair history",
+    "completed repair",
+    "previously",
+    "formerly",
+    "used to",
+    "no longer",
+    "regression fix",
+    "workaround for",
+)
 
 
 def fail(message: str) -> None:
@@ -126,24 +138,12 @@ def check_test_runner_contract() -> None:
 
 
 def check_document_style() -> None:
-    retrospective_phrases = (
-        "Verified on",
-        "tests pass",
-        "repair history",
-        "completed repair",
-        "previously",
-        "formerly",
-        "used to",
-        "no longer",
-        "regression fix",
-        "workaround for",
-    )
     maximum_line_length = 500
 
     for document in REQUIRED_DOCS:
         text = read(document)
         lowered = text.lower()
-        for phrase in retrospective_phrases:
+        for phrase in RETROSPECTIVE_PHRASES:
             if phrase.lower() in lowered:
                 fail(f"{document} contains retrospective phrase {phrase!r}")
         for line_number, line in enumerate(text.splitlines(), start=1):
@@ -154,6 +154,22 @@ def check_document_style() -> None:
                 )
 
 
+def check_self_contract() -> None:
+    """Keep the checker's own contracts honest so a broken gate cannot silently pass."""
+    if not REQUIRED_DOCS:
+        fail("REQUIRED_DOCS must name every owned document")
+    for document in REQUIRED_DOCS:
+        if not document.endswith(".md"):
+            fail(f"REQUIRED_DOCS entries must be Markdown files: {document}")
+    for phrase in RETROSPECTIVE_PHRASES:
+        if not phrase:
+            fail("retrospective phrase list must not contain an empty entry")
+    read("scripts/check_docs.py")
+    for required in ("README.md", "STATUS.md", "TESTING.md"):
+        if required not in REQUIRED_DOCS:
+            fail(f"self contract requires {required} to stay in REQUIRED_DOCS")
+
+
 def main() -> None:
     for document in REQUIRED_DOCS:
         read(document)
@@ -162,6 +178,7 @@ def main() -> None:
     check_readme_map()
     check_test_runner_contract()
     check_document_style()
+    check_self_contract()
     print("Documentation contracts are consistent.")
 
 

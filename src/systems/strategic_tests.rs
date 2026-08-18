@@ -7370,4 +7370,167 @@ mod ai {
             "a refused recapitalization must not spend owner treasury"
         );
     }
+
+    #[test]
+    fn ai_credit_participation_issues_a_working_capital_loan() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        // Choose a rival without existing active debt so the AI lending branch can
+        // fund its working-capital shortfall.
+        let borrowers_with_debt: BTreeSet<_> = state
+            .loans
+            .values()
+            .filter(|loan| loan.status.is_repayment_active())
+            .map(|loan| loan.borrower_dynasty_id)
+            .collect();
+        let borrower_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|id| *id != state.player_dynasty_id && !borrowers_with_debt.contains(id))
+            .expect("campaign must contain a rival without active debt");
+        let business_id = state
+            .businesses
+            .ids_for_owner(borrower_id)
+            .expect("rival owner index must exist")
+            .iter()
+            .next()
+            .copied()
+            .expect("rival must own a business");
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("rival business must exist");
+            business.finance.cash = Money::ZERO;
+        }
+        // Drain the borrower so it cannot self-finance.
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("rival dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(1_000);
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|id| *id != state.player_dynasty_id && *id != borrower_id)
+            .expect("campaign must contain a second rival dynasty");
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("lender dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(60_000);
+        let loans_before = state.loans.len();
+        let borrower_business_cash_before = {
+            let business = state
+                .businesses
+                .get(business_id)
+                .expect("rival business must exist");
+            business.cash()
+        };
+
+        advance_ai_credit_participation(registry, &mut state);
+
+        assert!(
+            state.loans.len() > loans_before,
+            "AI credit participation must create a working-capital loan"
+        );
+        assert!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("rival business must exist")
+                .cash()
+                > borrower_business_cash_before,
+            "the loaned capital must reach the short business"
+        );
+    }
+
+    #[test]
+    fn ai_credit_participation_skips_a_house_with_an_active_loan() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        // A bootstrap loan already exists with some rival as borrower. Force that
+        // borrower to be capital-hungry so the AI would otherwise lend to it, and
+        // give the lender liquidity, then confirm no second loan is issued.
+        let existing = state
+            .loans
+            .values()
+            .find(|loan| {
+                loan.borrower_dynasty_id != state.player_dynasty_id
+                    && loan.status.is_repayment_active()
+            })
+            .expect("bootstrap must create a rival active loan");
+        state
+            .dynasties
+            .get_mut(&existing.borrower_dynasty_id)
+            .expect("rival borrower must exist")
+            .resources
+            .treasury = Money::from_copper(1_000);
+        state
+            .dynasties
+            .get_mut(&existing.lender_dynasty_id)
+            .expect("rival lender must exist")
+            .resources
+            .treasury = Money::from_copper(60_000);
+        let loans_before = state.loans.len();
+
+        advance_ai_credit_participation(registry, &mut state);
+
+        assert_eq!(
+            state.loans.len(),
+            loans_before,
+            "a borrower with active repayment debt must not receive a second loan"
+        );
+    }
+
+    #[test]
+    fn district_decay_revalues_property_values_downward() {
+        let mut state = make_test_campaign();
+        // Pick a non-residence property in a district.
+        let (district_id, property_id, value_before) = state
+            .properties
+            .values()
+            .find(|property| property.kind != PropertyKind::Residence)
+            .map(|property| (property.district_id, property.id(), property.value))
+            .expect("campaign must contain a non-residence property");
+        let rent_index_before = state
+            .districts
+            .get(&district_id)
+            .expect("property district must exist")
+            .rent_index_basis_points;
+        // Crash district desirability so the rent index and property values fall.
+        {
+            let district = state
+                .districts
+                .get_mut(&district_id)
+                .expect("property district must exist");
+            district.safety_basis_points = 1_000;
+            district.sanitation_basis_points = 1_000;
+        }
+
+        update_district_conditions(&mut state);
+
+        let district = state
+            .districts
+            .get(&district_id)
+            .expect("property district must exist");
+        assert!(
+            district.rent_index_basis_points < rent_index_before,
+            "crashing district desirability must lower the rent index (was {rent_index_before}, now {})",
+            district.rent_index_basis_points
+        );
+        let property = state
+            .properties
+            .get(&property_id)
+            .expect("property must exist");
+        assert!(
+            property.value < value_before,
+            "a decaying district must pull property values downward (was {value_before}, now {})",
+            property.value
+        );
+    }
 }
