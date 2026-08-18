@@ -11,6 +11,8 @@ This file is the execution card for repository work. [ARCHITECTURE.md](ARCHITECT
 5. Use [TESTING.md](TESTING.md) for broader test selection and the completion gate.
 6. Update the one document that owns any changed architecture, behavior, schema, API, command, harness, or scope contract.
 
+This project applies the Universal, Stateful Application, Deterministic System, and Automated Behavior Evaluation portfolio profiles.
+
 ## Primary owners
 
 | Concern | Owner |
