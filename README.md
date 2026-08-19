@@ -59,15 +59,15 @@ Given the same registry, state, seed, command sequence, and day count, the simul
   version is `Cargo.toml` (`rust-version`), pinned for local development by
   `rust-toolchain.toml`. Local validation commands use that pinned toolchain. Do
   not duplicate the version value in other current documents.
-- Bash for repository scripts
+- Bash or PowerShell for repository scripts
 - Python for documentation and CLI structured-output checks
 - `cargo-audit` for the complete security gate
 
 The crate uses Rust 2024 and has no runtime service dependency.
 
 Verification is local-only. There are no hosted CI runners; the scripted lanes
-in `scripts/test.sh` are the authoritative gate. Optionally install the
-version-controlled local git hooks with `bash scripts/install_hooks.sh` — a fast
+in `scripts/test.sh` (or `scripts/test.ps1` on Windows) are the authoritative gate. Optionally install the
+version-controlled local git hooks with `bash scripts/install_hooks.sh` (or `scripts/install_hooks.ps1`) — a fast
 pre-commit check (format, shell syntax, whitespace) and a `standard` lane on
 push.
 
@@ -152,9 +152,12 @@ src/
 scripts/
   check_gameplay.py    Structured validation for long-running gameplay gate reports
   check_docs.py       Documentation consistency checks
-  test.sh             Test tier runner
-  verify_cli.sh       CLI smoke groups
-  install_hooks.sh    Install version-controlled local git hooks
+  test.sh             Test tier runner (Bash)
+  test.ps1            Test tier runner (PowerShell)
+  verify_cli.sh       CLI smoke groups (Bash)
+  verify_cli.ps1      CLI smoke groups (PowerShell)
+  install_hooks.sh    Install version-controlled local git hooks (Bash)
+  install_hooks.ps1   Install version-controlled local git hooks (PowerShell)
   hooks/              Local pre-commit/pre-push gates
 ```
 

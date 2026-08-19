@@ -9,6 +9,8 @@ use crate::test_support::{assert_set_eq, make_test_campaign, rivergate_registry_
 use std::sync::OnceLock;
 
 static FOCUSED_REPORT_30_DAYS: OnceLock<GameplayHarnessReport> = OnceLock::new();
+static FOCUSED_REPORT_60_DAYS: OnceLock<GameplayHarnessReport> = OnceLock::new();
+static FOCUSED_REPORT_180_DAYS: OnceLock<GameplayHarnessReport> = OnceLock::new();
 
 fn focused_config(days: u32) -> GameplayHarnessConfig {
     GameplayHarnessConfig {
@@ -24,6 +26,8 @@ fn focused_config(days: u32) -> GameplayHarnessConfig {
 fn cached_focused_report(days: u32) -> GameplayHarnessReport {
     let report = match days {
         30 => FOCUSED_REPORT_30_DAYS.get_or_init(|| build_focused_report(30)),
+        60 => FOCUSED_REPORT_60_DAYS.get_or_init(|| build_focused_report(60)),
+        180 => FOCUSED_REPORT_180_DAYS.get_or_init(|| build_focused_report(180)),
         _ => panic!("no cached focused report is configured for {days} days"),
     };
     report.clone()
@@ -615,9 +619,7 @@ mod harness {
 
     #[test]
     fn trace_retains_feedback_and_explicit_phase_context() {
-        let registry = rivergate_registry_for_test();
-        let report = run_gameplay_harness(registry, focused_config(180))
-            .expect("gameplay harness must complete");
+        let report = cached_focused_report(180);
         let campaign = report.campaigns.first().expect("one campaign must run");
 
         assert!(
@@ -638,9 +640,7 @@ mod harness {
 
     #[test]
     fn trace_steps_record_no_action_causes_and_render_a_decision_log() {
-        let registry = rivergate_registry_for_test();
-        let report = run_gameplay_harness(registry, focused_config(180))
-            .expect("gameplay harness must complete");
+        let report = cached_focused_report(180);
         let campaign = report.campaigns.first().expect("one campaign must run");
 
         for step in &campaign.trace {
@@ -889,9 +889,7 @@ mod harness {
 
     #[test]
     fn rendered_report_surfaces_scores_findings_and_traces() {
-        let registry = rivergate_registry_for_test();
-        let report = run_gameplay_harness(registry, focused_config(60))
-            .expect("gameplay harness must complete");
+        let report = cached_focused_report(60);
 
         let rendered = render_gameplay_report(&report);
 

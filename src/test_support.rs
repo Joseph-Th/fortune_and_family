@@ -1,8 +1,12 @@
 //! Shared deterministic fixtures and state-difference diagnostics for unit tests.
 
 use crate::core::{AppState, NewGameConfig};
+use crate::money::{Money, Quantity};
 use crate::registry::{Registry, build_rivergate_registry};
-use crate::systems::build_new_game;
+use crate::systems::{
+    CommandError, CommandOutcome, PlayerCommand, apply_player_command, build_new_game,
+    validate_invariants,
+};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
@@ -64,6 +68,82 @@ where
         return;
     }
     panic!("{context}; missing members: {missing:#?}; unexpected members: {unexpected:#?}");
+}
+
+#[track_caller]
+pub(crate) fn assert_money_eq(actual: Money, expected: Money, context: &str) {
+    if actual == expected {
+        return;
+    }
+    panic!(
+        "{context}; money mismatch: expected {} ({} copper), got {} ({} copper)",
+        expected,
+        expected.copper(),
+        actual,
+        actual.copper(),
+    );
+}
+
+#[track_caller]
+pub(crate) fn assert_quantity_eq(actual: Quantity, expected: Quantity, context: &str) {
+    if actual == expected {
+        return;
+    }
+    panic!(
+        "{context}; quantity mismatch: expected {} ({} milliunits), got {} ({} milliunits)",
+        expected,
+        expected.milliunits(),
+        actual,
+        actual.milliunits(),
+    );
+}
+
+#[track_caller]
+pub(crate) fn assert_command_rejected_with(
+    registry: &Registry,
+    state: &mut AppState,
+    command: PlayerCommand,
+    expected_error: &CommandError,
+    context: &str,
+) {
+    let before = state.clone();
+    let result = apply_player_command(registry, state, command);
+    match result {
+        Ok(outcome) => {
+            panic!(
+                "{context}; expected command to be rejected with error {expected_error:?}, but succeeded with {outcome:?}"
+            );
+        }
+        Err(err) => {
+            assert_eq!(
+                &err, expected_error,
+                "{context}; command rejected with wrong error"
+            );
+        }
+    }
+    assert_state_unchanged(
+        &before,
+        state,
+        &format!("{context} (rejected mutation must leave campaign state unchanged)"),
+    );
+}
+
+#[track_caller]
+pub(crate) fn assert_command_success(
+    registry: &Registry,
+    state: &mut AppState,
+    command: PlayerCommand,
+    context: &str,
+) -> CommandOutcome {
+    match apply_player_command(registry, state, command) {
+        Ok(outcome) => {
+            validate_invariants(registry, state);
+            outcome
+        }
+        Err(err) => {
+            panic!("{context}; expected command to succeed, but failed with error: {err:?}");
+        }
+    }
 }
 
 fn display_json(value: &Value) -> String {
@@ -183,5 +263,51 @@ mod tests {
         assert!(actual.ends_with('…'));
         assert!(expected.chars().count() <= 241);
         assert!(actual.chars().count() <= 241);
+    }
+
+    #[test]
+    fn assert_money_and_quantity_helpers_match_exact_values() {
+        assert_money_eq(
+            Money::from_copper(1250),
+            Money::from_copper(1250),
+            "identical money must pass",
+        );
+        assert_quantity_eq(
+            Quantity::from_milliunits(500),
+            Quantity::from_milliunits(500),
+            "identical quantity must pass",
+        );
+    }
+
+    #[test]
+    fn assert_command_helpers_validate_rejection_and_success() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+
+        let outcome = assert_command_success(
+            registry,
+            &mut state,
+            PlayerCommand::SetHouseGovernance {
+                governance: crate::core::HouseGovernance::FamilyPartnership,
+            },
+            "setting house governance must succeed",
+        );
+        assert!(
+            outcome.summary.contains("FamilyPartnership"),
+            "feedback summary must reflect governance update"
+        );
+
+        // Immediate duplicate change must be rejected and preserve state
+        assert_command_rejected_with(
+            registry,
+            &mut state,
+            PlayerCommand::SetHouseGovernance {
+                governance: crate::core::HouseGovernance::FamilyPartnership,
+            },
+            &CommandError::UnchangedHouseGovernance {
+                governance: crate::core::HouseGovernance::FamilyPartnership,
+            },
+            "duplicate governance update must be rejected",
+        );
     }
 }
