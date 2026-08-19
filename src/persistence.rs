@@ -6,6 +6,7 @@ use crate::core::{
 };
 use crate::ids::{BusinessId, HouseholdId};
 use crate::money::{Money, Quantity, checked_cost_for};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -78,6 +79,22 @@ pub enum PersistenceError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("save file {path} contains duplicate member {member:?} at {json_path}")]
+    DuplicateMember {
+        path: PathBuf,
+        json_path: String,
+        member: String,
+    },
+    #[error("save file {path} exists and explicit overwrite was not requested")]
+    DestinationExists { path: PathBuf },
+    #[error(
+        "save file {path} was modified by another writer (expected revision {expected_revision}, found {current_revision})"
+    )]
+    StaleWriterConflict {
+        path: PathBuf,
+        expected_revision: String,
+        current_revision: String,
+    },
     #[error("save file {path} has no numeric schema_version")]
     MissingSchemaVersion { path: PathBuf },
     #[error(
@@ -96,6 +113,51 @@ pub enum PersistenceError {
     },
 }
 
+/// The outcome of a save operation after visibility commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SaveOutcome {
+    /// Save was atomically replaced and parent directory durability synchronized.
+    Committed,
+    /// Save was atomically replaced and is visible to subsequent reads, but parent directory
+    /// synchronization failed or was degraded.
+    CommittedWithDegradedDurability,
+}
+
+/// A deterministic fingerprint of a save file's committed contents for CAS / optimistic concurrency.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaveRevision {
+    hash: u64,
+    size: u64,
+}
+
+impl SaveRevision {
+    #[must_use]
+    pub fn of_bytes(bytes: &[u8]) -> Self {
+        let mut hasher = crate::registry::DeterministicRegistryHasher::new();
+        hasher.write(bytes);
+        Self {
+            hash: hasher.finish(),
+            size: bytes.len() as u64,
+        }
+    }
+
+    /// Computes a save revision from a save file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `PersistenceError` if reading or sizing the save file fails.
+    pub fn of_file(path: impl AsRef<Path>) -> Result<Self, PersistenceError> {
+        let path = path.as_ref();
+        let bytes = read_bounded_save(path)?;
+        Ok(Self::of_bytes(&bytes))
+    }
+
+    #[must_use]
+    pub fn display_token(&self) -> String {
+        format!("{:016x}:{}", self.hash, self.size)
+    }
+}
+
 #[derive(Debug)]
 struct StateValidationError {
     kind: StateValidationKind,
@@ -111,19 +173,73 @@ impl StateValidationError {
     }
 }
 
-/// Serializes the complete application state to a JSON save file.
-///
-/// # Errors
-///
-/// Returns an error when state validation fails, the parent directory or temporary file cannot be
-/// created, serialization fails, or the destination cannot be atomically replaced.
-pub fn save_state(path: impl AsRef<Path>, state: &AppState) -> Result<(), PersistenceError> {
-    let path = path.as_ref();
+#[cfg(test)]
+std::thread_local! {
+    static INJECT_DIRECTORY_SYNC_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_inject_directory_sync_failure_for_test(inject: bool) {
+    INJECT_DIRECTORY_SYNC_FAILURE.with(|cell| cell.set(inject));
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn sync_save_directory_with_injection(
+    #[allow(unused_variables)] parent: &Path,
+) -> Result<(), PersistenceError> {
+    #[cfg(test)]
+    if INJECT_DIRECTORY_SYNC_FAILURE.with(std::cell::Cell::get) {
+        return Err(PersistenceError::SyncDirectory {
+            path: parent.to_path_buf(),
+            source: std::io::Error::other("injected directory sync failure"),
+        });
+    }
+    #[cfg(unix)]
+    sync_save_directory(parent)?;
+    Ok(())
+}
+
+fn save_state_impl(
+    path: &Path,
+    state: &AppState,
+    expected_revision: Option<&SaveRevision>,
+    overwrite: Option<bool>,
+) -> Result<SaveOutcome, PersistenceError> {
     validate_state(state).map_err(|error| PersistenceError::InvalidState {
         path: path.to_path_buf(),
         kind: error.kind,
         reason: error.reason,
     })?;
+
+    if let Some(overwrite_allowed) = overwrite
+        && !overwrite_allowed
+        && (path.exists() || fs::symlink_metadata(path).is_ok())
+    {
+        return Err(PersistenceError::DestinationExists {
+            path: path.to_path_buf(),
+        });
+    }
+
+    if let Some(expected) = expected_revision {
+        if path.exists() {
+            let current_bytes = read_bounded_save(path)?;
+            let current_revision = SaveRevision::of_bytes(&current_bytes);
+            if &current_revision != expected {
+                return Err(PersistenceError::StaleWriterConflict {
+                    path: path.to_path_buf(),
+                    expected_revision: expected.display_token(),
+                    current_revision: current_revision.display_token(),
+                });
+            }
+        } else {
+            return Err(PersistenceError::StaleWriterConflict {
+                path: path.to_path_buf(),
+                expected_revision: expected.display_token(),
+                current_revision: "missing".to_owned(),
+            });
+        }
+    }
+
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -160,9 +276,52 @@ pub fn save_state(path: impl AsRef<Path>, state: &AppState) -> Result<(), Persis
             path: path.to_path_buf(),
             source: error.error,
         })?;
-    #[cfg(unix)]
-    sync_save_directory(parent)?;
-    Ok(())
+
+    let outcome = match sync_save_directory_with_injection(parent) {
+        Ok(()) => SaveOutcome::Committed,
+        Err(_) => SaveOutcome::CommittedWithDegradedDurability,
+    };
+    Ok(outcome)
+}
+
+/// Serializes the complete application state to a JSON save file.
+///
+/// # Errors
+///
+/// Returns an error when state validation fails, the parent directory or temporary file cannot be
+/// created, serialization fails, or the destination cannot be atomically replaced.
+pub fn save_state(
+    path: impl AsRef<Path>,
+    state: &AppState,
+) -> Result<SaveOutcome, PersistenceError> {
+    save_state_impl(path.as_ref(), state, None, Some(true))
+}
+
+/// Serializes the application state to an existing campaign path using compare-and-swap validation.
+///
+/// # Errors
+///
+/// Returns `PersistenceError::StaleWriterConflict` when the destination was modified by another
+/// writer since `expected_revision` was read.
+pub fn save_state_cas(
+    path: impl AsRef<Path>,
+    state: &AppState,
+    expected_revision: &SaveRevision,
+) -> Result<SaveOutcome, PersistenceError> {
+    save_state_impl(path.as_ref(), state, Some(expected_revision), Some(true))
+}
+
+/// Serializes a new campaign state, optionally requiring that the destination does not already exist.
+///
+/// # Errors
+///
+/// Returns `PersistenceError::DestinationExists` if `overwrite` is false and the file exists.
+pub fn save_state_new(
+    path: impl AsRef<Path>,
+    state: &AppState,
+    overwrite: bool,
+) -> Result<SaveOutcome, PersistenceError> {
+    save_state_impl(path.as_ref(), state, None, Some(overwrite))
 }
 
 #[cfg(unix)]
@@ -175,15 +334,19 @@ fn sync_save_directory(parent: &Path) -> Result<(), PersistenceError> {
         })
 }
 
-/// Loads and validates a current-schema JSON save file.
+/// Loads and validates a current-schema JSON save file, returning its committed file revision.
 ///
 /// # Errors
 ///
-/// Returns an error when the path is not a bounded regular file, the file cannot be read or parsed,
-/// the schema version is not current, or the deserialized state fails release validation.
-pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> {
+/// Returns an error when the path is not a bounded regular file, contains duplicate JSON members,
+/// cannot be parsed, uses an unsupported schema, or fails release validation.
+pub fn load_state_with_revision(
+    path: impl AsRef<Path>,
+) -> Result<(AppState, SaveRevision), PersistenceError> {
     let path = path.as_ref();
     let bytes = read_bounded_save(path)?;
+    let revision = SaveRevision::of_bytes(&bytes);
+    validate_no_duplicate_json_members(&bytes, path)?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|source| PersistenceError::Parse {
             path: path.to_path_buf(),
@@ -200,7 +363,18 @@ pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> 
         kind: error.kind,
         reason: error.reason,
     })?;
-    Ok(state)
+    Ok((state, revision))
+}
+
+/// Loads and validates a current-schema JSON save file.
+///
+/// # Errors
+///
+/// Returns an error when the path is not a bounded regular file, the file cannot be read or parsed,
+/// contains duplicate JSON members, the schema version is not current, or the deserialized state
+/// fails release validation.
+pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> {
+    load_state_with_revision(path).map(|(state, _)| state)
 }
 
 fn read_bounded_save(path: &Path) -> Result<Vec<u8>, PersistenceError> {
@@ -268,9 +442,19 @@ fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
             format!("unsupported scenario key {:?}", state.scenario_key),
         ));
     }
+    let registry = crate::registry::build_rivergate_registry();
+    if state.registry_fingerprint != registry.fingerprint() {
+        return Err(StateValidationError::new(
+            StateValidationKind::Scenario,
+            format!(
+                "registry fingerprint mismatch: save has {:016x}, current registry has {:016x}",
+                state.registry_fingerprint,
+                registry.fingerprint()
+            ),
+        ));
+    }
     validate_simulation_clock(state)
         .map_err(|reason| StateValidationError::new(StateValidationKind::NumericRanges, reason))?;
-    let registry = crate::registry::build_rivergate_registry();
     validate_definition_references(&registry, state).map_err(|reason| {
         StateValidationError::new(StateValidationKind::DefinitionReferences, reason)
     })?;
@@ -286,6 +470,285 @@ fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     state.validate_next_ids().map_err(|reason| {
         StateValidationError::new(StateValidationKind::IdentifierAllocation, reason)
     })
+}
+
+struct JsonDuplicateScanner<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    path: &'a Path,
+}
+
+impl<'a> JsonDuplicateScanner<'a> {
+    const fn new(bytes: &'a [u8], path: &'a Path) -> Self {
+        Self {
+            bytes,
+            pos: 0,
+            path,
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.pos < self.bytes.len() {
+            match self.bytes[self.pos] {
+                b' ' | b'\t' | b'\n' | b'\r' => self.pos += 1,
+                _ => break,
+            }
+        }
+    }
+
+    fn peek(&mut self) -> Option<u8> {
+        self.skip_whitespace();
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn parse_value(&mut self, current_path: &str) -> Result<(), PersistenceError> {
+        self.skip_whitespace();
+        let b = self
+            .bytes
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| PersistenceError::Parse {
+                path: self.path.to_path_buf(),
+                source: serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "unexpected end of JSON input",
+                )),
+            })?;
+        match b {
+            b'{' => self.parse_object(current_path),
+            b'[' => self.parse_array(current_path),
+            b'"' => {
+                self.parse_string()?;
+                Ok(())
+            }
+            b't' | b'f' | b'n' => {
+                self.parse_literal();
+                Ok(())
+            }
+            b'-' | b'0'..=b'9' => {
+                self.parse_number();
+                Ok(())
+            }
+            _ => Err(PersistenceError::Parse {
+                path: self.path.to_path_buf(),
+                source: serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid character in JSON: {}", b as char),
+                )),
+            }),
+        }
+    }
+
+    fn parse_object(&mut self, current_path: &str) -> Result<(), PersistenceError> {
+        self.pos += 1; // skip '{'
+        let mut seen_keys = BTreeSet::new();
+        loop {
+            self.skip_whitespace();
+            if self.peek() == Some(b'}') {
+                self.pos += 1;
+                break;
+            }
+            if self.peek() != Some(b'"') {
+                return Err(PersistenceError::Parse {
+                    path: self.path.to_path_buf(),
+                    source: serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "expected string key in object",
+                    )),
+                });
+            }
+            let key = self.parse_string()?;
+            if !seen_keys.insert(key.clone()) {
+                return Err(PersistenceError::DuplicateMember {
+                    path: self.path.to_path_buf(),
+                    json_path: current_path.to_owned(),
+                    member: key,
+                });
+            }
+            self.skip_whitespace();
+            if self.peek() != Some(b':') {
+                return Err(PersistenceError::Parse {
+                    path: self.path.to_path_buf(),
+                    source: serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "expected ':' after key",
+                    )),
+                });
+            }
+            self.pos += 1; // skip ':'
+            let child_path = if current_path == "$" {
+                format!("$.{key}")
+            } else {
+                format!("{current_path}.{key}")
+            };
+            self.parse_value(&child_path)?;
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b'}') => {
+                    self.pos += 1;
+                    break;
+                }
+                _ => {
+                    return Err(PersistenceError::Parse {
+                        path: self.path.to_path_buf(),
+                        source: serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "expected ',' or '}' in object",
+                        )),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_array(&mut self, current_path: &str) -> Result<(), PersistenceError> {
+        self.pos += 1; // skip '['
+        let mut index = 0;
+        loop {
+            self.skip_whitespace();
+            if self.peek() == Some(b']') {
+                self.pos += 1;
+                break;
+            }
+            let child_path = format!("{current_path}[{index}]");
+            self.parse_value(&child_path)?;
+            index += 1;
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b']') => {
+                    self.pos += 1;
+                    break;
+                }
+                _ => {
+                    return Err(PersistenceError::Parse {
+                        path: self.path.to_path_buf(),
+                        source: serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "expected ',' or ']' in array",
+                        )),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_string(&mut self) -> Result<String, PersistenceError> {
+        self.pos += 1; // skip '"'
+        let mut result = String::new();
+        let mut escaped = false;
+        while self.pos < self.bytes.len() {
+            let b = self.bytes[self.pos];
+            if escaped {
+                match b {
+                    b'"' => result.push('"'),
+                    b'\\' => result.push('\\'),
+                    b'/' => result.push('/'),
+                    b'b' => result.push('\x08'),
+                    b'f' => result.push('\x0c'),
+                    b'n' => result.push('\n'),
+                    b'r' => result.push('\r'),
+                    b't' => result.push('\t'),
+                    b'u' => {
+                        if self.pos + 4 >= self.bytes.len() {
+                            return Err(PersistenceError::Parse {
+                                path: self.path.to_path_buf(),
+                                source: serde_json::Error::io(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "incomplete unicode escape",
+                                )),
+                            });
+                        }
+                        let hex_slice = std::str::from_utf8(
+                            &self.bytes[self.pos + 1..=self.pos + 4],
+                        )
+                        .map_err(|_| PersistenceError::Parse {
+                            path: self.path.to_path_buf(),
+                            source: serde_json::Error::io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "invalid utf8 in unicode escape",
+                            )),
+                        })?;
+                        let code = u32::from_str_radix(hex_slice, 16).map_err(|_| {
+                            PersistenceError::Parse {
+                                path: self.path.to_path_buf(),
+                                source: serde_json::Error::io(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "invalid hex in unicode escape",
+                                )),
+                            }
+                        })?;
+                        if let Some(ch) = char::from_u32(code) {
+                            result.push(ch);
+                        }
+                        self.pos += 4;
+                    }
+                    _ => result.push(b as char),
+                }
+                escaped = false;
+                self.pos += 1;
+            } else if b == b'\\' {
+                escaped = true;
+                self.pos += 1;
+            } else if b == b'"' {
+                self.pos += 1; // skip closing quote
+                return Ok(result);
+            } else {
+                let start = self.pos;
+                while self.pos < self.bytes.len()
+                    && self.bytes[self.pos] != b'\\'
+                    && self.bytes[self.pos] != b'"'
+                {
+                    self.pos += 1;
+                }
+                let chunk = std::str::from_utf8(&self.bytes[start..self.pos]).map_err(|_| {
+                    PersistenceError::Parse {
+                        path: self.path.to_path_buf(),
+                        source: serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid UTF-8 sequence in string",
+                        )),
+                    }
+                })?;
+                result.push_str(chunk);
+            }
+        }
+        Err(PersistenceError::Parse {
+            path: self.path.to_path_buf(),
+            source: serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "unterminated string in JSON",
+            )),
+        })
+    }
+
+    fn parse_literal(&mut self) {
+        while self.pos < self.bytes.len() {
+            match self.bytes[self.pos] {
+                b'a'..=b'z' => self.pos += 1,
+                _ => break,
+            }
+        }
+    }
+
+    fn parse_number(&mut self) {
+        while self.pos < self.bytes.len() {
+            match self.bytes[self.pos] {
+                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E' => self.pos += 1,
+                _ => break,
+            }
+        }
+    }
+}
+
+fn validate_no_duplicate_json_members(bytes: &[u8], path: &Path) -> Result<(), PersistenceError> {
+    let mut scanner = JsonDuplicateScanner::new(bytes, path);
+    scanner.parse_value("$")?;
+    scanner.skip_whitespace();
+    Ok(())
 }
 
 fn validate_campaign_phase_consistency(state: &AppState) -> Result<(), String> {

@@ -321,6 +321,141 @@ impl Registry {
     pub fn get_institution_id(&self, key: &str) -> Option<InstitutionId> {
         self.institution_by_key.get(key).copied()
     }
+
+    /// Computes a deterministic canonical fingerprint of the behavior-relevant registry definitions
+    /// in stable typed-ID order.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        let mut hasher = DeterministicRegistryHasher::new();
+        hasher.write_str("scenario");
+        hasher.write_str(self.scenario.key());
+        hasher.write_str(self.scenario.name());
+        hasher.write_i32(self.scenario.start_year());
+
+        let mut districts: Vec<_> = self.districts.iter().collect();
+        districts.sort_by_key(|d| d.id().value());
+        for district in districts {
+            hasher.write_str("district");
+            hasher.write_u32(district.id().value());
+            hasher.write_str(district.key());
+            hasher.write_str(district.name());
+            hasher.write_u32(district.population());
+            hasher.write_i64(district.base_rent().copper());
+        }
+
+        let mut goods: Vec<_> = self.goods.iter().collect();
+        goods.sort_by_key(|g| g.id().value());
+        for good in goods {
+            hasher.write_str("good");
+            hasher.write_u32(good.id().value());
+            hasher.write_str(good.key());
+            hasher.write_str(good.name());
+            let cat_byte = match good.category() {
+                GoodCategory::Staple => 0_u8,
+                GoodCategory::Drink => 1_u8,
+                GoodCategory::Textile => 2_u8,
+                GoodCategory::Fuel => 3_u8,
+                GoodCategory::Material => 4_u8,
+                GoodCategory::Tool => 5_u8,
+            };
+            hasher.write_u8(cat_byte);
+            hasher.write_i64(good.base_price().copper());
+            hasher.write_i64(good.target_market_stock().milliunits());
+            hasher.write_u16(good.daily_spoilage_basis_points());
+        }
+
+        let mut recipes: Vec<_> = self.recipes.iter().collect();
+        recipes.sort_by_key(|r| r.id().value());
+        for recipe in recipes {
+            hasher.write_str("recipe");
+            hasher.write_u32(recipe.id().value());
+            hasher.write_str(recipe.key());
+            hasher.write_str(recipe.name());
+            let mut inputs: Vec<_> = recipe.inputs().iter().collect();
+            inputs.sort_by_key(|i| i.good_id().value());
+            hasher.write_u32(u32::try_from(inputs.len()).unwrap_or(u32::MAX));
+            for input in inputs {
+                hasher.write_u32(input.good_id().value());
+                hasher.write_i64(input.quantity().milliunits());
+            }
+            hasher.write_u32(recipe.output_good_id().value());
+            hasher.write_i64(recipe.output_quantity().milliunits());
+            hasher.write_i64(recipe.daily_operating_cost().copper());
+            hasher.write_u16(recipe.administrative_load());
+        }
+
+        let mut institutions: Vec<_> = self.institutions.iter().collect();
+        institutions.sort_by_key(|i| i.id().value());
+        for institution in institutions {
+            hasher.write_str("institution");
+            hasher.write_u32(institution.id().value());
+            hasher.write_str(institution.key());
+            hasher.write_str(institution.name());
+            let kind_byte = match institution.kind() {
+                InstitutionKind::CraftGuild => 0_u8,
+                InstitutionKind::MerchantGuild => 1_u8,
+                InstitutionKind::Council => 2_u8,
+                InstitutionKind::Court => 3_u8,
+                InstitutionKind::Watch => 4_u8,
+                InstitutionKind::Treasury => 5_u8,
+                InstitutionKind::Charity => 6_u8,
+                InstitutionKind::MarketOffice => 7_u8,
+            };
+            hasher.write_u8(kind_byte);
+            hasher.write_u32(institution.district_id().value());
+        }
+
+        hasher.finish()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct DeterministicRegistryHasher {
+    state: u64,
+}
+
+impl DeterministicRegistryHasher {
+    pub(crate) const fn new() -> Self {
+        Self {
+            state: 0xcbf2_9ce4_8422_2325,
+        }
+    }
+
+    pub(crate) fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.state ^= u64::from(byte);
+            self.state = self.state.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    pub(crate) fn write_u8(&mut self, val: u8) {
+        self.write(&[val]);
+    }
+
+    pub(crate) fn write_u16(&mut self, val: u16) {
+        self.write(&val.to_le_bytes());
+    }
+
+    pub(crate) fn write_u32(&mut self, val: u32) {
+        self.write(&val.to_le_bytes());
+    }
+
+    pub(crate) fn write_i32(&mut self, val: i32) {
+        self.write(&val.to_le_bytes());
+    }
+
+    pub(crate) fn write_i64(&mut self, val: i64) {
+        self.write(&val.to_le_bytes());
+    }
+
+    pub(crate) fn write_str(&mut self, s: &str) {
+        self.write_u32(u32::try_from(s.len()).unwrap_or(u32::MAX));
+        self.write(s.as_bytes());
+    }
+
+    pub(crate) const fn finish(&self) -> u64 {
+        self.state
+    }
 }
 
 #[derive(Debug)]

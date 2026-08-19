@@ -1168,7 +1168,7 @@ mod validation {
                 assert!(reason.contains("invalid economic value"));
             }
             Err(error) => panic!("expected invalid-state error, got {error:?}"),
-            Ok(()) => panic!("invalid in-memory state unexpectedly saved"),
+            Ok(_) => panic!("invalid in-memory state unexpectedly saved"),
         }
         assert!(
             !parent.exists(),
@@ -2800,5 +2800,199 @@ mod validation {
             StateValidationKind::StrategicRecords,
             "invalid or duplicate occupant",
         );
+    }
+}
+
+mod duplicate_json_members {
+    use super::*;
+
+    #[test]
+    fn rejects_duplicate_root_member() {
+        let json_text = r#"{
+            "schema_version": 22,
+            "scenario_key": "rivergate",
+            "scenario_key": "rivergate",
+            "registry_fingerprint": 0
+        }"#;
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("duplicate-root.json");
+        std::fs::write(&path, json_text).expect("fixture must write");
+
+        match load_state(&path) {
+            Err(PersistenceError::DuplicateMember {
+                json_path, member, ..
+            }) => {
+                assert_eq!(json_path, "$");
+                assert_eq!(member, "scenario_key");
+            }
+            other => panic!("expected DuplicateMember error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_nested_member() {
+        let json_text = r#"{
+            "schema_version": 22,
+            "scenario_key": "rivergate",
+            "registry_fingerprint": 0,
+            "clock": {
+                "day": 10,
+                "day": 12
+            }
+        }"#;
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("duplicate-nested.json");
+        std::fs::write(&path, json_text).expect("fixture must write");
+
+        match load_state(&path) {
+            Err(PersistenceError::DuplicateMember {
+                json_path, member, ..
+            }) => {
+                assert_eq!(json_path, "$.clock");
+                assert_eq!(member, "day");
+            }
+            other => panic!("expected DuplicateMember error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_member_in_array_element() {
+        let json_text = r#"{
+            "schema_version": 22,
+            "scenario_key": "rivergate",
+            "registry_fingerprint": 0,
+            "items": [
+                { "name": "first" },
+                { "name": "second", "name": "duplicate" }
+            ]
+        }"#;
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("duplicate-array.json");
+        std::fs::write(&path, json_text).expect("fixture must write");
+
+        match load_state(&path) {
+            Err(PersistenceError::DuplicateMember {
+                json_path, member, ..
+            }) => {
+                assert_eq!(json_path, "$.items[1]");
+                assert_eq!(member, "name");
+            }
+            other => panic!("expected DuplicateMember error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admits_valid_distinct_json_members() {
+        let state = make_test_campaign();
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("valid-campaign.json");
+        save_state(&path, &state).expect("valid campaign must save");
+        assert!(load_state(&path).is_ok());
+    }
+}
+
+mod directory_durability {
+    use super::*;
+
+    #[test]
+    fn save_state_returns_degraded_durability_when_sync_fails() {
+        let state = make_test_campaign();
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("degraded-save.json");
+
+        crate::persistence::set_inject_directory_sync_failure_for_test(true);
+        let outcome = save_state(&path, &state);
+        crate::persistence::set_inject_directory_sync_failure_for_test(false);
+
+        assert_eq!(
+            outcome.expect("save must commit even with degraded durability"),
+            SaveOutcome::CommittedWithDegradedDurability
+        );
+        let loaded = load_state(&path).expect("committed save must be loadable");
+        assert_eq!(loaded.clock().day(), state.clock().day());
+    }
+}
+
+mod registry_fingerprint {
+    use super::*;
+
+    #[test]
+    fn rejects_corrupted_registry_fingerprint() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(&state).expect("state must serialize");
+        let original_fp = state.registry_fingerprint();
+        value["registry_fingerprint"] = Value::from(original_fp.wrapping_add(1));
+
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("corrupted-fingerprint.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&value).unwrap().as_bytes(),
+        )
+        .expect("fixture must write");
+
+        match load_state(&path) {
+            Err(PersistenceError::InvalidState { kind, reason, .. }) => {
+                assert_eq!(kind, StateValidationKind::Scenario);
+                assert!(reason.contains("registry fingerprint mismatch"));
+            }
+            other => panic!("expected registry fingerprint mismatch error, got {other:?}"),
+        }
+    }
+}
+
+mod cas_concurrency {
+    use super::*;
+
+    #[test]
+    fn save_state_new_protects_against_accidental_clobber() {
+        let state = make_test_campaign();
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("new-campaign.json");
+
+        save_state_new(&path, &state, false).expect("initial new save must succeed");
+
+        let clobber_err = save_state_new(&path, &state, false);
+        assert!(matches!(
+            clobber_err,
+            Err(PersistenceError::DestinationExists { .. })
+        ));
+
+        save_state_new(&path, &state, true).expect("overwrite must succeed when requested");
+    }
+
+    #[test]
+    fn save_state_cas_detects_stale_writer_conflicts() {
+        let state = make_test_campaign();
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("campaign.json");
+
+        save_state(&path, &state).expect("initial save must succeed");
+        let (loaded_1, rev_1) =
+            load_state_with_revision(&path).expect("load with revision must succeed");
+        let (mut loaded_2, rev_2) =
+            load_state_with_revision(&path).expect("load with revision must succeed");
+
+        assert_eq!(rev_1, rev_2);
+
+        // Writer 1 updates state and saves via CAS
+        let registry = rivergate_registry_for_test();
+        let mut state_writer_1 = loaded_1;
+        crate::systems::advance_days(registry, &mut state_writer_1, 1).expect("advance");
+        save_state_cas(&path, &state_writer_1, &rev_1).expect("writer 1 CAS must succeed");
+
+        // Writer 2 attempts to save with stale rev_2
+        crate::systems::advance_days(registry, &mut loaded_2, 2).expect("advance");
+        let writer_2_err = save_state_cas(&path, &loaded_2, &rev_2);
+        assert!(matches!(
+            writer_2_err,
+            Err(PersistenceError::StaleWriterConflict { .. })
+        ));
+
+        // Writer 2 re-reads and CAS succeeds
+        let (mut refreshed, fresh_rev) = load_state_with_revision(&path).unwrap();
+        crate::systems::advance_days(registry, &mut refreshed, 1).expect("advance");
+        save_state_cas(&path, &refreshed, &fresh_rev)
+            .expect("writer 2 with fresh rev must succeed");
     }
 }

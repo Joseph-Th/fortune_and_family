@@ -153,6 +153,7 @@ fn empty_state(registry: &Registry, seed: u64) -> AppState {
     AppState {
         schema_version: CURRENT_SCHEMA_VERSION,
         scenario_key: registry.scenario().key().to_owned(),
+        registry_fingerprint: registry.fingerprint(),
         clock: SimulationClock::new(),
         rng: DeterministicRng::seeded(seed),
         next_ids: NextIds::new(),

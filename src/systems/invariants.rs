@@ -55,6 +55,11 @@ pub fn validate_invariants(registry: &Registry, state: &AppState) {
         registry.scenario().key(),
         "Registry Reference Validity: state scenario does not match loaded registry"
     );
+    debug_assert_eq!(
+        state.registry_fingerprint,
+        registry.fingerprint(),
+        "Registry Reference Validity: state registry fingerprint does not match loaded registry"
+    );
     debug_assert!(
         state.dynasties.contains_key(&state.player_dynasty_id),
         "Record Reference Validity: player dynasty does not exist"

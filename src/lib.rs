@@ -38,7 +38,10 @@ pub use gameplay::{
     GameplayQuietDiagnostic, GameplayScores, GameplaySnapshot, GameplaySuccessionTransition,
     GameplayTraceStep, GameplayViableOption, render_gameplay_report, run_gameplay_harness,
 };
-pub use persistence::{PersistenceError, StateValidationKind, load_state, save_state};
+pub use persistence::{
+    PersistenceError, SaveOutcome, SaveRevision, StateValidationKind, load_state,
+    load_state_with_revision, save_state, save_state_cas, save_state_new,
+};
 pub use projection::{
     CampaignProjection, StateSummary, build_campaign_projection, build_state_summary,
     render_campaign_html,

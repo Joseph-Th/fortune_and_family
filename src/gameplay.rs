@@ -105,7 +105,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 60;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 61;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -137,8 +137,13 @@ const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "audit_log",
 ];
 #[cfg(test)]
-const HARNESS_INTENTIONALLY_UNOBSERVED_STATE_COMPONENTS: &[&str] =
-    &["schema_version", "scenario_key", "rng", "next_ids"];
+const HARNESS_INTENTIONALLY_UNOBSERVED_STATE_COMPONENTS: &[&str] = &[
+    "schema_version",
+    "scenario_key",
+    "registry_fingerprint",
+    "rng",
+    "next_ids",
+];
 const CLOSE_CHOICE_SCORE_GAP: i64 = 300;
 const HEIR_CONFIRMATION_HEAD_AGE_YEARS: i64 = 52;
 const HEIR_CONFIRMATION_HEALTH_THRESHOLD: u16 = 5_000;
@@ -2157,6 +2162,7 @@ pub struct GameplayPhaseStats {
     pub generator_gap_cycles: u32,
     pub policy_gate_cycles: u32,
     pub validation_gate_cycles: u32,
+    pub budget_gate_cycles: u32,
     pub dormant_cycles: u32,
     pub cycles_with_multiple_viable_command_kinds: u32,
     pub cycles_with_close_viable_command_kinds: u32,
@@ -2182,10 +2188,12 @@ pub struct GameplayQuietDiagnostic {
     /// option, but the persona's reserve policy declined it.
     pub policy_gates: BTreeMap<GameplayCommandKind, u32>,
     /// Command kinds that generated candidates and passed the agent's filters
-    /// but none passed canonical validation during no-action cycles.
-    /// Identifies validation gates where the game built an option the player
-    /// could not actually commit.
+    /// where all generated candidates were probed and rejected by canonical validation
+    /// during no-action cycles.
     pub validation_gates: BTreeMap<GameplayCommandKind, u32>,
+    /// Command kinds where candidate variants remained unprobed due to the probe budget limit
+    /// and none of the probed variants were viable during no-action cycles.
+    pub budget_gates: BTreeMap<GameplayCommandKind, u32>,
     /// No-action cycles where no generator gap, spending-policy gate, or
     /// validation gate was detected. The world offered no detected opportunity;
     /// the agent was genuinely dormant rather than blocked by its own policy.
@@ -2526,6 +2534,7 @@ enum QuietCause {
     GeneratorGap,
     PolicyGate,
     ValidationGate,
+    BudgetGate,
     Dormant,
 }
 
@@ -2899,6 +2908,9 @@ impl CampaignAccumulator {
                 }
                 Some(QuietCause::ValidationGate) => {
                     stats.validation_gate_cycles = stats.validation_gate_cycles.saturating_add(1);
+                }
+                Some(QuietCause::BudgetGate) => {
+                    stats.budget_gate_cycles = stats.budget_gate_cycles.saturating_add(1);
                 }
                 Some(QuietCause::Dormant) => {
                     stats.dormant_cycles = stats.dormant_cycles.saturating_add(1);
@@ -3541,12 +3553,16 @@ fn run_decision_cycle_internal(
     record_offered_command_kinds(&candidates, accumulator);
     record_generated_candidates(&candidates, accumulator);
     let retained_kinds: BTreeSet<_> = candidates.iter().map(|candidate| candidate.kind).collect();
+    let mut retained_counts_by_kind = BTreeMap::new();
+    for candidate in &candidates {
+        *retained_counts_by_kind.entry(candidate.kind).or_default() += 1;
+    }
     let candidates_to_probe =
         select_probe_candidates(candidates, usize::from(config.max_candidate_probes));
-    let probed_kinds: BTreeSet<_> = candidates_to_probe
-        .iter()
-        .map(|candidate| candidate.kind)
-        .collect();
+    let mut probed_counts_by_kind = BTreeMap::new();
+    for candidate in &candidates_to_probe {
+        *probed_counts_by_kind.entry(candidate.kind).or_default() += 1;
+    }
     let probe_limit = candidates_to_probe.len();
     let projection_step_days = match mode {
         DecisionCycleMode::AdvanceCampaign { step_days } => step_days,
@@ -3566,7 +3582,8 @@ fn run_decision_cycle_internal(
         &probe,
         &raw_generated_kinds,
         &retained_kinds,
-        &probed_kinds,
+        &retained_counts_by_kind,
+        &probed_counts_by_kind,
         &activation_delta,
     );
     let choice_metrics =
@@ -4956,12 +4973,14 @@ fn activation_opportunity_delta(
 /// candidates), and validation gates (the game rejected every probed option).
 /// Returns a human-readable reason for the retained trace when the cycle had
 /// no actionable choice, and `None` when the agent could act.
+#[allow(clippy::too_many_lines)]
 fn record_quiet_diagnostic(
     accumulator: &mut CampaignAccumulator,
     probe: &ProbeResult,
     raw_generated_kinds: &BTreeSet<GameplayCommandKind>,
     retained_kinds: &BTreeSet<GameplayCommandKind>,
-    probed_kinds: &BTreeSet<GameplayCommandKind>,
+    retained_counts_by_kind: &BTreeMap<GameplayCommandKind, usize>,
+    probed_counts_by_kind: &BTreeMap<GameplayCommandKind, usize>,
     activation_delta: &BTreeMap<GameplayCommandKind, u32>,
 ) -> Option<String> {
     let actionable = probe.substantive_viable_count > 0;
@@ -5002,17 +5021,33 @@ fn record_quiet_diagnostic(
         }
     }
     let mut rejected_kinds = Vec::new();
-    for kind in probed_kinds {
+    let mut budget_kinds = Vec::new();
+    for kind in retained_kinds {
         if !probe.viable_command_kinds.contains(kind) {
-            rejected_kinds.push(*kind);
-            *accumulator
-                .quiet_diagnostic
-                .validation_gates
-                .entry(*kind)
-                .or_default() += 1;
+            let retained_count = retained_counts_by_kind.get(kind).copied().unwrap_or(0);
+            let probed_count = probed_counts_by_kind.get(kind).copied().unwrap_or(0);
+            if probed_count >= retained_count {
+                rejected_kinds.push(*kind);
+                *accumulator
+                    .quiet_diagnostic
+                    .validation_gates
+                    .entry(*kind)
+                    .or_default() += 1;
+            } else {
+                budget_kinds.push(*kind);
+                *accumulator
+                    .quiet_diagnostic
+                    .budget_gates
+                    .entry(*kind)
+                    .or_default() += 1;
+            }
         }
     }
-    if gap_kinds.is_empty() && gated_kinds.is_empty() && rejected_kinds.is_empty() {
+    if gap_kinds.is_empty()
+        && gated_kinds.is_empty()
+        && rejected_kinds.is_empty()
+        && budget_kinds.is_empty()
+    {
         accumulator.quiet_diagnostic.dormant_cycles = accumulator
             .quiet_diagnostic
             .dormant_cycles
@@ -5025,6 +5060,7 @@ fn record_quiet_diagnostic(
     gap_kinds.sort();
     gated_kinds.sort();
     rejected_kinds.sort();
+    budget_kinds.sort();
     let mut causes = Vec::new();
     if !gap_kinds.is_empty() {
         causes.push(format!(
@@ -5044,6 +5080,12 @@ fn record_quiet_diagnostic(
             kind_labels(&rejected_kinds)
         ));
     }
+    if !budget_kinds.is_empty() {
+        causes.push(format!(
+            "unverified due to probe budget [{}]",
+            kind_labels(&budget_kinds)
+        ));
+    }
     Some(causes.join("; "))
 }
 
@@ -5055,6 +5097,8 @@ fn quiet_cause(reason: Option<&str>) -> Option<QuietCause> {
         Some(QuietCause::PolicyGate)
     } else if reason.contains("rejected by validation") {
         Some(QuietCause::ValidationGate)
+    } else if reason.contains("unverified due to probe budget") {
+        Some(QuietCause::BudgetGate)
     } else if reason.starts_with("dormant:") {
         Some(QuietCause::Dormant)
     } else {
@@ -12272,6 +12316,14 @@ fn aggregate_quiet_diagnostics(campaigns: &[GameplayCampaignReport]) -> Gameplay
                 .unwrap_or(0)
                 .saturating_add(*count);
         }
+        for (kind, count) in &campaign.quiet_diagnostic.budget_gates {
+            *diagnostic.budget_gates.entry(*kind).or_default() = diagnostic
+                .budget_gates
+                .get(kind)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(*count);
+        }
         diagnostic.dormant_cycles = diagnostic
             .dormant_cycles
             .saturating_add(campaign.quiet_diagnostic.dormant_cycles);
@@ -16893,6 +16945,7 @@ fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mut String) {
     if diagnostic.generator_gaps.is_empty()
         && diagnostic.policy_gates.is_empty()
         && diagnostic.validation_gates.is_empty()
+        && diagnostic.budget_gates.is_empty()
         && diagnostic.dormant_cycles == 0
     {
         return;
@@ -16930,6 +16983,17 @@ fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mut String) {
             .collect::<Vec<_>>()
             .join(", ");
         let _ = writeln!(output, "  generated but rejected: {gate_text}");
+    }
+    if !diagnostic.budget_gates.is_empty() {
+        let mut gates: Vec<_> = diagnostic.budget_gates.iter().collect();
+        gates.sort_by_key(|(kind, count)| (std::cmp::Reverse(**count), **kind));
+        let gate_text = gates
+            .into_iter()
+            .take(5)
+            .map(|(kind, count)| format!("{} {count}", kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(output, "  unverified due to probe budget: {gate_text}");
     }
     if diagnostic.dormant_cycles > 0 {
         let _ = writeln!(

@@ -5207,9 +5207,13 @@ mod metrics {
     fn quiet_diagnostic_separates_policy_gates_from_generator_gaps() {
         let mut accumulator = CampaignAccumulator::new();
         let activation_delta = BTreeMap::from([(GameplayCommandKind::EnactLaw, 1_u32)]);
-        let raw_generated_kinds = BTreeSet::from([GameplayCommandKind::StartPublicWork]);
-        let retained_kinds = BTreeSet::new();
-        let probed_kinds = BTreeSet::from([GameplayCommandKind::FileLegalCase]);
+        let raw_generated_kinds = BTreeSet::from([
+            GameplayCommandKind::StartPublicWork,
+            GameplayCommandKind::FileLegalCase,
+        ]);
+        let retained_kinds = BTreeSet::from([GameplayCommandKind::FileLegalCase]);
+        let retained_counts_by_kind = BTreeMap::from([(GameplayCommandKind::FileLegalCase, 1)]);
+        let probed_counts_by_kind = BTreeMap::from([(GameplayCommandKind::FileLegalCase, 1)]);
         let probe = ProbeResult {
             selected: None,
             viable_count: 0,
@@ -5230,7 +5234,8 @@ mod metrics {
             &probe,
             &raw_generated_kinds,
             &retained_kinds,
-            &probed_kinds,
+            &retained_counts_by_kind,
+            &probed_counts_by_kind,
             &activation_delta,
         );
 
@@ -5283,13 +5288,15 @@ mod metrics {
             &probe,
             &BTreeSet::new(),
             &BTreeSet::new(),
-            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
 
         assert_eq!(accumulator.quiet_diagnostic.generator_gaps.len(), 0);
         assert_eq!(accumulator.quiet_diagnostic.policy_gates.len(), 0);
         assert_eq!(accumulator.quiet_diagnostic.validation_gates.len(), 0);
+        assert_eq!(accumulator.quiet_diagnostic.budget_gates.len(), 0);
     }
 
     #[test]
@@ -5305,6 +5312,9 @@ mod metrics {
             }
             for (kind, count) in &campaign.quiet_diagnostic.validation_gates {
                 *expected.validation_gates.entry(*kind).or_default() += *count;
+            }
+            for (kind, count) in &campaign.quiet_diagnostic.budget_gates {
+                *expected.budget_gates.entry(*kind).or_default() += *count;
             }
             expected.dormant_cycles += campaign.quiet_diagnostic.dormant_cycles;
         }
@@ -5334,7 +5344,8 @@ mod metrics {
             &probe,
             &BTreeSet::new(),
             &BTreeSet::new(),
-            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
 
@@ -5347,6 +5358,7 @@ mod metrics {
         assert_eq!(accumulator.quiet_diagnostic.generator_gaps.len(), 0);
         assert_eq!(accumulator.quiet_diagnostic.policy_gates.len(), 0);
         assert_eq!(accumulator.quiet_diagnostic.validation_gates.len(), 0);
+        assert_eq!(accumulator.quiet_diagnostic.budget_gates.len(), 0);
 
         let actionable_probe = ProbeResult {
             selected: None,
@@ -5359,7 +5371,8 @@ mod metrics {
             &actionable_probe,
             &BTreeSet::new(),
             &BTreeSet::new(),
-            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         assert_eq!(
@@ -5377,8 +5390,18 @@ mod metrics {
         let mut accumulator = CampaignAccumulator::new();
         let activation_delta = BTreeMap::from([(GameplayCommandKind::SellProperty, 1_u32)]);
         let raw_generated_kinds = BTreeSet::from([GameplayCommandKind::BuyProperty]);
-        let retained_kinds = BTreeSet::new();
-        let probed_kinds = BTreeSet::from([GameplayCommandKind::EnactLaw]);
+        let retained_kinds = BTreeSet::from([
+            GameplayCommandKind::EnactLaw,
+            GameplayCommandKind::FundPublicWork,
+        ]);
+        let retained_counts_by_kind = BTreeMap::from([
+            (GameplayCommandKind::EnactLaw, 2),
+            (GameplayCommandKind::FundPublicWork, 3),
+        ]);
+        let probed_counts_by_kind = BTreeMap::from([
+            (GameplayCommandKind::EnactLaw, 2),
+            (GameplayCommandKind::FundPublicWork, 1),
+        ]);
         let probe = ProbeResult {
             selected: None,
             viable_count: 0,
@@ -5399,7 +5422,8 @@ mod metrics {
             &probe,
             &raw_generated_kinds,
             &retained_kinds,
-            &probed_kinds,
+            &retained_counts_by_kind,
+            &probed_counts_by_kind,
             &activation_delta,
         )
         .expect("a caused quiet cycle must report a reason");
@@ -5407,6 +5431,7 @@ mod metrics {
         assert!(reason.contains("activation without candidate [sell-property]"));
         assert!(reason.contains("declined by agent policy [buy-property]"));
         assert!(reason.contains("rejected by validation [enact-law]"));
+        assert!(reason.contains("unverified due to probe budget [public-work-funding]"));
         assert_eq!(accumulator.quiet_diagnostic.dormant_cycles, 0);
     }
 

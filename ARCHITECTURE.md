@@ -160,23 +160,26 @@ The market clearing account is the market's internal cash pool: business purchas
 ### Persistence
 
 ```text
-save_state
-  -> release validation
+save_state / save_state_cas / save_state_new
+  -> release validation (including canonical registry fingerprint verification)
+  -> check destination non-existence or verify compare-and-swap SaveRevision
   -> serialize current AppState
   -> write and synchronize same-directory temporary file
-  -> atomically replace destination
+  -> atomically replace destination (visibility commit point)
+  -> synchronize parent directory durability (returns SaveOutcome)
 
-load_state
-  -> read schema version
-  -> require the current schema version
+load_state / load_state_with_revision
+  -> read bounded save file and compute SaveRevision
+  -> validate absence of duplicate JSON members
+  -> read schema version and require current schema version
   -> deserialize AppState
-  -> verify indexes and references
+  -> verify indexes, references, and registry fingerprint
   -> release validation
 ```
 
 Owner: `src/persistence.rs`.
 
-Serialized contract changes require a schema increment, current-schema round-trip tests, rejection coverage for non-current schemas, and `STATUS.md` updates. Older save schemas are unsupported rather than migrated.
+Serialized contract changes require a schema increment, current-schema round-trip tests, rejection coverage for non-current schemas, and `STATUS.md` updates. Older save schemas are unsupported rather than migrated. Atomic staging commits visibility before directory synchronization, and compare-and-swap validation prevents stale multi-process writer conflicts.
 
 ### Projection and rendering
 

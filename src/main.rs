@@ -7,8 +7,9 @@ use civic_dynasty::{
     NewGameConfig, NewGameError, PersistenceError, PlayerCommand, Registry, SimulationError,
     advance_days, apply_player_command, build_art_review, build_art_review_report,
     build_campaign_projection, build_new_game, build_rivergate_registry, build_state_summary,
-    load_state, render_art_review_html, render_campaign_html, render_gameplay_report,
-    run_gameplay_harness, save_state, validate_invariants,
+    load_state, load_state_with_revision, render_art_review_html, render_campaign_html,
+    render_gameplay_report, run_gameplay_harness, save_state, save_state_cas, save_state_new,
+    validate_invariants,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{self, Write};
@@ -41,6 +42,8 @@ enum Command {
         background: BackgroundArg,
         #[arg(long, default_value_t = 0)]
         advance: u32,
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
     },
     /// Advance an existing campaign and persist the result.
     Simulate {
@@ -194,6 +197,8 @@ enum CliError {
         #[source]
         source: std::io::Error,
     },
+    #[error("dashboard input {input} and output {output} identify the same filesystem path")]
+    DashboardPathAliasing { input: PathBuf, output: PathBuf },
     #[error("art review gate failed: {reason}")]
     ArtQualityGate { reason: String },
     #[error("failed to render campaign dashboard: {source}")]
@@ -255,6 +260,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
     result
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
     match cli.command {
         Command::New {
@@ -264,6 +270,7 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             founder,
             background,
             advance,
+            overwrite,
         } => {
             let config = NewGameConfig {
                 seed,
@@ -275,7 +282,7 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             if advance > 0 {
                 advance_days(registry, &mut state, advance)?;
             }
-            save_state(&output, &state)?;
+            save_state_new(&output, &state, overwrite)?;
             print_human_summary(registry, &state);
             println!("Saved {}", output.display());
         }
@@ -284,13 +291,18 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             output,
             days,
         } => {
-            let mut state = load_state(&input)?;
+            let in_place = output.is_none() || output.as_ref() == Some(&input);
+            let (mut state, revision) = load_state_with_revision(&input)?;
             validate_invariants(registry, &state);
             advance_days(registry, &mut state, days)?;
-            let output = output.unwrap_or(input);
-            save_state(&output, &state)?;
+            let output_path = output.unwrap_or(input);
+            if in_place {
+                save_state_cas(&output_path, &state, &revision)?;
+            } else {
+                save_state(&output_path, &state)?;
+            }
             print_human_summary(registry, &state);
-            println!("Saved {}", output.display());
+            println!("Saved {}", output_path.display());
         }
         Command::Summary { input, json } => {
             let state = load_state(input)?;
@@ -312,7 +324,7 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             println!("{json}");
         }
         Command::Dashboard { input, output } => {
-            write_dashboard(registry, input, &output)?;
+            write_dashboard(registry, &input, &output)?;
             println!("Wrote {}", output.display());
         }
         Command::Execute {
@@ -320,17 +332,22 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             command,
             output,
         } => {
-            let mut state = load_state(&input)?;
+            let in_place = output.is_none() || output.as_ref() == Some(&input);
+            let (mut state, revision) = load_state_with_revision(&input)?;
             validate_invariants(registry, &state);
             let command: PlayerCommand = serde_json::from_str(&command)
                 .map_err(|source| CliError::CommandParse { source })?;
             let outcome = apply_player_command(registry, &mut state, command)?;
             validate_invariants(registry, &state);
-            let output = output.unwrap_or(input);
-            save_state(&output, &state)?;
+            let output_path = output.unwrap_or(input);
+            if in_place {
+                save_state_cas(&output_path, &state, &revision)?;
+            } else {
+                save_state(&output_path, &state)?;
+            }
             println!("{}", outcome.summary);
             print_human_summary(registry, &state);
-            println!("Saved {}", output.display());
+            println!("Saved {}", output_path.display());
         }
         Command::Validate { input } => {
             let state = load_state(&input)?;
@@ -431,12 +448,18 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
     };
     if let Some(path) = args.output {
         ensure_output_parent(&path)?;
-        write_generated_output(&path, rendered.as_bytes()).map_err(|source| {
+        let outcome = write_generated_output(&path, rendered.as_bytes()).map_err(|source| {
             CliError::GameplayReportWrite {
                 path: path.clone(),
                 source,
             }
         })?;
+        if outcome == GeneratedOutputOutcome::CommittedWithDegradedDurability {
+            eprintln!(
+                "warning: directory durability synchronization degraded for {}",
+                path.display()
+            );
+        }
         println!("Wrote {}", path.display());
     } else {
         println!("{rendered}");
@@ -499,12 +522,18 @@ fn run_art(args: ArtArgs) -> Result<(), CliError> {
         render_art_review_html(&review)
     };
     ensure_output_parent(&args.output)?;
-    write_generated_output(&args.output, rendered.as_bytes()).map_err(|source| {
+    let outcome = write_generated_output(&args.output, rendered.as_bytes()).map_err(|source| {
         CliError::ArtReviewWrite {
             path: args.output.clone(),
             source,
         }
     })?;
+    if outcome == GeneratedOutputOutcome::CommittedWithDegradedDurability {
+        eprintln!(
+            "warning: directory durability synchronization degraded for {}",
+            args.output.display()
+        );
+    }
     println!(
         "Wrote {} ({} subjects, {} critical, {} warning or worse)",
         args.output.display(),
@@ -523,19 +552,92 @@ fn run_art(args: ArtArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-fn write_dashboard(registry: &Registry, input: PathBuf, output: &Path) -> Result<(), CliError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratedOutputOutcome {
+    Committed,
+    CommittedWithDegradedDurability,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static INJECT_GENERATED_OUTPUT_SYNC_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_inject_generated_output_sync_failure_for_test(inject: bool) {
+    INJECT_GENERATED_OUTPUT_SYNC_FAILURE.with(|cell| cell.set(inject));
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn sync_generated_output_directory_with_injection(
+    #[allow(unused_variables)] parent: &Path,
+) -> io::Result<()> {
+    #[cfg(test)]
+    if INJECT_GENERATED_OUTPUT_SYNC_FAILURE.with(std::cell::Cell::get) {
+        return Err(io::Error::other(
+            "injected generated output directory sync failure",
+        ));
+    }
+    #[cfg(unix)]
+    sync_generated_output_directory(parent)?;
+    Ok(())
+}
+
+fn check_dashboard_path_aliasing(input: &Path, output: &Path) -> Result<(), CliError> {
+    if input == output {
+        return Err(CliError::DashboardPathAliasing {
+            input: input.to_path_buf(),
+            output: output.to_path_buf(),
+        });
+    }
+    let input_canonical = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
+    if let Ok(output_canonical) = output.canonicalize() {
+        if input_canonical == output_canonical {
+            return Err(CliError::DashboardPathAliasing {
+                input: input.to_path_buf(),
+                output: output.to_path_buf(),
+            });
+        }
+    } else if let Some(parent) = output.parent() {
+        let parent_canonical = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        if let Some(file_name) = output.file_name() {
+            let synthetic_output = parent_canonical.join(file_name);
+            if input_canonical == synthetic_output {
+                return Err(CliError::DashboardPathAliasing {
+                    input: input.to_path_buf(),
+                    output: output.to_path_buf(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_dashboard(registry: &Registry, input: &Path, output: &Path) -> Result<(), CliError> {
+    check_dashboard_path_aliasing(input, output)?;
     let state = load_state(input)?;
     validate_invariants(registry, &state);
     let html = render_campaign_html(registry, &state)
         .map_err(|source| CliError::DashboardSerialization { source })?;
     ensure_output_parent(output)?;
-    write_generated_output(output, html.as_bytes()).map_err(|source| CliError::DashboardWrite {
-        path: output.to_path_buf(),
-        source,
-    })
+    let outcome = write_generated_output(output, html.as_bytes()).map_err(|source| {
+        CliError::DashboardWrite {
+            path: output.to_path_buf(),
+            source,
+        }
+    })?;
+    if outcome == GeneratedOutputOutcome::CommittedWithDegradedDurability {
+        eprintln!(
+            "warning: directory durability synchronization degraded for {}",
+            output.display()
+        );
+    }
+    Ok(())
 }
 
-fn write_generated_output(path: &Path, contents: &[u8]) -> io::Result<()> {
+fn write_generated_output(path: &Path, contents: &[u8]) -> io::Result<GeneratedOutputOutcome> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.file_type().is_file() => {
             return Err(io::Error::new(
@@ -563,9 +665,11 @@ fn write_generated_output(path: &Path, contents: &[u8]) -> io::Result<()> {
     temporary.write_all(contents)?;
     temporary.as_file_mut().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
-    #[cfg(unix)]
-    sync_generated_output_directory(parent)?;
-    Ok(())
+    let outcome = match sync_generated_output_directory_with_injection(parent) {
+        Ok(()) => GeneratedOutputOutcome::Committed,
+        Err(_) => GeneratedOutputOutcome::CommittedWithDegradedDurability,
+    };
+    Ok(outcome)
 }
 
 #[cfg(unix)]
@@ -883,5 +987,48 @@ mod tests {
             .map(|entry| entry.expect("directory entry must be readable").file_name())
             .collect::<Vec<_>>();
         assert_eq!(entries, ["report.json"]);
+    }
+
+    #[test]
+    fn generated_output_reports_degraded_durability_when_directory_sync_fails() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let output = directory.path().join("report.json");
+
+        set_inject_generated_output_sync_failure_for_test(true);
+        let outcome = write_generated_output(&output, b"degraded report");
+        set_inject_generated_output_sync_failure_for_test(false);
+
+        assert_eq!(
+            outcome.expect("write must commit even if directory sync degrades"),
+            GeneratedOutputOutcome::CommittedWithDegradedDurability
+        );
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"degraded report",
+            "file must be visible and readable on disk despite degraded sync"
+        );
+    }
+
+    #[test]
+    fn dashboard_path_aliasing_detects_same_and_canonicalized_paths() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let campaign_path = directory.path().join("campaign.json");
+        std::fs::write(&campaign_path, b"{}").expect("fixture must write");
+
+        let direct_err = check_dashboard_path_aliasing(&campaign_path, &campaign_path);
+        assert!(matches!(
+            direct_err,
+            Err(CliError::DashboardPathAliasing { .. })
+        ));
+
+        let dot_slash = directory.path().join(".").join("campaign.json");
+        let canonical_err = check_dashboard_path_aliasing(&campaign_path, &dot_slash);
+        assert!(matches!(
+            canonical_err,
+            Err(CliError::DashboardPathAliasing { .. })
+        ));
+
+        let distinct_output = directory.path().join("dashboard.html");
+        assert!(check_dashboard_path_aliasing(&campaign_path, &distinct_output).is_ok());
     }
 }

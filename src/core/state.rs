@@ -17,7 +17,7 @@ use crate::rng::DeterministicRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 21;
+pub const CURRENT_SCHEMA_VERSION: u32 = 22;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGameConfig {
@@ -603,6 +603,7 @@ impl NextIds {
 pub struct AppState {
     pub(crate) schema_version: u32,
     pub(crate) scenario_key: String,
+    pub(crate) registry_fingerprint: u64,
     pub(crate) clock: SimulationClock,
     pub(crate) rng: DeterministicRng,
     pub(crate) next_ids: NextIds,
@@ -643,6 +644,11 @@ impl AppState {
     #[must_use]
     pub fn scenario_key(&self) -> &str {
         &self.scenario_key
+    }
+
+    #[must_use]
+    pub const fn registry_fingerprint(&self) -> u64 {
+        self.registry_fingerprint
     }
 
     #[must_use]
