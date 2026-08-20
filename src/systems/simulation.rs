@@ -659,11 +659,14 @@ fn worker_limited_batches(state: &AppState, business_id: BusinessId) -> u16 {
 }
 
 fn input_limited_batches(business: &crate::core::Business, recipe: &RecipeDef) -> u16 {
+    if recipe.inputs().is_empty() {
+        return u16::MAX;
+    }
     recipe.inputs().iter().fold(u16::MAX, |limit, input| {
         let available = business.inventory_quantity(input.good_id()).milliunits();
         let per_batch = input.quantity().milliunits();
         let input_limited = if per_batch == 0 {
-            0
+            i64::from(u16::MAX)
         } else {
             available / per_batch
         };

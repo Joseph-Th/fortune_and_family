@@ -162,6 +162,20 @@ pub(crate) fn synchronize_employment_for_business_status(
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn last_audit_day(
+    state: &crate::core::AppState,
+    kind: crate::core::AuditKind,
+    subject: &str,
+) -> Option<i64> {
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == kind && record.subject() == subject)
+        .map(|record| record.day())
+}
+
 pub use bootstrap::{NewGameError, build_new_game};
 #[cfg(test)]
 pub(crate) use commands::INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT;
