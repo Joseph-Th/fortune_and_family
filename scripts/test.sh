@@ -458,6 +458,25 @@ run_all() {
   run_generation_gameplay
 }
 
+# Full unfiltered routine lanes may produce a validation receipt. Capture the
+# repository bytes before work starts so a concurrent edit cannot be blessed by
+# a gate that actually ran against an earlier tree.
+receipt_lane=
+case "$mode" in
+  fast|quick)
+    [[ $# -eq 1 ]] && receipt_lane=quick
+    ;;
+  standard|all)
+    receipt_lane=standard
+    ;;
+esac
+receipt_python=
+receipt_start=
+if [[ -n "$receipt_lane" ]]; then
+  receipt_python=$(resolve_python)
+  receipt_start=$("$receipt_python" scripts/validation_receipt.py fingerprint)
+fi
+
 case "$mode" in
   fast)
     [[ $# -le 2 ]] || usage
@@ -544,3 +563,7 @@ case "$mode" in
     usage
     ;;
 esac
+
+if [[ -n "$receipt_lane" ]]; then
+  "$receipt_python" scripts/validation_receipt.py record "$receipt_lane" "$receipt_start"
+fi

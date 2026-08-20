@@ -8,4 +8,15 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 gate=${CIVIC_DYNASTY_PRE_PUSH:-quick}
+python_command=
+for candidate in python3 python py; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    python_command=$candidate
+    break
+  fi
+done
+if [[ -n "$python_command" ]] && "$python_command" scripts/validation_receipt.py check "$gate"; then
+  printf 'pre-push: current repository content already passed %s-or-broader validation; skipping duplicate gate\n' "$gate"
+  exit 0
+fi
 bash scripts/test.sh "$gate"

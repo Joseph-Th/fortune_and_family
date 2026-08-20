@@ -61,8 +61,10 @@ The crate uses Rust 2024 and has no runtime service dependency.
 Verification is local-only. There are no hosted CI runners; the scripted lanes
 in `scripts/test.sh` (or `scripts/test.ps1` on Windows) are the authoritative gate. Optionally install the
 version-controlled local git hooks with `bash scripts/install_hooks.sh` (or `scripts/install_hooks.ps1`) — a fast
-pre-commit check (format, shell syntax, whitespace) and a `standard` lane on
-push.
+pre-commit check (format, shell syntax, whitespace) and a `quick` lane on push.
+Successful unfiltered routine validation leaves a local content-addressed
+receipt, so the push hook does not rebuild repository bytes that already passed
+an equal-or-broader lane.
 
 ## Common commands
 

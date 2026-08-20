@@ -43,6 +43,14 @@ development machine responsive.
   library code only.
 - The pre-push hook defaults to `quick` for snappy pushes; set
   `CIVIC_DYNASTY_PRE_PUSH=standard` to enforce the fuller gate.
+- Successful unfiltered `quick`/`fast`, `standard`, and `all` runs record a
+  content-addressed receipt under the local Git metadata. The pre-push hook
+  reuses a current receipt of equal or broader routine strength instead of
+  compiling the same repository bytes again. Staging and committing those
+  unchanged bytes do not invalidate the receipt; any tracked or non-ignored
+  file-content change does. Receipt-eligible lanes fingerprint before and after
+  validation and refuse to issue evidence if another process changes repository
+  bytes while the gate is running.
 
 The CLI smoke runner accepts `CIVIC_DYNASTY_PROFILE=release` when a release
 binary is desired, or `CIVIC_DYNASTY_BINARY` when a caller has already built
@@ -182,6 +190,6 @@ lane.
 
 Do not run a compile-only or lint build immediately before an executable lane that necessarily recompiles the same changed surface unless the separate diagnostic is itself required. Prefer one build-producing operation per checkpoint when practical. GitHub Actions and hosted runners are not part of the verification path.
 
-Optional local git hooks provide a fast safety net: `bash scripts/install_hooks.sh` installs a pre-commit gate (format, shell syntax, whitespace) and a pre-push gate that runs `standard`. Use `git commit --no-verify` to skip the pre-commit gate during focused iteration.
+Optional local git hooks provide a fast safety net: `bash scripts/install_hooks.sh` installs a pre-commit gate (format, shell syntax, whitespace) and a pre-push gate that defaults to `quick` (or `standard` when `CIVIC_DYNASTY_PRE_PUSH=standard`). If the exact repository content already has a current equal-or-broader validation receipt, pre-push reuses that evidence instead of rebuilding it. Use `git commit --no-verify` to skip the pre-commit gate during focused iteration.
 
 The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier reuses one debug CLI build across all adapter smoke groups and remains an explicit broad tier rather than a routine prerequisite.

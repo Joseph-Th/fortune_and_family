@@ -355,6 +355,22 @@ function Run-All {
     Run-GameplayGates
 }
 
+# Capture the exact repository bytes before a receipt-eligible lane starts. A
+# concurrent edit during validation then prevents the receipt from being issued.
+$ReceiptLane = $null
+if (($Mode -eq "fast" -or $Mode -eq "quick") -and -not $Filter) {
+    $ReceiptLane = "quick"
+} elseif ($Mode -eq "standard" -or $Mode -eq "all") {
+    $ReceiptLane = "standard"
+}
+$ReceiptPython = $null
+$ReceiptStart = $null
+if ($ReceiptLane) {
+    $ReceiptPython = Resolve-PythonInterpreter
+    $ReceiptStart = (& $ReceiptPython scripts/validation_receipt.py fingerprint).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $ReceiptStart) { throw "Failed to fingerprint repository before validation" }
+}
+
 switch ($Mode) {
     "fast"           { Run-Fast $Filter }
     "quick"          { Run-Fast $Filter }
@@ -381,4 +397,9 @@ switch ($Mode) {
     "deep"           { Run-SlowGates; Run-GameplayAudit }
     "all"            { Run-All }
     default          { Show-Usage }
+}
+
+if ($ReceiptLane) {
+    & $ReceiptPython scripts/validation_receipt.py record $ReceiptLane $ReceiptStart
+    if ($LASTEXITCODE -ne 0) { throw "Failed to record validation receipt" }
 }

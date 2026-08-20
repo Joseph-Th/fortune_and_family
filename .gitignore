@@ -1,3 +1,5 @@
 /target/
 /saves/
+__pycache__/
+*.pyc
 *.tmp
