@@ -7,8 +7,8 @@ This file is the execution card for repository work. [ARCHITECTURE.md](ARCHITECT
 1. Read [`../AGENTS.md`](../AGENTS.md) and preserve unrelated working-tree state.
 2. Read [README.md](README.md), [STATUS.md](STATUS.md), and only the relevant section of [ARCHITECTURE.md](ARCHITECTURE.md).
 3. Identify the owning source module and sibling tests; trace the public entry point to canonical mutation and invariant validation.
-4. Run the narrowest proving test before changing behavior.
-5. Use [TESTING.md](TESTING.md) for broader test selection and the completion gate.
+4. Identify the narrowest proving test before changing behavior. Run it before editing only when reproducing a failure or establishing a baseline the task actually needs; otherwise execute it when the behavior is ready for proof.
+5. Use [TESTING.md](TESTING.md) to choose the smallest completion lane that owns the changed surface.
 6. Update the one document that owns any changed architecture, behavior, schema, API, command, harness, or scope contract.
 
 This project applies the Universal, Stateful Application, Deterministic System, and Automated Behavior Evaluation portfolio profiles.
@@ -39,4 +39,10 @@ This project applies the Universal, Stateful Application, Deterministic System, 
 
 ## Completion
 
-Use `bash scripts/test.sh fast <filter>` for focused iteration, then the applicable tiers from [TESTING.md](TESTING.md), including `standard` for a normal commit and deeper lanes when the changed contract requires them. Confirm canonical ownership, deterministic/persistence/invariant behavior, current documentation, and clean diff hygiene.
+Use `bash scripts/test.sh fast <filter>` for focused iteration when it shortens feedback or isolates a failure.
+When ordinary work is ready for completion, go directly to `standard` instead of running `fast`
+immediately beforehand merely as a prelude. For specialized surfaces, run the smallest lane from
+[TESTING.md](TESTING.md) that owns the changed contract, plus only genuinely distinct evidence that lane
+does not already contain. Deeper lanes are required only when their distinct contract changed. Confirm
+canonical ownership, deterministic/persistence/invariant behavior, current documentation, and clean diff
+hygiene.

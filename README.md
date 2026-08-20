@@ -24,14 +24,7 @@ For a new contributor or agent, use this reading order:
 
 Each contract has one owner. Link to the owning document instead of restating it elsewhere.
 
-Before editing:
-
-```bash
-git status --short
-bash scripts/test.sh fast
-```
-
-Preserve unrelated working-tree changes.
+Before editing, run `git status --short` and preserve unrelated working-tree changes. Use `bash scripts/test.sh fast` before the change only when reproducing a failure or establishing a baseline the task actually needs; otherwise start with the narrowest owner-level proof once the behavior is ready.
 
 ## Mental model
 

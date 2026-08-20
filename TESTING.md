@@ -155,7 +155,7 @@ Collection helpers should show observed members. Candidate and finding helpers s
 
 ## Completion gate
 
-Run the narrowest relevant subset while editing.
+Run the narrowest relevant subset while editing. Once behavior is ready, run one routine completion lane rather than climbing through progressively broader tiers.
 
 For ordinary changes:
 
@@ -163,22 +163,25 @@ For ordinary changes:
 bash scripts/test.sh standard
 ```
 
-For cross-cutting changes, run:
+Specialized lanes are selected by the contract that changed:
 
-```bash
-cargo fmt --all -- --check
-bash scripts/test.sh all
-cargo clippy --all-targets --all-features --locked -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
-cargo test --release --quiet --locked --lib
-cargo audit
-git diff --check
-```
+- `soak` for long-horizon simulation, determinism, or invariant evidence;
+- `adapters` for CLI/adapter surfaces;
+- `gameplay` or `gameplay-audit` for gameplay-report and design-evaluation contracts;
+- `docs` for documentation infrastructure;
+- `slow` for release-profile behavior that can differ from development;
+- `ci-gates`, `all`, or `deep` only for verification topology, dependency/security work, broadly shared build configuration, or a deliberate release/deep-design checkpoint.
 
-Cross-cutting changes include persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and gameplay-report schemas.
+Persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and
+gameplay-report schemas require focused owner coverage plus the relevant specialized lane above. This is
+a coverage requirement, not automatically two separate invocations: when the selected completion lane
+already executes the necessary owner coverage, do not rerun a focused test immediately beforehand. They
+do not automatically require every deep command in the repository. A deeper lane discovered while
+reading this document is not an additional completion requirement unless the changed contract owns that
+lane.
 
-The commands above are the authoritative local full gate for cross-cutting changes. Ordinary changes use `bash scripts/test.sh standard`; cross-cutting changes run the complete command set above. GitHub Actions and hosted runners are not part of the verification path. The `all` tier runs the complete library suite in debug plus the soak and gameplay gates in release; the separate release library-test line covers the full suite under the release profile.
+Do not run a compile-only or lint build immediately before an executable lane that necessarily recompiles the same changed surface unless the separate diagnostic is itself required. Prefer one build-producing operation per checkpoint when practical. GitHub Actions and hosted runners are not part of the verification path.
 
 Optional local git hooks provide a fast safety net: `bash scripts/install_hooks.sh` installs a pre-commit gate (format, shell syntax, whitespace) and a pre-push gate that runs `standard`. Use `git commit --no-verify` to skip the pre-commit gate during focused iteration.
 
-Clippy is intentionally the single all-target compile/lint gate in the full validation path; an additional duplicate compile pass should not be added without coverage value. The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier also reuses one debug CLI build across all adapter smoke groups.
+The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier reuses one debug CLI build across all adapter smoke groups and remains an explicit broad tier rather than a routine prerequisite.
