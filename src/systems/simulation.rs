@@ -11,7 +11,7 @@ use crate::core::{
     ChronicleKind, CrisisKind, EmploymentStatus, FamilyLink, FamilyLinkKind, HouseGovernance,
     MarketCause, OutboxKind, SocialClass,
 };
-use crate::ids::{BusinessId, CharacterId, DynastyId, GoodId};
+use crate::ids::{BusinessId, CharacterId, DynastyId, GoodId, RecipeId};
 use crate::money::{Money, Quantity, affordable_quantity, checked_cost_for, cost_for};
 use crate::registry::{GoodCategory, RecipeDef, Registry};
 use std::collections::{BTreeMap, BTreeSet};
@@ -413,18 +413,17 @@ fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
     let mut remaining_tools_stock = tools_quote.stock;
     let mut lines = Vec::new();
     for business in state.businesses.iter() {
-        let Some(mut line) = decide_business_production(registry, state, business) else {
+        let Some(line) = decide_business_production(
+            registry,
+            state,
+            business,
+            tools_id,
+            remaining_tools_stock,
+            tools_price,
+        ) else {
             continue;
         };
-        if line.output_good_id != tools_id && line.operating_cost > Money::ZERO {
-            let tool_budget = line
-                .operating_cost
-                .saturating_mul_ratio(PRODUCTION_TOOL_SHARE_BASIS_POINTS, 10_000);
-            line.tool_quantity =
-                remaining_tools_stock.min(affordable_quantity(tool_budget, tools_price));
-            line.tool_cost = cost_for(line.tool_quantity, tools_price);
-            remaining_tools_stock = remaining_tools_stock.saturating_sub(line.tool_quantity);
-        }
+        remaining_tools_stock = remaining_tools_stock.saturating_sub(line.tool_quantity);
         lines.push(line);
     }
     ProductionPlan { tools_id, lines }
@@ -442,6 +441,9 @@ fn decide_business_production(
     registry: &Registry,
     state: &AppState,
     business: &crate::core::Business,
+    tools_id: GoodId,
+    available_tools: Quantity,
+    tools_price: Money,
 ) -> Option<ProductionLine> {
     if matches!(
         business.status(),
@@ -461,6 +463,14 @@ fn decide_business_production(
     batches = batches.min(worker_limited_batches(state, business.id()));
     batches = batches.min(input_limited_batches(business, recipe));
     batches = batches.min(cash_limited_batches(business, recipe));
+    if recipe.output_good_id() != tools_id {
+        batches = batches.min(tool_limited_batches(
+            batches,
+            available_tools,
+            recipe.daily_operating_cost(),
+            tools_price,
+        ));
+    }
     if batches == 0 {
         return None;
     }
@@ -480,6 +490,14 @@ fn decide_business_production(
     let craft_efficiency = 9_000_u32
         .saturating_add(u32::from(manager.capabilities.craft).saturating_mul(10))
         .min(10_000);
+    let operating_cost = recipe
+        .daily_operating_cost()
+        .saturating_mul(i64::from(batches));
+    let tool_quantity = if recipe.output_good_id() == tools_id {
+        Quantity::ZERO
+    } else {
+        production_tool_quantity(operating_cost, tools_price)
+    };
     Some(ProductionLine {
         business_id: business.id(),
         inputs,
@@ -489,12 +507,53 @@ fn decide_business_production(
             .saturating_mul_ratio(i64::from(batches), 1)
             .saturating_mul_ratio(i64::from(quality_efficiency), 10_000)
             .saturating_mul_ratio(i64::from(craft_efficiency), 10_000),
-        operating_cost: recipe
-            .daily_operating_cost()
-            .saturating_mul(i64::from(batches)),
-        tool_quantity: Quantity::ZERO,
-        tool_cost: Money::ZERO,
+        operating_cost,
+        tool_quantity,
+        tool_cost: cost_for(tool_quantity, tools_price),
     })
+}
+
+fn production_tool_quantity(operating_cost: Money, tools_price: Money) -> Quantity {
+    if operating_cost <= Money::ZERO || tools_price <= Money::ZERO {
+        return Quantity::ZERO;
+    }
+    let tool_budget =
+        operating_cost.saturating_mul_ratio(PRODUCTION_TOOL_SHARE_BASIS_POINTS, 10_000);
+    affordable_quantity(tool_budget, tools_price)
+}
+
+fn tool_limited_batches(
+    maximum_batches: u16,
+    available_tools: Quantity,
+    daily_operating_cost: Money,
+    tools_price: Money,
+) -> u16 {
+    if maximum_batches == 0
+        || daily_operating_cost <= Money::ZERO
+        || tools_price <= Money::ZERO
+        || available_tools == Quantity::ZERO
+    {
+        return if production_tool_quantity(daily_operating_cost, tools_price).is_zero() {
+            maximum_batches
+        } else {
+            0
+        };
+    }
+    let mut low = 0_u16;
+    let mut high = maximum_batches;
+    while low < high {
+        let midpoint = low.saturating_add(high.saturating_sub(low).div_ceil(2));
+        let required = production_tool_quantity(
+            daily_operating_cost.saturating_mul(i64::from(midpoint)),
+            tools_price,
+        );
+        if required <= available_tools {
+            low = midpoint;
+        } else {
+            high = midpoint.saturating_sub(1);
+        }
+    }
+    low
 }
 
 fn effective_capacity_batches(state: &AppState, business: &crate::core::Business) -> u16 {
@@ -1230,6 +1289,18 @@ fn apply_household_consumption(
 
 const MAINTENANCE_TOOL_SHARE_BASIS_POINTS: i64 = 10_000;
 
+#[derive(Clone, Copy)]
+struct MaintenanceSnapshot {
+    business_id: BusinessId,
+    recipe_id: RecipeId,
+    cash: Money,
+    minimum_cash_reserve: Money,
+    maintenance_basis_points: u16,
+    quality_target_basis_points: u16,
+    condition_basis_points: u16,
+    quality_basis_points: u16,
+}
+
 fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenancePlan {
     let tools_id = registry
         .get_good_id("tools")
@@ -1244,23 +1315,49 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
     let snapshots: Vec<_> = state
         .businesses
         .iter()
-        .map(|business| {
-            (
-                business.id(),
-                business.recipe_id(),
-                business.cash(),
-                business.policy.minimum_cash_reserve,
-                business.policy.maintenance_basis_points,
-                business.policy.quality_target_basis_points,
-                business.operations.condition_basis_points,
-                business.operations.quality_basis_points,
+        .filter(|business| {
+            !matches!(
                 business.status(),
+                BusinessStatus::Closed | BusinessStatus::Insolvent
+            )
+        })
+        .map(|business| MaintenanceSnapshot {
+            business_id: business.id(),
+            recipe_id: business.recipe_id(),
+            cash: business.cash(),
+            minimum_cash_reserve: business.policy.minimum_cash_reserve,
+            maintenance_basis_points: business.policy.maintenance_basis_points,
+            quality_target_basis_points: business.policy.quality_target_basis_points,
+            condition_basis_points: business.operations.condition_basis_points,
+            quality_basis_points: business.operations.quality_basis_points,
+        })
+        .collect();
+    let lines = snapshots
+        .into_iter()
+        .map(|snapshot| {
+            maintenance_line(
+                registry,
+                state,
+                snapshot,
+                tools_id,
+                tools_price,
+                &mut remaining_tools_stock,
             )
         })
         .collect();
-    let mut lines = Vec::new();
 
-    for (
+    MaintenancePlan { tools_id, lines }
+}
+
+fn maintenance_line(
+    registry: &Registry,
+    state: &mut AppState,
+    snapshot: MaintenanceSnapshot,
+    tools_id: GoodId,
+    tools_price: Money,
+    remaining_tools_stock: &mut Quantity,
+) -> MaintenanceLine {
+    let MaintenanceSnapshot {
         business_id,
         recipe_id,
         cash,
@@ -1269,45 +1366,40 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
         quality_target_basis_points,
         condition_basis_points,
         quality_basis_points,
-        status,
-    ) in snapshots
-    {
-        if matches!(status, BusinessStatus::Closed | BusinessStatus::Insolvent) {
-            continue;
-        }
-        let recipe = registry
-            .get_recipe(recipe_id)
-            .expect("business recipe reference must be valid");
-        let desired_cost =
-            maintenance_cost(recipe.daily_operating_cost(), maintenance_basis_points);
-        let effect_points = maintenance_effect(maintenance_basis_points, condition_basis_points);
-        let can_maintain =
-            desired_cost > Money::ZERO && cash.saturating_sub(minimum_cash_reserve) >= desired_cost;
-        let tool_budget = if can_maintain && recipe.output_good_id() != tools_id {
-            desired_cost.saturating_mul_ratio(MAINTENANCE_TOOL_SHARE_BASIS_POINTS, 10_000)
-        } else {
-            Money::ZERO
-        };
-        let tool_quantity =
-            remaining_tools_stock.min(affordable_quantity(tool_budget, tools_price));
-        let tool_cost = cost_for(tool_quantity, tools_price);
-        remaining_tools_stock = remaining_tools_stock.saturating_sub(tool_quantity);
-        let random_wear = i16::try_from(state.rng.range_u32(4)).expect("wear fits i16");
-        let neglect_penalty = if can_maintain { 0 } else { 5 };
-        let accident_penalty = if condition_basis_points < 4_000 && state.rng.is_chance_success(40)
-        {
-            120
-        } else {
-            0
-        };
-        let improvement = if can_maintain && condition_basis_points < 9_500 {
-            effect_points
-        } else {
-            0
-        };
-        let quality_improvement = if can_maintain
-            && quality_basis_points < quality_target_basis_points
-        {
+    } = snapshot;
+    let recipe = registry
+        .get_recipe(recipe_id)
+        .expect("business recipe reference must be valid");
+    let desired_cost = maintenance_cost(recipe.daily_operating_cost(), maintenance_basis_points);
+    let effect_points = maintenance_effect(maintenance_basis_points, condition_basis_points);
+    let can_maintain =
+        desired_cost > Money::ZERO && cash.saturating_sub(minimum_cash_reserve) >= desired_cost;
+    let tool_budget = if can_maintain && recipe.output_good_id() != tools_id {
+        desired_cost.saturating_mul_ratio(MAINTENANCE_TOOL_SHARE_BASIS_POINTS, 10_000)
+    } else {
+        Money::ZERO
+    };
+    let required_tool_quantity = affordable_quantity(tool_budget, tools_price);
+    let tool_quantity = (*remaining_tools_stock).min(required_tool_quantity);
+    let tool_cost = cost_for(tool_quantity, tools_price);
+    *remaining_tools_stock = (*remaining_tools_stock).saturating_sub(tool_quantity);
+    let tools_available = tool_quantity >= required_tool_quantity;
+    let maintenance_succeeds =
+        can_maintain && (recipe.output_good_id() == tools_id || tools_available);
+    let random_wear = i16::try_from(state.rng.range_u32(4)).expect("wear fits i16");
+    let neglect_penalty = if maintenance_succeeds { 0 } else { 5 };
+    let accident_penalty = if condition_basis_points < 4_000 && state.rng.is_chance_success(40) {
+        120
+    } else {
+        0
+    };
+    let improvement = if maintenance_succeeds && condition_basis_points < 9_500 {
+        effect_points
+    } else {
+        0
+    };
+    let quality_improvement =
+        if maintenance_succeeds && quality_basis_points < quality_target_basis_points {
             i16::try_from(
                 (quality_target_basis_points - quality_basis_points)
                     .min(u16::try_from(effect_points).expect("maintenance effect is nonnegative")),
@@ -1316,22 +1408,19 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
         } else {
             0
         };
-        let quality_decline = if can_maintain { 0 } else { 3 };
-        lines.push(MaintenanceLine {
-            business_id,
-            cost: if can_maintain {
-                desired_cost
-            } else {
-                Money::ZERO
-            },
-            tool_quantity,
-            tool_cost,
-            condition_delta: improvement - 2 - random_wear - neglect_penalty - accident_penalty,
-            quality_delta: quality_improvement - quality_decline,
-        });
+    let quality_decline = if maintenance_succeeds { 0 } else { 3 };
+    MaintenanceLine {
+        business_id,
+        cost: if maintenance_succeeds {
+            desired_cost
+        } else {
+            Money::ZERO
+        },
+        tool_quantity,
+        tool_cost,
+        condition_delta: improvement - 2 - random_wear - neglect_penalty - accident_penalty,
+        quality_delta: quality_improvement - quality_decline,
     }
-
-    MaintenancePlan { tools_id, lines }
 }
 
 fn maintenance_cost(daily_operating_cost: Money, maintenance_basis_points: u16) -> Money {

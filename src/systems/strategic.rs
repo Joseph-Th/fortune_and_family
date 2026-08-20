@@ -34,6 +34,8 @@ pub(crate) const OFFICE_DUTY_PORTFOLIO_SURCHARGE_PER_ADDITIONAL_OFFICE: Money =
 const AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY: Money = Money::from_copper(500);
 const AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER: Money = Money::from_copper(250);
 const AI_DYNASTY_UPKEEP_PER_BUSINESS: Money = Money::from_copper(400);
+const AI_DYNASTY_UPKEEP_SHORTFALL_LEGITIMACY_PENALTY: u16 = 60;
+const AI_DYNASTY_UPKEEP_SHORTFALL_RELIABILITY_PENALTY: u16 = 120;
 const OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS: i64 = 90;
 const OFFICE_DUTY_FORFEITURE_WINDOW_DAYS: i64 = 90;
 const OFFICE_DUTY_REELECTION_BAN_DAYS: i64 = 180;
@@ -666,6 +668,17 @@ fn commit_loan_record(
     next_due_day: i64,
 ) {
     if let Some(defaulted_loan_id) = defaulted_loan_id {
+        let prior_collateral = state
+            .loans
+            .get(&defaulted_loan_id)
+            .and_then(|loan| loan.collateral_property_id);
+        if prior_collateral != terms.collateral_property_id
+            && let Some(property_id) = prior_collateral
+            && let Some(property) = state.properties.get_mut(&property_id)
+            && property.collateral_loan_id == Some(defaulted_loan_id)
+        {
+            property.collateral_loan_id = None;
+        }
         let loan = state
             .loans
             .get_mut(&defaulted_loan_id)
@@ -5207,10 +5220,10 @@ pub(crate) fn run_monthly_strategic_systems(
 /// Applies a monthly household upkeep to every non-player dynasty so that rival houses
 /// bear real recurring costs for their families and business portfolios.
 ///
-/// A dynasty that cannot cover its upkeep falls behind on its obligations instead of
-/// accumulating unlimited wealth, which makes credit demand, loan defaults, and grounded
-/// legal claims reachable in normal play. The player is exempt because the player's own
-/// discretionary spending already taxes the dynasty treasury.
+/// A dynasty that cannot cover its upkeep loses standing instead of silently receiving a
+/// free pass. This makes credit demand, loan defaults, and grounded legal claims reachable
+/// in normal play. The player is exempt because the player's own discretionary spending
+/// already taxes the dynasty treasury.
 fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> {
     let player_id = state.player_dynasty_id;
     let dynasties: Vec<_> = state
@@ -5237,6 +5250,7 @@ fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> 
         })
         .collect();
     let mut total_upkeep = Money::ZERO;
+    let mut total_shortfall = Money::ZERO;
     for (dynasty_id, family_members, business_count, treasury) in dynasties {
         let family = AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER
             .saturating_mul(i64::try_from(family_members).unwrap_or(i64::MAX));
@@ -5249,9 +5263,7 @@ fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> 
             continue;
         }
         let paid = required.min(treasury);
-        if paid == Money::ZERO {
-            continue;
-        }
+        let shortfall = required.saturating_sub(paid);
         let dynasty = state
             .dynasties
             .get_mut(&dynasty_id)
@@ -5271,13 +5283,34 @@ fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> 
                     current: total_upkeep,
                     incoming: paid,
                 })?;
+        if shortfall > Money::ZERO {
+            dynasty.resources.legitimacy_basis_points = dynasty
+                .resources
+                .legitimacy_basis_points
+                .saturating_sub(AI_DYNASTY_UPKEEP_SHORTFALL_LEGITIMACY_PENALTY);
+            dynasty.resources.reputation_reliability_basis_points = dynasty
+                .resources
+                .reputation_reliability_basis_points
+                .saturating_sub(AI_DYNASTY_UPKEEP_SHORTFALL_RELIABILITY_PENALTY);
+            total_shortfall = total_shortfall.checked_add(shortfall).ok_or(
+                SimulationError::DynastyTreasuryOverflow {
+                    dynasty_id,
+                    current: total_shortfall,
+                    incoming: shortfall,
+                },
+            )?;
+        }
     }
-    if total_upkeep > Money::ZERO {
+    if total_upkeep > Money::ZERO || total_shortfall > Money::ZERO {
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::HouseholdUpkeep,
             subject: "ai-dynasties".into(),
-            detail: format!("monthly_upkeep={}", total_upkeep.copper()),
+            detail: format!(
+                "monthly_upkeep={};shortfall={}",
+                total_upkeep.copper(),
+                total_shortfall.copper()
+            ),
         });
     }
     Ok(())

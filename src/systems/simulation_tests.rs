@@ -568,6 +568,99 @@ mod starting_economies {
     }
 
     #[test]
+    fn tool_shortage_stops_non_tool_production() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("registry must define tools");
+        assert!(
+            state.businesses.iter().any(|business| {
+                registry
+                    .get_recipe(business.recipe_id())
+                    .expect("business recipe must exist")
+                    .output_good_id()
+                    != tools_id
+            }),
+            "campaign must contain a non-tool business"
+        );
+        let baseline_plan = decide_production(registry, &state);
+        assert!(
+            baseline_plan
+                .lines
+                .iter()
+                .any(|line| line.output_good_id != tools_id),
+            "campaign fixture must be able to produce a non-tool good before the shortage"
+        );
+        state
+            .market
+            .quotes
+            .get_mut(&tools_id)
+            .expect("tools quote must exist")
+            .stock = Quantity::ZERO;
+
+        let plan = decide_production(registry, &state);
+
+        assert!(
+            plan.lines
+                .iter()
+                .filter(|line| line.output_good_id != tools_id)
+                .all(|line| line.tool_quantity == Quantity::ZERO),
+            "production must not consume inputs and produce output when replacement tools are unavailable"
+        );
+        assert!(
+            plan.lines
+                .iter()
+                .all(|line| line.output_good_id == tools_id),
+            "only a toolmaker may continue production while the tool market is empty"
+        );
+    }
+
+    #[test]
+    fn tool_shortage_turns_maintenance_into_neglect() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("registry must define tools");
+        state
+            .market
+            .quotes
+            .get_mut(&tools_id)
+            .expect("tools quote must exist")
+            .stock = Quantity::ZERO;
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| {
+                !matches!(
+                    business.status(),
+                    BusinessStatus::Closed | BusinessStatus::Insolvent
+                ) && registry
+                    .get_recipe(business.recipe_id())
+                    .expect("business recipe must exist")
+                    .output_good_id()
+                    != tools_id
+            })
+            .expect("campaign must contain a non-tool business")
+            .id();
+
+        let plan = decide_maintenance(registry, &mut state);
+        let line = plan
+            .lines
+            .iter()
+            .find(|line| line.business_id == business_id)
+            .expect("maintenance plan must include the selected business");
+
+        assert_eq!(line.tool_quantity, Quantity::ZERO);
+        assert_eq!(line.cost, Money::ZERO);
+        assert!(
+            line.condition_delta < 0 && line.quality_delta < 0,
+            "maintenance without tools must degrade the business instead of reporting successful upkeep"
+        );
+    }
+
+    #[test]
     fn maintenance_spending_creates_industrial_tool_demand() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -2139,6 +2232,15 @@ mod maintenance_policy {
             business.operations.condition_basis_points = 500;
             business.operations.quality_basis_points = 500;
         }
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("registry must define tools");
+        state
+            .market
+            .quotes
+            .get_mut(&tools_id)
+            .expect("tools quote must exist")
+            .stock = Quantity::from_units(100_000);
 
         for _ in 0..360 {
             let plan = decide_maintenance(registry, &mut state);

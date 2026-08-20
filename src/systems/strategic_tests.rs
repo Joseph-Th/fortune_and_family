@@ -4424,9 +4424,19 @@ mod loans {
     #[test]
     fn aged_defaulted_credit_is_restructured_in_place() {
         let mut state = make_test_campaign();
-        let terms = make_test_loan_terms(&state);
+        let mut terms = make_test_loan_terms(&state);
         let lender_id = terms.lender_dynasty_id;
         let borrower_id = terms.borrower_dynasty_id;
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(borrower_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("borrower must own an unpledged property")
+            .id;
+        terms.collateral_property_id = Some(property_id);
         let loan_id = issue_loan(&mut state, terms.clone()).expect("loan must be issued");
         let (principal_before, balance_before) = {
             let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
@@ -4461,6 +4471,7 @@ mod loans {
             principal: advance,
             weekly_payment: Money::from_copper(10),
             interest_basis_points: 900,
+            collateral_property_id: None,
             ..terms
         };
 
@@ -4485,6 +4496,7 @@ mod loans {
         );
         assert_eq!(loan.weekly_payment, Money::from_copper(10));
         assert_eq!(loan.interest_basis_points, 900);
+        assert_eq!(loan.collateral_property_id, None);
         assert_eq!(loan.missed_payments, 0);
         assert_eq!(loan.next_due_day, state.clock.day().saturating_add(7));
         assert_eq!(
@@ -4502,6 +4514,15 @@ mod loans {
                 .expect("borrower must exist")
                 .treasury(),
             borrower_before.saturating_add(advance)
+        );
+        assert_eq!(
+            state
+                .properties
+                .get(&property_id)
+                .expect("collateral property must remain present")
+                .collateral_loan_id,
+            None,
+            "restructuring without replacement collateral must clear the old reverse pledge"
         );
     }
 
@@ -7310,6 +7331,48 @@ mod ai {
             Money::ZERO,
             "upkeep must never drive a dynasty treasury below zero"
         );
+    }
+
+    #[test]
+    fn ai_upkeep_shortfall_reduces_dynasty_standing() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a rival dynasty");
+        let (legitimacy_before, reliability_before) = {
+            let dynasty = state
+                .dynasties
+                .get_mut(&dynasty_id)
+                .expect("rival dynasty must exist");
+            dynasty.resources.treasury = Money::ZERO;
+            (
+                dynasty.resources.legitimacy_basis_points,
+                dynasty.resources.reputation_reliability_basis_points,
+            )
+        };
+
+        apply_ai_dynasty_upkeep(&mut state).expect("AI dynasty upkeep must commit");
+
+        let dynasty = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("rival dynasty must exist");
+        assert!(
+            dynasty.resources.legitimacy_basis_points < legitimacy_before,
+            "unpaid upkeep must damage the dynasty's legitimacy"
+        );
+        assert!(
+            dynasty.resources.reputation_reliability_basis_points < reliability_before,
+            "unpaid upkeep must damage the dynasty's financial reliability"
+        );
+        assert!(state.audit_log.iter().rev().any(|record| {
+            record.kind() == AuditKind::HouseholdUpkeep
+                && record.subject() == "ai-dynasties"
+                && record.detail().contains("shortfall=")
+        }));
     }
 
     #[test]

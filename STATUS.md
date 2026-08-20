@@ -39,7 +39,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 | World | One detailed city with six districts, regional routes, seasonal pressure, and external disruption. |
 | Population | Dynasties, notable characters, grouped households, health, loyalty, family links, wards, education, councils, heirs, and succession. |
 | Businesses | Ownership, management, policy, cash, inventory, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, and protected owner distributions. |
-| Markets | Scarce procurement, production, business and household demand, industrial tool demand, spoilage, maintenance, price formation, controls, and regional supply. |
+| Markets | Scarce procurement, production, business and household demand, industrial tool demand, tool-constrained production and maintenance, spoilage, price formation, controls, and regional supply. |
 | Contracts | Scheduled supply, payment, penalties, fulfillment, attribution, breach, and termination. |
 | Private finance | Loans, interest, repayment, delinquency, default, collateral, seizure, restructuring, and repayment records. |
 | Municipal finance | Authorizing laws, dynasty creditors, treasury proceeds, debt service, delinquency, default, and civic consequences. |
@@ -50,7 +50,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 | Civic systems | Laws, differentiated public works, district conditions, grounded legal cases and settlements, crisis response, municipal debt, and private funding of sponsored public works. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, subject, summary, creation, expiry, passive reports, and paid market/district/counterparty intelligence. |
-| AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; monthly household upkeep for family and portfolio; dynamic private-credit participation through the canonical loan machinery; recapitalization only for lifetime-profitable businesses; grounded legal filing; and institution selection. |
+| AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; monthly household upkeep for family and portfolio with standing penalties for shortfalls; dynamic private-credit participation through the canonical loan machinery; recapitalization only for lifetime-profitable businesses; grounded legal filing; and institution selection. |
 | Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, response, recovery, effects, and resolution. |
 | Observability | State summary, campaign projection, HTML dashboard, outbox, chronicle, audit history, validation, campaign progression, gameplay reports with causal feedback traces, and art review reports. |
 
