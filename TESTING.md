@@ -7,6 +7,7 @@ This document defines test tiers, suite organization, assertion standards, and c
 | Goal | Command |
 |---|---|
 | One domain or behavior | `bash scripts/test.sh fast <filter>` |
+| Fastest library-only loop | `bash scripts/test.sh quick <filter>` |
 | All ordinary library tests | `bash scripts/test.sh fast` |
 | Normal pre-commit loop | `bash scripts/test.sh standard` |
 | List matching tests | `bash scripts/test.sh list <filter>` |
@@ -28,7 +29,20 @@ This document defines test tiers, suite organization, assertion standards, and c
 
 Successful test and smoke steps print concise summaries with elapsed time. Failures print the complete command output, including compiler diagnostics when a CLI build fails. A filter matching no executable library test exits with code 2.
 
-Pass `CIVIC_DYNASTY_JOBS=<n>` to forward `--jobs <n>` to every `cargo test` or `cargo build` the runner invokes. The default is Cargo's own parallelism, which already uses the machine's cores; lowering it can keep a heavily used development machine responsive.
+For the tightest edit-test loop, use `bash scripts/test.sh fast <filter>` (e.g., `fast simulation`, `fast strategic`) or `bash scripts/test.sh quick <filter>` for library-only iteration that never triggers docs or CLI builds. `quick` is an alias for `fast` optimized for rapid solo iteration. The `standard` lane (shell checks, library, docs, core CLI) is the normal pre-commit; deeper lanes (`soak`, `adapters`, `gameplay`, `ci-gates`, `all`) are for cross-cutting or release work.
+
+Pass `CIVIC_DYNASTY_JOBS=<n>` to forward `--jobs <n>` to every `cargo test`
+or `cargo build` the runner invokes. The default is Cargo's own parallelism,
+which already uses the machine's cores; lowering it can keep a heavily used
+development machine responsive.
+
+- If `cargo-nextest` is installed, `fast`/`quick` use it automatically for
+  faster per-test execution; set `CIVIC_DYNASTY_NO_NEXTEST=1` to force plain
+  `cargo test`.
+- Set `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` to skip CLI rebuilds when iterating on
+  library code only.
+- The pre-push hook defaults to `quick` for snappy pushes; set
+  `CIVIC_DYNASTY_PRE_PUSH=standard` to enforce the fuller gate.
 
 The CLI smoke runner accepts `CIVIC_DYNASTY_PROFILE=release` when a release
 binary is desired, or `CIVIC_DYNASTY_BINARY` when a caller has already built

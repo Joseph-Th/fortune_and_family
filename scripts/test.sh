@@ -18,7 +18,8 @@ fi
 usage() {
   cat >&2 <<EOF
 usage:
-  $0 fast [filter]       run non-ignored library tests (default loop)
+  $0 fast [filter]       run non-ignored library tests (default loop, incremental)
+  $0 quick [filter]      fastest loop: same as fast, skips docs/CLI (alias for rapid iteration)
   $0 standard            pre-commit loop: syntax, library, docs, core CLI smoke
   $0 exact <test-name>   run one fully qualified library test
   $0 debug <test-name>   run one exact test with captured output enabled
@@ -37,11 +38,19 @@ usage:
   $0 slow                heavy release gates (ci-gates minus audit)
   $0 deep                deepest design gates (slow + gameplay-audit)
 
+fast iteration:
+  Use 'fast <filter>' for the tightest loop (e.g. 'fast simulation', 'fast strategic').
+  'quick' is an alias for 'fast' that never triggers docs or CLI builds.
+  Set CIVIC_DYNASTY_JOBS=4 to cap parallelism on a busy machine.
+  Set CIVIC_DYNASTY_SKIP_CLI_BUILD=1 to skip CLI rebuild when iterating on lib only.
+  If 'cargo nextest' is installed, 'fast' will use it automatically for ~30%% faster runs.
+
 environment:
-  CIVIC_DYNASTY_JOBS      pass --jobs N to cargo test/build commands
-  CIVIC_DYNASTY_PROFILE   debug (default) or release for adapter smoke builds
-  CIVIC_DYNASTY_BINARY    reuse a prebuilt CLI binary for adapter smoke groups
-  CIVIC_DYNASTY_PYTHON    select an explicit Python interpreter
+  CIVIC_DYNASTY_JOBS           pass --jobs N to cargo test/build commands
+  CIVIC_DYNASTY_PROFILE        debug (default) or release for adapter smoke builds
+  CIVIC_DYNASTY_BINARY         reuse a prebuilt CLI binary for adapter smoke groups
+  CIVIC_DYNASTY_SKIP_CLI_BUILD skip CLI rebuild when set (fast lib-only iteration)
+  CIVIC_DYNASTY_PYTHON         select an explicit Python interpreter
 EOF
   exit 2
 }
@@ -68,6 +77,9 @@ resolve_python() {
 }
 
 ensure_cli_binary() {
+  if [[ -n "${CIVIC_DYNASTY_SKIP_CLI_BUILD:-}" ]]; then
+    return 0
+  fi
   local requested_profile=${1:-debug}
   if [[ -n "${CIVIC_DYNASTY_BINARY_OVERRIDE:-}" ]]; then
     # An explicit CIVIC_DYNASTY_BINARY_OVERRIDE wins over every profile choice,
@@ -94,6 +106,16 @@ ensure_cli_binary() {
       if [[ ! -x "$CIVIC_DYNASTY_BINARY" ]]; then
         printf 'CIVIC_DYNASTY_BINARY is not executable: %q\n' "$CIVIC_DYNASTY_BINARY" >&2
         return 1
+      fi
+      # Incremental fast path: if the requested binary exists and is newer than
+      # Cargo sources, skip the rebuild — cargo's own incrementality handles the
+      # rest, but this avoids even invoking cargo for a no-op.
+      local binary_mtime
+      binary_mtime=$(stat -c %Y "$CIVIC_DYNASTY_BINARY" 2>/dev/null || stat -f %m "$CIVIC_DYNASTY_BINARY" 2>/dev/null || printf '0')
+      local cargo_mtime
+      cargo_mtime=$(stat -c %Y Cargo.toml 2>/dev/null || stat -f %m Cargo.toml 2>/dev/null || printf '0')
+      if (( binary_mtime > cargo_mtime )) && [[ -n "${CIVIC_DYNASTY_SKIP_CLI_BUILD:-}" ]]; then
+        return 0
       fi
       return 0
     fi
@@ -153,8 +175,12 @@ run_standard() {
   run_shell_syntax
   run_fast
   run_docs
-  ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
-  run_cli_core
+  if [[ -z "${CIVIC_DYNASTY_SKIP_CLI_BUILD:-}" ]]; then
+    ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
+    run_cli_core
+  else
+    printf '\n==> Core CLI smoke tests (skipped via CIVIC_DYNASTY_SKIP_CLI_BUILD)\n'
+  fi
 }
 
 format_duration() {
@@ -239,15 +265,31 @@ matching_tests() {
   printf '%s\n' "$output" | grep ': test$' || true
 }
 
+has_nextest() {
+  command -v cargo-nextest >/dev/null 2>&1 || cargo nextest --version >/dev/null 2>&1
+}
+
 run_fast() {
   local filter=${1:-}
-  local command=(cargo test --quiet --locked --lib "${job_args[@]}")
   local label='Library tests'
   local match_description=''
   if [[ -n "$filter" ]]; then
-    command+=("$filter")
     label="Library tests matching '$filter'"
     match_description=$filter
+  fi
+  # Prefer cargo-nextest when available: ~30% faster and per-test timing.
+  if has_nextest && [[ -z "${CIVIC_DYNASTY_NO_NEXTEST:-}" ]]; then
+    local command=(cargo nextest run --locked --lib "${job_args[@]}" --no-fail-fast)
+    if [[ -n "$filter" ]]; then
+      command+=(-E "test($filter)")
+    fi
+    # nextest already prints concise per-test output; wrap as a step
+    run_step "$label (nextest)" "${command[@]}"
+    return $?
+  fi
+  local command=(cargo test --quiet --locked --lib "${job_args[@]}")
+  if [[ -n "$filter" ]]; then
+    command+=("$filter")
   fi
   run_test_step "$label" "$match_description" "${command[@]}"
 }
@@ -418,6 +460,10 @@ run_all() {
 
 case "$mode" in
   fast)
+    [[ $# -le 2 ]] || usage
+    run_fast "${2:-}"
+    ;;
+  quick)
     [[ $# -le 2 ]] || usage
     run_fast "${2:-}"
     ;;

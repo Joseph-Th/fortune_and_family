@@ -25,6 +25,7 @@ function Show-Usage {
     @"
 usage:
   .\scripts\test.ps1 fast [filter]       run non-ignored library tests (default loop)
+  .\scripts\test.ps1 quick [filter]      fastest loop: same as fast, skips docs/CLI
   .\scripts\test.ps1 standard            pre-commit loop: syntax, library, docs, core CLI smoke
   .\scripts\test.ps1 exact <test-name>   run one fully qualified library test
   .\scripts\test.ps1 debug <test-name>   run one exact test with captured output enabled
@@ -44,10 +45,11 @@ usage:
   .\scripts\test.ps1 deep                deepest design gates (slow + gameplay-audit)
 
 environment:
-  CIVIC_DYNASTY_JOBS      pass --jobs N to cargo test/build commands
-  CIVIC_DYNASTY_PROFILE   debug (default) or release for adapter smoke builds
-  CIVIC_DYNASTY_BINARY    reuse a prebuilt CLI binary for adapter smoke groups
-  CIVIC_DYNASTY_PYTHON    select an explicit Python interpreter
+  CIVIC_DYNASTY_JOBS           pass --jobs N to cargo test/build commands
+  CIVIC_DYNASTY_PROFILE        debug (default) or release for adapter smoke builds
+  CIVIC_DYNASTY_BINARY         reuse a prebuilt CLI binary for adapter smoke groups
+  CIVIC_DYNASTY_SKIP_CLI_BUILD skip CLI rebuild when set (fast lib-only iteration)
+  CIVIC_DYNASTY_PYTHON         select an explicit Python interpreter
 "@ | Write-Host
     exit 2
 }
@@ -145,8 +147,26 @@ function Ensure-CliBinary([string]$RequestedProfile = "debug") {
     $env:CIVIC_DYNASTY_BINARY = (Resolve-Path $binary).Path
 }
 
+function Has-Nextest {
+    try {
+        & cargo nextest --version 2>$null | Out-Null
+        return $true
+    } catch { return $false }
+}
+
 function Run-Fast([string]$TestFilter) {
     $label = if ($TestFilter) { "Library tests matching '$TestFilter'" } else { "Library tests" }
+    if ((Has-Nextest) -and (-not $env:CIVIC_DYNASTY_NO_NEXTEST)) {
+        $nextestArgs = @("nextest", "run", "--locked", "--lib") + $JobArgs + @("--no-fail-fast")
+        if ($TestFilter) {
+            $nextestArgs += @("-E", "test($TestFilter)")
+        }
+        Run-Step "$label (nextest)" {
+            & cargo @nextestArgs
+            if ($LASTEXITCODE -ne 0) { throw "Library tests failed" }
+        }
+        return
+    }
     $testArgs = @("test", "--quiet", "--locked", "--lib") + $JobArgs
     if ($TestFilter) {
         $testArgs += $TestFilter
@@ -265,8 +285,12 @@ function Run-GameplayAudit {
 function Run-Standard {
     Run-Fast
     Run-Docs
-    Ensure-CliBinary $(if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" })
-    Run-CliGroup "core"
+    if (-not $env:CIVIC_DYNASTY_SKIP_CLI_BUILD) {
+        Ensure-CliBinary $(if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" })
+        Run-CliGroup "core"
+    } else {
+        Write-Host "`n==> Core CLI smoke tests (skipped via CIVIC_DYNASTY_SKIP_CLI_BUILD)" -ForegroundColor Yellow
+    }
 }
 
 function Run-CiVerify {
@@ -333,6 +357,7 @@ function Run-All {
 
 switch ($Mode) {
     "fast"           { Run-Fast $Filter }
+    "quick"          { Run-Fast $Filter }
     "standard"       { Run-Standard }
     "exact"          { if (-not $Filter) { Show-Usage }; Run-Exact $Filter }
     "debug"          { if (-not $Filter) { Show-Usage }; Run-Debug $Filter }

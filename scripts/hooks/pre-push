@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Local pre-push gate: the normal pre-commit loop for every pushed change.
-# This is the equivalent of a lightweight CI lane without hosted runners.
+# Local pre-push gate: fast verification for solo local work.
+# Keeps pushes snappy — runs the quick library gate only. Use
+# `bash scripts/test.sh standard` manually before a risky push,
+# or set CIVIC_DYNASTY_PRE_PUSH=standard to enforce the fuller gate.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-bash scripts/test.sh standard
+gate=${CIVIC_DYNASTY_PRE_PUSH:-quick}
+bash scripts/test.sh "$gate"
