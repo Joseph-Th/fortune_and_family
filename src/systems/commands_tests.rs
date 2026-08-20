@@ -261,6 +261,40 @@ mod validation {
     }
 
     #[test]
+    fn rejects_undersized_public_work_budget_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let district_id = registry
+            .districts()
+            .first()
+            .expect("registry must contain a district")
+            .id();
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::StartPublicWork {
+                district_id,
+                kind: PublicWorkKind::Bridge,
+                budget: Money::from_copper(1),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InvalidPublicWorkBudget {
+                minimum: PUBLIC_WORK_MINIMUM_BUDGET,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an undersized public-work budget must be rejected before charging the sponsor",
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_unfinished_public_work_without_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

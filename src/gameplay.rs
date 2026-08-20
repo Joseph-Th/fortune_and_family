@@ -11679,7 +11679,7 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::InsufficientPlayerFunds { .. } => "insufficient player funds",
         CommandError::InsufficientPlayerLegitimacy { .. } => "insufficient player legitimacy",
         CommandError::InsufficientBusinessFunds { .. } => "insufficient business funds",
-        CommandError::InvalidPublicWorkBudget
+        CommandError::InvalidPublicWorkBudget { .. }
         | CommandError::PublicWorkFunding(_)
         | CommandError::PublicWorkCapacity { .. } => BAD_WORK,
         CommandError::PublicWorkSponsorshipRequiresOffice => WORK_REQUIRES_OFFICE,

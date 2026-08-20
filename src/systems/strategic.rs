@@ -5240,6 +5240,14 @@ fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> 
                 .ids_for_owner(dynasty.id())
                 .into_iter()
                 .flatten()
+                .filter(|business_id| {
+                    state.businesses.get(**business_id).is_some_and(|business| {
+                        !matches!(
+                            business.status(),
+                            BusinessStatus::Insolvent | BusinessStatus::Closed
+                        )
+                    })
+                })
                 .count();
             (
                 dynasty.id(),
@@ -7046,7 +7054,13 @@ fn advance_ai_rival_objective(
         .resentment_basis_points
         .saturating_add(100)
         .min(10_000);
-    let achieved = relationship.fear_basis_points >= 5_000;
+    // The objective is reviewed and abandoned after `AI_OBJECTIVE_REVIEW_DAYS`
+    // (at most 24 monthly increments of +100), so the maximum fear a dynasty can
+    // reach on its own is bootstrap_max(2_500) + 24 * 100 = 4_900. Requiring the
+    // current 5_000 threshold made the objective mathematically impossible to
+    // complete. 4_500 keeps the milestone meaningful (well above the bootstrap
+    // range) while staying reachable for houses that start with substantial fear.
+    let achieved = relationship.fear_basis_points >= 4_500;
     if achieved {
         let rival_name = state.dynasties.get(&dynasty_id).map_or_else(
             || dynasty_id.to_string(),

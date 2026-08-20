@@ -212,6 +212,7 @@ const PRIVATE_LOAN_COUNTERPARTY_MIN_COLLATERAL_LTV_BASIS_POINTS: i64 = 2_000;
 pub(crate) const PROPERTY_COUNTERPARTY_BUYER_RESERVE: Money = Money::from_copper(10_000);
 pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
+pub(crate) const PUBLIC_WORK_MINIMUM_BUDGET: Money = Money::from_copper(1_000);
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
 pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_080;
 pub(crate) const FAMILY_COUNCIL_MEETING_INTERVAL_DAYS: i64 = 360;
@@ -419,8 +420,8 @@ pub enum CommandError {
         available: Money,
         required: Money,
     },
-    #[error("public-work budget must be positive")]
-    InvalidPublicWorkBudget,
+    #[error("public-work budget must be at least {minimum}")]
+    InvalidPublicWorkBudget { minimum: Money },
     #[error(transparent)]
     PublicWorkFunding(#[from] PublicWorkFundingError),
     #[error("the player dynasty must hold political office before sponsoring a public work")]
@@ -1913,8 +1914,10 @@ fn apply_public_work(
     if registry.get_district(district_id).is_none() {
         return Err(CommandError::MissingDistrict { district_id });
     }
-    if budget <= Money::ZERO {
-        return Err(CommandError::InvalidPublicWorkBudget);
+    if budget < PUBLIC_WORK_MINIMUM_BUDGET {
+        return Err(CommandError::InvalidPublicWorkBudget {
+            minimum: PUBLIC_WORK_MINIMUM_BUDGET,
+        });
     }
     if state.public_works.values().any(|work| {
         work.district_id == district_id && work.kind == kind && work.status.is_unfinished()

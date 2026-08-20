@@ -6733,6 +6733,38 @@ mod ai {
     }
 
     #[test]
+    fn containment_objective_can_complete_within_the_review_window() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a nonplayer dynasty");
+        let pair = DynastyPair::new(dynasty_id, state.player_dynasty_id);
+        {
+            let relationship = state
+                .relationships
+                .get_mut(&pair)
+                .expect("rival relationship must exist");
+            relationship.fear_basis_points = 2_500;
+        }
+        let months_in_review_window = AI_OBJECTIVE_REVIEW_DAYS / 30;
+
+        let mut progress = ObjectiveProgress::Pending;
+        for _ in 0..months_in_review_window {
+            progress = advance_ai_rival_objective(&mut state, dynasty_id)
+                .expect("AI rival objective must succeed");
+        }
+
+        assert_eq!(
+            progress,
+            ObjectiveProgress::Achieved,
+            "a house at bootstrap-maximum fear must reach the containment milestone before the review window forces abandonment"
+        );
+    }
+
+    #[test]
     fn stalled_objectives_are_abandoned_and_replaced() {
         let registry = test_registry();
         let mut state = make_test_campaign();
@@ -7302,6 +7334,64 @@ mod ai {
                 && record.subject() == "ai-dynasties"
                 && record.detail().starts_with("monthly_upkeep=")
         }));
+    }
+
+    #[test]
+    fn ai_upkeep_ignores_businesses_that_have_closed() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a rival dynasty");
+        let owned = state
+            .businesses
+            .ids_for_owner(dynasty_id)
+            .expect("rival owner index must exist");
+        let business_count_before = owned.len();
+        assert!(
+            business_count_before > 0,
+            "rival dynasty must own at least one business"
+        );
+        let business_id = *owned.first().expect("rival dynasty must own a business");
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("selected business must exist")
+            .operations
+            .status = BusinessStatus::Closed;
+        let treasury_before = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("rival dynasty must exist")
+            .treasury();
+        let family_members = state
+            .family_councils
+            .get(&dynasty_id)
+            .expect("rival dynasty must have a family council")
+            .members
+            .len();
+        let expected = AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY
+            .saturating_add(
+                AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER
+                    .saturating_mul(i64::try_from(family_members).unwrap_or(i64::MAX)),
+            )
+            .saturating_add(AI_DYNASTY_UPKEEP_PER_BUSINESS.saturating_mul(
+                i64::try_from(business_count_before.saturating_sub(1)).unwrap_or(i64::MAX),
+            ));
+
+        apply_ai_dynasty_upkeep(&mut state).expect("AI dynasty upkeep must commit");
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("rival dynasty must exist")
+                .treasury(),
+            treasury_before.saturating_sub(expected),
+            "upkeep must not charge a dynasty for businesses that have closed or become insolvent"
+        );
     }
 
     #[test]

@@ -1051,6 +1051,21 @@ mod validation {
     }
 
     #[test]
+    fn rejects_terminal_exhausted_identifier_allocator() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["next_ids"]["business"] = Value::from(u32::MAX - 1);
+        let (_directory, path) =
+            write_test_json_fixture("terminal-exhausted-business-id.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::IdentifierAllocation,
+            "exhausted the supported identifier space",
+        );
+    }
+
+    #[test]
     fn rejects_malformed_institution_campaign_audit_subjects() {
         let mut state = make_test_campaign();
         let character_id = state
