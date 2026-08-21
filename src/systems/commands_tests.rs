@@ -2771,6 +2771,10 @@ mod politics {
         capabilities.craft = 0;
     }
 
+    /// Advance far enough past the resolution window for the contest, monthly
+    /// systems, and follow-on effects to settle before the fixture returns.
+    const NOMINATION_FIXTURE_SETTLE_DAYS: i64 = OFFICE_NOMINATION_RESOLUTION_DAYS * 3;
+
     fn resolved_failed_nomination_fixture(
         registry: &Registry,
     ) -> (AppState, CharacterId, InstitutionId) {
@@ -2805,8 +2809,8 @@ mod politics {
         advance_days(
             registry,
             &mut state,
-            u32::try_from(OFFICE_NOMINATION_INTERVAL_DAYS)
-                .expect("office nomination interval must fit the simulation day command"),
+            u32::try_from(NOMINATION_FIXTURE_SETTLE_DAYS)
+                .expect("office nomination settlement must fit the simulation day command"),
         )
         .expect("campaign must advance through the nomination cooldown");
         assert_ne!(
@@ -4009,7 +4013,7 @@ mod politics {
         assert_eq!(
             result,
             Err(CommandError::OfficeNominationCooldown {
-                next_nomination_day: OFFICE_NOMINATION_INTERVAL_DAYS,
+                next_nomination_day: OFFICE_NOMINATION_RECOVERY_DAYS,
             })
         );
         assert_state_unchanged(
@@ -4243,7 +4247,7 @@ mod politics {
             registry,
             &mut state,
             u32::try_from(
-                OFFICE_NOMINATION_RECOVERY_DAYS.saturating_sub(OFFICE_NOMINATION_INTERVAL_DAYS),
+                OFFICE_NOMINATION_RECOVERY_DAYS.saturating_sub(NOMINATION_FIXTURE_SETTLE_DAYS),
             )
             .expect("remaining nomination recovery must fit the simulation day command"),
         )

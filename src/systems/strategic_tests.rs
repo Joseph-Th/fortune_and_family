@@ -577,8 +577,8 @@ mod arithmetic_boundaries {
         );
         assert!(state.outbox.iter().any(|message| {
             message.kind() == OutboxKind::Contract
-                && message.body().contains(&contract_id.to_string())
-                && message.body().contains("external commercial performance")
+                && message.body.contains(&contract_id.to_string())
+                && message.body.contains("external commercial performance")
         }));
         validate_invariants(registry, &state);
     }
@@ -793,9 +793,13 @@ mod public_works {
             quote_after.stock < quote_before.stock,
             "funded construction must consume tools from the shared market"
         );
-        assert!(
-            quote_after.demand_today > quote_before.demand_today,
-            "public construction must register tool demand alongside household and business demand"
+        // Weekly public-work purchases settle after the day's price update and
+        // before the next market-flow reset, so they record stock and clearing
+        // movement only; a `demand_today` write would be zeroed before any
+        // trading could observe it.
+        assert_eq!(
+            quote_after.demand_today, quote_before.demand_today,
+            "off-hours construction purchasing must not fabricate intraday demand"
         );
         assert!(
             state.market.clearing_account > clearing_before,
@@ -6400,8 +6404,9 @@ mod routes {
 
         for route in state.external_routes.values() {
             assert_eq!(
-                route.disruption_basis_points, 6_750,
-                "monthly recovery must remove exactly 750 basis points"
+                route.disruption_basis_points,
+                7_500 - ROUTE_DISRUPTION_HEALING_BASIS_POINTS,
+                "monthly recovery must remove exactly the healing allowance"
             );
         }
     }

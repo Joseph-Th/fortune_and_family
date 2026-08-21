@@ -40,17 +40,6 @@ impl Money {
         }
     }
 
-    /// Returns the largest nonnegative amount that can be added without overflowing.
-    #[must_use]
-    pub const fn max_nonnegative_addend(self) -> Self {
-        let headroom = i64::MAX.saturating_sub(self.0);
-        if headroom > 0 {
-            Self(headroom)
-        } else {
-            Self::ZERO
-        }
-    }
-
     #[must_use]
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
@@ -139,11 +128,6 @@ impl Money {
         let rounded = quotient.saturating_add((product % denominator != 0) as i128);
         Self(saturating_i128_to_i64(rounded))
     }
-
-    #[must_use]
-    pub const fn min(self, other: Self) -> Self {
-        if self.0 <= other.0 { self } else { other }
-    }
 }
 
 impl fmt::Display for Money {
@@ -207,17 +191,6 @@ impl Quantity {
         }
     }
 
-    /// Returns the largest nonnegative amount that can be added without overflowing.
-    #[must_use]
-    pub const fn max_nonnegative_addend(self) -> Self {
-        let headroom = i64::MAX.saturating_sub(self.0);
-        if headroom > 0 {
-            Self(headroom)
-        } else {
-            Self::ZERO
-        }
-    }
-
     #[must_use]
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
@@ -240,16 +213,6 @@ impl Quantity {
     /// Panics when `denominator` is zero.
     pub const fn saturating_mul_ratio(self, numerator: i64, denominator: i64) -> Self {
         Self(saturating_mul_ratio_i64(self.0, numerator, denominator))
-    }
-
-    #[must_use]
-    pub const fn min(self, other: Self) -> Self {
-        if self.0 <= other.0 { self } else { other }
-    }
-
-    #[must_use]
-    pub const fn max(self, other: Self) -> Self {
-        if self.0 >= other.0 { self } else { other }
     }
 }
 
@@ -436,26 +399,6 @@ mod tests {
         assert_eq!(
             Money::from_copper(i64::MAX).saturating_mul_ratio_ceil_nonnegative(2, 2),
             Money::from_copper(i64::MAX)
-        );
-    }
-
-    #[test]
-    fn nonnegative_addend_capacity_preserves_exact_boundary_addition() {
-        let money = Money::from_copper(i64::MAX - 7);
-        let quantity = Quantity::from_milliunits(i64::MAX - 11);
-
-        assert_eq!(money.max_nonnegative_addend(), Money::from_copper(7));
-        assert_eq!(
-            money.checked_add(money.max_nonnegative_addend()),
-            Some(Money::from_copper(i64::MAX))
-        );
-        assert_eq!(
-            quantity.max_nonnegative_addend(),
-            Quantity::from_milliunits(11)
-        );
-        assert_eq!(
-            quantity.checked_add(quantity.max_nonnegative_addend()),
-            Some(Quantity::from_milliunits(i64::MAX))
         );
     }
 

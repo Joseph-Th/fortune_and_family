@@ -170,24 +170,6 @@ impl Canvas {
         }
     }
 
-    /// Returns a horizontally mirrored copy.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if this canvas violates the dimension invariants established by
-    /// [`Canvas::new`].
-    #[must_use]
-    pub fn flipped_horizontally(&self) -> Self {
-        let mut flipped = Self::new(self.width, self.height);
-        let last = i32::try_from(self.width).expect("canvas width must fit i32") - 1;
-        for y in 0..i32::try_from(self.height).expect("canvas height must fit i32") {
-            for x in 0..=last {
-                flipped.set(last - x, y, self.get(x, y));
-            }
-        }
-        flipped
-    }
-
     /// Returns the number of opaque pixels.
     #[must_use]
     pub fn opaque_count(&self) -> usize {
@@ -230,61 +212,6 @@ impl Canvas {
             u32::try_from(i64::from(maximum_y) - i64::from(minimum_y) + 1)
                 .expect("opaque height must fit u32"),
         ))
-    }
-
-    /// Returns whether `(x, y)` is opaque and orthogonally borders transparency.
-    #[must_use]
-    pub fn is_silhouette_edge(&self, x: i32, y: i32) -> bool {
-        if self.get(x, y) == TRANSPARENT_INDEX {
-            return false;
-        }
-        [(0, -1), (0, 1), (-1, 0), (1, 0)]
-            .into_iter()
-            .any(|(step_x, step_y)| {
-                let Some(neighbor_x) = x.checked_add(step_x) else {
-                    return true;
-                };
-                let Some(neighbor_y) = y.checked_add(step_y) else {
-                    return true;
-                };
-                !self.contains(neighbor_x, neighbor_y)
-                    || self.get(neighbor_x, neighbor_y) == TRANSPARENT_INDEX
-            })
-    }
-
-    /// Returns a copy scaled by an integer factor using nearest-neighbor sampling.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `factor` is zero or the scaled dimensions exceed the supported coordinate
-    /// range.
-    #[must_use]
-    pub fn scaled(&self, factor: u32) -> Self {
-        assert!(factor > 0, "scale factor must be positive");
-        let width = self
-            .width
-            .checked_mul(factor)
-            .expect("scaled canvas width must fit u32");
-        let height = self
-            .height
-            .checked_mul(factor)
-            .expect("scaled canvas height must fit u32");
-        let mut scaled = Self::new(width, height);
-        let factor = i32::try_from(factor).expect("scale factor must fit i32 coordinates");
-        for y in 0..i32::try_from(self.height).expect("canvas height must fit i32") {
-            for x in 0..i32::try_from(self.width).expect("canvas width must fit i32") {
-                let index = self.get(x, y);
-                if index == TRANSPARENT_INDEX {
-                    continue;
-                }
-                for offset_y in 0..factor {
-                    for offset_x in 0..factor {
-                        scaled.set(x * factor + offset_x, y * factor + offset_y, index);
-                    }
-                }
-            }
-        }
-        scaled
     }
 }
 
@@ -329,34 +256,5 @@ mod tests {
 
         assert_eq!(destination.get(1, 1), 9);
         assert_eq!(destination.get(2, 2), 7);
-    }
-
-    #[test]
-    fn horizontal_flip_is_an_involution() {
-        let mut canvas = Canvas::new(5, 3);
-        canvas.set(0, 1, 3);
-        canvas.set(4, 2, 6);
-
-        assert_eq!(canvas.flipped_horizontally().flipped_horizontally(), canvas);
-    }
-
-    #[test]
-    fn silhouette_edges_exclude_interior_pixels() {
-        let mut canvas = Canvas::new(5, 5);
-        canvas.fill_rect(Rect::new(1, 1, 3, 3), 2);
-
-        assert!(canvas.is_silhouette_edge(1, 1));
-        assert!(!canvas.is_silhouette_edge(2, 2));
-    }
-
-    #[test]
-    fn scaling_multiplies_dimensions_and_opaque_area() {
-        let mut canvas = Canvas::new(2, 2);
-        canvas.set(0, 0, 1);
-
-        let scaled = canvas.scaled(3);
-
-        assert_eq!((scaled.width(), scaled.height()), (6, 6));
-        assert_eq!(scaled.opaque_count(), 9);
     }
 }

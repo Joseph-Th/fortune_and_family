@@ -1461,19 +1461,23 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
             .businesses
             .get_mut(business_id)
             .expect("planned maintenance business must exist");
-        if cost > Money::ZERO {
-            debug_assert!(tool_cost <= cost);
+        // A successful maintenance pays its full desired cost, which already
+        // includes the consumed tools. A failed maintenance that still consumed
+        // partially available tools must pay for exactly those tools;
+        // otherwise the market clearing account would receive unbacked money.
+        let charge = cost.max(tool_cost);
+        if charge > Money::ZERO {
             let resulting_cash = business
                 .finance
                 .cash
-                .checked_sub(cost)
+                .checked_sub(charge)
                 .expect("planned maintenance must fit available cash");
             let resulting_lifetime_costs =
-                business.finance.lifetime_costs.checked_add(cost).ok_or(
+                business.finance.lifetime_costs.checked_add(charge).ok_or(
                     SimulationError::BusinessLifetimeCostsOverflow {
                         business_id,
                         current: business.finance.lifetime_costs,
-                        incoming: cost,
+                        incoming: charge,
                     },
                 )?;
             let next_finance_version = next_business_finance_version(business)?;
@@ -1652,12 +1656,17 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
         if output_milliunits <= 0 {
             continue;
         }
+        // Only `Active` and `Disputed` agreements are paid at weekly wage
+        // settlement, so suspended payroll must not inflate the break-even.
         let weekly_labor_copper = state
             .employment
             .values()
             .filter(|agreement| {
                 agreement.business_id == business.id()
-                    && agreement.status != EmploymentStatus::Ended
+                    && matches!(
+                        agreement.status,
+                        EmploymentStatus::Active | EmploymentStatus::Disputed
+                    )
             })
             .fold(0_i128, |total, agreement| {
                 total + i128::from(agreement.weekly_wage.copper())
@@ -1671,7 +1680,13 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
             recipe.daily_operating_cost(),
             business.policy.maintenance_basis_points,
         );
-        let overhead_per_batch = daily_labor.saturating_add(daily_maintenance);
+        // Labor and maintenance accrue once per day, so unit break-even spreads
+        // them across every batch the business expects to run rather than
+        // charging a full day of overhead to a single batch of output.
+        let expected_batches = i64::from(effective_capacity_batches(state, business));
+        let overhead_per_batch = daily_labor
+            .saturating_add(daily_maintenance)
+            .saturating_mul_ratio_ceil_nonnegative(1_000, expected_batches * 1_000);
         let batch_cost = recipe.inputs().iter().fold(
             recipe
                 .daily_operating_cost()
@@ -1788,7 +1803,10 @@ fn update_business_lifecycle(
         let recipe = registry
             .get_recipe(recipe_id)
             .expect("business recipe reference must be valid");
-        let new_status =
+        // An insolvent business that receives capital must pass back through
+        // `Distressed` rehabilitation before regaining full operation; it may
+        // not leap directly from insolvency to `Active`.
+        let candidate_status =
             if prior_status == BusinessStatus::Insolvent && cash == Money::ZERO && !has_inventory {
                 BusinessStatus::Closed
             } else if cash == Money::ZERO && !has_inventory {
@@ -1801,6 +1819,10 @@ fn update_business_lifecycle(
             } else {
                 BusinessStatus::Active
             };
+        let new_status = match (prior_status, candidate_status) {
+            (BusinessStatus::Insolvent, BusinessStatus::Active) => BusinessStatus::Distressed,
+            (_, status) => status,
+        };
         if new_status != prior_status {
             state
                 .businesses
@@ -2234,14 +2256,25 @@ fn generate_next_heir(
     );
     let parent_child_age_requirement =
         (20 * 360_i64).saturating_add(crate::core::MIN_PARENT_CHILD_AGE_GAP_DAYS);
+    let incoming_birth_day = state
+        .characters
+        .get(incoming_head_id)
+        .expect("dynasty heir reference must be valid")
+        .birth_day();
     let (birth_day, link_kind) = if incoming_age_days >= parent_child_age_requirement {
         (
             state.clock.day().saturating_sub(20 * 360),
             FamilyLinkKind::ParentChild,
         )
     } else {
+        // A generated sibling must always be younger than the incoming head,
+        // even when forced succession elevates a child or adolescent heir.
         (
-            state.clock.day().saturating_sub(18 * 360),
+            state
+                .clock
+                .day()
+                .saturating_sub(18 * 360)
+                .max(incoming_birth_day.saturating_add(1)),
             FamilyLinkKind::Sibling,
         )
     };

@@ -93,11 +93,6 @@ impl Clip {
         self.looping
     }
 
-    #[must_use]
-    pub fn keys(&self) -> &[Keyframe] {
-        &self.keys
-    }
-
     /// Samples the clip at `frame`, wrapping when the clip loops and clamping when it does not.
     ///
     /// # Panics
@@ -325,11 +320,19 @@ mod tests {
 
     #[test]
     fn sampling_a_keyframe_returns_that_pose() {
-        let skeleton = skeleton();
-        let clip = humanoid_clip(&skeleton, HumanClip::Walk);
-        let key = &clip.keys()[2];
+        let start = Pose::new(vec![Angle::from_degrees(0)]);
+        let held = Pose::new(vec![Angle::from_degrees(20)]);
+        let clip = Clip::new(
+            "test",
+            8,
+            false,
+            vec![
+                Keyframe::new(0, start, (0, 0)),
+                Keyframe::new(4, held.clone(), (0, 0)),
+            ],
+        );
 
-        assert_eq!(clip.sample(key.frame).pose, key.pose);
+        assert_eq!(clip.sample(4).pose, held);
     }
 
     #[test]

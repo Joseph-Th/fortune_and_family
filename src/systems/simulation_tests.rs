@@ -2022,6 +2022,28 @@ mod business_lifecycle {
         update_business_lifecycle(registry, &mut state)
             .expect("business lifecycle update must succeed");
 
+        // Fresh capital ends insolvency, but recovery must pass through a
+        // distressed rehabilitation period before full operation resumes.
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .status(),
+            BusinessStatus::Distressed
+        );
+        assert!(
+            state
+                .employment
+                .values()
+                .filter(|agreement| agreement.business_id == business_id)
+                .all(|agreement| agreement.status == EmploymentStatus::Disputed),
+            "reopening after insolvency must preserve labor consequences instead of resetting loyalty"
+        );
+
+        update_business_lifecycle(registry, &mut state)
+            .expect("second business lifecycle update must succeed");
+
         assert_eq!(
             state
                 .businesses
@@ -2030,14 +2052,15 @@ mod business_lifecycle {
                 .status(),
             BusinessStatus::Active
         );
-        assert_eq!(state.chronicle.len(), chronicle_before + 1);
-        assert!(
+        assert_eq!(state.chronicle.len(), chronicle_before + 2);
+        assert_eq!(
             state
-                .employment
-                .values()
-                .filter(|agreement| agreement.business_id == business_id)
-                .all(|agreement| agreement.status == EmploymentStatus::Disputed),
-            "reopening after insolvency must preserve labor consequences instead of resetting loyalty"
+                .chronicle
+                .iter()
+                .nth_back(1)
+                .expect("rehabilitation must add a distress entry")
+                .kind,
+            ChronicleKind::BusinessDistress
         );
         assert_eq!(
             state
@@ -2860,8 +2883,8 @@ mod health_and_succession {
         );
         assert!(state.outbox.iter().any(|message| {
             message.kind() == OutboxKind::Family
-                && message.body().contains(&character_id.to_string())
-                && message.body().contains("health reached zero")
+                && message.body.contains(&character_id.to_string())
+                && message.body.contains("health reached zero")
         }));
         validate_invariants(registry, &state);
     }
@@ -3069,10 +3092,18 @@ mod market_prices {
             exact_daily_labor > ceil_div_nonnegative_wide(i128::from(i64::MAX), 7),
             "test setup must exceed a saturate-then-divide payroll calculation"
         );
+        let expected_batches = i64::from(effective_capacity_batches(
+            &state,
+            state
+                .businesses
+                .get(target_business_id)
+                .expect("target business must exist"),
+        ));
         let minimum_labor_only_floor = Money::from_copper(
             i64::try_from(exact_daily_labor)
                 .expect("test daily labor remains within the Money range"),
         )
+        .saturating_mul_ratio_ceil_nonnegative(1_000, expected_batches * 1_000)
         .saturating_mul_ratio_ceil_nonnegative(1_000, recipe.output_quantity().milliunits())
         .saturating_mul_ratio_ceil_nonnegative(11, 10);
 

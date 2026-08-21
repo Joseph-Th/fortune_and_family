@@ -3239,6 +3239,9 @@ fn settle_fulfilled_contract(
         .get_mut(&due.id)
         .expect("contract must exist");
     contract.fulfilled_deliveries = contract.fulfilled_deliveries.saturating_add(1);
+    // Breach requires repeated nonperformance, so a delivered week ends any
+    // run of misses instead of letting isolated slips accumulate forever.
+    contract.missed_deliveries = 0;
     let buyer_deliveries = contract
         .fulfilled_deliveries_by_dynasty
         .entry(settlement.buyer.owner_id)
@@ -3887,19 +3890,31 @@ fn settle_missed_loan_payment(
         loan.status == LoanStatus::Defaulted
     };
     if defaulted {
-        let collateral_recovery = seize_defaulted_collateral(state, due);
+        let CollateralSeizure {
+            recovery: collateral_recovery,
+            equity_returned,
+        } = seize_defaulted_collateral(state, due);
         let remaining_balance = state
             .loans
             .get(&due.id)
             .expect("defaulted loan must exist")
             .balance;
+        let surplus_note = if equity_returned > Money::ZERO {
+            format!(" Surplus collateral equity of {equity_returned} was returned to the borrower.")
+        } else {
+            String::new()
+        };
         try_push_outbox(
             state,
             OutboxKind::Finance,
             format!("Loan {} defaulted", due.id),
             format!(
-                "Dynasty {} defaulted on its obligation to dynasty {}. Collateral recovered {}; remaining balance {}.",
-                due.borrower_id, due.lender_id, collateral_recovery, remaining_balance
+                "Dynasty {} defaulted on its obligation to dynasty {}. Collateral recovered {}; remaining balance {}.{}",
+                due.borrower_id,
+                due.lender_id,
+                collateral_recovery,
+                remaining_balance,
+                surplus_note
             ),
         )?;
     }
@@ -3933,7 +3948,17 @@ fn settle_missed_loan_payment(
     Ok(())
 }
 
-fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) -> Money {
+/// Outcome of seizing defaulted collateral.
+#[derive(Clone, Copy, Debug)]
+struct CollateralSeizure {
+    /// Balance cancelled by the collateral's liquidation value.
+    recovery: Money,
+    /// Liquidation equity above the settled debt, returned to the borrower so
+    /// the lender never gains more than the obligation the collateral secured.
+    equity_returned: Money,
+}
+
+fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) -> CollateralSeizure {
     if let Some(property_id) = due.collateral_property_id {
         let (occupant_owner_id, existing_tenant_id) = {
             let property = state
@@ -3960,33 +3985,56 @@ fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) -> Money {
         property.collateral_loan_id = None;
         apply_defaulted_collateral_recovery(state, due.id)
     } else {
-        Money::ZERO
+        CollateralSeizure {
+            recovery: Money::ZERO,
+            equity_returned: Money::ZERO,
+        }
     }
 }
 
-fn apply_defaulted_collateral_recovery(state: &mut AppState, loan_id: crate::ids::LoanId) -> Money {
-    let recovery = {
+fn apply_defaulted_collateral_recovery(
+    state: &mut AppState,
+    loan_id: crate::ids::LoanId,
+) -> CollateralSeizure {
+    let (recovery, equity_surplus) = {
         let loan = state
             .loans
             .get(&loan_id)
             .expect("defaulted loan must exist");
         if loan.status != LoanStatus::Defaulted {
-            return Money::ZERO;
+            return CollateralSeizure {
+                recovery: Money::ZERO,
+                equity_returned: Money::ZERO,
+            };
         }
         let Some(property_id) = loan.collateral_property_id else {
-            return Money::ZERO;
+            return CollateralSeizure {
+                recovery: Money::ZERO,
+                equity_returned: Money::ZERO,
+            };
         };
-        state
+        let liquidation_value = state
             .properties
             .get(&property_id)
             .expect("defaulted loan collateral must exist")
             .value
-            .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000)
-            .min(loan.balance)
+            .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000);
+        (
+            liquidation_value.min(loan.balance),
+            liquidation_value.saturating_sub(loan.balance),
+        )
     };
     if recovery <= Money::ZERO {
-        return Money::ZERO;
+        return CollateralSeizure {
+            recovery: Money::ZERO,
+            equity_returned: Money::ZERO,
+        };
     }
+    let equity_returned = if equity_surplus > Money::ZERO {
+        return_collateral_equity_surplus(state, loan_id, equity_surplus)
+    } else {
+        Money::ZERO
+    };
     let loan = state
         .loans
         .get_mut(&loan_id)
@@ -3999,7 +4047,55 @@ fn apply_defaulted_collateral_recovery(state: &mut AppState, loan_id: crate::ids
         loan.status = LoanStatus::Repaid;
         loan.missed_payments = 0;
     }
-    recovery
+    CollateralSeizure {
+        recovery,
+        equity_returned,
+    }
+}
+
+/// Pays collateral liquidation equity above the settled debt back to the
+/// borrower, bounded by what the lender's treasury can fund.
+fn return_collateral_equity_surplus(
+    state: &mut AppState,
+    loan_id: crate::ids::LoanId,
+    surplus: Money,
+) -> Money {
+    let (lender_id, borrower_id) = {
+        let loan = state
+            .loans
+            .get(&loan_id)
+            .expect("defaulted loan must exist");
+        (loan.lender_dynasty_id, loan.borrower_dynasty_id)
+    };
+    let lender_treasury = state
+        .dynasties
+        .get(&lender_id)
+        .expect("collateral lender must exist")
+        .treasury();
+    let paid = surplus.min(lender_treasury);
+    if paid <= Money::ZERO {
+        return Money::ZERO;
+    }
+    let borrower_treasury = state
+        .dynasties
+        .get(&borrower_id)
+        .expect("collateral borrower must exist")
+        .treasury();
+    let resulting_borrower = borrower_treasury
+        .checked_add(paid)
+        .expect("bounded collateral equity must fit borrower treasury");
+    state
+        .dynasties
+        .get_mut(&borrower_id)
+        .expect("collateral borrower must exist")
+        .resources
+        .treasury = resulting_borrower;
+    let lender = state
+        .dynasties
+        .get_mut(&lender_id)
+        .expect("collateral lender must exist");
+    lender.resources.treasury = lender.resources.treasury.saturating_sub(paid);
+    paid
 }
 
 fn active_interest_limit(state: &AppState) -> Option<u16> {
@@ -4111,12 +4207,37 @@ fn apply_loan_payment(
     }
     Ok(payment)
 }
+/// A tenancy attached to a business premise ends when that business stops
+/// operating; the former tenant must not keep paying rent on premises nobody
+/// can use.
+fn terminate_stale_tenancy(
+    state: &mut AppState,
+    property_id: PropertyId,
+    tenant_id: DynastyId,
+) -> Result<(), SimulationError> {
+    if let Some(property) = state.properties.get_mut(&property_id) {
+        property.tenant_dynasty_id = None;
+    }
+    if tenant_id == state.player_dynasty_id {
+        try_push_outbox(
+            state,
+            OutboxKind::Property,
+            format!("Tenancy at property {property_id} ended"),
+            format!(
+                "The business occupying property {property_id} stopped operating, so its tenancy was terminated and weekly rent no longer accrues."
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
     let rents: Vec<_> = state
         .properties
         .values()
         .filter_map(|property| {
             Some((
+                property.id,
                 property.owner_dynasty_id?,
                 property.tenant_dynasty_id,
                 property.occupant_business_id,
@@ -4124,7 +4245,7 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
             ))
         })
         .collect();
-    for (owner_id, tenant_id, occupant_business_id, rent) in rents {
+    for (property_id, owner_id, tenant_id, occupant_business_id, rent) in rents {
         let occupant_is_closed = occupant_business_id.is_some_and(|business_id| {
             state.businesses.get(business_id).is_some_and(|business| {
                 matches!(
@@ -4135,6 +4256,10 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
         });
         let paid = if let Some(tenant_id) = tenant_id {
             if owner_id == tenant_id {
+                continue;
+            }
+            if occupant_is_closed {
+                terminate_stale_tenancy(state, property_id, tenant_id)?;
                 continue;
             }
             let tenant_cash = state
@@ -4876,7 +5001,6 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<()
 struct PublicWorkToolPurchase {
     tools_id: GoodId,
     market_stock_after: Quantity,
-    market_demand_after: Quantity,
     clearing_after: Money,
 }
 
@@ -4906,25 +5030,18 @@ fn plan_public_work_tool_purchase(
         .stock
         .checked_sub(quantity)
         .expect("planned public-work tool purchase must not exceed market stock");
-    let market_demand_after =
-        quote
-            .demand_today
-            .checked_add(quantity)
-            .ok_or(SimulationError::MarketDemandOverflow {
-                good_id: tools_id,
-                current: quote.demand_today,
-                incoming: quantity,
-            })?;
     let clearing_after = state.market.clearing_account.checked_add(cost).ok_or(
         SimulationError::MarketClearingAccountOverflow {
             current: state.market.clearing_account,
             change: cost,
         },
     )?;
+    // Weekly settlement runs after the day's price update and before the next
+    // market-flow reset, so this off-hours purchase records stock and money
+    // movement only; a `demand_today` write here would be dead state.
     Ok(Some(PublicWorkToolPurchase {
         tools_id,
         market_stock_after,
-        market_demand_after,
         clearing_after,
     }))
 }
@@ -4936,7 +5053,6 @@ fn apply_public_work_tool_purchase(state: &mut AppState, purchase: PublicWorkToo
         .get_mut(&purchase.tools_id)
         .expect("planned public-work tools quote must exist");
     quote.stock = purchase.market_stock_after;
-    quote.demand_today = purchase.market_demand_after;
     state.market.clearing_account = purchase.clearing_after;
 }
 
@@ -4947,11 +5063,16 @@ fn update_relationships_from_obligations(state: &mut AppState) {
                 .trust_basis_points
                 .saturating_add(5)
                 .min(10_000);
+            // An outstanding favor is gradually worked off as the grateful
+            // house repays it through cooperation, so its weekly trust
+            // influence is bounded instead of accruing forever.
+            relationship.obligation -= 1;
         } else if relationship.obligation < 0 {
             relationship.resentment_basis_points = relationship
                 .resentment_basis_points
                 .saturating_add(5)
                 .min(10_000);
+            relationship.obligation += 1;
         }
     }
 }
@@ -6214,7 +6335,9 @@ fn office_duty_subject(institution_id: crate::ids::InstitutionId, dynasty_id: Dy
 
 fn recover_external_routes(state: &mut AppState) {
     for route in state.external_routes.values_mut() {
-        route.disruption_basis_points = route.disruption_basis_points.saturating_sub(750);
+        route.disruption_basis_points = route
+            .disruption_basis_points
+            .saturating_sub(ROUTE_DISRUPTION_HEALING_BASIS_POINTS);
     }
 }
 
@@ -7563,16 +7686,39 @@ pub(crate) fn settle_legal_claim_source(
     }
 }
 
+/// A single bad month adds between these bounds of route disruption.
+const ROUTE_DISRUPTION_SPIKE_MIN_BASIS_POINTS: u16 = 1_500;
+const ROUTE_DISRUPTION_SPIKE_RANGE_BASIS_POINTS: u32 = 1_500;
+/// Routine calm months remove this much accumulated route disruption.
+const ROUTE_DISRUPTION_CALM_RECOVERY_BASIS_POINTS: u16 = 150;
+/// Post-crisis healing removes this much accumulated route disruption.
+const ROUTE_DISRUPTION_HEALING_BASIS_POINTS: u16 = 250;
+
 fn update_external_route_risk(state: &mut AppState) {
     for route in state.external_routes.values_mut() {
-        let random_pressure = u16::try_from(state.rng.range_u32(500)).unwrap_or(0);
-        if state.rng.is_chance_success(route.risk_basis_points / 12) {
+        // Route risk is an annual hazard expressed as a monthly spike chance.
+        // Sustained bad luck must be able to accumulate into a trade
+        // disruption crisis, so spikes are large relative to routine decay;
+        // otherwise the TradeDisruption crisis could never occur in live play.
+        if state.rng.is_chance_success(route.risk_basis_points) {
+            let spike = u16::try_from(
+                i32::from(ROUTE_DISRUPTION_SPIKE_MIN_BASIS_POINTS)
+                    + i32::try_from(
+                        state
+                            .rng
+                            .range_u32(ROUTE_DISRUPTION_SPIKE_RANGE_BASIS_POINTS),
+                    )
+                    .unwrap_or(0),
+            )
+            .unwrap_or(u16::MAX);
             route.disruption_basis_points = route
                 .disruption_basis_points
-                .saturating_add(random_pressure)
+                .saturating_add(spike)
                 .min(9_500);
         } else {
-            route.disruption_basis_points = route.disruption_basis_points.saturating_sub(150);
+            route.disruption_basis_points = route
+                .disruption_basis_points
+                .saturating_sub(ROUTE_DISRUPTION_CALM_RECOVERY_BASIS_POINTS);
         }
     }
 }

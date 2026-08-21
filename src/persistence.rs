@@ -141,17 +141,6 @@ impl SaveRevision {
         }
     }
 
-    /// Computes a save revision from a save file on disk.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `PersistenceError` if reading or sizing the save file fails.
-    pub fn of_file(path: impl AsRef<Path>) -> Result<Self, PersistenceError> {
-        let path = path.as_ref();
-        let bytes = read_bounded_save(path)?;
-        Ok(Self::of_bytes(&bytes))
-    }
-
     #[must_use]
     pub fn display_token(&self) -> String {
         format!("{:016x}:{}", self.hash, self.size)

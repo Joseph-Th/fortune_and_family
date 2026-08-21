@@ -171,7 +171,7 @@ const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_000);
 const FAMILY_MAINTENANCE_MONTHLY_COPPER: i64 = 250;
 const AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER: Money = Money::from_copper(30_000);
 const AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION: Money = Money::from_copper(12_000);
-const AGENT_ENDOWMENT_LIQUIDITY_FLOOR: Money = Money::from_copper(20_000);
+const AGENT_ENDOWMENT_LIQUIDITY_FLOOR: Money = Money::from_copper(12_000);
 const AGENT_ENDOWMENT_OFFICE_BUFFER: Money = Money::from_copper(10_000);
 /// Minimum business-cash surplus above the operating target that justifies a
 /// strategic owner withdrawal to meet a dynasty-level treasury commitment.
@@ -7100,10 +7100,10 @@ const fn recapitalization_dynasty_reserve(
         return Money::ZERO;
     }
     match persona {
-        GameplayPersona::Steward => Money::from_copper(15_000),
-        GameplayPersona::Entrepreneur => Money::from_copper(10_000),
-        GameplayPersona::PowerBroker => Money::from_copper(20_000),
-        GameplayPersona::Opportunist => Money::from_copper(8_000),
+        GameplayPersona::Steward => Money::from_copper(8_000),
+        GameplayPersona::Entrepreneur => Money::from_copper(5_000),
+        GameplayPersona::PowerBroker => Money::from_copper(10_000),
+        GameplayPersona::Opportunist => Money::from_copper(4_000),
     }
 }
 
@@ -11751,6 +11751,7 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::InformationReportExpired { .. } => "intelligence report expired",
         CommandError::InformationReportHasNoLeverage { .. } => REPORT_NO_LEVERAGE,
         CommandError::MissingNotification { .. } => "missing notification",
+        CommandError::MarketExtractionUnavailable { .. } => "market extraction unavailable",
     }
 }
 
@@ -14093,6 +14094,11 @@ fn add_score_findings(aggregate: &GameplayAggregate, findings: &mut Vec<Gameplay
 /// such a route shows `generated == 0` despite world activation, the signal is
 /// agent restraint (a coverage gap the design review should weigh), not a broken
 /// or unreachable game route, so the finding is a Warning rather than Critical.
+///
+/// The liquidity routes are included because the agent deliberately narrows
+/// them through its rebalancing cadence, cash targets, and distribution
+/// reserves: an activation opportunity without a candidate there means the
+/// portfolio simply had no shortfall worth acting on.
 const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> bool {
     matches!(
         kind,
@@ -14103,6 +14109,8 @@ const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> bool {
             | GameplayCommandKind::InvestInBusiness
             | GameplayCommandKind::WithdrawFromInstitution
             | GameplayCommandKind::FundPublicWork
+            | GameplayCommandKind::TransferBusinessCash
+            | GameplayCommandKind::WithdrawBusinessCash
     )
 }
 

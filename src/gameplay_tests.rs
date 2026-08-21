@@ -9306,6 +9306,35 @@ mod findings {
     }
 
     #[test]
+    fn policy_gated_liquidity_routes_without_candidates_are_warnings() {
+        for kind in [
+            GameplayCommandKind::TransferBusinessCash,
+            GameplayCommandKind::WithdrawBusinessCash,
+        ] {
+            let mut report = cached_focused_report(30);
+            report.aggregate.simulated_days = 720;
+            let stats = report
+                .aggregate
+                .commands
+                .get_mut(&kind)
+                .expect("all command statistics must exist");
+            stats.activation_opportunities = 1;
+
+            let findings = derive_findings(&report.aggregate, &report.campaigns);
+            let finding = finding_with_title(
+                &findings,
+                &format!("{} had no reachable candidate", kind.label()),
+            );
+
+            assert_eq!(
+                finding.severity,
+                GameplayFindingSeverity::Warning,
+                "an idle liquidity route reflects the agent's rebalancing policy, not a broken game route"
+            );
+        }
+    }
+
+    #[test]
     fn event_driven_routes_without_a_trigger_remain_informational() {
         let mut report = cached_focused_report(30);
         report.aggregate.simulated_days = 7_200;

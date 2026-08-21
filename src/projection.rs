@@ -136,13 +136,8 @@ pub fn build_state_summary(registry: &Registry, state: &AppState) -> StateSummar
     }
 }
 
-impl AppState {
-    /// Builds the compact read-only summary used by user-interface adapters.
-    #[must_use]
-    pub fn summary(&self, registry: &Registry) -> StateSummary {
-        build_state_summary(registry, self)
-    }
-}
+// `build_state_summary` is the single read-model entry point; no convenience
+// wrapper duplicates it.
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CampaignProjection {

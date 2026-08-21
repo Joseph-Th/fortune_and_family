@@ -1,6 +1,6 @@
 //! Procedural character sprites: material assembly, posed drawing, and sheet composition.
 
-use super::anim::{Clip, HumanClip, humanoid_clip};
+use super::anim::Clip;
 use super::canvas::Canvas;
 use super::color::{Hsl, Palette, Ramp, Rgb8, ShadeProfile};
 use super::math::{ONE, scale};
@@ -374,9 +374,9 @@ pub fn render_character_sheet(spec: CharacterSpec, clip: &Clip) -> SpriteSheet {
 #[must_use]
 pub fn render_character_clips(spec: CharacterSpec) -> Vec<SpriteSheet> {
     let skeleton = spec.skeleton();
-    HumanClip::ALL
-        .into_iter()
-        .map(|clip| render_character_sheet(spec, &humanoid_clip(&skeleton, clip)))
+    crate::art::humanoid_clip_library(&skeleton)
+        .iter()
+        .map(|clip| render_character_sheet(spec, clip))
         .collect()
 }
 
@@ -718,6 +718,7 @@ fn draw_face(
 
 #[cfg(test)]
 mod tests {
+    use super::super::anim::{HumanClip, humanoid_clip};
     use super::super::color::TRANSPARENT_INDEX;
     use super::super::rig::humanoid_skeleton;
     use super::*;

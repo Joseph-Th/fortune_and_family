@@ -1,6 +1,7 @@
 //! Determinism and long-running invariant tests for application state.
 
 use super::*;
+use crate::money::Money;
 use crate::systems::{advance_days, validate_invariants};
 use crate::test_support::{
     assert_state_eq, make_test_campaign, make_test_campaign_with, rivergate_registry_for_test,
@@ -125,6 +126,24 @@ mod id_allocation {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         state.next_ids.chronicle = u32::MAX - 1;
+        // Force a chronicle allocation on the first simulated day (business
+        // distress entry) so the typed identifier error surfaces from the
+        // daily pipeline before invariant validation examines the exhausted
+        // allocator directly.
+        let distressed_business = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        {
+            let business = state
+                .businesses
+                .get_mut(distressed_business)
+                .expect("business must exist");
+            business.finance.cash = Money::ZERO;
+            business.inventory.clear();
+        }
         let before = state.clone();
 
         let result = advance_days(registry, &mut state, 360);

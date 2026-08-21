@@ -763,14 +763,4 @@ impl OutboxMessage {
     pub const fn kind(&self) -> OutboxKind {
         self.kind
     }
-
-    #[must_use]
-    pub fn subject(&self) -> &str {
-        &self.subject
-    }
-
-    #[must_use]
-    pub fn body(&self) -> &str {
-        &self.body
-    }
 }

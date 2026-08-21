@@ -47,31 +47,6 @@ impl Rgb8 {
         let blue = i32::from(self.blue);
         (2_126 * red + 7_152 * green + 722 * blue) / (10 * 255)
     }
-
-    /// Returns a linear blend toward `other`, where `weight` is per-mille.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `weight` is outside `0..=1000`.
-    #[must_use]
-    pub fn mix(self, other: Self, weight: i32) -> Self {
-        assert!(
-            (0..=PER_MILLE).contains(&weight),
-            "weight must be per-mille"
-        );
-        Self::new(
-            mix_channel(self.red, other.red, weight),
-            mix_channel(self.green, other.green, weight),
-            mix_channel(self.blue, other.blue, weight),
-        )
-    }
-}
-
-fn mix_channel(from: u8, to: u8, weight: i32) -> u8 {
-    let from = i32::from(from);
-    let to = i32::from(to);
-    let value = from + (to - from) * weight / PER_MILLE;
-    u8::try_from(value.clamp(0, 255)).expect("clamped channel must fit a byte")
 }
 
 /// A hue, saturation, lightness triple in integer units.

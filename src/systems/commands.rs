@@ -242,7 +242,6 @@ const INSTITUTION_SUPPORT_CAPABILITY_TARGET_SCORE: u32 = 10_000;
 const INSTITUTION_SUPPORT_CAPABILITY_DELIVERY_STEP: u32 = 200;
 const INSTITUTION_SUPPORT_MAX_PREPARATION_DELIVERIES: u32 = 13;
 pub(crate) const MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER: usize = 2;
-pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_RECOVERY_DAYS: i64 = 720;
 pub(crate) const OFFICE_NOMINATION_RESOLUTION_DAYS: i64 = 120;
 pub(crate) const OFFICE_NOMINATION_CAMPAIGN_COST: Money = Money::from_copper(300);
@@ -425,6 +424,8 @@ pub enum CommandError {
     InsufficientPlayerFunds { available: Money, required: Money },
     #[error("player legitimacy is {available}, but command requires {required}")]
     InsufficientPlayerLegitimacy { available: u16, required: u16 },
+    #[error("the panicked market holds only {available}, so there is nothing left to extract")]
+    MarketExtractionUnavailable { available: Money },
     #[error("business {business_id} has {available}, but command requires {required}")]
     InsufficientBusinessFunds {
         business_id: BusinessId,
@@ -951,7 +952,12 @@ fn apply_property_sale(
     let buyer_after = buyer_treasury
         .checked_sub(quote.buyer_contribution)
         .expect("quoted property buyer contribution must fit treasury");
-    if buyer_after < PROPERTY_COUNTERPARTY_BUYER_RESERVE {
+    // The counterparty reserve protects against selling to a buyer who
+    // cannot genuinely afford the asset. In a civic-guaranteed auction the
+    // buyer has committed their entire treasury by construction and the
+    // civic treasury funds the shortfall, so the discretionary reserve does
+    // not apply there.
+    if quote.civic_guarantee == Money::ZERO && buyer_after < PROPERTY_COUNTERPARTY_BUYER_RESERVE {
         return Err(CommandError::PropertyCounterpartyBuyerReserve {
             buyer_dynasty_id,
             available: buyer_treasury,
@@ -1972,10 +1978,10 @@ fn apply_public_work(
     let progress_basis_points = u16::try_from(
         contribution
             .saturating_mul_ratio(10_000, budget.copper())
-            .copper(),
+            .copper()
+            .clamp(0, 10_000),
     )
-    .unwrap_or(10_000)
-    .min(10_000);
+    .expect("clamped public-work progress must fit u16");
     let id = state.next_ids.try_public_work()?;
     state.public_works.insert(
         id,
@@ -2424,7 +2430,8 @@ fn apply_legal_settlement(
 ) -> Result<CommandOutcome, CommandError> {
     let quote = quote_player_legal_settlement(state, case_id)?;
     let player_id = state.player_dynasty_id;
-    spend_player_treasury(state, quote.amount)?;
+    // Resolve both sides' resulting balances before committing anything so a
+    // rejected settlement never leaves a debited payer behind.
     let plaintiff_treasury = state
         .dynasties
         .get(&quote.plaintiff_dynasty_id)
@@ -2437,6 +2444,18 @@ fn apply_legal_settlement(
             incoming: quote.amount,
         },
     )?;
+    let player_treasury = state
+        .dynasties
+        .get(&player_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    if player_treasury < quote.amount {
+        return Err(CommandError::InsufficientPlayerFunds {
+            available: player_treasury,
+            required: quote.amount,
+        });
+    }
+    spend_player_treasury(state, quote.amount)?;
     let claim_source = state
         .legal_cases
         .get(&case_id)
@@ -3982,16 +4001,13 @@ pub(crate) fn office_nomination_next_day(
     state: &AppState,
     character_id: CharacterId,
 ) -> Option<i64> {
+    // Every office campaign imposes its full recovery period from the
+    // campaign day. Because the resolution window is shorter than the
+    // ordinary interval, any retry at that interval would already land after
+    // resolution, so a single stable schedule keeps the quoted retry day
+    // honest and the accept/reject decisions unchanged.
     let campaign = latest_character_campaign_day(state, AuditKind::OfficeNomination, character_id)
-        .map(|day| {
-            let resolution_day = future_day_or_terminal(day, OFFICE_NOMINATION_RESOLUTION_DAYS);
-            let interval = if state.clock.day() < resolution_day {
-                OFFICE_NOMINATION_INTERVAL_DAYS
-            } else {
-                OFFICE_NOMINATION_RECOVERY_DAYS
-            };
-            future_day_or_terminal(day, interval)
-        });
+        .map(|day| future_day_or_terminal(day, OFFICE_NOMINATION_RECOVERY_DAYS));
     let dynasty_office_resignation = latest_player_office_resignation_day(state)
         .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
     campaign.into_iter().chain(dynasty_office_resignation).max()
@@ -4137,12 +4153,18 @@ fn apply_crisis_response(
                     required: required_legitimacy,
                 });
             }
-            // Crisis profiteering extracts wealth from the panicked market; the
-            // gain is bounded by what the market clearing pool actually holds so
-            // no money is created without a counterparty.
+            // Crisis profiteering extracts wealth from the panicked market. The
+            // whole result resolves before any mutation: an empty or overdrawn
+            // clearing pool offers nothing to take, so spending legitimacy on
+            // the attempt must reject up front instead of paying full price
+            // for zero gain.
             let desired_gain = Money::from_copper(i64::from(severity));
             let gain = desired_gain.min(state.market.clearing_account);
-            debit_market_clearing_account(state, gain)?;
+            if gain <= Money::ZERO {
+                return Err(CommandError::MarketExtractionUnavailable {
+                    available: state.market.clearing_account,
+                });
+            }
             let current_treasury = state
                 .dynasties
                 .get(&state.player_dynasty_id)
@@ -4158,6 +4180,7 @@ fn apply_crisis_response(
                             incoming: gain,
                         },
                     ))?;
+            debit_market_clearing_account(state, gain)?;
             let dynasty = state
                 .dynasties
                 .get_mut(&state.player_dynasty_id)
