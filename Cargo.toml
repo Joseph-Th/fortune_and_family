@@ -6,6 +6,11 @@ rust-version = "1.97"
 description = "A deterministic dynasty, political-economy, and civic strategy simulation"
 license = "MIT"
 
+[package.metadata.git-wizard.validation]
+quick = "bash scripts/test.sh quick"
+standard = "bash scripts/test.sh standard"
+full = "bash scripts/test.sh all"
+
 [lib]
 name = "civic_dynasty"
 path = "src/lib.rs"
