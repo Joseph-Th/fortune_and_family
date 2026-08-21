@@ -566,7 +566,10 @@ fn validate_strategic_state(registry: &Registry, state: &AppState, ids: &Registr
     validate_outbox(state);
 }
 
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dispatch keeps the full decision path in one auditable function"
+)]
 fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) {
     for (contract_id, contract) in &state.contracts {
         debug_assert_eq!(
@@ -1733,9 +1736,13 @@ fn validate_audit_record_invariants(state: &AppState, record: &crate::core::Audi
         debug_assert!(
             subject.institution_id().is_some_and(|institution_id| {
                 state.institutions.contains_key(&institution_id)
-                    && subject.as_str() == format!("institution:{institution_id}")
+                    && subject.dynasty_id().is_some_and(|dynasty_id| {
+                        state.dynasties.contains_key(&dynasty_id)
+                            && subject.as_str()
+                                == format!("institution:{institution_id};dynasty:{dynasty_id}")
+                    })
             }),
-            "Record Reference Validity: institution endowment audit record has invalid institution subject"
+            "Record Reference Validity: institution endowment audit record has invalid institution/dynasty subject"
         );
     }
     if matches!(

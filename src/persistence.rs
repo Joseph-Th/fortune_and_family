@@ -2391,7 +2391,7 @@ fn validate_audit_record_references(
         validate_office_directive_audit_reference(state, record)?;
     }
     if record.kind() == AuditKind::InstitutionEndowment {
-        validate_institution_endowment_audit_reference(record)?;
+        validate_institution_endowment_audit_reference(state, record)?;
     }
     if matches!(
         record.kind(),
@@ -2425,15 +2425,24 @@ fn validate_office_directive_audit_reference(
 }
 
 fn validate_institution_endowment_audit_reference(
+    state: &AppState,
     record: &crate::core::AuditRecord,
 ) -> Result<(), String> {
-    let institution_id = record
-        .audit_subject()
+    let subject = record.audit_subject();
+    let institution_id = subject
         .institution_id()
         .expect("institution endowment subject was validated above");
-    if record.subject() != format!("institution:{institution_id}") {
+    let Some(dynasty_id) = subject.dynasty_id() else {
+        return Err("InstitutionEndowment audit record lacks dynasty attribution".to_owned());
+    };
+    if !state.dynasties.contains_key(&dynasty_id) {
+        return Err(format!(
+            "InstitutionEndowment audit record references missing dynasty {dynasty_id}"
+        ));
+    }
+    if subject.as_str() != format!("institution:{institution_id};dynasty:{dynasty_id}") {
         return Err(
-            "InstitutionEndowment audit record has an invalid institution subject".to_owned(),
+            "InstitutionEndowment audit record has an invalid dynasty attribution".to_owned(),
         );
     }
     Ok(())

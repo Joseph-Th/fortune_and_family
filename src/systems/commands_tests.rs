@@ -1203,10 +1203,8 @@ mod validation {
             lender_dynasty_id: state.player_dynasty_id,
             borrower_dynasty_id,
             principal,
-            weekly_payment: ceil_positive_money_div(
-                principal,
-                PRIVATE_LOAN_DISTRESSED_BORROWER_MIN_AMORTIZATION_WEEKS,
-            ),
+            weekly_payment: principal
+                .ceil_div_positive(PRIVATE_LOAN_DISTRESSED_BORROWER_MIN_AMORTIZATION_WEEKS),
             interest_basis_points: PRIVATE_LOAN_COUNTERPARTY_MAX_INTEREST_BASIS_POINTS,
             collateral_property_id: None,
         };
@@ -1227,12 +1225,10 @@ mod validation {
             .resources
             .treasury = Money::from_copper(20_000);
         let principal = Money::from_copper(8_000);
-        let weekly_payment = ceil_positive_money_div(
-            principal,
-            PRIVATE_LOAN_DISTRESSED_BORROWER_MIN_AMORTIZATION_WEEKS,
-        );
+        let weekly_payment =
+            principal.ceil_div_positive(PRIVATE_LOAN_DISTRESSED_BORROWER_MIN_AMORTIZATION_WEEKS);
         let maximum_payment =
-            ceil_positive_money_div(principal, PRIVATE_LOAN_COUNTERPARTY_MIN_AMORTIZATION_WEEKS);
+            principal.ceil_div_positive(PRIVATE_LOAN_COUNTERPARTY_MIN_AMORTIZATION_WEEKS);
         let terms = LoanTerms {
             lender_dynasty_id: state.player_dynasty_id,
             borrower_dynasty_id,
@@ -1310,7 +1306,7 @@ mod validation {
                     lender_dynasty_id: player_id,
                     borrower_dynasty_id,
                     principal,
-                    weekly_payment: ceil_positive_money_div(principal, 26),
+                    weekly_payment: principal.ceil_div_positive(26),
                     interest_basis_points: 900,
                     collateral_property_id: None,
                 },
@@ -1379,7 +1375,7 @@ mod validation {
                     lender_dynasty_id: player_id,
                     borrower_dynasty_id,
                     principal: Money::from_copper(5_000),
-                    weekly_payment: ceil_positive_money_div(Money::from_copper(5_000), 26),
+                    weekly_payment: Money::from_copper(5_000).ceil_div_positive(26),
                     interest_basis_points: 900,
                     collateral_property_id: None,
                 },
@@ -1416,10 +1412,8 @@ mod validation {
             lender_dynasty_id,
             borrower_dynasty_id: state.player_dynasty_id,
             principal,
-            weekly_payment: ceil_positive_money_div(
-                principal,
-                PRIVATE_LOAN_COUNTERPARTY_MAX_AMORTIZATION_WEEKS,
-            ),
+            weekly_payment: principal
+                .ceil_div_positive(PRIVATE_LOAN_COUNTERPARTY_MAX_AMORTIZATION_WEEKS),
             interest_basis_points: 700,
             collateral_property_id: None,
         };
@@ -1604,7 +1598,7 @@ mod validation {
         let weekly_payment =
             crate::money::checked_cost_for(terms.quantity_per_week, terms.unit_price)
                 .expect("test contract payment must fit");
-        let minimum_penalty = ceil_positive_money_div(weekly_payment, 4);
+        let minimum_penalty = weekly_payment.ceil_div_positive(4);
         let maximum_penalty = weekly_payment.saturating_mul(4);
         let before = state.clone();
 
@@ -1685,6 +1679,49 @@ mod validation {
             &before,
             &state,
             "a voluntary property liquidation must not consume the named buyer's entire treasury",
+        );
+    }
+
+    #[test]
+    fn property_sale_rejects_an_unknown_buyer_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| property.owner_dynasty_id == Some(state.player_dynasty_id))
+            .expect("player dynasty must own a property")
+            .id;
+        let buyer_dynasty_id = DynastyId::new(
+            state
+                .dynasties
+                .keys()
+                .map(|dynasty_id| dynasty_id.value())
+                .max()
+                .expect("campaign must contain dynasties")
+                + 1,
+        );
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SellProperty {
+                property_id,
+                buyer_dynasty_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::MissingDynasty {
+                dynasty_id: buyer_dynasty_id
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an unknown buyer must be rejected before any sale mutation",
         );
     }
 }
@@ -3258,7 +3295,11 @@ mod politics {
         );
         assert!(state.audit_log.iter().any(|record| {
             record.kind() == AuditKind::InstitutionEndowment
-                && record.subject() == format!("institution:{institution_id}")
+                && record.subject()
+                    == format!(
+                        "institution:{institution_id};dynasty:{}",
+                        state.player_dynasty_id
+                    )
         }));
 
         let before_second = state.clone();
@@ -5430,6 +5471,57 @@ mod crises {
             &state,
             "overflowing exploitation must not consume legitimacy or intensify the crisis",
         );
+    }
+
+    #[test]
+    fn exploitation_gain_is_bounded_by_the_market_clearing_pool() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state.market.clearing_account = Money::from_copper(120);
+        let crisis_id = state.next_ids.crisis();
+        let severity = 4_000;
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: crate::core::CrisisKind::NobleDemand,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: severity,
+                status: CrisisStatus::Active,
+                cause: "test crisis".to_owned(),
+            },
+        );
+        let treasury_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Exploit,
+            },
+        )
+        .expect("exploitation must succeed within the market's liquidity");
+
+        // The gain is capped at what the market pool holds, so no money is
+        // created without a counterparty.
+        assert_eq!(state.market.clearing_account, Money::ZERO);
+        let player = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist");
+        assert_eq!(
+            player.treasury(),
+            treasury_before
+                .checked_add(Money::from_copper(120))
+                .expect("bounded gain must fit")
+        );
+        validate_invariants(registry, &state);
     }
 
     #[test]

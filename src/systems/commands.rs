@@ -4,13 +4,15 @@ use super::legal::{
     LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LEGAL_CASE_HEARING_DELAY_DAYS,
 };
 use super::transactions::{
-    TimelineError, checked_future_day, next_business_finance_version, next_family_charter_version,
+    TimelineError, checked_future_day, debit_market_clearing_account,
+    next_business_finance_version, next_family_charter_version,
 };
 use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
     acquire_business, available_supply_contract_capacity, business_recapitalization_target,
     buy_unowned_property, capitalize_owned_business, distribute_owned_business_cash,
-    sell_owned_property, transfer_business_cash, validate_loan, validate_supply_contract,
+    quote_property_liquidation, sell_owned_property, transfer_business_cash, validate_loan,
+    validate_supply_contract,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
@@ -194,6 +196,7 @@ struct BusinessPolicyInput {
 
 pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 180;
 pub(crate) const LAW_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
+pub(crate) const LAW_SPONSORSHIP_COST: Money = Money::from_copper(2_000);
 pub(crate) const LAW_LEGITIMACY_REQUIREMENT: u16 = 3_000;
 pub(crate) const LAW_LEGITIMACY_COST: u16 = 250;
 pub(crate) const CIVIC_DEBT_INTEREST_BASIS_POINTS: u16 = 600;
@@ -213,6 +216,8 @@ pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
 pub(crate) const PUBLIC_WORK_MINIMUM_BUDGET: Money = Money::from_copper(1_000);
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
+const LABOR_CONDITIONS_IMPROVEMENT_COST: Money = Money::from_copper(1_000);
+const LABOR_NEGOTIATION_COST: Money = Money::from_copper(500);
 pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_080;
 pub(crate) const FAMILY_COUNCIL_MEETING_INTERVAL_DAYS: i64 = 360;
 pub(crate) const FAMILY_COUNCIL_MEETING_COST: Money = Money::from_copper(2_500);
@@ -240,6 +245,7 @@ pub(crate) const MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER: usize = 2;
 pub(crate) const OFFICE_NOMINATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const OFFICE_NOMINATION_RECOVERY_DAYS: i64 = 720;
 pub(crate) const OFFICE_NOMINATION_RESOLUTION_DAYS: i64 = 120;
+pub(crate) const OFFICE_NOMINATION_CAMPAIGN_COST: Money = Money::from_copper(300);
 pub(crate) const OFFICE_NOMINATION_REPUTATION_REQUIREMENT: u16 = 5_500;
 pub(crate) const OFFICE_NOMINATION_DELIVERY_REQUIREMENT: u32 = 78;
 const OFFICE_NOMINATION_CAPABILITY_TARGET_SCORE: u32 = 10_000;
@@ -250,6 +256,9 @@ pub(crate) const WARD_ADOPTION_COST: Money = Money::from_copper(6_000);
 pub(crate) const WARD_ADOPTION_LEGITIMACY_REQUIREMENT: u16 = 3_500;
 pub(crate) const WARD_ADOPTION_REPUTATION_REQUIREMENT: u16 = 5_200;
 pub(crate) const WARD_ADOPTION_DELIVERY_REQUIREMENT: u32 = 52;
+const WARD_ADOPTION_UNITY_COST: u16 = 100;
+const WARD_ADOPTION_LEGITIMACY_COST: u16 = 250;
+const WARD_PROPERTY_CLAIM_BASIS_POINTS: u16 = 1_500;
 pub(crate) const MAX_ACTIVE_WARDS: usize = 4;
 pub(crate) const FAMILY_EDUCATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const FAMILY_EDUCATION_DYNASTY_INTERVAL_DAYS: i64 = 180;
@@ -257,6 +266,9 @@ pub(crate) const FAMILY_EDUCATION_COST: Money = Money::from_copper(2_000);
 pub(crate) const INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const INFORMATION_COMMISSION_COST: Money = Money::from_copper(600);
 pub(crate) const INFORMATION_LEVERAGE_COST: Money = Money::from_copper(600);
+pub(crate) const CRISIS_RELIEF_COST_PER_SEVERITY_POINT: Money = Money::from_copper(2);
+pub(crate) const CRISIS_REFORM_COST: Money = Money::from_copper(1_500);
+pub(crate) const CRISIS_SUPPRESS_COST: Money = Money::from_copper(900);
 pub(crate) const INFORMATION_REPORT_LIFETIME_DAYS: i64 = 540;
 pub(crate) const COMMISSIONED_INFORMATION_SOURCE: &str = "Commissioned intelligence";
 
@@ -892,11 +904,15 @@ fn apply_loan(
     ensure_player_loan_party(state, terms)?;
     let validated = validate_loan(state, terms.clone())?;
     ensure_non_player_loan_counterparty_accepts(state, terms)?;
+    let restructured = validated.restructures_defaulted_loan();
     let id = validated.commit(state)?;
     deploy_non_player_financing_package(registry, state, terms)?;
-    Ok(CommandOutcome {
-        summary: format!("Issued loan {id}."),
-    })
+    let summary = if restructured {
+        format!("Restructured loan {id}.")
+    } else {
+        format!("Issued loan {id}.")
+    };
+    Ok(CommandOutcome { summary })
 }
 
 fn apply_property_purchase(
@@ -915,31 +931,41 @@ fn apply_property_sale(
     property_id: PropertyId,
     buyer_dynasty_id: DynastyId,
 ) -> Result<CommandOutcome, CommandError> {
-    let snapshot = state.clone();
-    let buyer_treasury_before = snapshot
+    let buyer_treasury = state
         .dynasties
         .get(&buyer_dynasty_id)
-        .expect("validated property buyer must exist")
+        .ok_or(CommandError::MissingDynasty {
+            dynasty_id: buyer_dynasty_id,
+        })?
         .treasury();
-    let quote = sell_owned_property(
+    // Resolve the complete sale result before committing anything: the quote is
+    // pure, so the counterparty reserve is enforced pre-commit and a rejected
+    // sale never mutates state.
+    let quote = quote_property_liquidation(
         registry,
         state,
         state.player_dynasty_id,
         buyer_dynasty_id,
         property_id,
     )?;
-    let buyer_after = buyer_treasury_before
+    let buyer_after = buyer_treasury
         .checked_sub(quote.buyer_contribution)
-        .expect("validated property buyer contribution must fit treasury");
+        .expect("quoted property buyer contribution must fit treasury");
     if buyer_after < PROPERTY_COUNTERPARTY_BUYER_RESERVE {
-        *state = snapshot;
         return Err(CommandError::PropertyCounterpartyBuyerReserve {
             buyer_dynasty_id,
-            available: buyer_treasury_before,
+            available: buyer_treasury,
             buyer_contribution: quote.buyer_contribution,
             required_reserve: PROPERTY_COUNTERPARTY_BUYER_RESERVE,
         });
     }
+    sell_owned_property(
+        registry,
+        state,
+        state.player_dynasty_id,
+        buyer_dynasty_id,
+        property_id,
+    )?;
     Ok(CommandOutcome {
         summary: format!("Sold property {property_id} for {}.", quote.price),
     })
@@ -1343,7 +1369,7 @@ fn ensure_non_player_contract_counterparty_accepts(
 
     let weekly_payment = crate::money::checked_cost_for(terms.quantity_per_week, terms.unit_price)
         .expect("validated contract payment must fit the supported money range");
-    let minimum_penalty = ceil_positive_money_div(weekly_payment, 4);
+    let minimum_penalty = weekly_payment.ceil_div_positive(4);
     let maximum_penalty = weekly_payment.saturating_mul(4);
     if terms.penalty < minimum_penalty || terms.penalty > maximum_penalty {
         return Err(CommandError::ContractCounterpartyPenaltyOutOfRange {
@@ -1513,7 +1539,7 @@ fn ensure_non_player_loan_counterparty_accepts(
             });
         }
         let minimum_payment =
-            ceil_positive_money_div(exposure, PRIVATE_LOAN_COUNTERPARTY_MAX_AMORTIZATION_WEEKS);
+            exposure.ceil_div_positive(PRIVATE_LOAN_COUNTERPARTY_MAX_AMORTIZATION_WEEKS);
         if terms.weekly_payment < minimum_payment {
             return Err(CommandError::LoanCounterpartyPaymentTooLow {
                 weekly_payment: terms.weekly_payment,
@@ -1535,7 +1561,7 @@ fn ensure_non_player_loan_counterparty_accepts(
             } else {
                 PRIVATE_LOAN_COUNTERPARTY_MIN_AMORTIZATION_WEEKS
             };
-        let maximum_payment = ceil_positive_money_div(exposure, minimum_amortization_weeks);
+        let maximum_payment = exposure.ceil_div_positive(minimum_amortization_weeks);
         if terms.weekly_payment > maximum_payment {
             return Err(CommandError::LoanCounterpartyPaymentTooHigh {
                 weekly_payment: terms.weekly_payment,
@@ -1581,6 +1607,9 @@ fn deploy_non_player_financing_package(
         .businesses
         .iter()
         .filter(|business| business.owner_dynasty_id() == terms.borrower_dynasty_id)
+        // Closed premises cannot be recapitalized; deploying funds there would
+        // fail after the loan itself has committed.
+        .filter(|business| business.status() != BusinessStatus::Closed)
         .filter(|business| {
             business.cash() < business_recapitalization_target(registry, state, business)
         })
@@ -1589,6 +1618,8 @@ fn deploy_non_player_financing_package(
                 match business.status() {
                     BusinessStatus::Insolvent => 0_u8,
                     BusinessStatus::Distressed => 1,
+                    // Closed premises are filtered out above; the arm exists for
+                    // exhaustiveness only.
                     BusinessStatus::Active | BusinessStatus::Closed => 2,
                 },
                 business.cash(),
@@ -1630,13 +1661,6 @@ fn negotiated_loan_exposure(state: &AppState, terms: &LoanTerms) -> Money {
     prior_default
         .checked_add(terms.principal)
         .expect("validated loan exposure must fit the supported money range")
-}
-
-fn ceil_positive_money_div(value: Money, denominator: i64) -> Money {
-    debug_assert!(value > Money::ZERO);
-    debug_assert!(denominator > 0);
-    let copper = value.copper();
-    Money::from_copper(copper / denominator + i64::from(copper % denominator != 0))
 }
 
 fn ceil_basis_point_share(value: Money, basis_points: i64) -> Money {
@@ -1703,7 +1727,7 @@ fn validate_civic_debt_issuance(
             .checked_sub(principal)
             .expect("validated civic debt creditor must cover the principal"),
         treasury_budget_after,
-        weekly_payment: ceil_positive_money_div(principal, CIVIC_DEBT_TERM_WEEKS),
+        weekly_payment: principal.ceil_div_positive(CIVIC_DEBT_TERM_WEEKS),
         next_due_day: checked_future_day(state.clock.day(), 7)?,
     })
 }
@@ -1846,8 +1870,7 @@ fn apply_law(
     value: i64,
 ) -> Result<CommandOutcome, CommandError> {
     let validation = validate_law_sponsorship(registry, state, kind, value)?;
-    let cost = Money::from_copper(2_000);
-    spend_player_treasury(state, cost)?;
+    spend_player_treasury(state, LAW_SPONSORSHIP_COST)?;
     state
         .dynasties
         .get_mut(&state.player_dynasty_id)
@@ -2152,7 +2175,7 @@ fn validate_public_work_cooldown(state: &AppState, subject: &str) -> Result<(), 
     Ok(())
 }
 
-fn has_player_office(state: &AppState) -> bool {
+pub(crate) fn has_player_office(state: &AppState) -> bool {
     state.institutions.values().any(|institution| {
         institution.office_holder_id.is_some_and(|character_id| {
             state
@@ -2401,17 +2424,7 @@ fn apply_legal_settlement(
 ) -> Result<CommandOutcome, CommandError> {
     let quote = quote_player_legal_settlement(state, case_id)?;
     let player_id = state.player_dynasty_id;
-    let player_treasury = state
-        .dynasties
-        .get(&player_id)
-        .expect("player dynasty must exist")
-        .treasury();
-    if player_treasury < quote.amount {
-        return Err(CommandError::InsufficientPlayerFunds {
-            available: player_treasury,
-            required: quote.amount,
-        });
-    }
+    spend_player_treasury(state, quote.amount)?;
     let plaintiff_treasury = state
         .dynasties
         .get(&quote.plaintiff_dynasty_id)
@@ -2430,14 +2443,6 @@ fn apply_legal_settlement(
         .expect("quoted legal case must exist")
         .claim_source;
 
-    state
-        .dynasties
-        .get_mut(&player_id)
-        .expect("player dynasty must exist")
-        .resources
-        .treasury = player_treasury
-        .checked_sub(quote.amount)
-        .expect("prevalidated settlement must fit player treasury");
     state
         .dynasties
         .get_mut(&quote.plaintiff_dynasty_id)
@@ -2804,7 +2809,9 @@ fn apply_adopt_ward(
         .get_mut(&dynasty_id)
         .expect("validated family council must exist");
     council.members.insert(ward_id);
-    council.unity_basis_points = council.unity_basis_points.saturating_sub(100);
+    council.unity_basis_points = council
+        .unity_basis_points
+        .saturating_sub(WARD_ADOPTION_UNITY_COST);
     let dynasty = state
         .dynasties
         .get_mut(&dynasty_id)
@@ -2812,7 +2819,7 @@ fn apply_adopt_ward(
     dynasty.resources.legitimacy_basis_points = dynasty
         .resources
         .legitimacy_basis_points
-        .saturating_sub(250);
+        .saturating_sub(WARD_ADOPTION_LEGITIMACY_COST);
     dynasty.resources.administrative_capacity =
         dynasty.resources.administrative_capacity.saturating_add(8);
     record_ward_adoption(state, dynasty_id, ward_id, &ward_name, focus)?;
@@ -2871,7 +2878,12 @@ fn validate_ward_adoption(state: &AppState) -> Result<WardAdoptionContext, Comma
         .audit_log
         .iter()
         .rev()
-        .find(|record| record.kind() == AuditKind::WardAdoption)
+        .find(|record| {
+            record.kind() == AuditKind::WardAdoption
+                && record
+                    .subject()
+                    .starts_with(&format!("dynasty:{dynasty_id}:"))
+        })
         .map(AuditRecord::day)
     {
         let next_adoption_day = checked_future_day(last_adoption_day, WARD_ADOPTION_INTERVAL_DAYS)?;
@@ -2924,7 +2936,7 @@ fn insert_ward_family_link(
             second_character_id: ward_id,
             kind: FamilyLinkKind::Ward,
             active: true,
-            property_claim_basis_points: 1_500,
+            property_claim_basis_points: WARD_PROPERTY_CLAIM_BASIS_POINTS,
         },
     );
     Ok(())
@@ -2960,7 +2972,9 @@ fn record_ward_adoption(
     )?;
     Ok(())
 }
-fn active_player_ward_count(state: &AppState) -> usize {
+/// Canonical active ward count for the player dynasty: a ward occupies a slot
+/// only while both its guardian and the ward are active.
+pub(crate) fn active_player_ward_count(state: &AppState) -> usize {
     state
         .family_links
         .values()
@@ -3420,10 +3434,13 @@ fn commit_institution_endowment(
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::InstitutionEndowment,
-        subject: format!("institution:{}", endowment.institution_id).into(),
+        subject: format!(
+            "institution:{};dynasty:{}",
+            endowment.institution_id, endowment.player_id
+        )
+        .into(),
         detail: format!(
-            "dynasty={};amount={};institution_legitimacy_gain={}",
-            endowment.player_id,
+            "amount={};institution_legitimacy_gain={}",
             endowment.amount.copper(),
             endowment.legitimacy_gain
         ),
@@ -3471,7 +3488,10 @@ pub(crate) fn institution_endowment_next_day(state: &AppState) -> Option<i64> {
         .audit_log
         .iter()
         .rev()
-        .find(|record| record.kind() == AuditKind::InstitutionEndowment)
+        .find(|record| {
+            record.kind() == AuditKind::InstitutionEndowment
+                && record.audit_subject().dynasty_id() == Some(state.player_dynasty_id)
+        })
         .map(|record| future_day_or_terminal(record.day(), INSTITUTION_ENDOWMENT_INTERVAL_DAYS))
 }
 
@@ -3589,14 +3609,12 @@ fn apply_office_nomination(
             next_nomination_day,
         });
     }
-    let campaign_cost = Money::from_copper(300);
     let selection_day = checked_future_day(state.clock.day(), OFFICE_NOMINATION_RESOLUTION_DAYS)?;
-    spend_player_treasury(state, campaign_cost)?;
+    spend_player_treasury(state, OFFICE_NOMINATION_CAMPAIGN_COST)?;
     let institution = state
         .institutions
         .get_mut(&institution_id)
         .expect("validated institution must exist");
-    institution.members.insert(character_id);
     institution.next_selection_day = institution.next_selection_day.min(selection_day);
     let dynasty = state
         .dynasties
@@ -3612,7 +3630,7 @@ fn apply_office_nomination(
         day: state.clock.day(),
         kind: AuditKind::OfficeNomination,
         subject: subject.into(),
-        detail: format!("campaign_cost={}", campaign_cost.copper()),
+        detail: format!("campaign_cost={}", OFFICE_NOMINATION_CAMPAIGN_COST.copper()),
     });
     super::strategic::try_push_outbox(
         state,
@@ -4086,20 +4104,21 @@ fn apply_crisis_response(
     let district_id = crisis.district_id;
     match response {
         CrisisResponse::Relief => {
-            let cost = Money::from_copper(i64::from(severity).saturating_mul(2));
+            let cost =
+                CRISIS_RELIEF_COST_PER_SEVERITY_POINT.saturating_mul(i64::from(severity).max(1));
             spend_player_treasury(state, cost)?;
             reduce_crisis(state, crisis_id, 2_500);
             adjust_player_legitimacy(state, 500, true);
             adjust_district_unrest(state, district_id, 800, false);
         }
         CrisisResponse::Reform => {
-            spend_player_treasury(state, Money::from_copper(1_500))?;
+            spend_player_treasury(state, CRISIS_REFORM_COST)?;
             reduce_crisis(state, crisis_id, 1_800);
             adjust_player_legitimacy(state, 300, true);
             adjust_district_unrest(state, district_id, 500, false);
         }
         CrisisResponse::Suppress => {
-            spend_player_treasury(state, Money::from_copper(900))?;
+            spend_player_treasury(state, CRISIS_SUPPRESS_COST)?;
             reduce_crisis(state, crisis_id, 2_000);
             adjust_player_legitimacy(state, 450, false);
             adjust_district_unrest(state, district_id, 700, true);
@@ -4118,7 +4137,12 @@ fn apply_crisis_response(
                     required: required_legitimacy,
                 });
             }
-            let gain = Money::from_copper(i64::from(severity));
+            // Crisis profiteering extracts wealth from the panicked market; the
+            // gain is bounded by what the market clearing pool actually holds so
+            // no money is created without a counterparty.
+            let desired_gain = Money::from_copper(i64::from(severity));
+            let gain = desired_gain.min(state.market.clearing_account);
+            debit_market_clearing_account(state, gain)?;
             let current_treasury = state
                 .dynasties
                 .get(&state.player_dynasty_id)
@@ -4289,7 +4313,7 @@ fn apply_labor_response(
         validate_negotiated_weekly_wage(agreement, employment_id, response)?;
     match response {
         LaborResponse::ImproveConditions => {
-            spend_business_cash(state, business_id, Money::from_copper(1_000))?;
+            spend_business_cash(state, business_id, LABOR_CONDITIONS_IMPROVEMENT_COST)?;
             let agreement = state
                 .employment
                 .get_mut(&employment_id)
@@ -4305,7 +4329,7 @@ fn apply_labor_response(
             agreement.status = EmploymentStatus::Active;
         }
         LaborResponse::Negotiate => {
-            spend_business_cash(state, business_id, Money::from_copper(500))?;
+            spend_business_cash(state, business_id, LABOR_NEGOTIATION_COST)?;
             let agreement = state
                 .employment
                 .get_mut(&employment_id)
@@ -4373,10 +4397,13 @@ fn spend_business_cash(
         .get(business_id)
         .ok_or(CommandError::MissingBusiness { business_id })?;
     let cash = business.cash();
-    if cash < amount {
+    // Player-driven business spending honors the same operating-reserve floor the
+    // business's own daily purchase and production decisions honor.
+    let spendable = cash.saturating_sub(business.policy.minimum_cash_reserve);
+    if spendable < amount {
         return Err(CommandError::InsufficientBusinessFunds {
             business_id,
-            available: cash,
+            available: spendable,
             required: amount,
         });
     }

@@ -48,6 +48,8 @@ pub(crate) const PROPERTY_LIQUIDATION_BASIS_POINTS: i64 = 5_000;
 const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000);
 const UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS: u16 = 240;
 const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
+/// Route disruption at or above this level spawns a trade-disruption crisis.
+const TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD: u16 = 7_000;
 const EPIDEMIC_ONSET_WELFARE_DIVISOR: u16 = 7;
 const EPIDEMIC_DAILY_WELFARE_DIVISOR: u16 = 60;
 const DISTRICT_BACKGROUND_EMPLOYMENT_BASIS_POINTS: u16 = 4_500;
@@ -545,9 +547,16 @@ fn commit_supply_contract(
 #[derive(Debug)]
 pub struct ValidatedLoan {
     terms: LoanTerms,
+    restructures_defaulted_loan: bool,
 }
 
 impl ValidatedLoan {
+    /// Whether committing this loan restructures an existing defaulted loan in place
+    /// instead of issuing a new loan record.
+    pub fn restructures_defaulted_loan(&self) -> bool {
+        self.restructures_defaulted_loan
+    }
+
     /// Revalidates and commits a previously validated loan atomically.
     ///
     /// # Errors
@@ -896,8 +905,11 @@ pub fn sign_supply_contract(
 ///
 /// Returns an error for missing parties, invalid terms, insufficient lender funds, or invalid collateral.
 pub fn validate_loan(state: &AppState, terms: LoanTerms) -> Result<ValidatedLoan, StrategicError> {
-    validate_loan_terms(state, &terms)?;
-    Ok(ValidatedLoan { terms })
+    let defaulted_loan_id = validate_loan_terms(state, &terms)?;
+    Ok(ValidatedLoan {
+        restructures_defaulted_loan: defaulted_loan_id.is_some(),
+        terms,
+    })
 }
 
 fn validate_loan_terms(
@@ -4156,20 +4168,27 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
                 .expect("bounded rent payment must not exceed tenant treasury");
             paid
         } else if occupant_business_id.is_none() || occupant_is_closed {
+            // Vacancy income is an abstraction funded by the market's own
+            // clearing pool; it is bounded by what that pool holds so the
+            // weekly settlement can never overdraw it.
+            let paid = rent.min(state.market.clearing_account);
+            if paid <= Money::ZERO {
+                continue;
+            }
             let owner_treasury = state
                 .dynasties
                 .get(&owner_id)
                 .expect("property owner dynasty must exist")
                 .treasury();
             owner_treasury
-                .checked_add(rent)
+                .checked_add(paid)
                 .ok_or(SimulationError::DynastyTreasuryOverflow {
                     dynasty_id: owner_id,
                     current: owner_treasury,
-                    incoming: rent,
+                    incoming: paid,
                 })?;
-            debit_market_clearing_account(state, rent)?;
-            rent
+            debit_market_clearing_account(state, paid)?;
+            paid
         } else {
             Money::ZERO
         };
@@ -4388,8 +4407,10 @@ fn pay_employment_wage(
     let recipe = registry
         .get_recipe(business.recipe_id())
         .expect("employment business recipe must exist");
+    // Wages settle weekly, so even a distressed employer retains one week of
+    // operating funds instead of spending down to a single day's cost.
     let payroll_reserve = if business.status() == BusinessStatus::Distressed {
-        recipe.daily_operating_cost()
+        recipe.daily_operating_cost().saturating_mul(7)
     } else {
         business.policy.minimum_cash_reserve
     };
@@ -4641,22 +4662,18 @@ fn business_labor_utilization_basis_points(
     let required_output = reserve_shortfall
         .saturating_add(contract_reserve)
         .saturating_add(weekly_market_demand);
-    let required_batches = ceil_div_nonnegative_i64(required_output.milliunits(), output_per_batch);
+    let required_batches =
+        crate::money::ceil_div_nonnegative(required_output.milliunits(), output_per_batch);
     let weekly_capacity_batches =
         i64::from(business.operations.capacity_batches_per_day).saturating_mul(7);
     if weekly_capacity_batches <= 0 {
         return 0;
     }
     let utilization_numerator = required_batches.saturating_mul(10_000);
-    let utilization = ceil_div_nonnegative_i64(utilization_numerator, weekly_capacity_batches)
-        .clamp(RETAINER_BASIS_POINTS, 10_000);
+    let utilization =
+        crate::money::ceil_div_nonnegative(utilization_numerator, weekly_capacity_batches)
+            .clamp(RETAINER_BASIS_POINTS, 10_000);
     u16::try_from(utilization).expect("clamped utilization must fit u16")
-}
-
-fn ceil_div_nonnegative_i64(numerator: i64, denominator: i64) -> i64 {
-    debug_assert!(numerator >= 0 && denominator > 0);
-    let quotient = numerator / denominator;
-    quotient.saturating_add(i64::from(numerator % denominator != 0))
 }
 
 pub(crate) fn apply_public_work_completion(
@@ -4809,10 +4826,13 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<()
                     .spent
                     .checked_add(weekly_spend)
                     .expect("bounded public-work spending must fit project total");
-                let progress = work
-                    .spent
-                    .saturating_mul_ratio(10_000, work.budget.copper())
-                    .copper();
+                let progress = if work.budget.copper() > 0 {
+                    work.spent
+                        .saturating_mul_ratio(10_000, work.budget.copper())
+                        .copper()
+                } else {
+                    0
+                };
                 work.progress_basis_points =
                     u16::try_from(progress.clamp(0, 10_000)).unwrap_or(10_000);
                 (work.progress_basis_points >= 10_000).then_some((work.district_id, work.kind))
@@ -5438,8 +5458,8 @@ fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
 }
 
 /// The borrowing half of AI credit participation: a house whose businesses need capital
-/// and whose treasury is thin seeks a working-capital loan from a liquid house or the
-/// player.
+/// and whose treasury is thin seeks a working-capital loan from a liquid rival house.
+/// Player lending is a deliberate player command, never an autonomous AI counterparty.
 fn advance_ai_credit_borrowing(registry: &Registry, state: &mut AppState) {
     let player_id = state.player_dynasty_id;
     let dynasties: Vec<_> = state.dynasties.keys().copied().collect();
@@ -5522,8 +5542,7 @@ fn advance_ai_credit_borrowing(registry: &Registry, state: &mut AppState) {
 fn ai_loan_weekly_payment(principal: Money, weeks: i64) -> Money {
     debug_assert!(principal > Money::ZERO);
     debug_assert!(weeks > 0);
-    let copper = principal.copper();
-    Money::from_copper(copper / weeks + i64::from(copper % weeks != 0))
+    principal.ceil_div_positive(weeks)
 }
 
 fn dynasty_has_active_ai_borrowing(state: &AppState, dynasty_id: DynastyId) -> bool {
@@ -5616,15 +5635,29 @@ fn apply_active_office_directives(
                 institution.active_directive = None;
                 return None;
             }
-            Some((institution.institution_id, directive.power))
+            Some((
+                institution.institution_id,
+                directive.power,
+                institution.office_holder_id,
+            ))
         })
         .collect();
-    for (institution_id, power) in directives {
+    for (institution_id, power, office_holder_id) in directives {
         let district_id = registry
             .get_institution(institution_id)
             .expect("active office directive institution must remain registered")
             .district_id();
-        apply_office_directive_momentum(registry, state, institution_id, district_id, power)?;
+        let holder_dynasty_id = office_holder_id
+            .and_then(|character_id| state.characters.get(character_id))
+            .map(crate::core::Character::dynasty_id);
+        apply_office_directive_momentum(
+            registry,
+            state,
+            institution_id,
+            district_id,
+            power,
+            holder_dynasty_id,
+        )?;
     }
     Ok(())
 }
@@ -5635,14 +5668,20 @@ fn apply_office_directive_momentum(
     institution_id: InstitutionId,
     district_id: DistrictId,
     power: OfficePower,
+    holder_dynasty_id: Option<DynastyId>,
 ) -> Result<(), SimulationError> {
     match power {
         OfficePower::Licenses => adjust_directive_businesses(state, district_id, 10, 10),
         OfficePower::Inspections => adjust_directive_businesses(state, district_id, 15, 25),
         OfficePower::MarketTolls => adjust_directive_household_welfare(state, district_id, -15),
         OfficePower::DebtEnforcement => {
+            // Enforcement breeds respect and fear toward whichever house wields
+            // the office, not toward an unrelated bystander house.
+            let Some(holder_dynasty_id) = holder_dynasty_id else {
+                return Ok(());
+            };
             for (pair, relationship) in &mut state.relationships {
-                if pair.first == state.player_dynasty_id || pair.second == state.player_dynasty_id {
+                if pair.first == holder_dynasty_id || pair.second == holder_dynasty_id {
                     relationship.respect_basis_points = relationship
                         .respect_basis_points
                         .saturating_add(10)
@@ -7610,7 +7649,7 @@ fn detect_and_advance_crises(
             CrisisKind::NobleDemand,
             district_id,
             3_000,
-            "The regional prince demanded an extraordinary payment from Rivergate.",
+            "The regional prince demanded an extraordinary payment from the city.",
         )?;
     }
     detect_periodic_crises(state, day)?;
@@ -7632,7 +7671,18 @@ fn advance_existing_crises(state: &mut AppState) -> Result<(), SimulationError> 
         }
         let previous_status = crisis.status;
         let subject = format!("crisis:{}", crisis.id);
-        crisis.severity_basis_points = if addressed_subjects.contains(&subject) {
+        // A trade disruption tracks the condition that spawned it: once every
+        // route has healed below the detection threshold, the crisis recovers
+        // instead of escalating against a cause that no longer exists.
+        let cause_healed = crisis.kind == CrisisKind::TradeDisruption
+            && state
+                .external_routes
+                .values()
+                .map(|route| route.disruption_basis_points)
+                .max()
+                .unwrap_or(0)
+                < TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD;
+        crisis.severity_basis_points = if addressed_subjects.contains(&subject) || cause_healed {
             crisis
                 .severity_basis_points
                 .saturating_sub(ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS)
@@ -7800,7 +7850,7 @@ fn detect_trade_disruption(state: &mut AppState) -> Result<(), SimulationError> 
         .map(|route| route.disruption_basis_points)
         .max()
         .unwrap_or(0);
-    if disruption >= 7_000 {
+    if disruption >= TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD {
         insert_crisis(
             state,
             CrisisKind::TradeDisruption,

@@ -1,7 +1,9 @@
 //! Behavioral coverage for the deterministic gameplay harness.
 
 use super::*;
-use crate::core::{AuditKind, AuditRecord, Crisis, CrisisKind, OutboxKind, OutboxMessage};
+use crate::core::{
+    AuditKind, AuditRecord, Crisis, CrisisKind, FamilyLinkKind, OutboxKind, OutboxMessage,
+};
 use crate::ids::{DynastyId, OutboxMessageId};
 use crate::systems::{INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_INTERVAL_DAYS};
 use crate::systems::{OFFICE_POWER_ESTABLISHMENT_DAYS, OFFICE_TERM_DAYS, issue_loan};
@@ -3579,7 +3581,7 @@ mod candidates {
             candidate.command,
             PlayerCommand::IssueLoan { ref terms }
                 if terms.weekly_payment
-                    == positive_money_ceil_div(terms.principal, AGENT_LOAN_AMORTIZATION_WEEKS)
+                    == terms.principal.ceil_div_positive(AGENT_LOAN_AMORTIZATION_WEEKS)
         ));
     }
 
@@ -4879,7 +4881,9 @@ mod candidates {
         );
         assert_eq!(
             terms.weekly_payment,
-            positive_money_ceil_div(terms.principal, AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS)
+            terms
+                .principal
+                .ceil_div_positive(AGENT_OPPORTUNIST_LOAN_AMORTIZATION_WEEKS)
         );
         assert!(candidate.description.contains("high-yield short-term loan"));
     }
@@ -4987,10 +4991,9 @@ mod candidates {
         assert!(terms.principal >= Money::from_copper(5_000));
         assert_eq!(
             terms.weekly_payment,
-            positive_money_ceil_div(
-                terms.principal,
-                AGENT_OPPORTUNIST_STRESSED_LOAN_AMORTIZATION_WEEKS
-            )
+            terms
+                .principal
+                .ceil_div_positive(AGENT_OPPORTUNIST_STRESSED_LOAN_AMORTIZATION_WEEKS)
         );
     }
 

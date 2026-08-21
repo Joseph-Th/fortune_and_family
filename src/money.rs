@@ -80,6 +80,21 @@ impl Money {
         Self(saturating_mul_ratio_i64(self.0, numerator, denominator))
     }
 
+    #[must_use]
+    /// Divides this positive value by a positive denominator and rounds any fractional copper
+    /// upward.
+    ///
+    /// # Panics
+    ///
+    /// Panics when this value is not positive or `denominator` is not positive.
+    pub const fn ceil_div_positive(self, denominator: i64) -> Self {
+        assert!(self.0 > 0, "ceiling division dividend must be positive");
+        assert!(
+            denominator > 0,
+            "ceiling division denominator must be positive"
+        );
+        Self(self.0 / denominator + (self.0 % denominator != 0) as i64)
+    }
     /// Multiplies this value by a rational number using a wide intermediate.
     ///
     /// Returns `None` when the final value is outside the supported money range.
@@ -290,6 +305,19 @@ const fn saturating_mul_ratio_i64(value: i64, numerator: i64, denominator: i64) 
     assert!(denominator != 0, "ratio denominator must not be zero");
     let result = (value as i128).saturating_mul(numerator as i128) / denominator as i128;
     saturating_i128_to_i64(result)
+}
+
+/// Ceil-divides a nonnegative numerator by a positive denominator.
+pub(crate) const fn ceil_div_nonnegative(numerator: i64, denominator: i64) -> i64 {
+    assert!(
+        numerator >= 0,
+        "ceiling division numerator must be nonnegative"
+    );
+    assert!(
+        denominator > 0,
+        "ceiling division denominator must be positive"
+    );
+    numerator / denominator + (numerator % denominator != 0) as i64
 }
 
 // The explicit bounds checks make this final narrowing conversion lossless.

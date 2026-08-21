@@ -2769,6 +2769,69 @@ mod validation {
     }
 
     #[test]
+    fn rejects_endowment_audit_with_missing_dynasty_attribution() {
+        let mut state = make_test_campaign();
+        let institution_id = state
+            .institutions
+            .keys()
+            .copied()
+            .next()
+            .expect("bootstrap must create an institution");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionEndowment,
+            subject: format!("institution:{institution_id}").into(),
+            detail: "fabricated endowment history".to_owned(),
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("endowment-audit-missing-dynasty.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "InstitutionEndowment audit record lacks dynasty attribution",
+        );
+    }
+
+    #[test]
+    fn rejects_endowment_audit_referencing_missing_dynasty() {
+        let mut state = make_test_campaign();
+        let institution_id = state
+            .institutions
+            .keys()
+            .copied()
+            .next()
+            .expect("bootstrap must create an institution");
+        let missing_dynasty_id = DynastyId::new(
+            state
+                .dynasties
+                .keys()
+                .map(|dynasty_id| dynasty_id.value())
+                .max()
+                .expect("bootstrap must create dynasties")
+                + 1,
+        );
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionEndowment,
+            subject: format!("institution:{institution_id};dynasty:{missing_dynasty_id}").into(),
+            detail: "fabricated endowment history".to_owned(),
+        });
+        let value = serde_json::to_value(state).expect("state must serialize");
+        let (_directory, path) =
+            write_test_json_fixture("endowment-audit-missing-dynasty-record.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            &format!(
+                "InstitutionEndowment audit record references missing dynasty {missing_dynasty_id}"
+            ),
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_property_occupants() {
         let state = make_test_campaign();
         let mut value = serde_json::to_value(state).expect("state must serialize");

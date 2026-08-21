@@ -6487,6 +6487,39 @@ mod routes {
             "severe disruption must be detected before routine monthly recovery masks it"
         );
     }
+
+    #[test]
+    fn healed_routes_de_escalate_an_unaddressed_trade_disruption() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        state.crises.clear();
+        // Every route has healed below the detection threshold, but no player
+        // response was ever recorded for the crisis.
+        for route in state.external_routes.values_mut() {
+            route.risk_basis_points = 0;
+            route.disruption_basis_points = 0;
+        }
+        let crisis_id = insert_crisis(
+            &mut state,
+            CrisisKind::TradeDisruption,
+            None,
+            5_000,
+            "test route disruption",
+        )
+        .expect("test crisis insertion must succeed");
+
+        run_monthly_strategic_systems(registry, &mut state)
+            .expect("monthly strategic systems must run");
+
+        let crisis = state
+            .crises
+            .get(&crisis_id)
+            .expect("trade disruption crisis must remain present");
+        assert!(
+            crisis.severity_basis_points < 5_000,
+            "a trade disruption whose routes healed must recover instead of escalating"
+        );
+    }
 }
 
 mod ai {

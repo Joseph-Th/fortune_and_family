@@ -260,7 +260,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
     result
 }
 
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dispatch keeps the full decision path in one auditable function"
+)]
 fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
     match cli.command {
         Command::New {

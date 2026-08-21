@@ -3,9 +3,8 @@
 use crate::core::{
     AppState, AuditKind, AuditRecord, AuditSubject, BusinessStatus, CharacterStatus,
     CivicDebtStatus, ContractStatus, CrisisKind, CrisisStatus, DynastyPair, EmploymentStatus,
-    FamilyLinkKind, HouseGovernance, LawKind, LegalCaseKind, LegalCaseStatus, LoanStatus,
-    NewGameConfig, ObjectiveStatus, OfficePower, PublicWorkKind, PublicWorkStatus,
-    StartingBackground,
+    HouseGovernance, LawKind, LegalCaseKind, LegalCaseStatus, LoanStatus, NewGameConfig,
+    ObjectiveStatus, OfficePower, PublicWorkKind, PublicWorkStatus, StartingBackground,
 };
 use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, InstitutionId};
 use crate::money::{Money, Quantity, checked_cost_for};
@@ -30,16 +29,16 @@ use crate::systems::{
     PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
     SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
     WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
-    WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT, advance_days,
-    apply_player_command, available_household_workers, available_supply_contract_capacity,
-    build_new_game, business_owner_distribution_reserve, business_recapitalization_target,
-    contract_counterparty_price_bounds, contract_relationship_pressure_basis_points,
-    crisis_response_contains_crisis, family_education_next_day,
-    has_established_player_institution_membership, has_established_player_office_power,
-    institution_capability_score, institution_endowment_next_day, institution_membership_count,
-    institution_support_day, institution_support_delivery_requirement,
-    institution_support_next_day, office_nomination_delivery_requirement,
-    office_nomination_next_day, player_contract_deliveries,
+    WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT,
+    active_player_ward_count, advance_days, apply_player_command, available_household_workers,
+    available_supply_contract_capacity, build_new_game, business_owner_distribution_reserve,
+    business_recapitalization_target, contract_counterparty_price_bounds,
+    contract_relationship_pressure_basis_points, crisis_response_contains_crisis,
+    family_education_next_day, has_established_player_institution_membership,
+    has_established_player_office_power, has_player_office, institution_capability_score,
+    institution_endowment_next_day, institution_membership_count, institution_support_day,
+    institution_support_delivery_requirement, institution_support_next_day,
+    office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
     private_loan_borrower_financing_pressure, projected_dynasty_monthly_office_duty,
     projected_dynasty_monthly_office_duty_with_additional_offices, quote_business_acquisition,
     quote_information_leverage, quote_player_legal_claim, quote_player_legal_settlement,
@@ -1300,7 +1299,7 @@ impl CivicSnapshotPart {
             offices_held: count_player_offices(state, player_id),
             available_offices: usize_to_u16(state.institutions.len()),
             eligible_officeholders: count_eligible_officeholders(state, player_id),
-            active_wards: count_active_player_wards(state, player_id),
+            active_wards: usize_to_u16(active_player_ward_count(state)),
             player_family_capability_checksum: player_family_capability_checksum(state, player_id),
             player_office_checksum: state
                 .institutions
@@ -3523,7 +3522,10 @@ fn run_decision_cycle(
 // This is the intentionally linear harness pipeline: observe, generate, probe,
 // commit, advance, attribute, and record. Keeping it visible preserves the
 // canonical gameplay order while feedback capture adds a few bookkeeping lines.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dispatch keeps the full decision path in one auditable function"
+)]
 fn run_decision_cycle_internal(
     registry: &Registry,
     config: &GameplayHarnessConfig,
@@ -4561,12 +4563,17 @@ fn has_ward_adoption_opportunity(state: &AppState) -> bool {
             .max(player.resources.reputation_reliability_basis_points)
             >= WARD_ADOPTION_REPUTATION_REQUIREMENT
         && player_contract_deliveries(state) >= WARD_ADOPTION_DELIVERY_REQUIREMENT
-        && usize::from(count_active_player_wards(state, player_id)) < MAX_ACTIVE_WARDS
+        && active_player_ward_count(state) < MAX_ACTIVE_WARDS
         && state
             .audit_log
             .iter()
             .rev()
-            .find(|record| record.kind() == AuditKind::WardAdoption)
+            .find(|record| {
+                record.kind() == AuditKind::WardAdoption
+                    && record
+                        .subject()
+                        .starts_with(&format!("dynasty:{player_id}:"))
+            })
             .is_none_or(|record| {
                 state.clock.day() >= record.day().saturating_add(WARD_ADOPTION_INTERVAL_DAYS)
             })
@@ -4973,7 +4980,10 @@ fn activation_opportunity_delta(
 /// candidates), and validation gates (the game rejected every probed option).
 /// Returns a human-readable reason for the retained trace when the cycle had
 /// no actionable choice, and `None` when the agent could act.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dispatch keeps the full decision path in one auditable function"
+)]
 fn record_quiet_diagnostic(
     accumulator: &mut CampaignAccumulator,
     probe: &ProbeResult,
@@ -5531,7 +5541,10 @@ struct CycleObservation<'a> {
 
 // Consequence attribution and trace assembly are kept together so every
 // reported domain and feedback event comes from the same pair of branches.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dispatch keeps the full decision path in one auditable function"
+)]
 fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAccumulator) {
     let CycleObservation {
         before,
@@ -8098,7 +8111,7 @@ fn add_borrow_candidate(
                 lender_dynasty_id: lender.id(),
                 borrower_dynasty_id: player_id,
                 principal,
-                weekly_payment: positive_money_ceil_div(repayment_balance, amortization_weeks),
+                weekly_payment: repayment_balance.ceil_div_positive(amortization_weeks),
                 interest_basis_points: if defaulted_loan.is_some() { 1_000 } else { 700 },
                 collateral_property_id: collateral.map(|property| property.id),
             },
@@ -8157,13 +8170,6 @@ fn lending_limits(persona: GameplayPersona) -> (Money, usize) {
         GameplayPersona::PowerBroker => (Money::from_copper(50_000), 1),
         GameplayPersona::Opportunist => (Money::from_copper(25_000), 2),
     }
-}
-
-fn positive_money_ceil_div(value: Money, denominator: i64) -> Money {
-    debug_assert!(value > Money::ZERO);
-    debug_assert!(denominator > 0);
-    let copper = value.copper();
-    Money::from_copper(copper / denominator + i64::from(copper % denominator != 0))
 }
 
 fn active_player_lending(state: &AppState) -> usize {
@@ -8334,7 +8340,7 @@ fn add_lend_candidate(
                 lender_dynasty_id: state.player_dynasty_id,
                 borrower_dynasty_id: borrower.id(),
                 principal,
-                weekly_payment: positive_money_ceil_div(repayment_balance, amortization_weeks),
+                weekly_payment: repayment_balance.ceil_div_positive(amortization_weeks),
                 interest_basis_points,
                 collateral_property_id: collateral.map(|property| property.id),
             },
@@ -9388,17 +9394,6 @@ const fn public_work_intent(kind: PublicWorkKind) -> &'static str {
         PublicWorkKind::Hospital => "improve sanitation and social stability",
         PublicWorkKind::School => "create local employment and reduce unrest",
     }
-}
-
-fn has_player_office(state: &AppState) -> bool {
-    state.institutions.values().any(|institution| {
-        institution.office_holder_id.is_some_and(|character_id| {
-            state
-                .characters
-                .get(character_id)
-                .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
-        })
-    })
 }
 
 fn generate_legal_candidates(
@@ -10492,13 +10487,17 @@ fn generate_ward_adoption_candidates(
             .max(player.resources.reputation_reliability_basis_points)
             >= WARD_ADOPTION_REPUTATION_REQUIREMENT
         && player_contract_deliveries(state) >= WARD_ADOPTION_DELIVERY_REQUIREMENT
-        && usize::from(count_active_player_wards(state, state.player_dynasty_id))
-            < MAX_ACTIVE_WARDS
+        && active_player_ward_count(state) < MAX_ACTIVE_WARDS
         && state
             .audit_log
             .iter()
             .rev()
-            .find(|record| record.kind() == AuditKind::WardAdoption)
+            .find(|record| {
+                record.kind() == AuditKind::WardAdoption
+                    && record
+                        .subject()
+                        .starts_with(&format!("dynasty:{}:", state.player_dynasty_id))
+            })
             .is_none_or(|record| {
                 state.clock.day() >= record.day().saturating_add(WARD_ADOPTION_INTERVAL_DAYS)
             });
@@ -17829,34 +17828,6 @@ fn count_eligible_officeholders(state: &AppState, player_id: DynastyId) -> u16 {
             .iter()
             .filter(|character| {
                 character.dynasty_id() == player_id && character.status() == CharacterStatus::Active
-            })
-            .count(),
-    )
-}
-
-fn count_active_player_wards(state: &AppState, player_id: DynastyId) -> u16 {
-    usize_to_u16(
-        state
-            .family_links
-            .values()
-            .filter(|link| link.active && link.kind == FamilyLinkKind::Ward)
-            .filter(|link| {
-                // Mirror the canonical ward-capacity count
-                // (`active_player_ward_count`): a ward occupies a slot only
-                // while both its guardian and the ward are active.
-                let guardian_active = state
-                    .characters
-                    .get(link.first_character_id)
-                    .is_some_and(|character| character.status() == CharacterStatus::Active);
-                let ward_active =
-                    state
-                        .characters
-                        .get(link.second_character_id)
-                        .is_some_and(|character| {
-                            character.dynasty_id() == player_id
-                                && character.status() == CharacterStatus::Active
-                        });
-                guardian_active && ward_active
             })
             .count(),
     )
