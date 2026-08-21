@@ -1530,6 +1530,26 @@ fn apply_market_spoilage(registry: &Registry, state: &mut AppState) {
             .saturating_mul_ratio(i64::from(good.daily_spoilage_basis_points()), 10_000);
         quote.stock = quote.stock.saturating_sub(spoiled);
     }
+    for business in state.businesses.iter_mut() {
+        let goods_to_spoil: Vec<(GoodId, Quantity)> = business
+            .inventory
+            .iter()
+            .map(|(good_id, quantity)| (*good_id, *quantity))
+            .collect();
+        for (good_id, quantity) in goods_to_spoil {
+            let spoilage_bp = registry
+                .get_good(good_id)
+                .map_or(0, crate::registry::GoodDef::daily_spoilage_basis_points);
+            if spoilage_bp == 0 {
+                continue;
+            }
+            let spoiled = quantity.saturating_mul_ratio(i64::from(spoilage_bp), 10_000);
+            if spoiled.is_zero() {
+                continue;
+            }
+            business.remove_inventory(good_id, spoiled);
+        }
+    }
 }
 
 fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {

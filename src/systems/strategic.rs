@@ -4113,6 +4113,14 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
         })
         .collect();
     for (owner_id, tenant_id, occupant_business_id, rent) in rents {
+        let occupant_is_closed = occupant_business_id.is_some_and(|business_id| {
+            state.businesses.get(business_id).is_some_and(|business| {
+                matches!(
+                    business.status(),
+                    crate::core::BusinessStatus::Closed | crate::core::BusinessStatus::Insolvent
+                )
+            })
+        });
         let paid = if let Some(tenant_id) = tenant_id {
             if owner_id == tenant_id {
                 continue;
@@ -4147,7 +4155,7 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
                 .checked_sub(paid)
                 .expect("bounded rent payment must not exceed tenant treasury");
             paid
-        } else if occupant_business_id.is_none() {
+        } else if occupant_business_id.is_none() || occupant_is_closed {
             let owner_treasury = state
                 .dynasties
                 .get(&owner_id)
@@ -6405,9 +6413,19 @@ fn revalue_district_properties(state: &mut AppState, district_id: DistrictId, re
         if property.kind == PropertyKind::Residence {
             continue;
         }
-        let target_value = property
-            .value
-            .saturating_mul_ratio(i64::from(rent_index), 10_000);
+        let baseline_multiplier = match property.kind {
+            PropertyKind::Workshop => 82,
+            PropertyKind::Warehouse => 393,
+            PropertyKind::Residence => 0,
+        };
+        let baseline_value = property.weekly_rent.saturating_mul(baseline_multiplier);
+        let target_value = if baseline_value > Money::ZERO {
+            baseline_value.saturating_mul_ratio(i64::from(rent_index), 10_000)
+        } else {
+            property
+                .value
+                .saturating_mul_ratio(i64::from(rent_index), 10_000)
+        };
         // A small monthly step toward the target prevents wild swings while still
         // letting sustained district decay pull values down. Cap the step so a
         // sudden extreme gap cannot move a property by more than 5% of its value

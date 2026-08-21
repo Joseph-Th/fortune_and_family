@@ -10,8 +10,7 @@ use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
     acquire_business, available_supply_contract_capacity, business_recapitalization_target,
     buy_unowned_property, capitalize_owned_business, distribute_owned_business_cash,
-    quote_property_liquidation, sell_owned_property, transfer_business_cash, validate_loan,
-    validate_supply_contract,
+    sell_owned_property, transfer_business_cash, validate_loan, validate_supply_contract,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
@@ -916,29 +915,12 @@ fn apply_property_sale(
     property_id: PropertyId,
     buyer_dynasty_id: DynastyId,
 ) -> Result<CommandOutcome, CommandError> {
-    let quote = quote_property_liquidation(
-        registry,
-        state,
-        state.player_dynasty_id,
-        buyer_dynasty_id,
-        property_id,
-    )?;
-    let buyer = state
+    let snapshot = state.clone();
+    let buyer_treasury_before = snapshot
         .dynasties
         .get(&buyer_dynasty_id)
-        .expect("validated property buyer must exist");
-    let buyer_after = buyer
-        .treasury()
-        .checked_sub(quote.buyer_contribution)
-        .expect("validated property buyer contribution must fit treasury");
-    if buyer_after < PROPERTY_COUNTERPARTY_BUYER_RESERVE {
-        return Err(CommandError::PropertyCounterpartyBuyerReserve {
-            buyer_dynasty_id,
-            available: buyer.treasury(),
-            buyer_contribution: quote.buyer_contribution,
-            required_reserve: PROPERTY_COUNTERPARTY_BUYER_RESERVE,
-        });
-    }
+        .expect("validated property buyer must exist")
+        .treasury();
     let quote = sell_owned_property(
         registry,
         state,
@@ -946,6 +928,18 @@ fn apply_property_sale(
         buyer_dynasty_id,
         property_id,
     )?;
+    let buyer_after = buyer_treasury_before
+        .checked_sub(quote.buyer_contribution)
+        .expect("validated property buyer contribution must fit treasury");
+    if buyer_after < PROPERTY_COUNTERPARTY_BUYER_RESERVE {
+        *state = snapshot;
+        return Err(CommandError::PropertyCounterpartyBuyerReserve {
+            buyer_dynasty_id,
+            available: buyer_treasury_before,
+            buyer_contribution: quote.buyer_contribution,
+            required_reserve: PROPERTY_COUNTERPARTY_BUYER_RESERVE,
+        });
+    }
     Ok(CommandOutcome {
         summary: format!("Sold property {property_id} for {}.", quote.price),
     })
@@ -3082,11 +3076,15 @@ pub(crate) fn family_education_next_day(
     state: &AppState,
     character_id: CharacterId,
 ) -> Option<i64> {
+    let dynasty_prefix = format!("dynasty:{}:", state.player_dynasty_id);
     let dynasty_next = state
         .audit_log
         .iter()
         .rev()
-        .find(|record| record.kind() == AuditKind::FamilyEducation)
+        .find(|record| {
+            record.kind() == AuditKind::FamilyEducation
+                && record.subject().starts_with(&dynasty_prefix)
+        })
         .map(|record| future_day_or_terminal(record.day(), FAMILY_EDUCATION_DYNASTY_INTERVAL_DAYS));
     let subject = family_education_subject(state.player_dynasty_id, character_id);
     let character_next = state

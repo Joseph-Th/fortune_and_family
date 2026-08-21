@@ -566,6 +566,7 @@ fn validate_strategic_state(registry: &Registry, state: &AppState, ids: &Registr
     validate_outbox(state);
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) {
     for (contract_id, contract) in &state.contracts {
         debug_assert_eq!(
@@ -593,6 +594,16 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
                 buyer.owner_dynasty_id(),
                 seller.owner_dynasty_id(),
                 "Ownership Exclusivity: contract businesses must belong to different dynasties"
+            );
+            debug_assert!(
+                !matches!(
+                    buyer.status(),
+                    crate::core::BusinessStatus::Insolvent | crate::core::BusinessStatus::Closed
+                ) && !matches!(
+                    seller.status(),
+                    crate::core::BusinessStatus::Insolvent | crate::core::BusinessStatus::Closed
+                ),
+                "Lifecycle Validity: active contract has an insolvent or closed party"
             );
         }
         debug_assert!(
@@ -730,6 +741,10 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
                 "Record Reference Validity: property tenant dynasty does not exist"
             );
         }
+        debug_assert!(
+            property.tenant_dynasty_id.is_none() || property.owner_dynasty_id.is_some(),
+            "Lifecycle Validity: property has a tenant without an owner"
+        );
         if let Some(business_id) = property.occupant_business_id {
             debug_assert!(
                 property.owner_dynasty_id.is_some(),
@@ -1346,6 +1361,10 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
             debug_assert!(
                 state.dynasties.contains_key(&target_id),
                 "Record Reference Validity: AI objective target dynasty does not exist"
+            );
+            debug_assert_ne!(
+                target_id, objective.dynasty_id,
+                "Lifecycle Validity: AI objective cannot target its own dynasty"
             );
         }
         debug_assert!(

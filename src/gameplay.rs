@@ -11928,14 +11928,18 @@ fn score_campaign(
             .filter(|(kind, stats)| is_substantive_command_kind(**kind) && stats.executed > 0)
             .count(),
     );
-    let coverage_score = ratio_score(
-        u32::from(command_coverage),
-        usize_to_u32(ALL_COMMAND_KINDS.len().saturating_sub(1)),
+    let substantive_kind_count = usize_to_u32(
+        ALL_COMMAND_KINDS
+            .iter()
+            .filter(|kind| is_substantive_command_kind(**kind))
+            .count(),
     );
+    let coverage_score = ratio_score(u32::from(command_coverage), substantive_kind_count);
     let dominant_actions = accumulator
         .commands
-        .values()
-        .map(|stats| stats.executed)
+        .iter()
+        .filter(|(kind, _)| is_substantive_command_kind(**kind))
+        .map(|(_, stats)| stats.executed)
         .max()
         .unwrap_or(0);
     let distribution_score = 100_u16.saturating_sub(ratio_score(dominant_actions, executed));
@@ -12233,8 +12237,12 @@ fn aggregate_campaigns(campaigns: &[GameplayCampaignReport]) -> GameplayAggregat
         .values()
         .map(|stats| u64::from(stats.considered))
         .sum();
-    let command_coverage =
-        usize_to_u16(commands.values().filter(|stats| stats.executed > 0).count());
+    let command_coverage = usize_to_u16(
+        commands
+            .iter()
+            .filter(|(kind, stats)| is_substantive_command_kind(**kind) && stats.executed > 0)
+            .count(),
+    );
     let domain_coverage = usize_to_u16(domain_changes.values().filter(|count| **count > 0).count());
     let causal_domain_coverage = usize_to_u16(
         causal_domain_changes

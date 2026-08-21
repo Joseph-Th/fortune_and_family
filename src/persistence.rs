@@ -1373,6 +1373,11 @@ fn validate_strategic_records(
         if property.name.trim().is_empty() {
             return Err(format!("property {property_id} has a blank name"));
         }
+        if property.tenant_dynasty_id.is_some() && property.owner_dynasty_id.is_none() {
+            return Err(format!(
+                "property {property_id} has a tenant without an owner"
+            ));
+        }
         for dynasty_id in [property.owner_dynasty_id, property.tenant_dynasty_id]
             .into_iter()
             .flatten()
@@ -1445,6 +1450,19 @@ fn validate_contract_records(
         }
         let buyer = buyer.expect("validated contract buyer must exist");
         let seller = seller.expect("validated contract seller must exist");
+        if contract.status == crate::core::ContractStatus::Active
+            && (matches!(
+                buyer.status(),
+                crate::core::BusinessStatus::Insolvent | crate::core::BusinessStatus::Closed
+            ) || matches!(
+                seller.status(),
+                crate::core::BusinessStatus::Insolvent | crate::core::BusinessStatus::Closed
+            ))
+        {
+            return Err(format!(
+                "supply contract {contract_id} is incompatible with its business lifecycle"
+            ));
+        }
         let buyer_recipe = registry
             .get_recipe(buyer.recipe_id())
             .expect("validated business recipe must exist");
@@ -2084,6 +2102,7 @@ fn validate_ai_objective_records(state: &AppState) -> Result<(), String> {
             || objective
                 .target_dynasty_id
                 .is_some_and(|dynasty_id| !state.dynasties.contains_key(&dynasty_id))
+            || objective.target_dynasty_id == Some(objective.dynasty_id)
         {
             return Err(format!(
                 "AI objective {objective_id} has an invalid reference"
