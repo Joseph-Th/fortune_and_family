@@ -74,7 +74,10 @@ if (-not (Test-Path $Binary) -and (Test-Path "$Binary.exe")) {
     $Binary = "$Binary.exe"
 }
 
-if (-not (Test-Path $Binary)) {
+if (-not $env:CIVIC_DYNASTY_BINARY) {
+    # Match verify_cli.sh: rebuild whenever no explicit binary was supplied so a
+    # direct invocation never exercises a stale CLI. Cargo incrementality keeps
+    # an already-current build at no-op cost.
     Write-Host "Building $Profile CLI binary..."
     & cargo build --quiet --locked @CargoProfileArgs --bin civic-dynasty
     if ($LASTEXITCODE -ne 0) {
@@ -278,6 +281,11 @@ if art["critical_findings"] != 0:
         if ($res.ExitCode -ne 0) { Fail "gameplay harness command failed" $res.StdErrPath }
         Require-NonEmptyFile $playtest "gameplay harness JSON report"
 
+        $progress = Get-Content -Raw -Encoding utf8 $res.StdErrPath
+        if ($progress -notmatch 'playtest \d+\.\d{3}s \(') {
+            Fail "playtest progress line did not report concise timing"
+        }
+
         $checkPlaytestPy = Join-Path $WorkDir "check_playtest.py"
         $pyPlaytestCode = @'
 import json
@@ -317,6 +325,11 @@ if not playtest["campaigns"] or not playtest["campaigns"][0]["trace"]:
             Fail "gameplay quality gate unexpectedly succeeded"
         }
         Require-NonEmptyFile $gatedOutput "gated gameplay report"
+
+        $gateReason = Get-Content -Raw -Encoding utf8 $res.StdErrPath
+        if ($null -eq $gateReason -or $gateReason -notmatch 'overall score') {
+            Fail "gameplay quality gate failure must report the score reason" $res.StdErrPath
+        }
     }
 
     switch ($Mode) {

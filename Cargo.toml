@@ -45,12 +45,6 @@ opt-level = 2
 [profile.release]
 incremental = true
 
-# Fast iteration: prefer quick compile over peak runtime
-[profile.quick]
-inherits = "dev"
-incremental = true
-codegen-units = 16
-
 [lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"

@@ -4,6 +4,7 @@ set -euo pipefail
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$project_root"
 
+lane_start=$SECONDS
 mode=${1:-fast}
 test_jobs=${CIVIC_DYNASTY_JOBS:-}
 if [[ -n "$test_jobs" ]] && ! [[ "$test_jobs" =~ ^[1-9][0-9]*$ ]]; then
@@ -43,13 +44,15 @@ fast iteration:
   'quick' is an alias for 'fast' that never triggers docs or CLI builds.
   Set CIVIC_DYNASTY_JOBS=4 to cap parallelism on a busy machine.
   Set CIVIC_DYNASTY_SKIP_CLI_BUILD=1 to skip CLI rebuild when iterating on lib only.
-  If 'cargo nextest' is installed, 'fast' will use it automatically for ~30%% faster runs.
+  Set CIVIC_DYNASTY_NEXTEST=1 to run tests under cargo-nextest (per-test isolation
+  and failure capture; measured slower than plain cargo test on this suite).
 
 environment:
   CIVIC_DYNASTY_JOBS           pass --jobs N to cargo test/build commands
   CIVIC_DYNASTY_PROFILE        debug (default) or release for adapter smoke builds
   CIVIC_DYNASTY_BINARY         reuse a prebuilt CLI binary for adapter smoke groups
   CIVIC_DYNASTY_SKIP_CLI_BUILD skip CLI rebuild when set (fast lib-only iteration)
+  CIVIC_DYNASTY_NEXTEST        run library tests under cargo-nextest when set to 1
   CIVIC_DYNASTY_PYTHON         select an explicit Python interpreter
 EOF
   exit 2
@@ -106,16 +109,6 @@ ensure_cli_binary() {
       if [[ ! -x "$CIVIC_DYNASTY_BINARY" ]]; then
         printf 'CIVIC_DYNASTY_BINARY is not executable: %q\n' "$CIVIC_DYNASTY_BINARY" >&2
         return 1
-      fi
-      # Incremental fast path: if the requested binary exists and is newer than
-      # Cargo sources, skip the rebuild — cargo's own incrementality handles the
-      # rest, but this avoids even invoking cargo for a no-op.
-      local binary_mtime
-      binary_mtime=$(stat -c %Y "$CIVIC_DYNASTY_BINARY" 2>/dev/null || stat -f %m "$CIVIC_DYNASTY_BINARY" 2>/dev/null || printf '0')
-      local cargo_mtime
-      cargo_mtime=$(stat -c %Y Cargo.toml 2>/dev/null || stat -f %m Cargo.toml 2>/dev/null || printf '0')
-      if (( binary_mtime > cargo_mtime )) && [[ -n "${CIVIC_DYNASTY_SKIP_CLI_BUILD:-}" ]]; then
-        return 0
       fi
       return 0
     fi
@@ -272,18 +265,17 @@ has_nextest() {
 run_fast() {
   local filter=${1:-}
   local label='Library tests'
-  local match_description=''
   if [[ -n "$filter" ]]; then
     label="Library tests matching '$filter'"
-    match_description=$filter
   fi
-  # Prefer cargo-nextest when available: ~30% faster and per-test timing.
-  if has_nextest && [[ -z "${CIVIC_DYNASTY_NO_NEXTEST:-}" ]]; then
+  # Measured on this suite: one warm `cargo test` process is the fastest option
+  # because tests share campaign-fixture setup. Opt into cargo-nextest with
+  # CIVIC_DYNASTY_NEXTEST=1 when per-test isolation or failure capture helps.
+  if has_nextest && [[ -n "${CIVIC_DYNASTY_NEXTEST:-}" ]]; then
     local command=(cargo nextest run --locked --lib "${job_args[@]}" --no-fail-fast)
     if [[ -n "$filter" ]]; then
       command+=(-E "test($filter)")
     fi
-    # nextest already prints concise per-test output; wrap as a step
     run_step "$label (nextest)" "${command[@]}"
     return $?
   fi
@@ -291,7 +283,7 @@ run_fast() {
   if [[ -n "$filter" ]]; then
     command+=("$filter")
   fi
-  run_test_step "$label" "$match_description" "${command[@]}"
+  run_test_step "$label" "${filter:+$filter}" "${command[@]}"
 }
 
 run_exact() {
@@ -567,3 +559,5 @@ esac
 if [[ -n "$receipt_lane" ]]; then
   "$receipt_python" scripts/validation_receipt.py record "$receipt_lane" "$receipt_start"
 fi
+
+printf '\n==> Lane %q completed in %s\n' "$mode" "$(format_duration "$((SECONDS - lane_start))")"

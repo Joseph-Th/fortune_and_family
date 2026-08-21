@@ -39,7 +39,8 @@ This project applies the Universal, Stateful Application, Deterministic System, 
 
 ## Completion
 
-Use `bash scripts/test.sh fast <filter>` for focused iteration when it shortens feedback or isolates a failure.
+Use `bash scripts/test.sh fast <filter>` (or `.\scripts\test.ps1 fast <filter>`
+on Windows) for focused iteration when it shortens feedback or isolates a failure.
 When ordinary work is ready for completion, go directly to `standard` instead of running `fast`
 immediately beforehand merely as a prelude. For specialized surfaces, run the smallest lane from
 [TESTING.md](TESTING.md) that owns the changed contract, plus only genuinely distinct evidence that lane

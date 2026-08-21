@@ -12,6 +12,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $ProjectRoot
 
+$LaneStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $JobArgs = @()
 if ($env:CIVIC_DYNASTY_JOBS) {
     if ($env:CIVIC_DYNASTY_JOBS -notmatch '^[1-9][0-9]*$') {
@@ -52,6 +53,38 @@ environment:
   CIVIC_DYNASTY_PYTHON         select an explicit Python interpreter
 "@ | Write-Host
     exit 2
+}
+
+function Resolve-BashInterpreter {
+    $found = Get-Command bash -ErrorAction SilentlyContinue
+    if ($found) {
+        return $found.Source
+    }
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($git) {
+        $gitDir = Split-Path $git.Source
+        foreach ($relative in @("..\usr\bin\bash.exe", "..\bin\bash.exe")) {
+            $candidate = [System.IO.Path]::GetFullPath((Join-Path $gitDir $relative))
+            if (Test-Path $candidate) {
+                return $candidate
+            }
+        }
+    }
+    return $null
+}
+
+function Run-ShellSyntaxCheck {
+    # The git hooks and CI lanes execute the bash runners, so keep them
+    # syntactically valid even when driving verification from PowerShell.
+    $bash = Resolve-BashInterpreter
+    if (-not $bash) {
+        Write-Host "`n==> Shell syntax checks (skipped: bash not found)" -ForegroundColor Yellow
+        return
+    }
+    Run-Step "Shell syntax checks" {
+        & $bash -n scripts/test.sh scripts/verify_cli.sh
+        if ($LASTEXITCODE -ne 0) { throw "Shell syntax check failed" }
+    }
 }
 
 function Resolve-PythonInterpreter {
@@ -156,7 +189,10 @@ function Has-Nextest {
 
 function Run-Fast([string]$TestFilter) {
     $label = if ($TestFilter) { "Library tests matching '$TestFilter'" } else { "Library tests" }
-    if ((Has-Nextest) -and (-not $env:CIVIC_DYNASTY_NO_NEXTEST)) {
+    # Measured on this suite: one warm `cargo test` process is the fastest
+    # option because tests share campaign-fixture setup. Opt into cargo-nextest
+    # with CIVIC_DYNASTY_NEXTEST=1 when per-test isolation helps debugging.
+    if ((Has-Nextest) -and ($env:CIVIC_DYNASTY_NEXTEST -eq "1")) {
         $nextestArgs = @("nextest", "run", "--locked", "--lib") + $JobArgs + @("--no-fail-fast")
         if ($TestFilter) {
             $nextestArgs += @("-E", "test($TestFilter)")
@@ -283,6 +319,7 @@ function Run-GameplayAudit {
 }
 
 function Run-Standard {
+    Run-ShellSyntaxCheck
     Run-Fast
     Run-Docs
     if (-not $env:CIVIC_DYNASTY_SKIP_CLI_BUILD) {
@@ -294,6 +331,7 @@ function Run-Standard {
 }
 
 function Run-CiVerify {
+    Run-ShellSyntaxCheck
     Run-Step "Format" {
         & cargo fmt --all -- --check
         if ($LASTEXITCODE -ne 0) { throw "Formatting check failed" }
@@ -403,3 +441,6 @@ if ($ReceiptLane) {
     & $ReceiptPython scripts/validation_receipt.py record $ReceiptLane $ReceiptStart
     if ($LASTEXITCODE -ne 0) { throw "Failed to record validation receipt" }
 }
+
+$LaneStopwatch.Stop()
+Write-Host ("`n==> Lane '{0}' completed in {1}" -f $Mode, (Format-Duration $LaneStopwatch.Elapsed.TotalSeconds)) -ForegroundColor Cyan

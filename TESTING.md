@@ -36,9 +36,13 @@ or `cargo build` the runner invokes. The default is Cargo's own parallelism,
 which already uses the machine's cores; lowering it can keep a heavily used
 development machine responsive.
 
-- If `cargo-nextest` is installed, `fast`/`quick` use it automatically for
-  faster per-test execution; set `CIVIC_DYNASTY_NO_NEXTEST=1` to force plain
-  `cargo test`.
+- Plain `cargo test` is the default and fastest runner on this suite (tests
+  share campaign-fixture setup inside one process). Set
+  `CIVIC_DYNASTY_NEXTEST=1` to run library tests under `cargo-nextest` instead,
+  trading warm-run speed for per-test isolation, timing, and failure capture.
+- On Windows without bash on PATH, every mode in this table is also available
+  through the native PowerShell runner: `.\scripts\test.ps1 <mode> [filter]`.
+  It mirrors `scripts/test.sh`, including receipts, CLI reuse, and lane timing.
 - Set `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` to skip CLI rebuilds when iterating on
   library code only.
 - The pre-push hook defaults to `quick` for snappy pushes; set
