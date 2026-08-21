@@ -118,7 +118,7 @@ Each simulated day runs in this order:
 5. Decide and apply business sales.
 6. Decide and apply household consumption.
 7. Decide and apply maintenance.
-8. Apply spoilage and update prices.
+8. Apply spoilage (market and business inventories) and update prices.
 9. Apply price controls.
 10. Update business lifecycle state.
 11. Advance the clock.
