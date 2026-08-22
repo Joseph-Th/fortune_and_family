@@ -24,7 +24,7 @@ mod systems;
 
 pub use art::{
     ART_REVIEW_SCHEMA_VERSION, ArtReview, ArtReviewConfig, ArtReviewError, ArtReviewReport,
-    ArtSeverity, CharacterRole, CharacterSpec, build_art_review, build_art_review_report,
+    ArtSeverity, CharacterSpec, SpriteRole, build_art_review, build_art_review_report,
     render_art_review_html,
 };
 pub use core::{AppState, NewGameConfig};
@@ -40,11 +40,11 @@ pub use gameplay::{
 };
 pub use persistence::{
     PersistenceError, SaveOutcome, SaveRevision, StateValidationKind, load_state,
-    load_state_with_revision, save_state, save_state_cas, save_state_new,
+    load_state_with_revision, save_state, save_state_cas, save_state_new, write_generated_file,
 };
 pub use projection::{
-    CampaignProjection, StateSummary, build_campaign_projection, build_state_summary,
-    render_campaign_html,
+    AttentionItem, AttentionTone, CampaignProjection, StateSummary, build_campaign_projection,
+    build_state_summary, render_campaign_html,
 };
 pub use registry::{Registry, build_rivergate_registry};
 pub use systems::{

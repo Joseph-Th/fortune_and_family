@@ -627,34 +627,9 @@ fn output_limited_batches(
     recipe: &RecipeDef,
 ) -> u16 {
     let output_good_id = recipe.output_good_id();
-    let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
-        .saturating_mul(i64::from(business.policy.target_output_days));
-    let policy_reserve = recipe
-        .output_quantity()
-        .saturating_mul_ratio(reserve_batches, 1);
-    let contract_reserve = state
-        .contracts
-        .values()
-        .filter(|contract| {
-            contract.status == crate::core::ContractStatus::Active
-                && contract.seller_business_id == business.id()
-                && contract.good_id == output_good_id
-        })
-        .fold(Quantity::ZERO, |total, contract| {
-            total.saturating_add(contract.quantity_per_week)
-        });
-    let market_capacity =
-        state
-            .market
-            .quotes
-            .get(&output_good_id)
-            .map_or(Quantity::ZERO, |quote| {
-                quote
-                    .target_stock
-                    .saturating_mul_ratio(3, 2)
-                    .saturating_sub(quote.stock)
-                    .max(Quantity::ZERO)
-            });
+    let policy_reserve = super::business_policy_reserve(business, recipe.output_quantity());
+    let contract_reserve = super::business_contract_reserve(state, business.id(), output_good_id);
+    let market_capacity = super::market_absorption_capacity(state, output_good_id);
     let output_headroom = policy_reserve
         .saturating_add(contract_reserve)
         .saturating_add(market_capacity)
@@ -908,10 +883,17 @@ fn decide_business_sales(
         ) {
             continue;
         }
-        let candidate = plan_sale_candidate(registry, state, business)?;
-        let Some(candidate) = candidate else {
+        let Some(mut candidate) = plan_sale_candidate(registry, state, business)? else {
             continue;
         };
+        // Sellers share one absorption ceiling per good: each placement
+        // consumes the headroom later sellers plan against, mirroring the
+        // shared stock accounting in `decide_business_purchases`.
+        let shared_capacity = market_capacity
+            .get(&candidate.good_id)
+            .copied()
+            .unwrap_or(Quantity::ZERO);
+        candidate.capacity = candidate.capacity.min(shared_capacity);
         let quantity = sale_quantity(&candidate);
         if quantity.is_zero() {
             continue;
@@ -961,22 +943,8 @@ fn plan_sale_candidate(
         .expect("business manager reference must be valid");
     let good_id = recipe.output_good_id();
     let inventory = business.inventory_quantity(good_id);
-    let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
-        .saturating_mul(i64::from(business.policy.target_output_days));
-    let policy_reserve = recipe
-        .output_quantity()
-        .saturating_mul_ratio(reserve_batches, 1);
-    let contract_reserve = state
-        .contracts
-        .values()
-        .filter(|contract| {
-            contract.status == crate::core::ContractStatus::Active
-                && contract.seller_business_id == business.id()
-                && contract.good_id == good_id
-        })
-        .fold(Quantity::ZERO, |total, contract| {
-            total.saturating_add(contract.quantity_per_week)
-        });
+    let policy_reserve = super::business_policy_reserve(business, recipe.output_quantity());
+    let contract_reserve = super::business_contract_reserve(state, business.id(), good_id);
     let policy_reserve_basis_points = match business.status() {
         BusinessStatus::Active
             if business.cash() < recipe.daily_operating_cost().saturating_mul(2) =>
@@ -995,17 +963,7 @@ fn plan_sale_candidate(
     if surplus.is_zero() {
         return Ok(None);
     }
-    let capacity = state
-        .market
-        .quotes
-        .get(&good_id)
-        .map_or(Quantity::ZERO, |quote| {
-            quote
-                .target_stock
-                .saturating_mul_ratio(3, 2)
-                .saturating_sub(quote.stock)
-                .max(Quantity::ZERO)
-        });
+    let capacity = super::market_absorption_capacity(state, good_id);
     let quote = state
         .market
         .quotes
@@ -1315,7 +1273,6 @@ fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, 
         SocialClass::Laboring => (180, 200, 30),
         SocialClass::Artisan => (240, 400, 120),
         SocialClass::Merchant => (300, 600, 180),
-        SocialClass::Elite => (360, 800, 240),
     };
     (
         Quantity::from_milliunits(charcoal),
@@ -2113,9 +2070,25 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
         }
     } else {
         // Pro-rate the shortfall deterministically in stable household order.
+        // Truncated shares would otherwise strand copper between the clearing
+        // account debit and the households, so the first households in stable
+        // order absorb the one-copper rounding remainder until the paid-out
+        // total is fully delivered.
         let scale = paid_out.copper().saturating_mul(10_000) / total.copper();
-        for (household_id, paid) in payments {
+        let mut distributed_copper = 0_i64;
+        let mut shares = Vec::with_capacity(payments.len());
+        for (household_id, paid) in &payments {
             let share = paid.saturating_mul_ratio(scale, 10_000);
+            distributed_copper = distributed_copper.saturating_add(share.copper());
+            shares.push((*household_id, share));
+        }
+        let mut remainder_copper = paid_out.copper().saturating_sub(distributed_copper);
+        for (household_id, mut share) in shares {
+            if remainder_copper > 0 {
+                let bonus = remainder_copper.min(1);
+                share = Money::from_copper(share.copper().saturating_add(bonus));
+                remainder_copper = remainder_copper.saturating_sub(bonus);
+            }
             if share <= Money::ZERO {
                 continue;
             }
@@ -2133,7 +2106,11 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
         day: state.clock.day(),
         kind: AuditKind::LaborSettlement,
         subject: "external-economy".into(),
-        detail: format!("weekly_income={}", total.copper()),
+        detail: format!(
+            "weekly_income={} paid_out={}",
+            total.copper(),
+            paid_out.copper()
+        ),
     });
     Ok(())
 }
@@ -2231,29 +2208,94 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
 }
 
 /// Selects the most capable adult active dynasty member other than the head,
-/// breaking ties by stable ID order.
+/// breaking ties by stable ID order. When the house has no adult besides the
+/// head, the most capable active member of any age succeeds instead, so a
+/// household of minors still designates an heir and the annual succession
+/// pass can execute rather than leaving a headless house operating.
 fn emergency_successor(state: &AppState, head_id: CharacterId) -> Option<CharacterId> {
     let head = state.characters.get(head_id)?;
-    state
-        .characters
-        .iter()
-        .filter(|character| {
-            character.dynasty_id() == head.dynasty_id()
-                && character.id() != head_id
-                && character.status() == CharacterStatus::Active
-                && state.clock.day().saturating_sub(character.birth_day())
-                    >= crate::systems::commands::HEIR_MINIMUM_AGE_DAYS
-        })
-        .max_by_key(|character| {
-            (
-                u32::from(character.capabilities.administration)
-                    + u32::from(character.capabilities.commerce)
-                    + u32::from(character.capabilities.social)
-                    + u32::from(character.capabilities.craft),
-                character.id().value(),
-            )
-        })
+    let candidate = |character: &&crate::core::Character| {
+        character.dynasty_id() == head.dynasty_id()
+            && character.id() != head_id
+            && character.status() == CharacterStatus::Active
+    };
+    let mut candidates: Vec<_> = state.characters.iter().filter(candidate).collect();
+    if candidates.iter().all(|character| {
+        state.clock.day().saturating_sub(character.birth_day())
+            < crate::systems::commands::HEIR_MINIMUM_AGE_DAYS
+    }) {
+        return candidates
+            .into_iter()
+            .max_by_key(|character| emergency_successor_rank(character))
+            .map(crate::core::Character::id);
+    }
+    candidates.retain(|character| {
+        state.clock.day().saturating_sub(character.birth_day())
+            >= crate::systems::commands::HEIR_MINIMUM_AGE_DAYS
+    });
+    candidates
+        .into_iter()
+        .max_by_key(|character| emergency_successor_rank(character))
         .map(crate::core::Character::id)
+}
+
+/// Capability sum with stable typed-ID tie-breaking.
+fn emergency_successor_rank(character: &crate::core::Character) -> (u32, u32) {
+    (
+        u32::from(character.capabilities.administration)
+            + u32::from(character.capabilities.commerce)
+            + u32::from(character.capabilities.social)
+            + u32::from(character.capabilities.craft),
+        character.id().value(),
+    )
+}
+
+/// Vacates any office held by `character_id` (clamping the replacement
+/// selection day) and removes them from every institutional membership.
+fn vacate_character_institutional_roles(
+    state: &mut AppState,
+    character_id: CharacterId,
+    replacement_selection_day: Option<i64>,
+) {
+    for institution in state.institutions.values_mut() {
+        institution.members.remove(&character_id);
+        if institution.office_holder_id == Some(character_id) {
+            institution.office_holder_id = None;
+            institution.next_selection_day = institution
+                .next_selection_day
+                .min(replacement_selection_day.expect("office replacement day was preflighted"));
+        }
+    }
+}
+
+/// Hands management of a character's businesses to `replacement_manager_id`.
+fn reassign_managed_businesses(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+    character_id: CharacterId,
+    replacement_manager_id: CharacterId,
+) {
+    let managed_business_ids: Vec<_> = state
+        .businesses
+        .ids_for_owner(dynasty_id)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|business_id| {
+            state
+                .businesses
+                .get(*business_id)
+                .is_some_and(|business| business.manager_id() == character_id)
+        })
+        .collect();
+    for business_id in managed_business_ids {
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("owner business index must resolve")
+            .operations
+            .manager_id = replacement_manager_id;
+    }
 }
 
 fn synchronize_character_incapacitation(
@@ -2281,41 +2323,13 @@ fn synchronize_character_incapacitation(
         .expect("character dynasty must have a family council")
         .members
         .remove(&character_id);
-    for institution in state.institutions.values_mut() {
-        institution.members.remove(&character_id);
-        if institution.office_holder_id == Some(character_id) {
-            institution.office_holder_id = None;
-            institution.next_selection_day = institution
-                .next_selection_day
-                .min(replacement_selection_day.expect("office replacement day was preflighted"));
-        }
-    }
+    vacate_character_institutional_roles(state, character_id, replacement_selection_day);
     let replacement_manager_id = state
         .dynasties
         .get(&dynasty_id)
         .expect("character dynasty must exist")
         .head_id();
-    let managed_business_ids: Vec<_> = state
-        .businesses
-        .ids_for_owner(dynasty_id)
-        .into_iter()
-        .flatten()
-        .copied()
-        .filter(|business_id| {
-            state
-                .businesses
-                .get(*business_id)
-                .is_some_and(|business| business.manager_id() == character_id)
-        })
-        .collect();
-    for business_id in managed_business_ids {
-        state
-            .businesses
-            .get_mut(business_id)
-            .expect("owner business index must resolve")
-            .operations
-            .manager_id = replacement_manager_id;
-    }
+    reassign_managed_businesses(state, dynasty_id, character_id, replacement_manager_id);
     if dynasty_id == state.player_dynasty_id {
         super::strategic::try_push_outbox(
             state,
@@ -2616,46 +2630,26 @@ fn retire_outgoing_head(state: &mut AppState, outgoing_head_id: CharacterId) {
 
 fn update_institutions_for_succession(
     state: &mut AppState,
+    dynasty_id: DynastyId,
     outgoing_head_id: CharacterId,
+    incoming_head_id: CharacterId,
     replacement_selection_day: Option<i64>,
 ) {
+    // Non-player heads hold institutional seats by dynasty standing, so the
+    // incoming head inherits them. Player dynasties earn membership through
+    // patronage instead, so their seats are not transferred.
+    let transfer_membership = dynasty_id != state.player_dynasty_id;
     for institution in state.institutions.values_mut() {
         institution.members.remove(&outgoing_head_id);
+        if transfer_membership {
+            institution.members.insert(incoming_head_id);
+        }
         if institution.office_holder_id == Some(outgoing_head_id) {
             institution.office_holder_id = None;
             institution.next_selection_day = institution
                 .next_selection_day
                 .min(replacement_selection_day.expect("office replacement day was preflighted"));
         }
-    }
-}
-
-fn transfer_succession_business_management(
-    state: &mut AppState,
-    dynasty_id: DynastyId,
-    outgoing_head_id: CharacterId,
-    incoming_head_id: CharacterId,
-) {
-    let managed_business_ids: Vec<_> = state
-        .businesses
-        .ids_for_owner(dynasty_id)
-        .into_iter()
-        .flatten()
-        .copied()
-        .filter(|business_id| {
-            state
-                .businesses
-                .get(*business_id)
-                .is_some_and(|business| business.manager_id() == outgoing_head_id)
-        })
-        .collect();
-    for business_id in managed_business_ids {
-        state
-            .businesses
-            .get_mut(business_id)
-            .expect("owner business index must resolve")
-            .operations
-            .manager_id = incoming_head_id;
     }
 }
 
@@ -2821,13 +2815,14 @@ fn apply_successions_in_place(
             incoming.runtime.loyalty_basis_points = 10_000;
         }
 
-        update_institutions_for_succession(state, outgoing_head_id, replacement_selection_day);
-        transfer_succession_business_management(
+        update_institutions_for_succession(
             state,
             dynasty_id,
             outgoing_head_id,
             incoming_head_id,
+            replacement_selection_day,
         );
+        reassign_managed_businesses(state, dynasty_id, outgoing_head_id, incoming_head_id);
         let new_heir_id = insert_succession_heir(
             state,
             dynasty_id,

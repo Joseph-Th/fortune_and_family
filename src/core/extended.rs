@@ -14,7 +14,6 @@ pub enum ContractStatus {
     Active,
     Fulfilled,
     Breached,
-    Renegotiated,
     Cancelled,
 }
 
@@ -246,7 +245,6 @@ pub enum FamilyLinkKind {
     ParentChild,
     Sibling,
     Ward,
-    Adoptive,
 }
 
 pub(crate) const MIN_PARENT_CHILD_AGE_GAP_DAYS: i64 = 12 * 360;
@@ -495,7 +493,6 @@ pub struct RelationshipState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InformationConfidence {
-    Rumored,
     Probable,
     Confirmed,
 }
@@ -505,7 +502,6 @@ impl InformationConfidence {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Rumored => "Rumored",
             Self::Probable => "Probable",
             Self::Confirmed => "Confirmed",
         }

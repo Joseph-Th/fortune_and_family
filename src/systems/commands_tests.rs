@@ -2188,8 +2188,8 @@ mod business_acquisition {
 
         assert_eq!(
             result,
-            Err(CommandError::Simulation(
-                crate::systems::SimulationError::BusinessCashOverflow {
+            Err(CommandError::Strategic(
+                StrategicError::BusinessCashOverflow {
                     business_id,
                     current: Money::from_copper(i64::MAX),
                     incoming: amount,
@@ -2231,8 +2231,8 @@ mod business_acquisition {
 
         assert_eq!(
             result,
-            Err(CommandError::Simulation(
-                crate::systems::SimulationError::BusinessFinanceVersionExhausted { business_id }
+            Err(CommandError::Strategic(
+                StrategicError::BusinessFinanceVersionExhausted { business_id }
             ))
         );
         assert_state_unchanged(
@@ -2262,7 +2262,10 @@ mod business_acquisition {
             },
         );
 
-        assert_eq!(result, Err(CommandError::InvalidBusinessInvestment));
+        assert_eq!(
+            result,
+            Err(CommandError::Strategic(StrategicError::NonPositiveAmount))
+        );
         assert_state_unchanged(
             &before,
             &state,

@@ -88,8 +88,6 @@ pub enum CharacterStatus {
 pub enum CharacterRole {
     HeadOfHouse,
     Heir,
-    BusinessManager,
-    GuildRepresentative,
     Clerk,
 }
 
@@ -119,7 +117,6 @@ pub enum SocialClass {
     Laboring,
     Artisan,
     Merchant,
-    Elite,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,11 +179,6 @@ impl Character {
     #[must_use]
     pub const fn role(&self) -> CharacterRole {
         self.runtime.role
-    }
-
-    #[must_use]
-    pub const fn administration(&self) -> u16 {
-        self.capabilities.administration
     }
 }
 

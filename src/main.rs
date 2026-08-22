@@ -2,20 +2,18 @@
 
 use civic_dynasty::core::StartingBackground;
 use civic_dynasty::{
-    ArtReviewConfig, ArtReviewError, ArtSeverity, CharacterRole, CommandError,
-    GameplayFindingSeverity, GameplayHarnessConfig, GameplayHarnessError, GameplayPersona,
-    NewGameConfig, NewGameError, PersistenceError, PlayerCommand, Registry, SimulationError,
+    ArtReviewConfig, ArtReviewError, ArtSeverity, CommandError, GameplayFindingSeverity,
+    GameplayHarnessConfig, GameplayHarnessError, GameplayPersona, NewGameConfig, NewGameError,
+    PersistenceError, PlayerCommand, Registry, SaveOutcome, SimulationError, SpriteRole,
     advance_days, apply_player_command, build_art_review, build_art_review_report,
     build_campaign_projection, build_new_game, build_rivergate_registry, build_state_summary,
     load_state, load_state_with_revision, render_art_review_html, render_campaign_html,
     render_gameplay_report, run_gameplay_harness, save_state, save_state_cas, save_state_new,
-    validate_invariants,
+    validate_invariants, write_generated_file,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tempfile::Builder;
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -102,7 +100,7 @@ struct ArtArgs {
     scale: u32,
     /// Roles to render; repeat to select several. Omit to render all.
     #[arg(long, value_enum)]
-    role: Vec<CharacterRoleArg>,
+    role: Vec<SpriteRoleArg>,
     /// Emit the versioned structured JSON report instead of the HTML sheet.
     #[arg(long)]
     json: bool,
@@ -112,20 +110,20 @@ struct ArtArgs {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum CharacterRoleArg {
+enum SpriteRoleArg {
     Baker,
     Merchant,
     Laborer,
     Official,
 }
 
-impl From<CharacterRoleArg> for CharacterRole {
-    fn from(value: CharacterRoleArg) -> Self {
+impl From<SpriteRoleArg> for SpriteRole {
+    fn from(value: SpriteRoleArg) -> Self {
         match value {
-            CharacterRoleArg::Baker => Self::Baker,
-            CharacterRoleArg::Merchant => Self::Merchant,
-            CharacterRoleArg::Laborer => Self::Laborer,
-            CharacterRoleArg::Official => Self::Official,
+            SpriteRoleArg::Baker => Self::Baker,
+            SpriteRoleArg::Merchant => Self::Merchant,
+            SpriteRoleArg::Laborer => Self::Laborer,
+            SpriteRoleArg::Official => Self::Official,
         }
     }
 }
@@ -285,7 +283,8 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             if advance > 0 {
                 advance_days(registry, &mut state, advance)?;
             }
-            save_state_new(&output, &state, overwrite)?;
+            save_state_new(&output, &state, overwrite)
+                .map(|outcome| report_save_outcome(output.as_path(), outcome))?;
             print_human_summary(registry, &state);
             println!("Saved {}", output.display());
         }
@@ -294,16 +293,20 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             output,
             days,
         } => {
-            let in_place = output.is_none() || output.as_ref() == Some(&input);
+            let in_place = output.is_none()
+                || paths_refer_to_same_file(&input, output.as_deref().unwrap_or(input.as_path()));
             let (mut state, revision) = load_state_with_revision(&input)?;
             validate_invariants(registry, &state);
             advance_days(registry, &mut state, days)?;
             let output_path = output.unwrap_or(input);
-            if in_place {
-                save_state_cas(&output_path, &state, &revision)?;
-            } else {
-                save_state(&output_path, &state)?;
-            }
+            report_save_outcome(
+                output_path.as_path(),
+                if in_place {
+                    save_state_cas(&output_path, &state, &revision)
+                } else {
+                    save_state(&output_path, &state)
+                }?,
+            );
             print_human_summary(registry, &state);
             println!("Saved {}", output_path.display());
         }
@@ -335,7 +338,8 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             command,
             output,
         } => {
-            let in_place = output.is_none() || output.as_ref() == Some(&input);
+            let in_place = output.is_none()
+                || paths_refer_to_same_file(&input, output.as_deref().unwrap_or(input.as_path()));
             let (mut state, revision) = load_state_with_revision(&input)?;
             validate_invariants(registry, &state);
             let command: PlayerCommand = serde_json::from_str(&command)
@@ -343,11 +347,14 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             let outcome = apply_player_command(registry, &mut state, command)?;
             validate_invariants(registry, &state);
             let output_path = output.unwrap_or(input);
-            if in_place {
-                save_state_cas(&output_path, &state, &revision)?;
-            } else {
-                save_state(&output_path, &state)?;
-            }
+            report_save_outcome(
+                output_path.as_path(),
+                if in_place {
+                    save_state_cas(&output_path, &state, &revision)
+                } else {
+                    save_state(&output_path, &state)
+                }?,
+            );
             println!("{}", outcome.summary);
             print_human_summary(registry, &state);
             println!("Saved {}", output_path.display());
@@ -451,13 +458,13 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
     };
     if let Some(path) = args.output {
         ensure_output_parent(&path)?;
-        let outcome = write_generated_output(&path, rendered.as_bytes()).map_err(|source| {
+        let outcome = write_generated_file(&path, rendered.as_bytes()).map_err(|source| {
             CliError::GameplayReportWrite {
                 path: path.clone(),
                 source,
             }
         })?;
-        if outcome == GeneratedOutputOutcome::CommittedWithDegradedDurability {
+        if outcome == SaveOutcome::CommittedWithDegradedDurability {
             eprintln!(
                 "warning: directory durability synchronization degraded for {}",
                 path.display()
@@ -507,7 +514,7 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
 
 fn run_art(args: ArtArgs) -> Result<(), CliError> {
     let roles = if args.role.is_empty() {
-        CharacterRole::ALL.to_vec()
+        SpriteRole::ALL.to_vec()
     } else {
         args.role.into_iter().map(Into::into).collect()
     };
@@ -525,13 +532,13 @@ fn run_art(args: ArtArgs) -> Result<(), CliError> {
         render_art_review_html(&review)
     };
     ensure_output_parent(&args.output)?;
-    let outcome = write_generated_output(&args.output, rendered.as_bytes()).map_err(|source| {
+    let outcome = write_generated_file(&args.output, rendered.as_bytes()).map_err(|source| {
         CliError::ArtReviewWrite {
             path: args.output.clone(),
             source,
         }
     })?;
-    if outcome == GeneratedOutputOutcome::CommittedWithDegradedDurability {
+    if outcome == SaveOutcome::CommittedWithDegradedDurability {
         eprintln!(
             "warning: directory durability synchronization degraded for {}",
             args.output.display()
@@ -555,37 +562,28 @@ fn run_art(args: ArtArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GeneratedOutputOutcome {
-    Committed,
-    CommittedWithDegradedDurability,
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static INJECT_GENERATED_OUTPUT_SYNC_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-pub(crate) fn set_inject_generated_output_sync_failure_for_test(inject: bool) {
-    INJECT_GENERATED_OUTPUT_SYNC_FAILURE.with(|cell| cell.set(inject));
-}
-
-/// Performs the platform's parent-directory synchronization where the platform
-/// supports it; see the persistence layer's equivalent.
-#[allow(clippy::unnecessary_wraps)]
-fn sync_generated_output_directory_with_injection(
-    #[allow(unused_variables)] parent: &Path,
-) -> io::Result<()> {
-    #[cfg(test)]
-    if INJECT_GENERATED_OUTPUT_SYNC_FAILURE.with(std::cell::Cell::get) {
-        return Err(io::Error::other(
-            "injected generated output directory sync failure",
-        ));
+/// Surfaces degraded durability for campaign saves so a committed-but-unsynced
+/// write is visible to the operator, matching generated-output handling.
+fn report_save_outcome(path: &Path, outcome: SaveOutcome) {
+    if outcome == SaveOutcome::CommittedWithDegradedDurability {
+        eprintln!(
+            "warning: directory durability synchronization degraded for {}",
+            path.display()
+        );
     }
-    #[cfg(unix)]
-    sync_generated_output_directory(parent)?;
-    Ok(())
+}
+
+/// Resolves whether two paths refer to the same file by comparing
+/// canonicalized forms, so a textual alias (`./campaign.json`) does not
+/// silently bypass compare-and-swap in-place writes.
+fn paths_refer_to_same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a_canonical), Ok(b_canonical)) => a_canonical == b_canonical,
+        _ => false,
+    }
 }
 
 fn check_dashboard_path_aliasing(input: &Path, output: &Path) -> Result<(), CliError> {
@@ -627,59 +625,19 @@ fn write_dashboard(registry: &Registry, input: &Path, output: &Path) -> Result<(
     let html = render_campaign_html(registry, &state)
         .map_err(|source| CliError::DashboardSerialization { source })?;
     ensure_output_parent(output)?;
-    let outcome = write_generated_output(output, html.as_bytes()).map_err(|source| {
+    let outcome = write_generated_file(output, html.as_bytes()).map_err(|source| {
         CliError::DashboardWrite {
             path: output.to_path_buf(),
             source,
         }
     })?;
-    if outcome == GeneratedOutputOutcome::CommittedWithDegradedDurability {
+    if outcome == SaveOutcome::CommittedWithDegradedDurability {
         eprintln!(
             "warning: directory durability synchronization degraded for {}",
             output.display()
         );
     }
     Ok(())
-}
-
-fn write_generated_output(path: &Path, contents: &[u8]) -> io::Result<GeneratedOutputOutcome> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.file_type().is_file() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "generated output path is not a regular file: {}",
-                    path.display()
-                ),
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let prefix = path.file_name().and_then(|name| name.to_str()).map_or_else(
-        || ".generated-output-".to_owned(),
-        |name| format!(".{name}."),
-    );
-    let mut temporary = Builder::new().prefix(&prefix).tempfile_in(parent)?;
-    temporary.write_all(contents)?;
-    temporary.as_file_mut().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    let outcome = match sync_generated_output_directory_with_injection(parent) {
-        Ok(()) => GeneratedOutputOutcome::Committed,
-        Err(_) => GeneratedOutputOutcome::CommittedWithDegradedDurability,
-    };
-    Ok(outcome)
-}
-
-#[cfg(unix)]
-fn sync_generated_output_directory(parent: &Path) -> io::Result<()> {
-    std::fs::File::open(parent)?.sync_all()
 }
 
 fn ensure_output_parent(path: &Path) -> Result<(), CliError> {
@@ -729,92 +687,14 @@ fn print_human_summary(registry: &Registry, state: &civic_dynasty::AppState) {
 }
 
 fn print_cli_attention(projection: &civic_dynasty::CampaignProjection) {
-    use civic_dynasty::core::{BusinessStatus, EmploymentStatus, LegalCaseStatus, LoanStatus};
-
-    let player_id = projection.player.id;
-    let disputed_labor = projection.employment.iter().filter(|agreement| {
-        agreement.owner_dynasty_id == player_id && agreement.status == EmploymentStatus::Disputed
-    });
-    let distressed = projection.businesses.iter().filter(|business| {
-        business.owner_dynasty_id == player_id
-            && matches!(
-                business.status,
-                BusinessStatus::Distressed | BusinessStatus::Insolvent
-            )
-    });
-    let adverse_loans = projection.loans.iter().filter(|loan| {
-        loan.borrower_dynasty_id == player_id
-            && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
-    });
-    let defendant_cases = projection.legal_cases.iter().filter(|case| {
-        case.defendant_dynasty_id == player_id
-            && matches!(
-                case.status,
-                LegalCaseStatus::Filed | LegalCaseStatus::Hearing
-            )
-    });
-
     println!("Needs attention:");
-    let mut found = false;
-    if projection.player.unmet_office_duties > 0 {
-        println!(
-            "  ! {} unmet office duties",
-            projection.player.unmet_office_duties
-        );
-        found = true;
-    }
-    for agreement in disputed_labor {
-        println!(
-            "  ! labor dispute #{} at {}",
-            agreement.id, agreement.business
-        );
-        found = true;
-    }
-    for business in distressed {
-        println!(
-            "  ! business #{} {} is {} with {} cash",
-            business.id,
-            business.name,
-            business.status.label(),
-            business.cash
-        );
-        found = true;
-    }
-    for loan in adverse_loans {
-        println!(
-            "  ! loan #{} is {}: {} outstanding, {} missed payments",
-            loan.id,
-            loan.status.label(),
-            loan.balance,
-            loan.missed_payments
-        );
-        found = true;
-    }
-    for case in defendant_cases {
-        let settlement = case
-            .settlement_amount
-            .map_or_else(String::new, |amount| format!("; settlement {amount}"));
-        println!(
-            "  ! legal case #{} by {}: hearing day {}, damages {}{}",
-            case.id, case.plaintiff, case.hearing_day, case.damages, settlement
-        );
-        found = true;
-    }
-    for crisis in projection
-        .crises
-        .iter()
-        .filter(|crisis| crisis.status.is_active())
-    {
-        println!(
-            "  ! crisis #{} {}: {:.1}% severity",
-            crisis.id,
-            crisis.kind.label(),
-            f64::from(crisis.severity_basis_points) / 100.0
-        );
-        found = true;
-    }
-    if !found {
+    if projection.attention.is_empty() {
         println!("  none flagged by current campaign state");
+        return;
+    }
+    for item in &projection.attention {
+        println!("  ! [{}] {}: {}", item.category, item.title, item.detail);
+        println!("    → {}", item.action);
     }
 }
 
@@ -919,7 +799,7 @@ mod tests {
         let output = directory.path().join("report.json");
         std::fs::write(&output, b"old report").expect("existing report fixture must be written");
 
-        write_generated_output(&output, b"new report").expect("generated output must publish");
+        write_generated_file(&output, b"new report").expect("generated output must publish");
 
         assert_eq!(std::fs::read(&output).unwrap(), b"new report");
         let entries = std::fs::read_dir(directory.path())
@@ -937,36 +817,16 @@ mod tests {
         std::fs::write(output.join("sentinel"), b"preserve")
             .expect("directory sentinel fixture must be written");
 
-        let error = write_generated_output(&output, b"new report")
+        let error = write_generated_file(&output, b"new report")
             .expect_err("directory destination must be rejected");
 
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert_eq!(std::fs::read(output.join("sentinel")).unwrap(), b"preserve");
         let entries = std::fs::read_dir(directory.path())
             .expect("temporary directory must be readable")
             .map(|entry| entry.expect("directory entry must be readable").file_name())
             .collect::<Vec<_>>();
         assert_eq!(entries, ["report.json"]);
-    }
-
-    #[test]
-    fn generated_output_reports_degraded_durability_when_directory_sync_fails() {
-        let directory = tempfile::tempdir().expect("temporary directory must be created");
-        let output = directory.path().join("report.json");
-
-        set_inject_generated_output_sync_failure_for_test(true);
-        let outcome = write_generated_output(&output, b"degraded report");
-        set_inject_generated_output_sync_failure_for_test(false);
-
-        assert_eq!(
-            outcome.expect("write must commit even if directory sync degrades"),
-            GeneratedOutputOutcome::CommittedWithDegradedDurability
-        );
-        assert_eq!(
-            std::fs::read(&output).unwrap(),
-            b"degraded report",
-            "file must be visible and readable on disk despite degraded sync"
-        );
     }
 
     #[test]

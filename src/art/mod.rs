@@ -55,7 +55,7 @@ pub use png::{encode_indexed_png, encode_png_data_uri};
 pub use rig::{BodyProportions, HumanJoint, Pose, Skeleton, humanoid_skeleton};
 pub use shape::{Form, LightDirection, Shading};
 pub use sprite::{
-    CharacterRole, CharacterSpec, MAX_SPRITE_HEIGHT, MIN_SPRITE_HEIGHT, RenderedSprite,
-    SpriteSheet, render_character_clips, render_character_frame, render_character_sheet,
+    CharacterSpec, MAX_SPRITE_HEIGHT, MIN_SPRITE_HEIGHT, RenderedSprite, SpriteRole, SpriteSheet,
+    render_character_clips, render_character_frame, render_character_sheet,
 };
 pub use surface::{Brush, DitherMode, Material, MaterialTable, OutlineMode, Surface};

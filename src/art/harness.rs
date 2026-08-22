@@ -9,7 +9,7 @@
 use super::lint::{ArtFinding, ArtSeverity, count_at_least, review_sheet, split_frames};
 use super::png::encode_png_data_uri;
 use super::sprite::{
-    CharacterRole, CharacterSpec, MAX_SPRITE_HEIGHT, MIN_SPRITE_HEIGHT, SpriteSheet,
+    CharacterSpec, MAX_SPRITE_HEIGHT, MIN_SPRITE_HEIGHT, SpriteRole, SpriteSheet,
     render_character_clips,
 };
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ pub const MAX_REVIEW_SCALE: u32 = 16;
 /// Inputs that select which sprites the harness renders.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtReviewConfig {
-    pub roles: Vec<CharacterRole>,
+    pub roles: Vec<SpriteRole>,
     pub start_seed: u64,
     pub seeds: u32,
     pub height: i32,
@@ -39,7 +39,7 @@ pub struct ArtReviewConfig {
 impl Default for ArtReviewConfig {
     fn default() -> Self {
         Self {
-            roles: CharacterRole::ALL.to_vec(),
+            roles: SpriteRole::ALL.to_vec(),
             start_seed: 1,
             seeds: 2,
             height: 48,
@@ -54,7 +54,7 @@ pub enum ArtReviewError {
     #[error("an art review needs at least one role")]
     NoRoles,
     #[error("art review role {role:?} was requested more than once")]
-    DuplicateRole { role: CharacterRole },
+    DuplicateRole { role: SpriteRole },
     #[error("an art review needs at least one seed")]
     NoSeeds,
     #[error("sprite height {height} is outside the supported range {minimum}..={maximum}")]
@@ -212,7 +212,7 @@ pub struct ArtReviewReport {
 pub struct ArtSubjectReport {
     pub label: String,
     pub seed: u64,
-    pub role: CharacterRole,
+    pub role: SpriteRole,
     pub frame_width: u32,
     pub frame_height: u32,
     pub palette_colors: usize,
@@ -445,7 +445,7 @@ mod tests {
 
     fn small_config() -> ArtReviewConfig {
         ArtReviewConfig {
-            roles: vec![CharacterRole::Baker],
+            roles: vec![SpriteRole::Baker],
             start_seed: 4,
             seeds: 1,
             height: 40,
@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn a_review_covers_every_role_and_seed() {
         let config = ArtReviewConfig {
-            roles: vec![CharacterRole::Baker, CharacterRole::Official],
+            roles: vec![SpriteRole::Baker, SpriteRole::Official],
             seeds: 3,
             ..small_config()
         };
@@ -534,11 +534,11 @@ mod tests {
         assert_eq!(build_art_review(config), Err(ArtReviewError::NoRoles));
 
         let mut config = small_config();
-        config.roles.push(CharacterRole::Baker);
+        config.roles.push(SpriteRole::Baker);
         assert_eq!(
             build_art_review(config),
             Err(ArtReviewError::DuplicateRole {
-                role: CharacterRole::Baker,
+                role: SpriteRole::Baker,
             })
         );
 

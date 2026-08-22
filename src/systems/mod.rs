@@ -102,6 +102,61 @@ pub(crate) fn supported_worker_capacity(business: &crate::core::Business) -> u32
         .saturating_mul(u32::from(WORKERS_PER_BATCH))
 }
 
+/// Output quantity a business holds back to keep its target-stock policy
+/// covered before any surplus is planned for the market.
+#[must_use]
+pub(crate) fn business_policy_reserve(
+    business: &crate::core::Business,
+    output_quantity: crate::money::Quantity,
+) -> crate::money::Quantity {
+    let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
+        .saturating_mul(i64::from(business.policy.target_output_days));
+    output_quantity.saturating_mul_ratio(reserve_batches, 1)
+}
+
+/// Weekly quantity promised by a business's active supply contracts for one
+/// good. Every output-planning decision must hold this reserve back.
+#[must_use]
+pub(crate) fn business_contract_reserve(
+    state: &crate::core::AppState,
+    business_id: crate::ids::BusinessId,
+    good_id: crate::ids::GoodId,
+) -> crate::money::Quantity {
+    state
+        .contracts
+        .values()
+        .fold(crate::money::Quantity::ZERO, |total, contract| {
+            if contract.status == crate::core::ContractStatus::Active
+                && contract.seller_business_id == business_id
+                && contract.good_id == good_id
+            {
+                total.saturating_add(contract.quantity_per_week)
+            } else {
+                total
+            }
+        })
+}
+
+/// How much more of one good the market can absorb before stock exceeds the
+/// 150%-of-target placement ceiling.
+#[must_use]
+pub(crate) fn market_absorption_capacity(
+    state: &crate::core::AppState,
+    good_id: crate::ids::GoodId,
+) -> crate::money::Quantity {
+    state
+        .market
+        .quotes
+        .get(&good_id)
+        .map_or(crate::money::Quantity::ZERO, |quote| {
+            quote
+                .target_stock
+                .saturating_mul_ratio(3, 2)
+                .saturating_sub(quote.stock)
+                .max(crate::money::Quantity::ZERO)
+        })
+}
+
 /// Derives public-work completion progress in basis points from spent funds
 /// against budget. The single canonical derivation: mutation sites write it
 /// and both validation layers read the identical expression.

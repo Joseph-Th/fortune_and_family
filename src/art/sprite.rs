@@ -23,14 +23,14 @@ pub const MAX_SPRITE_HEIGHT: i32 = 256;
 
 /// The occupational silhouette a character is drawn with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum CharacterRole {
+pub enum SpriteRole {
     Baker,
     Merchant,
     Laborer,
     Official,
 }
 
-impl CharacterRole {
+impl SpriteRole {
     pub const ALL: [Self; 4] = [Self::Baker, Self::Merchant, Self::Laborer, Self::Official];
 
     #[must_use]
@@ -59,7 +59,7 @@ impl CharacterRole {
 /// A complete procedural recipe for one character sprite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CharacterSpec {
-    pub role: CharacterRole,
+    pub role: SpriteRole,
     /// Standing height in pixels.
     pub height: i32,
     /// Per-mille build factor applied to limb and torso thickness.
@@ -78,7 +78,7 @@ impl CharacterSpec {
     ///
     /// Panics when `height` falls outside the supported sprite-height range.
     #[must_use]
-    pub fn from_seed(seed: u64, role: CharacterRole, height: i32) -> Self {
+    pub fn from_seed(seed: u64, role: SpriteRole, height: i32) -> Self {
         assert!(
             (MIN_SPRITE_HEIGHT..=MAX_SPRITE_HEIGHT).contains(&height),
             "sprite height must be in {MIN_SPRITE_HEIGHT}..={MAX_SPRITE_HEIGHT}"
@@ -107,10 +107,10 @@ impl CharacterSpec {
         let garment = jitter(
             &mut rng,
             match role {
-                CharacterRole::Baker => Rgb8::new(196, 178, 148),
-                CharacterRole::Merchant => Rgb8::new(96, 62, 108),
-                CharacterRole::Laborer => Rgb8::new(108, 96, 76),
-                CharacterRole::Official => Rgb8::new(58, 72, 112),
+                SpriteRole::Baker => Rgb8::new(196, 178, 148),
+                SpriteRole::Merchant => Rgb8::new(96, 62, 108),
+                SpriteRole::Laborer => Rgb8::new(108, 96, 76),
+                SpriteRole::Official => Rgb8::new(58, 72, 112),
             },
             240,
             120,
@@ -118,10 +118,10 @@ impl CharacterSpec {
         let accent = jitter(
             &mut rng,
             match role {
-                CharacterRole::Baker => Rgb8::new(158, 74, 52),
-                CharacterRole::Merchant => Rgb8::new(184, 148, 68),
-                CharacterRole::Laborer => Rgb8::new(72, 92, 74),
-                CharacterRole::Official => Rgb8::new(158, 44, 52),
+                SpriteRole::Baker => Rgb8::new(158, 74, 52),
+                SpriteRole::Merchant => Rgb8::new(184, 148, 68),
+                SpriteRole::Laborer => Rgb8::new(72, 92, 74),
+                SpriteRole::Official => Rgb8::new(158, 44, 52),
             },
             300,
             80,
@@ -633,7 +633,7 @@ fn draw_head(
         radius_y,
     );
     draw_hair(surface, slots, center, radius_x, radius_y);
-    if spec.role == CharacterRole::Official {
+    if spec.role == SpriteRole::Official {
         fill_ellipsoid(
             surface,
             shading,
@@ -724,7 +724,7 @@ mod tests {
     use super::*;
 
     fn spec() -> CharacterSpec {
-        CharacterSpec::from_seed(7, CharacterRole::Baker, 48)
+        CharacterSpec::from_seed(7, SpriteRole::Baker, 48)
     }
 
     fn idle_clip(spec: CharacterSpec) -> Clip {
@@ -733,8 +733,8 @@ mod tests {
 
     #[test]
     fn generated_characters_are_deterministic_for_a_seed() {
-        let first = CharacterSpec::from_seed(42, CharacterRole::Merchant, 48);
-        let second = CharacterSpec::from_seed(42, CharacterRole::Merchant, 48);
+        let first = CharacterSpec::from_seed(42, SpriteRole::Merchant, 48);
+        let second = CharacterSpec::from_seed(42, SpriteRole::Merchant, 48);
 
         assert_eq!(first, second);
     }
@@ -750,8 +750,8 @@ mod tests {
 
     #[test]
     fn distinct_seeds_produce_distinct_characters() {
-        let first = CharacterSpec::from_seed(1, CharacterRole::Merchant, 48);
-        let second = CharacterSpec::from_seed(2, CharacterRole::Merchant, 48);
+        let first = CharacterSpec::from_seed(1, SpriteRole::Merchant, 48);
+        let second = CharacterSpec::from_seed(2, SpriteRole::Merchant, 48);
 
         assert_ne!(first, second);
     }
@@ -800,7 +800,7 @@ mod tests {
 
     #[test]
     fn animation_frames_differ_from_one_another() {
-        let spec = CharacterSpec::from_seed(3, CharacterRole::Laborer, 48);
+        let spec = CharacterSpec::from_seed(3, SpriteRole::Laborer, 48);
         let skeleton = humanoid_skeleton(spec.proportions());
         let clip = humanoid_clip(&skeleton, HumanClip::Walk);
 
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn every_role_renders_a_non_empty_silhouette() {
-        for role in CharacterRole::ALL {
+        for role in SpriteRole::ALL {
             let spec = CharacterSpec::from_seed(11, role, 48);
             let clip = idle_clip(spec);
             let rendered = render_character_frame(spec, &clip, 0);

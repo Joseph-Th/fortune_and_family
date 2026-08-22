@@ -416,7 +416,7 @@ mod tests {
     use super::super::anim::{HumanClip, humanoid_clip};
     use super::super::color::{Ramp, Rgb8, ShadeProfile};
     use super::super::sprite::{
-        CharacterRole, CharacterSpec, render_character_clips, render_character_sheet,
+        CharacterSpec, SpriteRole, render_character_clips, render_character_sheet,
     };
     use super::*;
 
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn generated_characters_report_no_critical_findings() {
-        for role in CharacterRole::ALL {
+        for role in SpriteRole::ALL {
             let spec = CharacterSpec::from_seed(5, role, 48);
             for sheet in render_character_clips(spec) {
                 let findings = review_sheet(&sheet);
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn review_output_is_deterministic() {
-        let spec = CharacterSpec::from_seed(9, CharacterRole::Merchant, 48);
+        let spec = CharacterSpec::from_seed(9, SpriteRole::Merchant, 48);
         let clip = humanoid_clip(&spec.skeleton(), HumanClip::Walk);
         let sheet = render_character_sheet(spec, &clip);
 

@@ -3037,6 +3037,59 @@ mod directory_durability {
         let loaded = load_state(&path).expect("committed save must be loadable");
         assert_eq!(loaded.clock().day(), state.clock().day());
     }
+
+    #[test]
+    fn write_generated_file_reports_degraded_durability_when_sync_fails() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let output = directory.path().join("report.json");
+
+        crate::persistence::set_inject_directory_sync_failure_for_test(true);
+        let outcome = crate::persistence::write_generated_file(&output, b"degraded report");
+        crate::persistence::set_inject_directory_sync_failure_for_test(false);
+
+        assert_eq!(
+            outcome.expect("write must commit even if directory sync degrades"),
+            SaveOutcome::CommittedWithDegradedDurability
+        );
+        assert_eq!(
+            std::fs::read(&output).expect("committed report must be readable"),
+            b"degraded report",
+            "file must be visible and readable on disk despite degraded sync"
+        );
+    }
+
+    #[test]
+    fn write_generated_file_replaces_existing_file_without_work_artifacts() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let output = directory.path().join("report.json");
+        std::fs::write(&output, b"old report").expect("existing report fixture must be written");
+
+        let outcome = crate::persistence::write_generated_file(&output, b"new report")
+            .expect("generated output must publish");
+
+        assert_eq!(outcome, SaveOutcome::Committed);
+        assert_eq!(std::fs::read(&output).unwrap(), b"new report");
+        let entries = std::fs::read_dir(directory.path())
+            .expect("temporary directory must be readable")
+            .map(|entry| entry.expect("directory entry must be readable").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, ["report.json"]);
+    }
+
+    #[test]
+    fn write_generated_file_rejects_directory_destination_without_mutating_it() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let output = directory.path().join("report.json");
+        std::fs::create_dir(&output).expect("directory destination fixture must be created");
+        std::fs::write(output.join("sentinel"), b"preserve")
+            .expect("directory sentinel fixture must be written");
+
+        let error = crate::persistence::write_generated_file(&output, b"new report")
+            .expect_err("directory destination must be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(output.join("sentinel")).unwrap(), b"preserve");
+    }
 }
 
 mod registry_fingerprint {

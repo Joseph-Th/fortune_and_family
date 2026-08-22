@@ -283,6 +283,16 @@ pub(crate) const CRISIS_RELIEF_BASE_COST_COPPER: i64 = 1_200;
 pub(crate) const CRISIS_RELIEF_SEVERITY_DIVISOR: i64 = 3;
 pub(crate) const CRISIS_REFORM_COST: Money = Money::from_copper(1_500);
 pub(crate) const CRISIS_SUPPRESS_COST: Money = Money::from_copper(900);
+const CRISIS_RELIEF_LEGITIMACY_GAIN: u16 = 500;
+const CRISIS_REFORM_LEGITIMACY_GAIN: u16 = 300;
+const CRISIS_SUPPRESS_LEGITIMACY_COST: u16 = 450;
+const CRISIS_RELIEF_UNREST_REDUCTION: u16 = 800;
+const CRISIS_REFORM_UNREST_REDUCTION: u16 = 500;
+const CRISIS_SUPPRESS_UNREST_INCREASE: u16 = 700;
+const CRISIS_EXPLOIT_LEGITIMACY_REQUIREMENT: u16 = 600;
+const CRISIS_EXPLOIT_SEVERITY_INCREASE: u16 = 500;
+const CRISIS_EXPLOIT_LEGITIMACY_COST: u16 = 600;
+const CRISIS_EXPLOIT_UNREST_INCREASE: u16 = 600;
 pub(crate) const INFORMATION_REPORT_LIFETIME_DAYS: i64 = 540;
 pub(crate) const COMMISSIONED_INFORMATION_SOURCE: &str = "Commissioned intelligence";
 
@@ -413,8 +423,6 @@ pub enum CommandError {
     },
     #[error("business {business_id} has no workforce to recompense")]
     BusinessHasNoWorkforce { business_id: BusinessId },
-    #[error("business investment must be positive")]
-    InvalidBusinessInvestment,
     #[error("law {kind:?} does not support value {value}")]
     InvalidLawValue { kind: LawKind, value: i64 },
     #[error("law {kind:?} is already active with value {value}")]
@@ -1169,40 +1177,16 @@ fn apply_business_investment(
     amount: Money,
 ) -> Result<CommandOutcome, CommandError> {
     ensure_owned_business(state, business_id)?;
-    if amount <= Money::ZERO {
-        return Err(CommandError::InvalidBusinessInvestment);
-    }
-    let business = state
-        .businesses
-        .get(business_id)
-        .expect("owned business must exist");
-    if business.status() == BusinessStatus::Closed {
-        return Err(CommandError::Strategic(StrategicError::BusinessInactive {
-            business_id,
-        }));
-    }
-    business.cash().checked_add(amount).ok_or_else(|| {
-        CommandError::Simulation(super::SimulationError::BusinessCashOverflow {
-            business_id,
-            current: business.cash(),
-            incoming: amount,
-        })
-    })?;
-    next_business_finance_version(business)?;
-    let treasury = state
-        .dynasties
-        .get(&state.player_dynasty_id)
-        .expect("player dynasty must exist")
-        .treasury();
-    if treasury < amount {
-        return Err(CommandError::InsufficientPlayerFunds {
-            available: treasury,
-            required: amount,
-        });
-    }
-    let rehabilitation =
-        capitalize_owned_business(state, state.player_dynasty_id, business_id, amount)
-            .expect("prevalidated player business capitalization must commit");
+    // The canonical capitalization path owns every rule (positive amount,
+    // lifecycle, treasury, overflow); the command translates its typed
+    // rejections instead of duplicating them under a second taxonomy.
+    let rehabilitation = super::strategic::capitalize_owned_business(
+        state,
+        state.player_dynasty_id,
+        business_id,
+        amount,
+    )
+    .map_err(CommandError::Strategic)?;
     super::strategic::try_push_outbox(
         state,
         OutboxKind::Finance,
@@ -1247,6 +1231,10 @@ fn apply_business_policy(
         quality_target_basis_points,
     } = input;
     ensure_owned_business(state, business_id)?;
+    // Rescue capital (`InvestInBusiness`) is the only player lever an
+    // insolvent firm still accepts; operating controls stay locked while
+    // insolvency runs and unlock again on recovery. The same gate guards
+    // policy, wages, and labor responses.
     if state.businesses.get(business_id).is_some_and(|business| {
         matches!(
             business.status(),
@@ -2697,11 +2685,9 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
         .family_councils
         .get(&dynasty_id)
         .ok_or(CommandError::MissingFamilyCouncil { dynasty_id })?;
-    if let Some(last_meeting_day) = latest_audit_day_for_subject(
-        state,
-        AuditKind::FamilyCouncilMeeting,
-        &format!("dynasty:{dynasty_id};council-meeting"),
-    ) {
+    if let Some(last_meeting_day) =
+        latest_audit_day_for_subject(state, AuditKind::FamilyCouncilMeeting, &subject)
+    {
         let next_meeting_day =
             checked_future_day(last_meeting_day, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS)?;
         if state.clock.day() < next_meeting_day {
@@ -2994,8 +2980,6 @@ fn validate_ward_adoption(state: &AppState) -> Result<WardAdoptionContext, Comma
         .dynasties
         .get(&dynasty_id)
         .expect("player dynasty must exist");
-    let quality = dynasty.resources.reputation_quality_basis_points;
-    let reliability = dynasty.resources.reputation_reliability_basis_points;
     let legitimacy = dynasty.resources.legitimacy_basis_points;
     if !state.family_councils.contains_key(&dynasty_id) {
         return Err(CommandError::MissingFamilyCouncil { dynasty_id });
@@ -3007,13 +2991,13 @@ fn validate_ward_adoption(state: &AppState) -> Result<WardAdoptionContext, Comma
             maximum: MAX_ACTIVE_WARDS,
         });
     }
-    if quality.max(reliability) < WARD_ADOPTION_REPUTATION_REQUIREMENT {
-        return Err(CommandError::InsufficientWardReputation {
+    ensure_reputation_standing(state, WARD_ADOPTION_REPUTATION_REQUIREMENT).map_err(
+        |(quality, reliability, required)| CommandError::InsufficientWardReputation {
             quality,
             reliability,
-            required: WARD_ADOPTION_REPUTATION_REQUIREMENT,
-        });
-    }
+            required,
+        },
+    )?;
     let delivered = player_contract_deliveries(state);
     if delivered < WARD_ADOPTION_DELIVERY_REQUIREMENT {
         return Err(CommandError::InsufficientWardCommercialRecord {
@@ -3630,25 +3614,37 @@ pub(crate) fn institution_endowment_next_day(state: &AppState) -> Option<i64> {
         .map(|record| future_day_or_terminal(record.day(), INSTITUTION_ENDOWMENT_INTERVAL_DAYS))
 }
 
-fn validate_institution_support_standing(
-    registry: &Registry,
-    state: &AppState,
-    institution_id: InstitutionId,
-    character_id: CharacterId,
-) -> Result<(), CommandError> {
+/// Reputation standing gate shared by every command that requires an
+/// established house: the better of quality and reliability must clear the
+/// requirement. The error payload carries the observed values so each caller
+/// can surface its own typed variant.
+fn ensure_reputation_standing(state: &AppState, required: u16) -> Result<(), (u16, u16, u16)> {
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist");
     let quality = player.resources.reputation_quality_basis_points;
     let reliability = player.resources.reputation_reliability_basis_points;
-    if quality.max(reliability) < INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT {
-        return Err(CommandError::InsufficientInstitutionSupportReputation {
+    if quality.max(reliability) < required {
+        Err((quality, reliability, required))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_institution_support_standing(
+    registry: &Registry,
+    state: &AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+) -> Result<(), CommandError> {
+    ensure_reputation_standing(state, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT).map_err(
+        |(quality, reliability, required)| CommandError::InsufficientInstitutionSupportReputation {
             quality,
             reliability,
-            required: INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
-        });
-    }
+            required,
+        },
+    )?;
     let delivered = player_contract_deliveries(state);
     let required =
         institution_support_delivery_requirement(registry, state, institution_id, character_id);
@@ -3867,6 +3863,9 @@ fn validate_office_power_directive(
             required: OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
         });
     }
+    // The directive cadence belongs to the issuing officeholder's dynasty, not
+    // to the institution: an elected successor must not inherit the previous
+    // holder's cooldown on their first directive.
     if let Some(last_directive_day) = state
         .audit_log
         .iter()
@@ -3874,6 +3873,7 @@ fn validate_office_power_directive(
         .find(|record| {
             record.kind() == AuditKind::OfficeDirective
                 && record.audit_subject().institution_id() == Some(institution_id)
+                && record.audit_subject().dynasty_id() == Some(state.player_dynasty_id)
         })
         .map(AuditRecord::day)
     {
@@ -4087,19 +4087,13 @@ fn validate_office_nomination_standing(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> Result<(), CommandError> {
-    let player = state
-        .dynasties
-        .get(&state.player_dynasty_id)
-        .expect("player dynasty must exist");
-    let quality = player.resources.reputation_quality_basis_points;
-    let reliability = player.resources.reputation_reliability_basis_points;
-    if quality.max(reliability) < OFFICE_NOMINATION_REPUTATION_REQUIREMENT {
-        return Err(CommandError::InsufficientOfficeReputation {
+    ensure_reputation_standing(state, OFFICE_NOMINATION_REPUTATION_REQUIREMENT).map_err(
+        |(quality, reliability, required)| CommandError::InsufficientOfficeReputation {
             quality,
             reliability,
-            required: OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
-        });
-    }
+            required,
+        },
+    )?;
     let delivered = player_contract_deliveries(state);
     let required =
         office_nomination_delivery_requirement(registry, state, institution_id, character_id);
@@ -4315,21 +4309,21 @@ fn apply_crisis_response(
     match response {
         CrisisResponse::Relief => {
             spend_player_treasury(state, crisis_relief_cost(severity))?;
-            reduce_crisis(state, crisis_id, 2_500);
-            adjust_player_legitimacy(state, 500, true);
-            adjust_district_unrest(state, district_id, 800, false);
+            reduce_crisis(state, crisis_id, organized_response_severity_reduction);
+            adjust_player_legitimacy(state, CRISIS_RELIEF_LEGITIMACY_GAIN, true);
+            adjust_district_unrest(state, district_id, CRISIS_RELIEF_UNREST_REDUCTION, false);
         }
         CrisisResponse::Reform => {
             spend_player_treasury(state, CRISIS_REFORM_COST)?;
-            reduce_crisis(state, crisis_id, 1_800);
-            adjust_player_legitimacy(state, 300, true);
-            adjust_district_unrest(state, district_id, 500, false);
+            reduce_crisis(state, crisis_id, organized_response_severity_reduction);
+            adjust_player_legitimacy(state, CRISIS_REFORM_LEGITIMACY_GAIN, true);
+            adjust_district_unrest(state, district_id, CRISIS_REFORM_UNREST_REDUCTION, false);
         }
         CrisisResponse::Suppress => {
             spend_player_treasury(state, CRISIS_SUPPRESS_COST)?;
-            reduce_crisis(state, crisis_id, 2_000);
-            adjust_player_legitimacy(state, 450, false);
-            adjust_district_unrest(state, district_id, 700, true);
+            reduce_crisis(state, crisis_id, organized_response_severity_reduction);
+            adjust_player_legitimacy(state, CRISIS_SUPPRESS_LEGITIMACY_COST, false);
+            adjust_district_unrest(state, district_id, CRISIS_SUPPRESS_UNREST_INCREASE, true);
         }
         CrisisResponse::Exploit => {
             apply_crisis_exploitation(state, crisis_id, severity, district_id)?;
@@ -4348,7 +4342,7 @@ fn apply_crisis_response(
         day: state.clock.day(),
         kind: AuditKind::CrisisResponse,
         subject: subject.into(),
-        detail: format!("response={response:?}"),
+        detail: super::strategic::crisis_response_audit_detail(response),
     });
     Ok(CommandOutcome {
         summary: format!("Applied {response:?} response to crisis {crisis_id}."),
@@ -4368,7 +4362,7 @@ fn apply_crisis_exploitation(
     severity: u16,
     district_id: Option<DistrictId>,
 ) -> Result<(), CommandError> {
-    let required_legitimacy = 600;
+    let required_legitimacy = CRISIS_EXPLOIT_LEGITIMACY_REQUIREMENT;
     let available_legitimacy = state
         .dynasties
         .get(&state.player_dynasty_id)
@@ -4412,10 +4406,12 @@ fn apply_crisis_exploitation(
         .crises
         .get_mut(&crisis_id)
         .expect("validated crisis must exist");
-    crisis.severity_basis_points = severity.saturating_add(500).min(10_000);
+    crisis.severity_basis_points = severity
+        .saturating_add(CRISIS_EXPLOIT_SEVERITY_INCREASE)
+        .min(10_000);
     crisis.status = CrisisStatus::from_severity(crisis.severity_basis_points);
-    adjust_player_legitimacy(state, 600, false);
-    adjust_district_unrest(state, district_id, 600, true);
+    adjust_player_legitimacy(state, CRISIS_EXPLOIT_LEGITIMACY_COST, false);
+    adjust_district_unrest(state, district_id, CRISIS_EXPLOIT_UNREST_INCREASE, true);
     Ok(())
 }
 
@@ -4439,9 +4435,9 @@ fn validate_crisis_response_history(
     let has_containment_response = prior_responses
         .iter()
         .any(|record| super::strategic::crisis_response_contains_crisis(record));
-    let has_exploitation_response = prior_responses
-        .iter()
-        .any(|record| record.detail() == "response=Exploit");
+    let has_exploitation_response = prior_responses.iter().any(|record| {
+        super::strategic::audit_record_crisis_response(record) == Some(CrisisResponse::Exploit)
+    });
     // A trade disruption is contained by healing its routes, and each response
     // heals a bounded amount of the tracked disruption. Repeated organized
     // responses are therefore a real strategy with real costs, not spam; other

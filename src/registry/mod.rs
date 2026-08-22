@@ -497,6 +497,14 @@ impl RegistryBuilder {
             !self.district_by_key.contains_key(key),
             "duplicate district key: {key}"
         );
+        assert!(
+            population > 0,
+            "district {key} must have a positive population"
+        );
+        assert!(
+            base_rent >= Money::ZERO,
+            "district {key} must not have a negative base rent"
+        );
         let id = DistrictId::new(u32::try_from(self.districts.len()).expect("too many districts"));
         self.districts.push(DistrictDef {
             id,

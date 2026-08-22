@@ -3,8 +3,8 @@
 use crate::core::{
     AppState, BusinessStatus, CampaignPhase, CivicDebtStatus, ContractStatus, CrisisKind,
     CrisisStatus, EmploymentStatus, HouseGovernance, InformationConfidence, InformationTarget,
-    LawKind, LegalCaseStatus, LegalClaimSource, LoanStatus, MarketCause, ObjectiveKind,
-    ObjectiveStatus, OutboxKind, PublicWorkKind, PublicWorkStatus,
+    LawKind, LegalCaseKind, LegalCaseStatus, LegalClaimSource, LoanStatus, MarketCause,
+    ObjectiveKind, ObjectiveStatus, OfficePower, OutboxKind, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CivicDebtId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId,
@@ -17,10 +17,10 @@ use crate::systems::{
     dynasty_office_administrative_load, effective_property_weekly_rent, quote_business_acquisition,
     quote_player_legal_settlement,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fmt::Write as _;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StateSummary {
     pub scenario_name: String,
     pub year: i32,
@@ -164,6 +164,27 @@ pub struct CampaignProjection {
     /// Total unread outbox messages, counted across the whole history rather
     /// than only the recent notification window surfaced above.
     pub unread_notifications: usize,
+    /// Conditions that need the player's attention. The projection layer owns
+    /// this classification once so every read view (CLI summary, dashboard)
+    /// reports the same set of flags instead of re-deriving its own rules.
+    pub attention: Vec<AttentionItem>,
+}
+
+/// Severity of an [`AttentionItem`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum AttentionTone {
+    Urgent,
+    Warning,
+    Info,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AttentionItem {
+    pub tone: AttentionTone,
+    pub category: String,
+    pub title: String,
+    pub detail: String,
+    pub action: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -388,7 +409,7 @@ pub struct InstitutionProjection {
     pub legitimacy_basis_points: u16,
     pub term_started_day: i64,
     pub next_selection_day: i64,
-    pub powers: Vec<String>,
+    pub powers: Vec<OfficePower>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -421,7 +442,7 @@ pub struct LegalCaseProjection {
     pub plaintiff: String,
     pub defendant_dynasty_id: DynastyId,
     pub defendant: String,
-    pub kind: String,
+    pub kind: LegalCaseKind,
     pub claim_source: Option<LegalClaimSource>,
     pub evidence_basis_points: u16,
     pub hearing_day: i64,
@@ -494,7 +515,7 @@ pub fn build_campaign_projection(registry: &Registry, state: &AppState) -> Campa
         .find(|dynasty| dynasty.id == state.player_dynasty_id)
         .cloned()
         .expect("player dynasty projection must exist");
-    CampaignProjection {
+    let mut projection = CampaignProjection {
         scenario: ScenarioProjection {
             name: summary.scenario_name,
             year: summary.year,
@@ -556,7 +577,10 @@ pub fn build_campaign_projection(registry: &Registry, state: &AppState) -> Campa
             .iter()
             .filter(|message| !message.acknowledged)
             .count(),
-    }
+        attention: Vec::new(),
+    };
+    projection.attention = build_attention_items(&projection);
+    projection
 }
 
 fn build_family_projection(state: &AppState) -> FamilyProjection {
@@ -1092,11 +1116,7 @@ fn build_institution_projections(
                 legitimacy_basis_points: institution.legitimacy_basis_points,
                 term_started_day: institution.term_started_day,
                 next_selection_day: institution.next_selection_day,
-                powers: institution
-                    .powers
-                    .iter()
-                    .map(|power| format!("{power:?}"))
-                    .collect(),
+                powers: institution.powers.iter().copied().collect(),
             }
         })
         .collect()
@@ -1176,7 +1196,7 @@ fn build_legal_case_projections(state: &AppState) -> Vec<LegalCaseProjection> {
                 .expect("legal defendant must exist")
                 .name()
                 .to_owned(),
-            kind: format!("{:?}", case.kind),
+            kind: case.kind,
             claim_source: case.claim_source,
             evidence_basis_points: case.evidence_basis_points,
             hearing_day: case.hearing_day,
@@ -1284,7 +1304,7 @@ fn build_dashboard_fragments(projection: &CampaignProjection) -> DashboardFragme
     let crises = filtered_clones(&projection.crises, |crisis| crisis.status.is_active());
     let laws = filtered_clones(&projection.laws, |law| law.active);
     DashboardFragments {
-        attention: render_attention_items(projection, &player_business_ids),
+        attention: render_attention_items(projection),
         district_rows: render_district_rows(&projection.districts),
         business_rows: render_business_rows(&businesses),
         acquisition_rows: render_acquisition_rows(&acquisitions),
@@ -1426,68 +1446,114 @@ pub fn render_campaign_html(
     ))
 }
 
-fn render_attention_items(
-    projection: &CampaignProjection,
-    player_business_ids: &std::collections::BTreeSet<BusinessId>,
-) -> String {
-    let mut cards = Vec::new();
-    append_house_attention(projection, &mut cards);
-    append_operational_attention(projection, &mut cards);
-    append_finance_attention(projection, &mut cards);
-    append_legal_and_crisis_attention(projection, &mut cards);
-    append_contract_attention(projection, player_business_ids, &mut cards);
-    append_notice_attention(projection, &mut cards);
-    if cards.is_empty() {
-        return "<article class=\"good\"><span class=\"badge good\">Stable</span><h3>No immediate intervention is flagged</h3><p>Current records show no overdue office duties, player labor disputes, distressed player businesses, adverse debt states, active crises, or unresolved claims against the house.</p></article>".to_owned();
-    }
-    cards.into_iter().take(12).collect::<String>()
+/// Classifies every condition that needs the player's attention. This is the
+/// single canonical classification, consumed by both the CLI summary and the
+/// dashboard.
+fn build_attention_items(projection: &CampaignProjection) -> Vec<AttentionItem> {
+    let mut items = Vec::new();
+    append_house_attention(projection, &mut items);
+    append_operational_attention(projection, &mut items);
+    append_finance_attention(projection, &mut items);
+    append_legal_and_crisis_attention(projection, &mut items);
+    let player_business_ids = projection
+        .businesses
+        .iter()
+        .filter(|business| business.owner_dynasty_id == projection.player.id)
+        .map(|business| business.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    append_contract_attention(projection, &player_business_ids, &mut items);
+    append_notice_attention(projection, &mut items);
+    items
 }
 
-fn append_house_attention(projection: &CampaignProjection, cards: &mut Vec<String>) {
+fn attention(
+    tone: AttentionTone,
+    category: &str,
+    title: String,
+    detail: String,
+    action: String,
+) -> AttentionItem {
+    AttentionItem {
+        tone,
+        category: category.to_owned(),
+        title,
+        detail,
+        action,
+    }
+}
+
+fn render_attention_items(projection: &CampaignProjection) -> String {
+    if projection.attention.is_empty() {
+        return "<article class=\"good\"><span class=\"badge good\">Stable</span><h3>No immediate intervention is flagged</h3><p>Current records show no overdue office duties, player labor disputes, distressed player businesses, adverse debt states, active crises, or unresolved claims against the house.</p></article>".to_owned();
+    }
+    projection
+        .attention
+        .iter()
+        .take(12)
+        .map(render_attention_card)
+        .collect()
+}
+
+fn render_attention_card(item: &AttentionItem) -> String {
+    let tone = match item.tone {
+        AttentionTone::Urgent => "urgent",
+        AttentionTone::Warning => "warning",
+        AttentionTone::Info => "info",
+    };
+    format!(
+        "<article class=\"{tone}\"><span class=\"badge {tone}\">{}</span><h3>{}</h3><p>{}</p><p class=\"action\">{}</p></article>",
+        escape_html(&item.category),
+        escape_html(&item.title),
+        escape_html(&item.detail),
+        escape_html(&item.action),
+    )
+}
+
+fn append_house_attention(projection: &CampaignProjection, items: &mut Vec<AttentionItem>) {
     if projection.player.effective_administrative_load > projection.player.administrative_capacity {
-        cards.push(render_attention_card(
-            "urgent",
+        items.push(attention(
+            AttentionTone::Urgent,
             "Administrative capacity",
-            "House administration is overloaded",
-            &format!(
+            "House administration is overloaded".to_owned(),
+            format!(
                 "Current load is {} against {} capacity.",
                 projection.player.effective_administrative_load,
                 projection.player.administrative_capacity
             ),
-            "Reduce administrative commitments before expanding businesses or offices.",
+            "Reduce administrative commitments before expanding businesses or offices.".to_owned(),
         ));
     }
     if projection.player.unmet_office_duties > 0 {
-        cards.push(render_attention_card(
-            "urgent",
+        items.push(attention(
+            AttentionTone::Urgent,
             "Office duties",
-            "Recurring office duties are unmet",
-            &format!(
+            "Recurring office duties are unmet".to_owned(),
+            format!(
                 "{} office-duty obligations are currently outstanding.",
                 projection.player.unmet_office_duties
             ),
-            "Protect treasury and administrative capacity for the next duty settlement.",
+            "Protect treasury and administrative capacity for the next duty settlement.".to_owned(),
         ));
     }
 }
 
-fn append_operational_attention(projection: &CampaignProjection, cards: &mut Vec<String>) {
+fn append_operational_attention(projection: &CampaignProjection, items: &mut Vec<AttentionItem>) {
     let player_id = projection.player.id;
     for agreement in projection.employment.iter().filter(|agreement| {
         agreement.owner_dynasty_id == player_id && agreement.status == EmploymentStatus::Disputed
     }) {
-        cards.push(render_attention_card(
-            "urgent",
+        items.push(attention(
+            AttentionTone::Urgent,
             "Labor",
-            &format!("Labor dispute at {}", agreement.business),
-            &format!(
+            format!("Labor dispute at {}", agreement.business),
+            format!(
                 "Agreement #{} covers {} workers; conditions are {:.1}% and loyalty is {:.1}%.",
                 agreement.id,
                 agreement.workers,
                 f64::from(agreement.conditions_basis_points) / 100.0,
                 f64::from(agreement.loyalty_basis_points) / 100.0
             ),
-            &format!(
+            format!(
                 "Resolve labor dispute #{} before operations deteriorate.",
                 agreement.id
             ),
@@ -1500,17 +1566,17 @@ fn append_operational_attention(projection: &CampaignProjection, cards: &mut Vec
                 BusinessStatus::Distressed | BusinessStatus::Insolvent
             )
     }) {
-        cards.push(render_attention_card(
-            "urgent",
+        items.push(attention(
+            AttentionTone::Urgent,
             "Business",
-            &format!("{} is {}", business.name, business.status.label()),
-            &format!(
+            format!("{} is {}", business.name, business.status.label()),
+            format!(
                 "Business #{} has {} cash and {:.1}% condition.",
                 business.id,
                 business.cash,
                 f64::from(business.condition_basis_points) / 100.0
             ),
-            &format!(
+            format!(
                 "Review capitalization and policy for business #{}.",
                 business.id
             ),
@@ -1518,7 +1584,7 @@ fn append_operational_attention(projection: &CampaignProjection, cards: &mut Vec
     }
 }
 
-fn append_finance_attention(projection: &CampaignProjection, cards: &mut Vec<String>) {
+fn append_finance_attention(projection: &CampaignProjection, items: &mut Vec<AttentionItem>) {
     let player_id = projection.player.id;
     for loan in projection.loans.iter().filter(|loan| {
         loan.borrower_dynasty_id == player_id
@@ -1529,20 +1595,24 @@ fn append_finance_attention(projection: &CampaignProjection, cards: &mut Vec<Str
         } else {
             String::new()
         };
-        cards.push(render_attention_card(
-            "urgent",
+        items.push(attention(
+            AttentionTone::Urgent,
             "Private finance",
-            &format!("Loan #{} is {}", loan.id, loan.status.label()),
-            &format!(
+            format!("Loan #{} is {}", loan.id, loan.status.label()),
+            format!(
                 "{} remains outstanding with {} missed payments.{}",
                 loan.balance, loan.missed_payments, due
             ),
-            "Preserve liquidity and review collateral exposure before taking on new commitments.",
+            "Preserve liquidity and review collateral exposure before taking on new commitments."
+                .to_owned(),
         ));
     }
 }
 
-fn append_legal_and_crisis_attention(projection: &CampaignProjection, cards: &mut Vec<String>) {
+fn append_legal_and_crisis_attention(
+    projection: &CampaignProjection,
+    items: &mut Vec<AttentionItem>,
+) {
     let player_id = projection.player.id;
     for case in projection.legal_cases.iter().filter(|case| {
         case.defendant_dynasty_id == player_id
@@ -1555,22 +1625,18 @@ fn append_legal_and_crisis_attention(projection: &CampaignProjection, cards: &mu
             || format!("Review case #{} before its hearing.", case.id),
             |amount| format!("Case #{} can currently be settled for {amount}.", case.id),
         );
-        cards.push(render_attention_card(
-            "urgent",
+        items.push(attention(
+            AttentionTone::Urgent,
             "Legal",
-            &format!(
-                "{} claim by {}",
-                humanize_identifier(&case.kind),
-                case.plaintiff
-            ),
-            &format!(
+            format!("{} claim by {}", humanize_debug(&case.kind), case.plaintiff),
+            format!(
                 "Case #{} seeks {} in damages; hearing day {} and evidence strength {:.1}%.",
                 case.id,
                 case.damages,
                 case.hearing_day,
                 f64::from(case.evidence_basis_points) / 100.0
             ),
-            &action,
+            action,
         ));
     }
     for crisis in projection
@@ -1582,18 +1648,18 @@ fn append_legal_and_crisis_attention(projection: &CampaignProjection, cards: &mu
             .district
             .as_deref()
             .map_or_else(|| "citywide".to_owned(), |name| format!("in {name}"));
-        cards.push(render_attention_card(
-            "warning",
+        items.push(attention(
+            AttentionTone::Warning,
             "Crisis",
-            &format!("{} {district}", crisis.kind.label()),
-            &format!(
+            format!("{} {district}", crisis.kind.label()),
+            format!(
                 "Crisis #{} is {} at {:.1}% severity. {}",
                 crisis.id,
                 crisis_status_label(crisis.status),
                 f64::from(crisis.severity_basis_points) / 100.0,
                 crisis.cause
             ),
-            &format!("Review response options for crisis #{}.", crisis.id),
+            format!("Review response options for crisis #{}.", crisis.id),
         ));
     }
 }
@@ -1601,7 +1667,7 @@ fn append_legal_and_crisis_attention(projection: &CampaignProjection, cards: &mu
 fn append_contract_attention(
     projection: &CampaignProjection,
     player_business_ids: &std::collections::BTreeSet<BusinessId>,
-    cards: &mut Vec<String>,
+    items: &mut Vec<AttentionItem>,
 ) {
     let player_id = projection.player.id;
     for contract in projection.contracts.iter().filter(|contract| {
@@ -1609,46 +1675,47 @@ fn append_contract_attention(
             || player_business_ids.contains(&contract.seller_business_id)
     }) {
         if contract.breaching_dynasty_id == Some(player_id) {
-            cards.push(render_attention_card(
-                "urgent",
+            items.push(attention(
+                AttentionTone::Urgent,
                 "Contract",
-                &format!(
+                format!(
                     "House {} breached contract #{}",
                     projection.player.name, contract.id
                 ),
-                &format!(
+                format!(
                     "{} remains as an unpaid breach penalty on the {} contract.",
                     contract.unpaid_breach_penalty, contract.good
                 ),
-                "Review legal and liquidity exposure from the breached obligation.",
+                "Review legal and liquidity exposure from the breached obligation.".to_owned(),
             ));
         } else if contract.breach_victim_dynasty_id == Some(player_id) {
-            cards.push(render_attention_card(
-                "warning",
+            items.push(attention(
+                AttentionTone::Warning,
                 "Contract",
-                &format!("Contract #{} was breached against your house", contract.id),
-                &format!(
+                format!("Contract #{} was breached against your house", contract.id),
+                format!(
                     "{} is the unpaid breach penalty on the {} contract.",
                     contract.unpaid_breach_penalty, contract.good
                 ),
-                "Review whether the attributed breach supports a legal claim.",
+                "Review whether the attributed breach supports a legal claim.".to_owned(),
             ));
         } else if contract.status == ContractStatus::Active && contract.missed_deliveries > 0 {
-            cards.push(render_attention_card(
-                "warning",
+            items.push(attention(
+                AttentionTone::Warning,
                 "Contract",
-                &format!("Contract #{} has missed deliveries", contract.id),
-                &format!(
+                format!("Contract #{} has missed deliveries", contract.id),
+                format!(
                     "{} deliveries have been missed; the next obligation is day {}.",
                     contract.missed_deliveries, contract.next_due_day
                 ),
-                "Review inventory, cash, and counterparty performance before the next settlement.",
+                "Review inventory, cash, and counterparty performance before the next settlement."
+                    .to_owned(),
             ));
         }
     }
 }
 
-fn append_notice_attention(projection: &CampaignProjection, cards: &mut Vec<String>) {
+fn append_notice_attention(projection: &CampaignProjection, items: &mut Vec<AttentionItem>) {
     let unread = projection
         .notifications
         .iter()
@@ -1661,30 +1728,14 @@ fn append_notice_attention(projection: &CampaignProjection, cards: &mut Vec<Stri
             .rev()
             .find(|notification| !notification.acknowledged)
     {
-        cards.push(render_attention_card(
-            "info",
+        items.push(attention(
+            AttentionTone::Info,
             "Notices",
-            &format!("{unread} unread notices"),
-            &format!("Latest: {}", latest.subject),
-            &format!("Review and acknowledge notice #{} when handled.", latest.id),
+            format!("{unread} unread notices"),
+            format!("Latest: {}", latest.subject),
+            format!("Review and acknowledge notice #{} when handled.", latest.id),
         ));
     }
-}
-
-fn render_attention_card(
-    tone: &str,
-    category: &str,
-    title: &str,
-    detail: &str,
-    action: &str,
-) -> String {
-    format!(
-        "<article class=\"{tone}\"><span class=\"badge {tone}\">{}</span><h3>{}</h3><p>{}</p><p class=\"action\">{}</p></article>",
-        escape_html(category),
-        escape_html(title),
-        escape_html(detail),
-        escape_html(action),
-    )
 }
 
 fn render_employment_rows(agreements: &[EmploymentProjection]) -> String {
@@ -1817,7 +1868,7 @@ fn render_institution_rows(institutions: &[InstitutionProjection], player_id: Dy
             institution
                 .powers
                 .iter()
-                .map(|power| humanize_identifier(power))
+                .map(humanize_debug)
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -1884,9 +1935,9 @@ fn render_legal_case_rows(cases: &[LegalCaseProjection], player_id: DynastyId) -
             rows,
             "<tr><td>#{}<br><small>{}</small></td><td>{}</td><td>{}<br><small>{}</small></td><td>{:.1}%</td><td>day {}</td><td>{}{}</td><td>{}</td></tr>",
             case.id,
-            escape_html(&humanize_identifier(&case.kind)),
+            escape_html(&humanize_debug(&case.kind)),
             role,
-            escape_html(&humanize_identifier(&case.kind)),
+            escape_html(&humanize_debug(&case.kind)),
             escape_html(&source),
             f64::from(case.evidence_basis_points) / 100.0,
             case.hearing_day,
@@ -2311,7 +2362,6 @@ const fn contract_status_label(status: ContractStatus) -> &'static str {
         ContractStatus::Active => "Active",
         ContractStatus::Fulfilled => "Fulfilled",
         ContractStatus::Breached => "Breached",
-        ContractStatus::Renegotiated => "Renegotiated",
         ContractStatus::Cancelled => "Cancelled",
     }
 }

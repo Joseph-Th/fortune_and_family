@@ -86,6 +86,10 @@ impl Money {
     }
     /// Multiplies this value by a rational number using a wide intermediate.
     ///
+    /// The result truncates toward zero, unlike the ceiling helpers in this
+    /// module; callers that must not undercharge should use
+    /// [`Money::saturating_mul_ratio_ceil_nonnegative`] instead.
+    ///
     /// Returns `None` when the final value is outside the supported money range.
     ///
     /// # Panics

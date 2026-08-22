@@ -183,7 +183,16 @@ fn runtime_campaign_phase(state: &AppState, dynasty_id: DynastyId) -> CampaignPh
             current
         };
     }
-    if dynasty_reputation_standing(state, dynasty_id) {
+    // Foundation promotion must mirror `reconstructed_campaign_phase` exactly:
+    // either current reputation standing or durable patronage history
+    // evidences an established house.
+    let has_standing_evidence = dynasty_reputation_standing(state, dynasty_id)
+        || audit_kind_references_dynasty_character(
+            state,
+            dynasty_id,
+            AuditKind::InstitutionPatronage,
+        );
+    if has_standing_evidence {
         if deliveries >= OFFICE_NOMINATION_DELIVERY_REQUIREMENT {
             CampaignPhase::Ascendancy
         } else {
@@ -302,6 +311,42 @@ mod tests {
                 .expect("player dynasty must exist")
                 .phase(),
             CampaignPhase::Legacy
+        );
+    }
+
+    #[test]
+    fn patronage_history_promotes_the_runtime_phase_like_reconstruction() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        state.audit_log.push(crate::core::AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionPatronage,
+            subject: format!("institution:{institution_id}:character:{}", {
+                state
+                    .dynasties
+                    .get(&player_id)
+                    .expect("player dynasty must exist")
+                    .head_id()
+            })
+            .into(),
+            detail: "durable patronage history".to_owned(),
+        });
+
+        refresh_campaign_phases(&mut state);
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .phase(),
+            CampaignPhase::Establishment,
+            "durable patronage must promote the live phase exactly like save reconstruction does"
         );
     }
 

@@ -329,6 +329,61 @@ fn sync_save_directory(parent: &Path) -> Result<(), PersistenceError> {
         })
 }
 
+/// Atomically writes adapter-generated output (dashboard HTML, gameplay and
+/// art review reports) with the same staging, visibility, and durability
+/// contract as campaign saves: synchronized same-directory temporary file,
+/// atomic replacement, then best-effort parent-directory synchronization.
+///
+/// An existing destination must be a regular file; symlinks, directories, and
+/// other non-regular targets are rejected.
+///
+/// # Errors
+///
+/// Returns an IO error when the destination is not a regular file, the parent
+/// directory or temporary file cannot be created or written, or the
+/// destination cannot be atomically replaced.
+pub fn write_generated_file(
+    path: impl AsRef<Path>,
+    contents: &[u8],
+) -> std::io::Result<SaveOutcome> {
+    let path = path.as_ref();
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "generated output path is not a regular file: {}",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if parent != Path::new(".") {
+        fs::create_dir_all(parent)?;
+    }
+    let prefix = path.file_name().and_then(|name| name.to_str()).map_or_else(
+        || ".generated-output-".to_owned(),
+        |name| format!(".{name}."),
+    );
+    let mut temporary = Builder::new().prefix(&prefix).tempfile_in(parent)?;
+    temporary.write_all(contents)?;
+    temporary.as_file_mut().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+
+    Ok(match sync_save_directory_with_injection(parent) {
+        Ok(()) => SaveOutcome::Committed,
+        Err(_) => SaveOutcome::CommittedWithDegradedDurability,
+    })
+}
+
 /// Loads and validates a current-schema JSON save file, returning its committed file revision.
 ///
 /// # Errors
@@ -1794,7 +1849,7 @@ fn validate_adoptive_or_ward_link(
     active_wards: &mut BTreeSet<crate::ids::CharacterId>,
     active_player_wards: &mut usize,
 ) -> Result<(), String> {
-    if !matches!(link.kind, FamilyLinkKind::Adoptive | FamilyLinkKind::Ward) {
+    if !matches!(link.kind, FamilyLinkKind::Ward) {
         return Ok(());
     }
     let first = state

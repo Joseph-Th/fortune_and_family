@@ -1098,7 +1098,7 @@ fn validate_family_links(state: &AppState) {
             );
         }
         validate_parent_child_chronology(state, link);
-        if matches!(link.kind, FamilyLinkKind::Adoptive | FamilyLinkKind::Ward) {
+        if matches!(link.kind, FamilyLinkKind::Ward) {
             let first = state
                 .characters
                 .get(link.first_character_id)

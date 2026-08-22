@@ -4,7 +4,7 @@ use super::*;
 use crate::core::{
     BusinessStatus, ContractStatus, EnactedLaw, LawKind, NewGameConfig, StartingBackground,
 };
-use crate::ids::{FamilyLinkId, InstitutionId};
+use crate::ids::{FamilyLinkId, GoodId, InstitutionId};
 use crate::systems::{build_new_game, validate_invariants};
 use crate::test_support::{
     assert_state_unchanged, make_test_campaign, rivergate_registry_for_test,
@@ -456,6 +456,47 @@ mod transfer_boundaries {
             &state,
             "aggregate income overflow must fail before crediting any household",
         );
+    }
+
+    #[test]
+    fn clamped_external_income_conserves_the_paid_out_total() {
+        let mut state = make_test_campaign();
+        for household in state.households.iter_mut() {
+            household.cash = Money::ZERO;
+        }
+        // Deliberately awkward per-household amounts so truncated pro-rated
+        // shares would strand copper if the rounding remainder were dropped.
+        let mut income = 1_000_i64;
+        for household in state.households.iter_mut() {
+            household.weekly_income = Money::from_copper(income);
+            income += 7;
+        }
+        let promised: i64 = state
+            .households
+            .iter()
+            .map(|household| household.weekly_income.copper())
+            .sum();
+        let pool_before = promised / 3;
+        state.market.clearing_account = Money::from_copper(pool_before);
+
+        settle_weekly_external_income(&mut state).expect("clamped settlement must commit");
+
+        let total_credited: i64 = state
+            .households
+            .iter()
+            .map(|household| household.cash.copper())
+            .sum();
+        assert_eq!(
+            i128::from(total_credited),
+            i128::from(pool_before),
+            "every copper debited from the clearing account must reach a household"
+        );
+        assert_eq!(
+            state.market.clearing_account,
+            Money::ZERO,
+            "the drained pool must be fully distributed"
+        );
+        validate_invariants(rivergate_registry_for_test(), &state);
     }
 
     #[test]
@@ -941,6 +982,114 @@ mod inventory_policy {
             .saturating_sub(narrow_limit_inventory);
 
         assert_eq!(purchase.quantity, expected);
+    }
+
+    #[test]
+    fn business_sales_share_one_market_absorption_ceiling_per_good() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        // Find a good produced by at least two operating businesses so the
+        // shared ceiling has multiple claimants.
+        let mut output_counts: std::collections::BTreeMap<GoodId, Vec<BusinessId>> =
+            std::collections::BTreeMap::new();
+        for business in state.businesses.iter() {
+            if matches!(
+                business.status(),
+                BusinessStatus::Closed | BusinessStatus::Insolvent
+            ) {
+                continue;
+            }
+            let good_id = registry
+                .get_recipe(business.recipe_id())
+                .expect("business recipe must exist")
+                .output_good_id();
+            output_counts
+                .entry(good_id)
+                .or_default()
+                .push(business.id());
+        }
+        let (good_id, seller_ids) = output_counts
+            .into_iter()
+            .find(|(_, sellers)| sellers.len() >= 2)
+            .expect("campaign must contain a good produced by at least two businesses");
+        let [first_seller_id, second_seller_id] = seller_ids[..] else {
+            panic!("shared-ceiling fixture requires at least two sellers");
+        };
+        // Drain the market so the whole target headroom is contested, cancel
+        // contract reserves, and let the first seller hold only a quarter of
+        // the headroom so it cannot absorb the entire ceiling alone.
+        state
+            .market
+            .quotes
+            .get_mut(&good_id)
+            .expect("quote must exist")
+            .stock = Quantity::ZERO;
+        let headroom = crate::systems::market_absorption_capacity(&state, good_id);
+        assert!(
+            headroom > Quantity::ZERO,
+            "fixture must leave sale headroom"
+        );
+        for business_id in [first_seller_id, second_seller_id] {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("seller must exist");
+            business.policy.target_output_days = 0;
+        }
+        {
+            let first = state
+                .businesses
+                .get_mut(first_seller_id)
+                .expect("first seller must exist");
+            first.inventory.insert(
+                good_id,
+                Quantity::from_units((headroom.milliunits() / 4_000).max(1)),
+            );
+        }
+        {
+            let second = state
+                .businesses
+                .get_mut(second_seller_id)
+                .expect("second seller must exist");
+            second
+                .inventory
+                .insert(good_id, Quantity::from_units(10_000));
+        }
+        for contract in state
+            .contracts
+            .values_mut()
+            .filter(|contract| contract.good_id == good_id)
+        {
+            contract.status = ContractStatus::Cancelled;
+        }
+
+        let plan = decide_business_sales(registry, &state).expect("sale plan must build");
+
+        let placements: std::collections::BTreeMap<BusinessId, Quantity> = plan
+            .lines
+            .iter()
+            .filter(|line| line.good_id == good_id)
+            .map(|line| (line.business_id, line.quantity))
+            .collect();
+        assert!(
+            placements.contains_key(&first_seller_id) && placements.contains_key(&second_seller_id),
+            "both sellers must place surplus against the shared ceiling, got {placements:?}"
+        );
+        let first_take = placements[&first_seller_id];
+        let second_take = placements[&second_seller_id];
+        assert!(
+            first_take <= Quantity::from_units(headroom.milliunits() / 4_000),
+            "a seller cannot place more than it stocks"
+        );
+        assert!(
+            second_take > Quantity::ZERO,
+            "the second seller must still reach the market after the first seller consumed part of the shared headroom"
+        );
+        // Renown may let one house claim up to ~17% beyond the raw remainder.
+        assert!(
+            first_take.saturating_add(second_take) <= headroom.saturating_mul_ratio(12_000, 10_000),
+            "aggregate placements must stay near the market's absorption ceiling instead of every seller claiming it independently"
+        );
     }
 
     #[test]
@@ -2525,6 +2674,50 @@ mod health_and_succession {
     }
 
     #[test]
+    fn ai_succession_transfers_dynasty_standing_institution_memberships() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain an AI dynasty");
+        let dynasty = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("AI dynasty must exist");
+        let outgoing_head_id = dynasty.head_id();
+        let incoming_head_id = dynasty.heir_id().expect("AI dynasty must have an heir");
+        assert!(
+            state
+                .institutions
+                .values()
+                .all(|institution| { institution.members.contains(&outgoing_head_id) }),
+            "fixture AI heads must sit on every institutional membership"
+        );
+        state
+            .characters
+            .get_mut(outgoing_head_id)
+            .expect("outgoing head must exist")
+            .runtime
+            .health_basis_points = 0;
+
+        let successions =
+            decide_successions(&mut state).expect("forced succession must remain representable");
+        apply_successions(&mut state, successions).expect("succession application must succeed");
+
+        for institution in state.institutions.values() {
+            assert!(!institution.members.contains(&outgoing_head_id));
+            assert!(
+                institution.members.contains(&incoming_head_id),
+                "every institution must seat the incoming AI dynasty head so offices stay fillable"
+            );
+        }
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn succession_deactivates_ward_links_to_the_outgoing_head() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -2906,7 +3099,7 @@ mod health_and_succession {
                 status: CharacterStatus::Active,
                 health_basis_points: 1,
                 loyalty_basis_points: 8_000,
-                role: CharacterRole::BusinessManager,
+                role: CharacterRole::Clerk,
             },
         });
         state

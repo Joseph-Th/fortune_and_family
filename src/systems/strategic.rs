@@ -1,6 +1,7 @@
 //! Strategic initialization, periodic systems, and validated cross-record operations.
 
 use super::SimulationError;
+use super::commands::CrisisResponse;
 use super::transactions::{
     TimelineError, add_market_supply, checked_future_day, checked_next_business_finance_version,
     credit_market_clearing_account, debit_market_clearing_account, next_business_finance_version,
@@ -3164,6 +3165,22 @@ fn is_final_contract_delivery(due: DueContract) -> bool {
             .is_some_and(|remaining_days| remaining_days < 7)
 }
 
+/// Attributes a contract breach to the single inactive party and records the
+/// other side as victim; mutual inactivity or no inactivity attributes nobody.
+/// The canonical rule behind `ContractSettlementState` attribution helpers.
+fn attribute_contract_breach(
+    buyer_owner_id: DynastyId,
+    seller_owner_id: DynastyId,
+    buyer_active: bool,
+    seller_active: bool,
+) -> (Option<DynastyId>, Option<DynastyId>) {
+    match (buyer_active, seller_active) {
+        (false, true) => (Some(buyer_owner_id), Some(seller_owner_id)),
+        (true, false) => (Some(seller_owner_id), Some(buyer_owner_id)),
+        (false, false) | (true, true) => (None, None),
+    }
+}
+
 fn terminate_inactive_contract(
     state: &mut AppState,
     contract_id: crate::ids::ContractId,
@@ -3177,16 +3194,10 @@ fn terminate_inactive_contract(
         .get_mut(&contract_id)
         .expect("contract must exist");
     contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
-    contract.breaching_dynasty_id = match (buyer_active, seller_active) {
-        (false, true) => Some(buyer_owner_id),
-        (true, false) => Some(seller_owner_id),
-        (false, false) | (true, true) => None,
-    };
-    contract.breach_victim_dynasty_id = match (buyer_active, seller_active) {
-        (false, true) => Some(seller_owner_id),
-        (true, false) => Some(buyer_owner_id),
-        (false, false) | (true, true) => None,
-    };
+    let (breaching_dynasty_id, breach_victim_dynasty_id) =
+        attribute_contract_breach(buyer_owner_id, seller_owner_id, buyer_active, seller_active);
+    contract.breaching_dynasty_id = breaching_dynasty_id;
+    contract.breach_victim_dynasty_id = breach_victim_dynasty_id;
     contract.unpaid_breach_penalty = if contract.breach_victim_dynasty_id.is_some() {
         contract.penalty
     } else {
@@ -4510,7 +4521,7 @@ pub(crate) fn effective_property_weekly_rent(state: &AppState, property: &Proper
             .value
             .saturating_mul_ratio(limit.clamp(0, 10_000), 10_000);
         let weekly_cap = if annual_cap.copper() > 0 {
-            Money::from_copper((annual_cap.copper() + 51) / 52)
+            Money::from_copper(crate::money::ceil_div_nonnegative(annual_cap.copper(), 52))
         } else {
             Money::ZERO
         };
@@ -5118,25 +5129,10 @@ fn business_labor_utilization_basis_points(
     if output_per_batch <= 0 {
         return 0;
     }
-    let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
-        .saturating_mul(i64::from(business.policy.target_output_days));
-    let policy_reserve = recipe
-        .output_quantity()
-        .saturating_mul_ratio(reserve_batches, 1);
-    let contract_reserve = state
-        .contracts
-        .values()
-        .filter(|contract| {
-            contract.status == ContractStatus::Active
-                && contract.seller_business_id == business_id
-                && contract.good_id == output_good_id
-        })
-        .fold(Quantity::ZERO, |total, contract| {
-            total.saturating_add(contract.quantity_per_week)
-        });
-    let reserve_shortfall = policy_reserve
+    let reserve_shortfall = super::business_policy_reserve(business, recipe.output_quantity())
         .saturating_sub(business.inventory_quantity(output_good_id))
         .max(Quantity::ZERO);
+    let contract_reserve = super::business_contract_reserve(state, business_id, output_good_id);
     let weekly_market_demand = state
         .market
         .quotes
@@ -6356,19 +6352,16 @@ fn apply_office_duties(state: &mut AppState) -> Result<(), SimulationError> {
                 counts
             },
         );
-    let duties: Vec<_> = state
-        .institutions
-        .values()
-        .filter_map(|institution| {
-            let holder_id = institution.office_holder_id?;
-            let dynasty_id = state.characters.get(holder_id)?.dynasty_id();
+    let duties: Vec<_> = active_officeholders(state)
+        .into_iter()
+        .map(|(institution_id, dynasty_id, power_count)| {
             let office_count = office_counts.get(&dynasty_id).copied().unwrap_or(1);
-            Some(OfficeDutyPlan {
-                institution_id: institution.institution_id,
+            OfficeDutyPlan {
+                institution_id,
                 dynasty_id,
-                power_count: institution.powers.len(),
+                power_count,
                 office_count,
-            })
+            }
         })
         .collect();
     preflight_office_duty_contributions(state, &duties)?;
@@ -6384,20 +6377,35 @@ fn apply_office_duties(state: &mut AppState) -> Result<(), SimulationError> {
     Ok(())
 }
 
-fn apply_office_stipends(state: &mut AppState) -> Result<(), SimulationError> {
-    let stipends: Vec<_> = state
+/// Sitting officeholders in stable institution order as
+/// `(institution_id, holder dynasty, power count)`. Institutions whose holder
+/// no longer resolves to a character are skipped.
+pub(crate) fn active_officeholders(state: &AppState) -> Vec<(InstitutionId, DynastyId, usize)> {
+    state
         .institutions
         .values()
         .filter_map(|institution| {
             let holder_id = institution.office_holder_id?;
             let dynasty_id = state.characters.get(holder_id)?.dynasty_id();
-            let power_count = institution.powers.len();
             Some((
                 institution.institution_id,
                 dynasty_id,
+                institution.powers.len(),
+            ))
+        })
+        .collect()
+}
+
+fn apply_office_stipends(state: &mut AppState) -> Result<(), SimulationError> {
+    let stipends: Vec<_> = active_officeholders(state)
+        .into_iter()
+        .map(|(institution_id, dynasty_id, power_count)| {
+            (
+                institution_id,
+                dynasty_id,
                 OFFICE_STIPEND_PER_POWER
                     .saturating_mul(i64::try_from(power_count).unwrap_or(i64::MAX)),
-            ))
+            )
         })
         .collect();
     for (institution_id, dynasty_id, stipend) in stipends {
@@ -8423,12 +8431,31 @@ fn advance_existing_crises(
     Ok(())
 }
 
+/// The single canonical audit-detail encoding for a crisis response. Readers
+/// must go through [`audit_record_crisis_response`] so the writer and the
+/// idempotence guards cannot drift apart.
+pub(crate) fn crisis_response_audit_detail(response: CrisisResponse) -> String {
+    format!("response={response:?}")
+}
+
+pub(crate) fn audit_record_crisis_response(record: &AuditRecord) -> Option<CrisisResponse> {
+    if record.kind() != AuditKind::CrisisResponse {
+        return None;
+    }
+    match record.detail().strip_prefix("response=")? {
+        "Relief" => Some(CrisisResponse::Relief),
+        "Reform" => Some(CrisisResponse::Reform),
+        "Suppress" => Some(CrisisResponse::Suppress),
+        "Exploit" => Some(CrisisResponse::Exploit),
+        _ => None,
+    }
+}
+
 pub(crate) fn crisis_response_contains_crisis(record: &AuditRecord) -> bool {
-    record.kind() == AuditKind::CrisisResponse
-        && matches!(
-            record.detail(),
-            "response=Relief" | "response=Reform" | "response=Suppress"
-        )
+    matches!(
+        audit_record_crisis_response(record),
+        Some(CrisisResponse::Relief | CrisisResponse::Reform | CrisisResponse::Suppress)
+    )
 }
 
 fn has_active_crisis(state: &AppState, kind: CrisisKind) -> bool {
@@ -8673,9 +8700,7 @@ fn educate_family_members(state: &mut AppState) {
                 character.capabilities.commerce =
                     character.capabilities.commerce.saturating_add(1).min(100);
             }
-            CharacterRole::HeadOfHouse
-            | CharacterRole::BusinessManager
-            | CharacterRole::GuildRepresentative => {}
+            CharacterRole::HeadOfHouse => {}
         }
     }
 }

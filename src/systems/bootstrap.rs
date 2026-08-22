@@ -553,7 +553,6 @@ fn insert_household_groups(state: &mut AppState, registry: &Registry) {
                 SocialClass::Laboring => 1,
                 SocialClass::Artisan => 2,
                 SocialClass::Merchant => 4,
-                SocialClass::Elite => 7,
             };
             let household_id = state.next_ids.household();
             state.households.insert(Household {

@@ -7008,7 +7008,7 @@ pub(crate) const fn command_error_category(error: &CommandError) -> &'static str
         CommandError::ContractCounterpartyPenaltyOutOfRange { .. } => CONTRACT_PENALTY,
         CommandError::ContractCounterpartyCapacity { .. } => "contract counterparty capacity",
         CommandError::PropertyCounterpartyBuyerReserve { .. } => "property buyer reserve",
-        CommandError::InvalidBusinessPolicy | CommandError::InvalidBusinessInvestment => BAD_BIZ,
+        CommandError::InvalidBusinessPolicy => BAD_BIZ,
         CommandError::UnchangedBusinessPolicy { .. } => "unchanged business policy",
         CommandError::BusinessPolicyCooldown { .. } => "business policy cooldown",
         CommandError::InvalidBusinessWage { .. } | CommandError::BusinessHasNoWorkforce { .. } => {

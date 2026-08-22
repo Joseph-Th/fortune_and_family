@@ -48,7 +48,14 @@ pub(crate) fn score_campaign(
         .map(|(_, stats)| stats.executed)
         .max()
         .unwrap_or(0);
-    let distribution_score = 100_u16.saturating_sub(ratio_score(dominant_actions, executed));
+    // With fewer than two substantive executions there is no distribution to
+    // be dominated, so the term stays neutral instead of punishing a campaign
+    // that simply had one decision.
+    let distribution_score = if executed < 2 {
+        100
+    } else {
+        100_u16.saturating_sub(ratio_score(dominant_actions, executed))
+    };
     let choice_richness = ratio_score(
         accumulator.total_viable_command_kinds,
         opportunity_cycles.saturating_mul(3),

@@ -123,7 +123,7 @@ Each simulated day runs in this order:
 10. Update business lifecycle state.
 11. Advance the clock.
 12. Expire time-limited reports and office directives after their inclusive expiry day.
-13. Run weekly systems on week boundaries, including household wage settlement from the market clearing account.
+13. Run weekly systems on week boundaries. Employment wages transfer directly from each business to its households; weekly external regional income is paid from the market clearing account.
 14. Run monthly systems every 30 days, including AI objectives, AI dynasty upkeep, AI legal filings, and institution selections.
 15. Run annual and succession systems every 360 days.
 16. Refresh campaign progression from durable milestones.
@@ -141,7 +141,7 @@ Strategic scheduling lives in `src/systems/strategic.rs`:
 - **Monthly**: district conditions (including property value drift), institution selections, office duties and directives, AI objectives, AI dynasty upkeep, AI credit participation, AI legal filings and case resolution, crisis detection.
 - **Annual**: character health, succession, dynastic milestones.
 
-The market clearing account is the market's internal cash pool: business purchases, unmodeled operating and maintenance costs, and unowned-property sale proceeds credit it; business sales, vacancy income, and crisis profiteering debit it; weekly household income is paid from it.
+The market clearing account is the market's internal cash pool: business purchases, unmodeled operating and maintenance costs, public-work tool purchases, unowned-property sale proceeds, banking-panic deposit flight, AI dynasty upkeep, AI campaigning spend, and AI legitimacy patronage credit it; business sales, vacancy income, crisis profiteering extraction, office toll-revenue draws against it debit it; weekly external income is paid from it.
 
 AI dynasties act on the same cadence through `recover_ai_businesses` (daily), `advance_ai_objectives`, `apply_ai_dynasty_upkeep`, `advance_ai_credit_participation`, `file_grounded_ai_legal_cases`, and `resolve_institution_selections` (monthly).
 
@@ -185,7 +185,7 @@ Serialized contract changes require a schema increment, current-schema round-tri
 
 ### Projection and rendering
 
-`build_state_summary` and `build_campaign_projection` derive read models from immutable registry and state data. `render_campaign_html` consumes the campaign projection.
+`build_state_summary` and `build_campaign_projection` derive read models from immutable registry and state data. `render_campaign_html` consumes the campaign projection. `CampaignProjection::attention` is the single canonical classification of conditions needing player attention; both the dashboard cards and the CLI summary format that one list instead of re-deriving their own rules.
 
 Projection code may aggregate and format. It must not mutate state or recreate command validation.
 
