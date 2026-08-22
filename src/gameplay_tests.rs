@@ -2151,10 +2151,21 @@ mod candidates {
                 .is_ok()),
             "the fixture must retain a raw liquidation quote so the reserve check is material"
         );
+        // With buyers holding exactly the reserve, every discretionary purchase
+        // would end below it, and an unfunded civic treasury rules out the
+        // guaranteed-auction exemption.
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define a treasury");
+        state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget = Money::ZERO;
 
         assert!(
             !has_property_liquidation_opportunity(registry, &state),
-            "an opportunity must not be reported when every buyer would violate its reserve"
+            "an opportunity must not be reported when every buyer would violate its reserve and no auction guarantee is available"
         );
         let mut candidates = Vec::new();
         generate_finance_candidates(registry, &state, GameplayPersona::Steward, &mut candidates);
@@ -2163,6 +2174,27 @@ mod candidates {
                 .iter()
                 .all(|candidate| candidate.kind != GameplayCommandKind::SellProperty),
             "candidate generation and opportunity accounting must agree"
+        );
+
+        // A funded civic treasury enables the guaranteed auction, where the
+        // buyer commits its entire treasury by construction and the reserve
+        // does not apply; the agent must surface exactly what commits.
+        state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget = Money::from_copper(10_000_000);
+        assert!(
+            has_property_liquidation_opportunity(registry, &state),
+            "a civic-guaranteed auction must count as an executable opportunity"
+        );
+        candidates.clear();
+        generate_finance_candidates(registry, &state, GameplayPersona::Steward, &mut candidates);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::SellProperty),
+            "civic-guaranteed sales must be proposed as candidates"
         );
     }
 
@@ -3390,15 +3422,41 @@ mod candidates {
             candidates
                 .iter()
                 .all(|candidate| candidate.kind != GameplayCommandKind::ResolveLaborDispute),
-            "worker replacement must not mask unaffordable unsafe conditions"
+            "no labor response may be proposed when nothing is affordable above the operating reserve"
         );
 
+        // With the default 500-copper reserve, 1_000 cash leaves only 500
+        // spendable: negotiation commits, condition improvement does not.
         state
             .businesses
             .get_mut(business_id)
             .expect("business must exist")
             .finance
             .cash = Money::from_copper(1_000);
+        candidates.clear();
+        generate_reactive_candidates(&state, GameplayPersona::Entrepreneur, &mut candidates);
+
+        let labor_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.kind == GameplayCommandKind::ResolveLaborDispute)
+            .cloned()
+            .collect();
+        let candidate = single_candidate(&labor_candidates, "labor dispute response");
+        assert!(matches!(
+            candidate.command,
+            PlayerCommand::ResolveLaborDispute {
+                response: LaborResponse::Negotiate,
+                ..
+            }
+        ));
+
+        // Above the reserve floor, improving unsafe conditions takes priority.
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("business must exist")
+            .finance
+            .cash = Money::from_copper(1_000 + 1_000);
         candidates.clear();
         generate_reactive_candidates(&state, GameplayPersona::Entrepreneur, &mut candidates);
 
@@ -6515,7 +6573,12 @@ mod metrics {
             .get(&GameplayCommandKind::AcknowledgeNotification)
             .expect("acknowledgement statistics must exist");
         assert_eq!(command_stats.executed, 1);
-        assert_eq!(command_stats.actions_with_persistent_consequences, 1);
+        // Housekeeping executes mechanically outside a decision cycle, so it
+        // is not credited with measured feedback or persistent consequences;
+        // those stay reserved for baseline-compared command families.
+        assert_eq!(command_stats.immediate_world_feedback, 0);
+        assert_eq!(command_stats.actions_with_feedback, 0);
+        assert_eq!(command_stats.actions_with_persistent_consequences, 0);
         assert!(
             command_stats
                 .changed_domains

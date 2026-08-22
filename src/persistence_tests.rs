@@ -365,7 +365,6 @@ mod round_trip {
                 second_character_id: ward_id,
                 kind: FamilyLinkKind::Ward,
                 active: true,
-                property_claim_basis_points: 1_500,
             },
         );
         let value = serde_json::to_value(state).expect("state must serialize");
@@ -2262,7 +2261,6 @@ mod validation {
                     second_character_id: spouse_id,
                     kind: FamilyLinkKind::Marriage,
                     active: true,
-                    property_claim_basis_points: 5_000,
                 },
             );
         }
@@ -2307,7 +2305,6 @@ mod validation {
                 second_character_id: inactive_character_id,
                 kind: FamilyLinkKind::Marriage,
                 active: true,
-                property_claim_basis_points: 5_000,
             },
         );
         let value = serde_json::to_value(state).expect("state must serialize");
@@ -2361,7 +2358,6 @@ mod validation {
                     second_character_id: ward_id,
                     kind: FamilyLinkKind::Ward,
                     active: true,
-                    property_claim_basis_points: 1_500,
                 },
             );
         }

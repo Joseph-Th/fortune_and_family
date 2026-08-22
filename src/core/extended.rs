@@ -44,6 +44,29 @@ impl SupplyContract {
         self.id
     }
 
+    /// Whether per-dynasty delivery attribution agrees with total fulfillment:
+    /// every attributed dynasty delivered at least once and no more than the
+    /// fulfilled total, and attribution covers fulfillment within a factor of
+    /// two (deliveries may be shared between partner dynasties).
+    #[must_use]
+    pub fn has_consistent_delivery_attribution(&self) -> bool {
+        let attributed_deliveries = self
+            .fulfilled_deliveries_by_dynasty
+            .values()
+            .map(|deliveries| u64::from(*deliveries))
+            .sum::<u64>();
+        let fulfilled_deliveries = u64::from(self.fulfilled_deliveries);
+        self.fulfilled_deliveries_by_dynasty
+            .values()
+            .all(|deliveries| *deliveries > 0 && *deliveries <= self.fulfilled_deliveries)
+            && if fulfilled_deliveries == 0 {
+                self.fulfilled_deliveries_by_dynasty.is_empty()
+            } else {
+                attributed_deliveries >= fulfilled_deliveries
+                    && attributed_deliveries <= fulfilled_deliveries * 2
+            }
+    }
+
     #[must_use]
     pub const fn status(&self) -> ContractStatus {
         self.status
@@ -223,7 +246,6 @@ pub struct FamilyLink {
     pub(crate) second_character_id: CharacterId,
     pub(crate) kind: FamilyLinkKind,
     pub(crate) active: bool,
-    pub(crate) property_claim_basis_points: u16,
 }
 
 impl FamilyLink {

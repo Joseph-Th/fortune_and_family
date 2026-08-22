@@ -531,11 +531,6 @@ impl MarketState {
     pub fn get_quote(&self, good_id: GoodId) -> Option<&MarketQuote> {
         self.quotes.get(&good_id)
     }
-
-    #[must_use]
-    pub const fn clearing_account(&self) -> Money {
-        self.clearing_account
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -607,6 +602,7 @@ pub enum AuditKind {
     OfficeDutyForfeiture,
     OfficeDirective,
     HouseGovernanceChange,
+    FamilyCouncilMeeting,
     HeirDesignation,
     WardAdoption,
     FamilyEducation,

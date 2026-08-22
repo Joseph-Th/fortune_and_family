@@ -6,6 +6,7 @@ use crate::core::{
 };
 use crate::ids::{BusinessId, HouseholdId};
 use crate::money::{Money, Quantity, checked_cost_for};
+use crate::systems::is_schedulable_day;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -116,10 +117,11 @@ pub enum PersistenceError {
 /// The outcome of a save operation after visibility commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SaveOutcome {
-    /// Save was atomically replaced and parent directory durability synchronized.
+    /// Save was atomically replaced; parent directory durability was
+    /// synchronized on platforms that support directory synchronization.
     Committed,
-    /// Save was atomically replaced and is visible to subsequent reads, but parent directory
-    /// synchronization failed or was degraded.
+    /// Save was atomically replaced and is visible to subsequent reads, but the
+    /// attempted parent directory synchronization failed or was degraded.
     CommittedWithDegradedDurability,
 }
 
@@ -172,6 +174,10 @@ pub(crate) fn set_inject_directory_sync_failure_for_test(inject: bool) {
     INJECT_DIRECTORY_SYNC_FAILURE.with(|cell| cell.set(inject));
 }
 
+/// Performs the platform's parent-directory synchronization where the platform
+/// supports it. Unix opens and syncs the directory; platforms without
+/// directory-fd semantics perform no synchronization and always report a full
+/// [`SaveOutcome::Committed`], whose contract is scoped to platform support.
 #[allow(clippy::unnecessary_wraps)]
 fn sync_save_directory_with_injection(
     #[allow(unused_variables)] parent: &Path,
@@ -767,10 +773,6 @@ fn validate_simulation_clock(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-const fn is_schedulable_day(day: i64) -> bool {
-    day != i64::MAX
-}
-
 fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
     for dynasty in state.dynasties.values() {
         if dynasty.treasury() < Money::ZERO
@@ -980,14 +982,6 @@ fn validate_institution_numeric_ranges(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
-    for link in state.family_links.values() {
-        if link.property_claim_basis_points > 10_000 {
-            return Err(format!(
-                "family link {} has an invalid property claim",
-                link.id
-            ));
-        }
-    }
     for council in state.family_councils.values() {
         if council.unity_basis_points > 10_000 || council.charter_version == u64::MAX {
             return Err(format!(
@@ -1026,13 +1020,8 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
                 work.id
             ));
         }
-        let expected_progress = u16::try_from(
-            work.spent
-                .saturating_mul_ratio(10_000, work.budget.copper())
-                .copper()
-                .clamp(0, 10_000),
-        )
-        .expect("clamped public-work progress must fit u16");
+        let expected_progress =
+            crate::systems::public_work_progress_basis_points(work.spent, work.budget);
         if work.progress_basis_points != expected_progress
             || (work.status == crate::core::PublicWorkStatus::Completed)
                 != (work.spent == work.budget)
@@ -1507,26 +1496,11 @@ fn contract_delivery_attribution_is_valid(
     state: &AppState,
     contract: &crate::core::SupplyContract,
 ) -> bool {
-    let attributed_deliveries = contract
-        .fulfilled_deliveries_by_dynasty
-        .values()
-        .map(|deliveries| u64::from(*deliveries))
-        .sum::<u64>();
-    let fulfilled_deliveries = u64::from(contract.fulfilled_deliveries);
     contract
         .fulfilled_deliveries_by_dynasty
-        .iter()
-        .all(|(dynasty_id, deliveries)| {
-            state.dynasties.contains_key(dynasty_id)
-                && *deliveries > 0
-                && *deliveries <= contract.fulfilled_deliveries
-        })
-        && if fulfilled_deliveries == 0 {
-            contract.fulfilled_deliveries_by_dynasty.is_empty()
-        } else {
-            attributed_deliveries >= fulfilled_deliveries
-                && attributed_deliveries <= fulfilled_deliveries * 2
-        }
+        .keys()
+        .all(|dynasty_id| state.dynasties.contains_key(dynasty_id))
+        && contract.has_consistent_delivery_attribution()
 }
 
 fn validate_finance_and_organization_records(state: &AppState) -> Result<(), String> {

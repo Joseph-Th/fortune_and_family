@@ -16,6 +16,12 @@ pub(crate) const MAX_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 14_000;
 pub(crate) const OFFICE_TERM_DAYS: i64 = 360;
 pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 120;
 
+/// Returns whether a scheduled day can still arrive: the terminal sentinel is
+/// never schedulable.
+pub(crate) const fn is_schedulable_day(day: i64) -> bool {
+    day != i64::MAX
+}
+
 /// Returns whether a repayment-active schedule's due day is validly settleable
 /// at `current_day`.
 ///
@@ -94,6 +100,22 @@ pub(crate) fn institution_powers_for(
 pub(crate) fn supported_worker_capacity(business: &crate::core::Business) -> u32 {
     u32::from(business.operations.capacity_batches_per_day)
         .saturating_mul(u32::from(WORKERS_PER_BATCH))
+}
+
+/// Derives public-work completion progress in basis points from spent funds
+/// against budget. The single canonical derivation: mutation sites write it
+/// and both validation layers read the identical expression.
+#[must_use]
+pub(crate) fn public_work_progress_basis_points(
+    spent: crate::money::Money,
+    budget: crate::money::Money,
+) -> u16 {
+    let ratio = if budget.copper() > 0 {
+        spent.saturating_mul_ratio(10_000, budget.copper()).copper()
+    } else {
+        0
+    };
+    u16::try_from(ratio.clamp(0, 10_000)).expect("clamped public-work progress must fit u16")
 }
 
 pub(crate) fn saturating_worker_count(workers: impl Iterator<Item = u32>) -> u32 {
@@ -176,29 +198,33 @@ pub use bootstrap::{NewGameError, build_new_game};
 pub(crate) use commands::INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT;
 pub(crate) use commands::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
-    COMMISSIONED_INFORMATION_SOURCE, FAMILY_COUNCIL_MEETING_COST,
-    FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, HEIR_DESIGNATION_INTERVAL_DAYS,
-    HEIR_DESIGNATION_LEGITIMACY_COST, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
-    INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
+    COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST, CRISIS_SUPPRESS_COST,
+    FAMILY_COUNCIL_MEETING_COST, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST,
+    HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
+    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST,
+    INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
     INFORMATION_REPORT_LIFETIME_DAYS, INSTITUTION_ENDOWMENT_MAX, INSTITUTION_ENDOWMENT_MIN,
     INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
-    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
-    MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
-    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, OFFICE_NOMINATION_RESOLUTION_DAYS,
-    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
-    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
-    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT,
-    WARD_ADOPTION_INTERVAL_DAYS, WARD_ADOPTION_LEGITIMACY_REQUIREMENT,
-    WARD_ADOPTION_REPUTATION_REQUIREMENT, active_player_ward_count,
+    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, LABOR_CONDITIONS_IMPROVEMENT_COST,
+    LABOR_NEGOTIATION_COST, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
+    LAW_SPONSORSHIP_COST, LAW_SPONSORSHIP_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
+    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, OFFICE_NOMINATION_CAMPAIGN_COST,
+    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+    OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
+    OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, PRIVATE_LOAN_COUNTERPARTY_RESERVE,
+    PROPERTY_COUNTERPARTY_BUYER_RESERVE, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST,
+    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT,
+    active_player_ward_count, business_operating_spendable_cash,
     contract_counterparty_price_bounds, contract_relationship_pressure_basis_points,
-    family_education_next_day, has_established_player_institution_membership,
+    crisis_relief_cost, family_education_next_day, has_established_player_institution_membership,
     has_established_player_office_power, has_player_office, institution_endowment_next_day,
     institution_membership_count, institution_support_day,
     institution_support_delivery_requirement, institution_support_next_day,
     office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
-    private_loan_borrower_financing_pressure, quote_information_leverage, quote_player_legal_claim,
-    quote_player_legal_settlement, required_office_power_for_law,
+    private_loan_borrower_financing_pressure, public_work_initial_contribution,
+    quote_information_leverage, quote_player_legal_claim, quote_player_legal_settlement,
+    required_office_power_for_law,
 };
 pub use commands::{
     CommandError, CommandOutcome, CrisisResponse, EducationFocus, InformationFocus, LaborResponse,

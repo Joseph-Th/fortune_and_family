@@ -1,5 +1,6 @@
 //! Debug-only assertions for registry, reference, index, lifecycle, and value invariants.
 
+use super::is_schedulable_day;
 use crate::core::{
     AppState, AuditKind, Business, CharacterStatus, CivicDebtStatus, ContractStatus, DynastyPair,
     EmploymentStatus, FamilyLinkKind, LegalCaseKind, LegalCaseStatus, LegalClaimSource, LoanStatus,
@@ -32,10 +33,6 @@ impl RegistryIds {
                 .collect(),
         }
     }
-}
-
-const fn is_schedulable_day(day: i64) -> bool {
-    day != i64::MAX
 }
 
 /// Asserts all cheap runtime invariants in debug builds.
@@ -566,10 +563,6 @@ fn validate_strategic_state(registry: &Registry, state: &AppState, ids: &Registr
     validate_outbox(state);
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the dispatch keeps the full decision path in one auditable function"
-)]
 fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) {
     for (contract_id, contract) in &state.contracts {
         debug_assert_eq!(
@@ -623,12 +616,6 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             contract_breach_penalty_is_valid(contract),
             "Lifecycle Validity: unpaid contract breach penalty is inconsistent"
         );
-        let attributed_deliveries = contract
-            .fulfilled_deliveries_by_dynasty
-            .values()
-            .map(|deliveries| u64::from(*deliveries))
-            .sum::<u64>();
-        let fulfilled_deliveries = u64::from(contract.fulfilled_deliveries);
         debug_assert!(
             contract
                 .fulfilled_deliveries_by_dynasty
@@ -641,12 +628,7 @@ fn validate_contracts(registry: &Registry, state: &AppState, ids: &RegistryIds) 
             "Record Reference Validity: contract delivery attribution is invalid"
         );
         debug_assert!(
-            if fulfilled_deliveries == 0 {
-                contract.fulfilled_deliveries_by_dynasty.is_empty()
-            } else {
-                attributed_deliveries >= fulfilled_deliveries
-                    && attributed_deliveries <= fulfilled_deliveries * 2
-            },
+            contract.has_consistent_delivery_attribution(),
             "Derived Data Consistency: contract delivery attribution does not match fulfillment"
         );
         if let Some(seller) = seller {
@@ -1097,10 +1079,6 @@ fn validate_family_links(state: &AppState) {
                 && state.characters.get(link.second_character_id).is_some(),
             "Record Reference Validity: family link character does not exist"
         );
-        debug_assert!(
-            link.property_claim_basis_points <= 10_000,
-            "Lifecycle Validity: family property claim is outside basis-point range"
-        );
         if link.active && link.kind == FamilyLinkKind::Marriage {
             debug_assert!(
                 actively_married_characters.insert(link.first_character_id)
@@ -1458,13 +1436,7 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
             work.progress_basis_points <= 10_000,
             "Lifecycle Validity: public work progress is outside basis-point range"
         );
-        let expected_progress = u16::try_from(
-            work.spent
-                .saturating_mul_ratio(10_000, work.budget.copper())
-                .copper()
-                .clamp(0, 10_000),
-        )
-        .expect("clamped public-work progress must fit u16");
+        let expected_progress = super::public_work_progress_basis_points(work.spent, work.budget);
         debug_assert_eq!(
             work.progress_basis_points, expected_progress,
             "Derived Data Consistency: public work progress does not match spending"

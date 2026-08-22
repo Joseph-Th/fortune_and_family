@@ -166,7 +166,7 @@ save_state / save_state_cas / save_state_new
   -> serialize current AppState
   -> write and synchronize same-directory temporary file
   -> atomically replace destination (visibility commit point)
-  -> synchronize parent directory durability (returns SaveOutcome)
+  -> synchronize parent directory durability on platforms that support it (returns SaveOutcome)
 
 load_state / load_state_with_revision
   -> read bounded save file and compute SaveRevision

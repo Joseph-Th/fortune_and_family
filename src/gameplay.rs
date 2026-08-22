@@ -11,38 +11,41 @@ use crate::money::{Money, Quantity, checked_cost_for};
 use crate::registry::{GoodCategory, InstitutionKind, Registry};
 use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
-    COMMISSIONED_INFORMATION_SOURCE, CommandError, CrisisResponse,
-    DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, EducationFocus, FAMILY_COUNCIL_MEETING_COST,
-    FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, HEIR_DESIGNATION_INTERVAL_DAYS,
-    HEIR_DESIGNATION_LEGITIMACY_COST, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
-    INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
-    INSTITUTION_ENDOWMENT_MAX, INSTITUTION_ENDOWMENT_MIN, INSTITUTION_SUPPORT_COST,
-    INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
-    InformationFocus, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_INTERVAL_DAYS, LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS,
-    LaborResponse, LoanTerms, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS,
-    MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, NewGameError,
-    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
-    OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
-    OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, OFFICE_POWER_ESTABLISHMENT_DAYS,
-    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
-    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
-    SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
-    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST, CRISIS_SUPPRESS_COST, CommandError,
+    CrisisResponse, DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, EducationFocus,
+    FAMILY_COUNCIL_MEETING_COST, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST,
+    HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
+    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST,
+    INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST, INSTITUTION_ENDOWMENT_MAX,
+    INSTITUTION_ENDOWMENT_MIN, INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
+    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, InformationFocus,
+    LABOR_CONDITIONS_IMPROVEMENT_COST, LABOR_NEGOTIATION_COST, LABOR_REPLACEMENT_COST,
+    LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_COST, LAW_SPONSORSHIP_INTERVAL_DAYS,
+    LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms,
+    MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
+    NewGameError, OFFICE_NOMINATION_CAMPAIGN_COST, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, OFFICE_NOMINATION_RESOLUTION_DAYS,
+    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
+    OFFICE_POWER_ESTABLISHMENT_DAYS, PRIVATE_LOAN_COUNTERPARTY_RESERVE,
+    PROPERTY_COUNTERPARTY_BUYER_RESERVE, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand,
+    STANDARD_CONTRACT_BATCHES_PER_WEEK, SimulationError, StrategicError, SupplyContractTerms,
+    WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT,
     active_player_ward_count, advance_days, apply_player_command, available_household_workers,
-    available_supply_contract_capacity, build_new_game, business_owner_distribution_reserve,
-    business_recapitalization_target, contract_counterparty_price_bounds,
-    contract_relationship_pressure_basis_points, crisis_response_contains_crisis,
-    family_education_next_day, has_established_player_institution_membership,
-    has_established_player_office_power, has_player_office, institution_capability_score,
-    institution_endowment_next_day, institution_membership_count, institution_support_day,
+    available_supply_contract_capacity, build_new_game, business_operating_spendable_cash,
+    business_owner_distribution_reserve, business_recapitalization_target,
+    contract_counterparty_price_bounds, contract_relationship_pressure_basis_points,
+    crisis_relief_cost, crisis_response_contains_crisis, family_education_next_day,
+    has_established_player_institution_membership, has_established_player_office_power,
+    has_player_office, institution_capability_score, institution_endowment_next_day,
+    institution_membership_count, institution_support_day,
     institution_support_delivery_requirement, institution_support_next_day,
     office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
     private_loan_borrower_financing_pressure, projected_dynasty_monthly_office_duty,
-    projected_dynasty_monthly_office_duty_with_additional_offices, quote_business_acquisition,
-    quote_information_leverage, quote_player_legal_claim, quote_player_legal_settlement,
-    quote_property_liquidation, required_office_power_for_law, validate_invariants,
+    projected_dynasty_monthly_office_duty_with_additional_offices,
+    public_work_initial_contribution, quote_business_acquisition, quote_information_leverage,
+    quote_player_legal_claim, quote_player_legal_settlement, quote_property_liquidation,
+    required_office_power_for_law, validate_invariants,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -104,7 +107,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 62;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 63;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -197,6 +200,8 @@ const AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD: u16 = 4_000;
 const AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD: u16 = 2_500;
 const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 14;
 const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 120;
+/// Fixed budget used by agent-proposed public-work candidates.
+const CANDIDATE_PUBLIC_WORK_BUDGET: Money = Money::from_copper(12_000);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GameplayPersona {
@@ -4050,17 +4055,15 @@ fn apply_notification_housekeeping(
         .commands
         .get_mut(&GameplayCommandKind::AcknowledgeNotification)
         .expect("acknowledgement statistics must exist");
+    // Housekeeping acknowledgements execute mechanically before any decision
+    // cycle, so only execution is credited here. Feedback and persistence
+    // counters stay reserved for commands measured against an action/no-action
+    // baseline like every other family.
     command_stats.offered_cycles = command_stats.offered_cycles.saturating_add(1);
     command_stats.generated = command_stats.generated.saturating_add(1);
     command_stats.considered = command_stats.considered.saturating_add(1);
     command_stats.viable = command_stats.viable.saturating_add(1);
     command_stats.executed = command_stats.executed.saturating_add(1);
-    command_stats.immediate_world_feedback =
-        command_stats.immediate_world_feedback.saturating_add(1);
-    command_stats.actions_with_feedback = command_stats.actions_with_feedback.saturating_add(1);
-    command_stats.actions_with_persistent_consequences = command_stats
-        .actions_with_persistent_consequences
-        .saturating_add(1);
     command_stats
         .changed_domains
         .insert(GameplayDomain::Feedback);
@@ -4558,7 +4561,7 @@ fn has_family_council_opportunity(state: &AppState) -> bool {
         .iter()
         .rev()
         .find(|record| {
-            record.kind() == AuditKind::HouseGovernanceChange && record.subject() == subject
+            record.kind() == AuditKind::FamilyCouncilMeeting && record.subject() == subject
         })
         .is_none_or(|record| {
             record
@@ -4660,13 +4663,13 @@ fn has_family_education_opportunity(state: &AppState) -> bool {
             character.dynasty_id() == player_id && character.status() == CharacterStatus::Active
         })
         .any(|character| {
-            education_focus_order(GameplayPersona::Steward)
-                .into_iter()
-                .any(|focus| {
-                    character_focus_value(character, focus) < 100
-                        && family_education_next_day(state, character.id())
-                            .is_none_or(|day| state.clock.day() >= day)
-                })
+            // Any trainable capability below 100 qualifies; persona-specific
+            // focus ordering only matters when generating candidates.
+            ALL_EDUCATION_FOCUSSES.into_iter().any(|focus| {
+                character_focus_value(character, focus) < 100
+                    && family_education_next_day(state, character.id())
+                        .is_none_or(|day| state.clock.day() >= day)
+            })
         })
 }
 
@@ -6238,10 +6241,8 @@ fn candidate_player_treasury_cost(
             .properties
             .get(property_id)
             .map_or(Money::ZERO, |property| property.value),
-        PlayerCommand::EnactLaw { .. } => Money::from_copper(2_000),
-        PlayerCommand::StartPublicWork { budget, .. } => {
-            Money::from_copper((budget.copper() / 10).max(1)).min(*budget)
-        }
+        PlayerCommand::EnactLaw { .. } => LAW_SPONSORSHIP_COST,
+        PlayerCommand::StartPublicWork { budget, .. } => public_work_initial_contribution(*budget),
         PlayerCommand::FileLegalCase { .. } => LEGAL_CASE_FILING_COST,
         PlayerCommand::SettleLegalCase { case_id } => {
             quote_player_legal_settlement(state, *case_id).map_or(Money::ZERO, |quote| quote.amount)
@@ -6250,7 +6251,7 @@ fn candidate_player_treasury_cost(
         PlayerCommand::AdoptWard { .. } => WARD_ADOPTION_COST,
         PlayerCommand::EducateFamilyMember { .. } => FAMILY_EDUCATION_COST,
         PlayerCommand::CultivateInstitutionSupport { .. } => INSTITUTION_SUPPORT_COST,
-        PlayerCommand::NominateForOffice { .. } => Money::from_copper(300),
+        PlayerCommand::NominateForOffice { .. } => OFFICE_NOMINATION_CAMPAIGN_COST,
         PlayerCommand::CommissionInformation { .. } => INFORMATION_COMMISSION_COST,
         PlayerCommand::LeverageInformation { .. } => INFORMATION_LEVERAGE_COST,
         PlayerCommand::RespondToCrisis {
@@ -6258,10 +6259,10 @@ fn candidate_player_treasury_cost(
             response,
         } => match response {
             CrisisResponse::Relief => state.crises.get(crisis_id).map_or(Money::ZERO, |crisis| {
-                Money::from_copper(i64::from(crisis.severity_basis_points).saturating_mul(2))
+                crisis_relief_cost(crisis.severity_basis_points)
             }),
-            CrisisResponse::Reform => Money::from_copper(1_500),
-            CrisisResponse::Suppress => Money::from_copper(900),
+            CrisisResponse::Reform => CRISIS_REFORM_COST,
+            CrisisResponse::Suppress => CRISIS_SUPPRESS_COST,
             CrisisResponse::Exploit => Money::ZERO,
         },
         PlayerCommand::TransferBusinessCash { .. }
@@ -6441,11 +6442,10 @@ fn can_afford_crisis_response(
         .expect("player dynasty must exist");
     match response {
         CrisisResponse::Relief => {
-            dynasty.treasury()
-                >= Money::from_copper(i64::from(crisis.severity_basis_points).saturating_mul(2))
+            dynasty.treasury() >= crisis_relief_cost(crisis.severity_basis_points)
         }
-        CrisisResponse::Reform => dynasty.treasury() >= Money::from_copper(1_500),
-        CrisisResponse::Suppress => dynasty.treasury() >= Money::from_copper(900),
+        CrisisResponse::Reform => dynasty.treasury() >= CRISIS_REFORM_COST,
+        CrisisResponse::Suppress => dynasty.treasury() >= CRISIS_SUPPRESS_COST,
         // Profiteering extracts from the panicked market's clearing pool, so an
         // empty pool makes the attempt a guaranteed rejection.
         CrisisResponse::Exploit => {
@@ -6460,9 +6460,13 @@ fn preferred_labor_response(
     agreement: &crate::core::EmploymentAgreement,
     persona: GameplayPersona,
 ) -> Option<LaborResponse> {
-    if agreement.conditions_basis_points < 5_000 {
-        return can_execute_labor_response(state, agreement, LaborResponse::ImproveConditions)
-            .then_some(LaborResponse::ImproveConditions);
+    // Poor working conditions prioritize improvement, but a business that
+    // cannot fund it falls through to the persona's remaining options instead
+    // of re-proposing a guaranteed rejection every cycle.
+    if agreement.conditions_basis_points < 5_000
+        && can_execute_labor_response(state, agreement, LaborResponse::ImproveConditions)
+    {
+        return Some(LaborResponse::ImproveConditions);
     }
     labor_responses(persona)
         .into_iter()
@@ -6477,11 +6481,14 @@ fn can_execute_labor_response(
     let Some(business) = state.businesses.get(agreement.business_id) else {
         return false;
     };
+    // Player-driven labor spending draws on the business's cash above its
+    // operating-reserve floor, exactly like the canonical command validation.
+    let spendable = business_operating_spendable_cash(business);
     match response {
-        LaborResponse::ImproveConditions => business.cash() >= Money::from_copper(1_000),
-        LaborResponse::Negotiate => business.cash() >= Money::from_copper(500),
+        LaborResponse::ImproveConditions => spendable >= LABOR_CONDITIONS_IMPROVEMENT_COST,
+        LaborResponse::Negotiate => spendable >= LABOR_NEGOTIATION_COST,
         LaborResponse::ReplaceWorkers => {
-            business.cash() >= LABOR_REPLACEMENT_COST
+            spendable >= LABOR_REPLACEMENT_COST
                 && state
                     .households
                     .ids_for_district(business.district_id())
@@ -7240,7 +7247,10 @@ fn generate_business_acquisition_candidates(
         else {
             continue;
         };
-        let recapitalization = acquisition_recapitalization(registry, state, business, quote);
+        let Some(recapitalization) = acquisition_recapitalization(registry, state, business, quote)
+        else {
+            continue;
+        };
         let required = quote.purchase_price.saturating_add(recapitalization);
         let player_treasury = state
             .dynasties
@@ -7323,12 +7333,17 @@ fn acquisition_manager_id(
         .map(crate::core::Character::id)
 }
 
+/// Sizes the recapitalization for an acquisition: a comfortable cushion above
+/// the quoted minimum when the treasury allows it. Returns `None` when the
+/// treasury cannot fund even the canonical minimum after the purchase price,
+/// so the candidate is skipped instead of being proposed as a guaranteed
+/// rejection.
 fn acquisition_recapitalization(
     registry: &Registry,
     state: &AppState,
     business: &crate::core::Business,
     quote: crate::systems::BusinessAcquisitionQuote,
-) -> Money {
+) -> Option<Money> {
     let recipe = registry
         .get_recipe(business.recipe_id())
         .expect("business recipe must exist");
@@ -7344,11 +7359,10 @@ fn acquisition_recapitalization(
         .copper()
         .saturating_sub(quote.purchase_price.copper())
         .max(0);
-    if available >= quote.minimum_recapitalization.copper() {
-        Money::from_copper(desired.copper().min(available))
-    } else {
-        quote.minimum_recapitalization
+    if available < quote.minimum_recapitalization.copper() {
+        return None;
     }
+    Some(Money::from_copper(desired.copper().min(available)))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -8063,10 +8077,13 @@ fn accepted_property_liquidation_quote(
     )
     .ok()?;
     let buyer = state.dynasties.get(&buyer_dynasty_id)?;
-    buyer
-        .treasury()
-        .checked_sub(quote.buyer_contribution)
-        .filter(|remaining| *remaining >= PROPERTY_COUNTERPARTY_BUYER_RESERVE)?;
+    let buyer_after = buyer.treasury().checked_sub(quote.buyer_contribution)?;
+    // Mirror the canonical sale validation: the discretionary counterparty
+    // reserve does not apply to a civic-guaranteed auction, where the buyer
+    // commits their entire treasury by construction.
+    if quote.civic_guarantee == Money::ZERO && buyer_after < PROPERTY_COUNTERPARTY_BUYER_RESERVE {
+        return None;
+    }
     Some(quote)
 }
 
@@ -9291,10 +9308,14 @@ fn generate_public_work_candidates(
     if !sponsorship_available {
         return;
     }
+    // Candidate public works use a fixed budget; the agent must afford at
+    // least the canonical initial sponsor contribution for that budget.
     if state
         .dynasties
         .get(&state.player_dynasty_id)
-        .is_none_or(|dynasty| dynasty.treasury() < Money::from_copper(1_200))
+        .is_none_or(|dynasty| {
+            dynasty.treasury() < public_work_initial_contribution(CANDIDATE_PUBLIC_WORK_BUDGET)
+        })
     {
         return;
     }
@@ -9323,7 +9344,7 @@ fn generate_public_work_candidates(
                 PlayerCommand::StartPublicWork {
                     district_id: district.id(),
                     kind,
-                    budget: Money::from_copper(12_000),
+                    budget: CANDIDATE_PUBLIC_WORK_BUDGET,
                 },
                 format!(
                     "start {kind:?} in {} to {}",
@@ -9707,7 +9728,7 @@ fn generate_family_council_candidate(
         .iter()
         .rev()
         .find(|record| {
-            record.kind() == AuditKind::HouseGovernanceChange && record.subject() == subject
+            record.kind() == AuditKind::FamilyCouncilMeeting && record.subject() == subject
         })
         .is_none_or(|record| {
             record
@@ -9820,18 +9841,18 @@ fn generate_heir_designation_candidates(
     if !designation_available {
         return;
     }
-    let Some(current_heir_id) = dynasty.heir_id() else {
-        return;
-    };
-    let Some(current_heir) = state.characters.get(current_heir_id) else {
-        return;
-    };
+    let current_heir_id = dynasty.heir_id();
+    let current_heir = current_heir_id.and_then(|heir_id| state.characters.get(heir_id));
     let (head_age, head_health) = character_age_and_health(state, dynasty.head_id());
-    if head_age < 48 && dynasty.runtime.succession_risk_basis_points < 2_000 {
+    // A house without any designated heir wants one as soon as the succession
+    // horizon matters at all; with an heir in place, only an aging or at-risk
+    // head justifies reconsidering the line.
+    if current_heir.is_some()
+        && head_age < 48
+        && dynasty.runtime.succession_risk_basis_points < 2_000
+    {
         return;
     }
-    let current_score = successor_score(current_heir, persona);
-    let current_primary = successor_primary_capability(current_heir, persona);
     let council = state
         .family_councils
         .get(&state.player_dynasty_id)
@@ -9842,7 +9863,7 @@ fn generate_heir_designation_candidates(
         .filter_map(|character_id| state.characters.get(*character_id))
         .filter(|character| {
             character.id() != dynasty.head_id()
-                && character.id() != current_heir_id
+                && Some(character.id()) != current_heir_id
                 && character.status() == CharacterStatus::Active
                 && state.clock.day().saturating_sub(character.birth_day()) >= 18 * 360
         })
@@ -9854,11 +9875,19 @@ fn generate_heir_designation_candidates(
             )
         });
     if let Some(replacement) = replacement {
-        let replacement_score = successor_score(replacement, persona);
-        let replacement_primary = successor_primary_capability(replacement, persona);
-        let broadly_superior = replacement_score >= current_score.saturating_add(20);
-        let strategically_specialized = replacement_primary >= current_primary.saturating_add(5);
-        if broadly_superior || strategically_specialized {
+        let should_designate = match current_heir {
+            // Without an heir the strongest eligible member is always worth
+            // designating; the canonical route supports first designation.
+            None => true,
+            Some(current_heir) => {
+                let broadly_superior = successor_score(replacement, persona)
+                    >= successor_score(current_heir, persona).saturating_add(20);
+                let strategically_specialized = successor_primary_capability(replacement, persona)
+                    >= successor_primary_capability(current_heir, persona).saturating_add(5);
+                broadly_superior || strategically_specialized
+            }
+        };
+        if should_designate {
             push_candidate(
                 candidates,
                 GameplayCommandKind::DesignateHeir,
@@ -9866,20 +9895,56 @@ fn generate_heir_designation_candidates(
                     character_id: replacement.id(),
                 },
                 format!(
-                    "designate character {} as heir for the {persona:?} succession strategy",
-                    replacement.id()
+                    "designate character {} as {} for the {persona:?} succession strategy",
+                    replacement.id(),
+                    if current_heir.is_some() {
+                        "heir"
+                    } else {
+                        "the first heir"
+                    },
                 ),
                 1_000_i64.saturating_add(head_age.saturating_sub(47).saturating_mul(20)),
             );
             return;
         }
     }
+    let (Some(current_heir_id), Some(current_heir)) = (current_heir_id, current_heir) else {
+        return;
+    };
+    propose_formal_confirmation(
+        state,
+        persona,
+        candidates,
+        council,
+        current_heir_id,
+        current_heir,
+        head_age,
+        head_health,
+        last_designation_day.is_some(),
+    );
+}
+
+/// Formally confirms an existing heir when the succession horizon demands it:
+/// the heir must be eligible and the head old or frail enough that leaving the
+/// line informal is a real risk.
+#[expect(clippy::too_many_arguments)]
+fn propose_formal_confirmation(
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+    council: &crate::core::FamilyCouncilState,
+    current_heir_id: crate::ids::CharacterId,
+    current_heir: &crate::core::Character,
+    head_age: i64,
+    head_health: u16,
+    designation_already_recorded: bool,
+) {
     let current_heir_is_eligible = current_heir.status() == CharacterStatus::Active
         && state.clock.day().saturating_sub(current_heir.birth_day()) >= 18 * 360
         && council.members.contains(&current_heir_id);
     let confirmation_pressure = head_age >= HEIR_CONFIRMATION_HEAD_AGE_YEARS
         || head_health <= HEIR_CONFIRMATION_HEALTH_THRESHOLD;
-    if last_designation_day.is_some() || !current_heir_is_eligible || !confirmation_pressure {
+    if designation_already_recorded || !current_heir_is_eligible || !confirmation_pressure {
         return;
     }
     push_candidate(
@@ -10871,6 +10936,13 @@ const fn institution_education_focus_is_relevant(
         }
     }
 }
+
+const ALL_EDUCATION_FOCUSSES: [EducationFocus; 4] = [
+    EducationFocus::Administration,
+    EducationFocus::Commerce,
+    EducationFocus::Social,
+    EducationFocus::Craft,
+];
 
 const fn education_focus_order(persona: GameplayPersona) -> [EducationFocus; 4] {
     match persona {

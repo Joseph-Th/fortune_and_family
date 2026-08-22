@@ -2460,7 +2460,6 @@ mod health_and_succession {
                 second_character_id: ward_id,
                 kind: FamilyLinkKind::Ward,
                 active: true,
-                property_claim_basis_points: 1_500,
             },
         );
         state
@@ -2858,7 +2857,6 @@ mod health_and_succession {
                 second_character_id: character_id,
                 kind: FamilyLinkKind::Ward,
                 active: true,
-                property_claim_basis_points: 1_000,
             },
         );
         let kinship_link_id = state.next_ids.family_link();
@@ -2870,7 +2868,6 @@ mod health_and_succession {
                 second_character_id: character_id,
                 kind: FamilyLinkKind::Sibling,
                 active: true,
-                property_claim_basis_points: 500,
             },
         );
         (ward_link_id, kinship_link_id)

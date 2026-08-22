@@ -25,6 +25,7 @@ use crate::money::{
 use crate::registry::{InstitutionKind, Registry};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use thiserror::Error;
 
 pub(crate) const OFFICE_ADMINISTRATIVE_LOAD_PER_POWER: u16 = 10;
@@ -50,6 +51,12 @@ const MAX_OFFICE_CONCENTRATION_BACKLASH: i16 = 600;
 pub(crate) const DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS: i64 = 180;
 pub(crate) const PROPERTY_LIQUIDATION_BASIS_POINTS: i64 = 5_000;
 const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000);
+
+/// Contract commitments are sized against a five-day operating week even
+/// though the simulation week has seven days: the margin keeps both parties
+/// free to keep trading the good on the open market alongside the contract.
+const CONTRACT_CAPACITY_COMMITMENT_DAYS: i64 = 5;
+
 const UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS: u16 = 240;
 const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
 /// Route disruption at or above this level spawns a trade-disruption crisis.
@@ -774,11 +781,13 @@ pub(crate) fn available_supply_contract_capacity(
         .find(|input| input.good_id() == good_id)?
         .quantity();
     let seller_capacity = seller_recipe.output_quantity().saturating_mul_ratio(
-        i64::from(seller.operations.capacity_batches_per_day).saturating_mul(5),
+        i64::from(seller.operations.capacity_batches_per_day)
+            .saturating_mul(CONTRACT_CAPACITY_COMMITMENT_DAYS),
         1,
     );
     let buyer_capacity = input_per_batch.saturating_mul_ratio(
-        i64::from(buyer.operations.capacity_batches_per_day).saturating_mul(5),
+        i64::from(buyer.operations.capacity_batches_per_day)
+            .saturating_mul(CONTRACT_CAPACITY_COMMITMENT_DAYS),
         1,
     );
     let committed_outgoing = state
@@ -2461,7 +2470,6 @@ fn initialize_family_governance(state: &mut AppState) {
                     second_character_id: heir_id,
                     kind: FamilyLinkKind::ParentChild,
                     active: true,
-                    property_claim_basis_points: 8_000,
                 },
             );
         }
@@ -3897,17 +3905,34 @@ fn settle_missed_loan_payment(
         let CollateralSeizure {
             recovery: collateral_recovery,
             equity_returned,
+            equity_withheld,
         } = seize_defaulted_collateral(state, due);
         let remaining_balance = state
             .loans
             .get(&due.id)
             .expect("defaulted loan must exist")
             .balance;
-        let surplus_note = if equity_returned > Money::ZERO {
-            format!(" Surplus collateral equity of {equity_returned} was returned to the borrower.")
-        } else {
-            String::new()
-        };
+        let mut surplus_note = String::new();
+        if equity_returned > Money::ZERO {
+            let _ = write!(
+                surplus_note,
+                " Surplus collateral equity of {equity_returned} was returned to the borrower."
+            );
+        }
+        if equity_withheld > Money::ZERO {
+            // The seizing lender could not fund the full surplus, so it kept a
+            // windfall above its claim; the borrower remembers the grievance.
+            let _ = write!(
+                surplus_note,
+                " Surplus collateral equity of {equity_withheld} was withheld because the lender lacked treasury funds."
+            );
+            adjust_dynasty_relationship(
+                state,
+                due.borrower_id,
+                due.lender_id,
+                RelationshipDelta::new(-150, -100, 0, 250, 0),
+            );
+        }
         try_push_outbox(
             state,
             OutboxKind::Finance,
@@ -3957,9 +3982,23 @@ fn settle_missed_loan_payment(
 struct CollateralSeizure {
     /// Balance cancelled by the collateral's liquidation value.
     recovery: Money,
-    /// Liquidation equity above the settled debt, returned to the borrower so
-    /// the lender never gains more than the obligation the collateral secured.
+    /// Liquidation equity above the settled debt that was actually returned
+    /// to the borrower in cash.
     equity_returned: Money,
+    /// Liquidation equity above the settled debt that the lender's treasury
+    /// could not fund. The lender keeps the corresponding windfall, so it is
+    /// recorded as a grievance against them rather than silently vanishing.
+    equity_withheld: Money,
+}
+
+impl CollateralSeizure {
+    const fn none() -> Self {
+        Self {
+            recovery: Money::ZERO,
+            equity_returned: Money::ZERO,
+            equity_withheld: Money::ZERO,
+        }
+    }
 }
 
 fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) -> CollateralSeizure {
@@ -3989,10 +4028,7 @@ fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) -> CollateralS
         property.collateral_loan_id = None;
         apply_defaulted_collateral_recovery(state, due.id)
     } else {
-        CollateralSeizure {
-            recovery: Money::ZERO,
-            equity_returned: Money::ZERO,
-        }
+        CollateralSeizure::none()
     }
 }
 
@@ -4006,16 +4042,10 @@ fn apply_defaulted_collateral_recovery(
             .get(&loan_id)
             .expect("defaulted loan must exist");
         if loan.status != LoanStatus::Defaulted {
-            return CollateralSeizure {
-                recovery: Money::ZERO,
-                equity_returned: Money::ZERO,
-            };
+            return CollateralSeizure::none();
         }
         let Some(property_id) = loan.collateral_property_id else {
-            return CollateralSeizure {
-                recovery: Money::ZERO,
-                equity_returned: Money::ZERO,
-            };
+            return CollateralSeizure::none();
         };
         let liquidation_value = state
             .properties
@@ -4029,15 +4059,12 @@ fn apply_defaulted_collateral_recovery(
         )
     };
     if recovery <= Money::ZERO {
-        return CollateralSeizure {
-            recovery: Money::ZERO,
-            equity_returned: Money::ZERO,
-        };
+        return CollateralSeizure::none();
     }
-    let equity_returned = if equity_surplus > Money::ZERO {
+    let (equity_returned, equity_withheld) = if equity_surplus > Money::ZERO {
         return_collateral_equity_surplus(state, loan_id, equity_surplus)
     } else {
-        Money::ZERO
+        (Money::ZERO, Money::ZERO)
     };
     let loan = state
         .loans
@@ -4054,16 +4081,19 @@ fn apply_defaulted_collateral_recovery(
     CollateralSeizure {
         recovery,
         equity_returned,
+        equity_withheld,
     }
 }
 
 /// Pays collateral liquidation equity above the settled debt back to the
-/// borrower, bounded by what the lender's treasury can fund.
+/// borrower. The payment is bounded by the lender's treasury: whatever the
+/// lender cannot fund is reported back so it can be recorded as a grievance
+/// instead of silently enriching the lender beyond its claim.
 fn return_collateral_equity_surplus(
     state: &mut AppState,
     loan_id: crate::ids::LoanId,
     surplus: Money,
-) -> Money {
+) -> (Money, Money) {
     let (lender_id, borrower_id) = {
         let loan = state
             .loans
@@ -4078,7 +4108,7 @@ fn return_collateral_equity_surplus(
         .treasury();
     let paid = surplus.min(lender_treasury);
     if paid <= Money::ZERO {
-        return Money::ZERO;
+        return (Money::ZERO, surplus);
     }
     let borrower_treasury = state
         .dynasties
@@ -4099,7 +4129,7 @@ fn return_collateral_equity_surplus(
         .get_mut(&lender_id)
         .expect("collateral lender must exist");
     lender.resources.treasury = lender.resources.treasury.saturating_sub(paid);
-    paid
+    (paid, surplus.saturating_sub(paid))
 }
 
 fn active_interest_limit(state: &AppState) -> Option<u16> {
@@ -4955,15 +4985,8 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<()
                     .spent
                     .checked_add(weekly_spend)
                     .expect("bounded public-work spending must fit project total");
-                let progress = if work.budget.copper() > 0 {
-                    work.spent
-                        .saturating_mul_ratio(10_000, work.budget.copper())
-                        .copper()
-                } else {
-                    0
-                };
                 work.progress_basis_points =
-                    u16::try_from(progress.clamp(0, 10_000)).unwrap_or(10_000);
+                    super::public_work_progress_basis_points(work.spent, work.budget);
                 (work.progress_basis_points >= 10_000).then_some((work.district_id, work.kind))
             }
         };
@@ -6629,13 +6652,12 @@ fn revalue_district_properties(state: &mut AppState, district_id: DistrictId, re
         .values_mut()
         .filter(|property| property.district_id == district_id)
     {
-        if property.kind == PropertyKind::Residence {
-            continue;
-        }
         let baseline_multiplier = match property.kind {
             PropertyKind::Workshop => 82,
             PropertyKind::Warehouse => 393,
-            PropertyKind::Residence => 0,
+            // Residences do not anchor on district rent; they keep their
+            // recorded market value and drift with the rent index directly.
+            PropertyKind::Residence => continue,
         };
         let baseline_value = property.weekly_rent.saturating_mul(baseline_multiplier);
         let target_value = if baseline_value > Money::ZERO {
@@ -6730,64 +6752,22 @@ fn resolve_institution_selections(
         return Ok(());
     }
     let next_selection_day = checked_future_day(day, super::OFFICE_TERM_DAYS)?;
-    let mut selections = Vec::new();
+
+    // Decide the complete selection result before committing any term change.
     let mut planned_office_holders = BTreeSet::new();
+    let mut selections = Vec::new();
     for institution_id in due {
-        let institution_kind = registry
-            .get_institution(institution_id)
-            .expect("runtime institution must have a registry definition")
-            .kind();
+        let winner = select_institution_officeholder(
+            registry,
+            state,
+            institution_id,
+            day,
+            &planned_office_holders,
+        );
         let institution = state
             .institutions
             .get(&institution_id)
             .expect("institution runtime must exist");
-        let incumbent_id = institution.office_holder_id;
-        let member_ids: Vec<_> = institution.members.iter().copied().collect();
-        let candidates: Vec<_> = member_ids
-            .iter()
-            .filter_map(|character_id| state.characters.get(*character_id))
-            .filter(|character| character.status() == crate::core::CharacterStatus::Active)
-            .filter(|character| !planned_office_holders.contains(&character.id()))
-            .filter(|character| {
-                !state.institutions.values().any(|other| {
-                    other.institution_id != institution_id
-                        && other.office_holder_id == Some(character.id())
-                })
-            })
-            .filter(|character| {
-                !has_recent_office_duty_forfeiture(
-                    state,
-                    institution_id,
-                    character.dynasty_id(),
-                    day,
-                ) && (character.dynasty_id() != state.player_dynasty_id
-                    || incumbent_id == Some(character.id())
-                    || has_recent_office_nomination(state, institution_id, character.id(), day))
-            })
-            .map(|character| {
-                let dynasty = state
-                    .dynasties
-                    .get(&character.dynasty_id())
-                    .expect("candidate dynasty must exist");
-                let campaign_bonus =
-                    if has_recent_office_nomination(state, institution_id, character.id(), day) {
-                        OFFICE_NOMINATION_CAMPAIGN_BONUS
-                    } else {
-                        0
-                    };
-                let relationship_support =
-                    institution_relationship_support(state, institution_id, character.dynasty_id());
-                let score = institution_capability_score(character, institution_kind)
-                    .saturating_add(u32::from(dynasty.resources.legitimacy_basis_points))
-                    .saturating_add(campaign_bonus)
-                    .saturating_add(relationship_support);
-                (score, character.id())
-            })
-            .collect();
-        let winner = candidates
-            .into_iter()
-            .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
-            .map(|(_, character_id)| character_id);
         let term_number = institution
             .term_number
             .checked_add(1)
@@ -6809,6 +6789,78 @@ fn resolve_institution_selections(
         institution.next_selection_day = next_selection_day;
         institution.term_number = *term_number;
     }
+    announce_institution_selections(state, selections)?;
+    Ok(())
+}
+
+/// Scores every eligible member and returns the winning officeholder for one
+/// institution's election, or `None` when no member qualifies.
+fn select_institution_officeholder(
+    registry: &Registry,
+    state: &AppState,
+    institution_id: InstitutionId,
+    day: i64,
+    planned_office_holders: &BTreeSet<CharacterId>,
+) -> Option<CharacterId> {
+    let institution_kind = registry
+        .get_institution(institution_id)
+        .expect("runtime institution must have a registry definition")
+        .kind();
+    let institution = state
+        .institutions
+        .get(&institution_id)
+        .expect("institution runtime must exist");
+    let incumbent_id = institution.office_holder_id;
+    let member_ids: Vec<_> = institution.members.iter().copied().collect();
+    let candidates: Vec<_> = member_ids
+        .iter()
+        .filter_map(|character_id| state.characters.get(*character_id))
+        .filter(|character| character.status() == crate::core::CharacterStatus::Active)
+        .filter(|character| !planned_office_holders.contains(&character.id()))
+        .filter(|character| {
+            !state.institutions.values().any(|other| {
+                other.institution_id != institution_id
+                    && other.office_holder_id == Some(character.id())
+            })
+        })
+        .filter(|character| {
+            !has_recent_office_duty_forfeiture(state, institution_id, character.dynasty_id(), day)
+                && (character.dynasty_id() != state.player_dynasty_id
+                    || incumbent_id == Some(character.id())
+                    || has_recent_office_nomination(state, institution_id, character.id(), day))
+        })
+        .map(|character| {
+            let dynasty = state
+                .dynasties
+                .get(&character.dynasty_id())
+                .expect("candidate dynasty must exist");
+            let campaign_bonus =
+                if has_recent_office_nomination(state, institution_id, character.id(), day) {
+                    OFFICE_NOMINATION_CAMPAIGN_BONUS
+                } else {
+                    0
+                };
+            let relationship_support =
+                institution_relationship_support(state, institution_id, character.dynasty_id());
+            let score = institution_capability_score(character, institution_kind)
+                .saturating_add(u32::from(dynasty.resources.legitimacy_basis_points))
+                .saturating_add(campaign_bonus)
+                .saturating_add(relationship_support);
+            (score, character.id())
+        })
+        .collect();
+    candidates
+        .into_iter()
+        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+        .map(|(_, character_id)| character_id)
+}
+
+/// Records concentration backlash and durable feedback for each committed
+/// office selection.
+fn announce_institution_selections(
+    state: &mut AppState,
+    selections: Vec<(InstitutionId, Option<CharacterId>, u32)>,
+) -> Result<(), SimulationError> {
     for (institution_id, winner, term_number) in selections {
         if let Some(winner) = winner {
             apply_office_concentration_backlash(state, institution_id, winner);
@@ -7368,16 +7420,12 @@ fn update_information_reports(
         ))
     });
     let Some((_, good_id, name, price, causes)) = most_changed.max_by_key(|item| item.0) else {
-        state
-            .information_reports
-            .retain(|_, report| report.expires_day >= day);
         return Ok(());
     };
     let expires_day = checked_future_day(day, 120)?;
     let id = state.next_ids.try_information_report()?;
-    state
-        .information_reports
-        .retain(|_, report| report.expires_day >= day);
+    // Expired reports are removed by the canonical daily
+    // `expire_time_limited_state` pass, which runs before monthly systems.
     state.information_reports.insert(
         id,
         InformationReport {
@@ -8249,7 +8297,6 @@ fn form_dynastic_marriage(state: &mut AppState) -> Result<(), SimulationError> {
             second_character_id: right_heir,
             kind: FamilyLinkKind::Marriage,
             active: true,
-            property_claim_basis_points: 2_500,
         },
     );
     let pair = DynastyPair::new(left_dynasty, right_dynasty);

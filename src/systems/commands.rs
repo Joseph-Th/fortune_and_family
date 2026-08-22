@@ -216,9 +216,10 @@ pub(crate) const PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const MAX_ACTIVE_SPONSORED_PUBLIC_WORKS: usize = 2;
 pub(crate) const PUBLIC_WORK_MINIMUM_BUDGET: Money = Money::from_copper(1_000);
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
-const LABOR_CONDITIONS_IMPROVEMENT_COST: Money = Money::from_copper(1_000);
-const LABOR_NEGOTIATION_COST: Money = Money::from_copper(500);
+pub(crate) const LABOR_CONDITIONS_IMPROVEMENT_COST: Money = Money::from_copper(1_000);
+pub(crate) const LABOR_NEGOTIATION_COST: Money = Money::from_copper(500);
 pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_080;
+const HOUSE_GOVERNANCE_UNITY_COST: u16 = 250;
 pub(crate) const FAMILY_COUNCIL_MEETING_INTERVAL_DAYS: i64 = 360;
 pub(crate) const FAMILY_COUNCIL_MEETING_COST: Money = Money::from_copper(2_500);
 const FAMILY_COUNCIL_MEETING_UNITY_GAIN: u16 = 1_500;
@@ -257,7 +258,6 @@ pub(crate) const WARD_ADOPTION_REPUTATION_REQUIREMENT: u16 = 5_200;
 pub(crate) const WARD_ADOPTION_DELIVERY_REQUIREMENT: u32 = 52;
 const WARD_ADOPTION_UNITY_COST: u16 = 100;
 const WARD_ADOPTION_LEGITIMACY_COST: u16 = 250;
-const WARD_PROPERTY_CLAIM_BASIS_POINTS: u16 = 1_500;
 pub(crate) const MAX_ACTIVE_WARDS: usize = 4;
 pub(crate) const FAMILY_EDUCATION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const FAMILY_EDUCATION_DYNASTY_INTERVAL_DAYS: i64 = 180;
@@ -1244,14 +1244,8 @@ fn apply_business_policy(
         return Err(CommandError::UnchangedBusinessPolicy { business_id });
     }
     let subject = format!("business:{business_id}");
-    if let Some(last_change_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::BusinessPolicyChange && record.subject() == subject
-        })
-        .map(AuditRecord::day)
+    if let Some(last_change_day) =
+        latest_audit_day_for_subject(state, AuditKind::BusinessPolicyChange, &subject)
     {
         let next_change_day =
             checked_future_day(last_change_day, BUSINESS_POLICY_CHANGE_INTERVAL_DAYS)?;
@@ -1973,15 +1967,9 @@ fn apply_public_work(
     if state.clock.day() < available_day {
         return Err(CommandError::PublicWorkPowerNotEstablished { available_day });
     }
-    let contribution = Money::from_copper((budget.copper() / 10).max(1)).min(budget);
+    let contribution = public_work_initial_contribution(budget);
     spend_player_treasury(state, contribution)?;
-    let progress_basis_points = u16::try_from(
-        contribution
-            .saturating_mul_ratio(10_000, budget.copper())
-            .copper()
-            .clamp(0, 10_000),
-    )
-    .expect("clamped public-work progress must fit u16");
+    let progress_basis_points = super::public_work_progress_basis_points(contribution, budget);
     let id = state.next_ids.try_public_work()?;
     state.public_works.insert(
         id,
@@ -2165,12 +2153,8 @@ fn quote_public_work_funding(
 }
 
 fn validate_public_work_cooldown(state: &AppState, subject: &str) -> Result<(), CommandError> {
-    if let Some(last_start_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::PublicWorkStarted && record.subject() == subject)
-        .map(AuditRecord::day)
+    if let Some(last_start_day) =
+        latest_audit_day_for_subject(state, AuditKind::PublicWorkStarted, subject)
     {
         let next_start_day =
             checked_future_day(last_start_day, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS)?;
@@ -2521,14 +2505,8 @@ fn apply_governance(
         return Err(CommandError::UnchangedHouseGovernance { governance });
     }
     let subject = format!("dynasty:{dynasty_id}");
-    if let Some(last_change_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::HouseGovernanceChange && record.subject() == subject
-        })
-        .map(AuditRecord::day)
+    if let Some(last_change_day) =
+        latest_audit_day_for_subject(state, AuditKind::HouseGovernanceChange, &subject)
     {
         let next_change_day =
             checked_future_day(last_change_day, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS)?;
@@ -2543,7 +2521,9 @@ fn apply_governance(
         .expect("validated family council must exist");
     council.governance = governance;
     council.charter_version = next_charter_version;
-    council.unity_basis_points = council.unity_basis_points.saturating_sub(250);
+    council.unity_basis_points = council
+        .unity_basis_points
+        .saturating_sub(HOUSE_GOVERNANCE_UNITY_COST);
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::HouseGovernanceChange,
@@ -2570,15 +2550,11 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
         .family_councils
         .get(&dynasty_id)
         .ok_or(CommandError::MissingFamilyCouncil { dynasty_id })?;
-    if let Some(last_meeting_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::HouseGovernanceChange && record.subject() == subject
-        })
-        .map(AuditRecord::day)
-    {
+    if let Some(last_meeting_day) = latest_audit_day_for_subject(
+        state,
+        AuditKind::FamilyCouncilMeeting,
+        &format!("dynasty:{dynasty_id};council-meeting"),
+    ) {
         let next_meeting_day =
             checked_future_day(last_meeting_day, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS)?;
         if state.clock.day() < next_meeting_day {
@@ -2610,7 +2586,7 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
     let unity_after = council.unity_basis_points;
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
-        kind: AuditKind::HouseGovernanceChange,
+        kind: AuditKind::FamilyCouncilMeeting,
         subject: subject.into(),
         detail: format!(
             "cost={};unity_before={unity_before};unity_after={unity_after};loyalty_gain={FAMILY_COUNCIL_MEETING_LOYALTY_GAIN}",
@@ -2896,17 +2872,10 @@ fn validate_ward_adoption(state: &AppState) -> Result<WardAdoptionContext, Comma
             required: WARD_ADOPTION_LEGITIMACY_REQUIREMENT,
         });
     }
-    if let Some(last_adoption_day) = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::WardAdoption
-                && record
-                    .subject()
-                    .starts_with(&format!("dynasty:{dynasty_id}:"))
+    if let Some(last_adoption_day) =
+        latest_audit_day(state, AuditKind::WardAdoption, |record_subject| {
+            record_subject.starts_with(&format!("dynasty:{dynasty_id}:"))
         })
-        .map(AuditRecord::day)
     {
         let next_adoption_day = checked_future_day(last_adoption_day, WARD_ADOPTION_INTERVAL_DAYS)?;
         if state.clock.day() < next_adoption_day {
@@ -2958,7 +2927,6 @@ fn insert_ward_family_link(
             second_character_id: ward_id,
             kind: FamilyLinkKind::Ward,
             active: true,
-            property_claim_basis_points: WARD_PROPERTY_CLAIM_BASIS_POINTS,
         },
     );
     Ok(())
@@ -3323,9 +3291,7 @@ fn apply_institution_endowment(
     amount: Money,
 ) -> Result<CommandOutcome, CommandError> {
     let validated = validate_institution_endowment(state, institution_id, amount)?;
-    let mut next_state = state.clone();
-    commit_institution_endowment(&mut next_state, &validated)?;
-    *state = next_state;
+    commit_institution_endowment(state, &validated)?;
     Ok(CommandOutcome {
         summary: format!("Endowed institution {institution_id} with {amount}."),
     })
@@ -3556,21 +3522,63 @@ pub(crate) fn institution_support_delivery_requirement(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> u32 {
+    capability_adjusted_delivery_requirement(
+        registry,
+        state,
+        institution_id,
+        character_id,
+        &StandingGateTuning {
+            context: "institution support",
+            base_requirement: INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT,
+            capability_target_score: INSTITUTION_SUPPORT_CAPABILITY_TARGET_SCORE,
+            capability_delivery_step: INSTITUTION_SUPPORT_CAPABILITY_DELIVERY_STEP,
+            max_preparation_deliveries: INSTITUTION_SUPPORT_MAX_PREPARATION_DELIVERIES,
+        },
+    )
+}
+
+/// Tuning for a standing-gated action's commercial-record requirement.
+#[derive(Clone, Copy)]
+struct StandingGateTuning {
+    /// Names the gate in validation panics.
+    context: &'static str,
+    base_requirement: u32,
+    capability_target_score: u32,
+    capability_delivery_step: u32,
+    max_preparation_deliveries: u32,
+}
+
+/// Deliveries a standing-gated action requires: its base commercial record plus
+/// preparation deliveries that cover the nominee's capability deficit for the
+/// institution's line of work.
+fn capability_adjusted_delivery_requirement(
+    registry: &Registry,
+    state: &AppState,
+    institution_id: InstitutionId,
+    character_id: CharacterId,
+    tuning: &StandingGateTuning,
+) -> u32 {
+    let StandingGateTuning {
+        context,
+        base_requirement,
+        capability_target_score,
+        capability_delivery_step,
+        max_preparation_deliveries,
+    } = *tuning;
     let character = state
         .characters
         .get(character_id)
-        .expect("institution support character must exist");
+        .unwrap_or_else(|| panic!("{context} character must exist"));
     let institution_kind = registry
         .get_institution(institution_id)
-        .expect("institution support target must exist in the registry")
+        .unwrap_or_else(|| panic!("{context} institution must exist in the registry"))
         .kind();
     let capability_score =
         super::strategic::institution_capability_score(character, institution_kind);
-    let deficit = INSTITUTION_SUPPORT_CAPABILITY_TARGET_SCORE.saturating_sub(capability_score);
-    let extra_deliveries = deficit.saturating_add(INSTITUTION_SUPPORT_CAPABILITY_DELIVERY_STEP - 1)
-        / INSTITUTION_SUPPORT_CAPABILITY_DELIVERY_STEP;
-    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT
-        .saturating_add(extra_deliveries.min(INSTITUTION_SUPPORT_MAX_PREPARATION_DELIVERIES))
+    let deficit = capability_target_score.saturating_sub(capability_score);
+    let extra_deliveries =
+        deficit.saturating_add(capability_delivery_step - 1) / capability_delivery_step;
+    base_requirement.saturating_add(extra_deliveries.min(max_preparation_deliveries))
 }
 
 fn apply_office_nomination(
@@ -3972,21 +3980,19 @@ pub(crate) fn office_nomination_delivery_requirement(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> u32 {
-    let character = state
-        .characters
-        .get(character_id)
-        .expect("office nomination character must exist");
-    let institution_kind = registry
-        .get_institution(institution_id)
-        .expect("office nomination institution must exist in the registry")
-        .kind();
-    let capability_score =
-        super::strategic::institution_capability_score(character, institution_kind);
-    let deficit = OFFICE_NOMINATION_CAPABILITY_TARGET_SCORE.saturating_sub(capability_score);
-    let extra_deliveries = deficit.saturating_add(OFFICE_NOMINATION_CAPABILITY_DELIVERY_STEP - 1)
-        / OFFICE_NOMINATION_CAPABILITY_DELIVERY_STEP;
-    OFFICE_NOMINATION_DELIVERY_REQUIREMENT
-        .saturating_add(extra_deliveries.min(OFFICE_NOMINATION_MAX_PREPARATION_DELIVERIES))
+    capability_adjusted_delivery_requirement(
+        registry,
+        state,
+        institution_id,
+        character_id,
+        &StandingGateTuning {
+            context: "office nomination",
+            base_requirement: OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
+            capability_target_score: OFFICE_NOMINATION_CAPABILITY_TARGET_SCORE,
+            capability_delivery_step: OFFICE_NOMINATION_CAPABILITY_DELIVERY_STEP,
+            max_preparation_deliveries: OFFICE_NOMINATION_MAX_PREPARATION_DELIVERIES,
+        },
+    )
 }
 
 pub(super) fn office_nomination_subject(
@@ -4067,6 +4073,25 @@ pub(crate) fn institution_membership_count(state: &AppState, character_id: Chara
         .count()
 }
 
+/// Most recent day an audit record of `kind` whose subject satisfies
+/// `subject_matches` was appended, scanning from newest to oldest.
+fn latest_audit_day(
+    state: &AppState,
+    kind: AuditKind,
+    subject_matches: impl Fn(&str) -> bool,
+) -> Option<i64> {
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| record.kind() == kind && subject_matches(record.subject()))
+        .map(AuditRecord::day)
+}
+
+fn latest_audit_day_for_subject(state: &AppState, kind: AuditKind, subject: &str) -> Option<i64> {
+    latest_audit_day(state, kind, |record_subject| record_subject == subject)
+}
+
 fn latest_character_campaign_day(
     state: &AppState,
     kind: AuditKind,
@@ -4092,14 +4117,7 @@ pub(crate) fn institution_support_day(
     character_id: CharacterId,
 ) -> Option<i64> {
     let subject = institution_support_subject(institution_id, character_id);
-    state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::InstitutionPatronage && record.subject() == subject
-        })
-        .map(AuditRecord::day)
+    latest_audit_day_for_subject(state, AuditKind::InstitutionPatronage, &subject)
 }
 
 pub(crate) fn player_contract_deliveries(state: &AppState) -> u32 {
@@ -4123,9 +4141,7 @@ fn apply_crisis_response(
     let district_id = crisis.district_id;
     match response {
         CrisisResponse::Relief => {
-            let cost =
-                CRISIS_RELIEF_COST_PER_SEVERITY_POINT.saturating_mul(i64::from(severity).max(1));
-            spend_player_treasury(state, cost)?;
+            spend_player_treasury(state, crisis_relief_cost(severity))?;
             reduce_crisis(state, crisis_id, 2_500);
             adjust_player_legitimacy(state, 500, true);
             adjust_district_unrest(state, district_id, 800, false);
@@ -4413,6 +4429,29 @@ fn apply_labor_response(
     })
 }
 
+/// Treasury cost of funding crisis relief for a crisis of the given severity.
+#[must_use]
+pub(crate) fn crisis_relief_cost(severity_basis_points: u16) -> Money {
+    CRISIS_RELIEF_COST_PER_SEVERITY_POINT.saturating_mul(i64::from(severity_basis_points).max(1))
+}
+
+/// Initial sponsor contribution demanded for a public work of the given budget.
+#[must_use]
+pub(crate) fn public_work_initial_contribution(budget: Money) -> Money {
+    Money::from_copper((budget.copper() / 10).max(1)).min(budget)
+}
+
+/// Cash a player-driven business action may spend: everything above the
+/// operating-reserve floor enforced by the business's own daily purchase and
+/// production decisions.
+#[must_use]
+pub(crate) fn business_operating_spendable_cash(business: &crate::core::Business) -> Money {
+    business
+        .cash()
+        .saturating_sub(business.policy.minimum_cash_reserve)
+        .max(Money::ZERO)
+}
+
 fn spend_business_cash(
     state: &mut AppState,
     business_id: BusinessId,
@@ -4425,7 +4464,7 @@ fn spend_business_cash(
     let cash = business.cash();
     // Player-driven business spending honors the same operating-reserve floor the
     // business's own daily purchase and production decisions honor.
-    let spendable = cash.saturating_sub(business.policy.minimum_cash_reserve);
+    let spendable = business_operating_spendable_cash(business);
     if spendable < amount {
         return Err(CommandError::InsufficientBusinessFunds {
             business_id,

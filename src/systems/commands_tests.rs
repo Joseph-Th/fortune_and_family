@@ -4561,7 +4561,7 @@ mod politics {
                 .is_some_and(|character| character.runtime.loyalty_basis_points == 5_600)
         }));
         assert!(state.audit_log.iter().any(|record| {
-            record.kind() == AuditKind::HouseGovernanceChange
+            record.kind() == AuditKind::FamilyCouncilMeeting
                 && record.subject() == format!("dynasty:{dynasty_id};council-meeting")
         }));
         let before = state.clone();

@@ -437,6 +437,16 @@ const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = 8_000;
 /// horizon most campaigns reach.
 const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 50;
 
+/// Falling into distress needs two days of operating cover.
+const ACTIVE_CASH_DAYS_OF_OPERATING_COST: i64 = 2;
+/// Climbing out needs six, so a business near the threshold cannot flap
+/// between `Distressed` and `Active` on daily price noise.
+const RECOVERY_CASH_DAYS_OF_OPERATING_COST: i64 = 6;
+
+/// Annual succession-chance pressure per year of head age past the
+/// eligibility threshold.
+const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 420;
+
 fn decide_business_production(
     registry: &Registry,
     state: &AppState,
@@ -1811,8 +1821,6 @@ fn update_business_lifecycle(
         // sitting near the threshold cannot flap between `Distressed` and
         // `Active` on daily price noise: falling into distress needs two days
         // of operating cover, but climbing out needs six.
-        const ACTIVE_CASH_DAYS_OF_OPERATING_COST: i64 = 2;
-        const RECOVERY_CASH_DAYS_OF_OPERATING_COST: i64 = 6;
         let active_status_cash_days = if matches!(
             prior_status,
             BusinessStatus::Distressed | BusinessStatus::Insolvent
@@ -2321,7 +2329,6 @@ fn succession_chance_basis_points(
     // the dynasty: founders begin at 56-58 years old, so this rate puts the
     // median first transition near mid-campaign while still leaving most of an
     // establishment phase untouched.
-    const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 420;
     let age_pressure = (age_years - SUCCESSION_ELIGIBILITY_AGE_YEARS)
         .saturating_mul(AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY);
     let governance_pressure = i64::from(succession_risk_basis_points / 2);
@@ -2433,7 +2440,6 @@ fn insert_succession_heir(
             second_character_id: new_heir_id,
             kind: new_heir_link_kind,
             active: true,
-            property_claim_basis_points: 8_000,
         },
     );
     Ok(new_heir_id)

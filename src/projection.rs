@@ -161,6 +161,9 @@ pub struct CampaignProjection {
     pub relationships: Vec<RelationshipProjection>,
     pub information: Vec<InformationProjection>,
     pub notifications: Vec<NotificationProjection>,
+    /// Total unread outbox messages, counted across the whole history rather
+    /// than only the recent notification window surfaced above.
+    pub unread_notifications: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -548,6 +551,11 @@ pub fn build_campaign_projection(registry: &Registry, state: &AppState) -> Campa
                 acknowledged: message.acknowledged,
             })
             .collect(),
+        unread_notifications: state
+            .outbox
+            .iter()
+            .filter(|message| !message.acknowledged)
+            .count(),
     }
 }
 
@@ -1295,11 +1303,7 @@ fn build_dashboard_fragments(projection: &CampaignProjection) -> DashboardFragme
         civic_debt_rows: render_civic_debt_rows(&projection.civic_debts),
         relationship_rows: render_relationship_rows(&projection.relationships),
         alerts: render_notifications(&projection.notifications),
-        unread_notices: projection
-            .notifications
-            .iter()
-            .filter(|notification| !notification.acknowledged)
-            .count(),
+        unread_notices: projection.unread_notifications,
         player_cases: legal_cases
             .iter()
             .filter(|case| {

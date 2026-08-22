@@ -571,6 +571,8 @@ pub(crate) fn set_inject_generated_output_sync_failure_for_test(inject: bool) {
     INJECT_GENERATED_OUTPUT_SYNC_FAILURE.with(|cell| cell.set(inject));
 }
 
+/// Performs the platform's parent-directory synchronization where the platform
+/// supports it; see the persistence layer's equivalent.
 #[allow(clippy::unnecessary_wraps)]
 fn sync_generated_output_directory_with_injection(
     #[allow(unused_variables)] parent: &Path,
