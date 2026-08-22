@@ -104,7 +104,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 61;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 62;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -2053,9 +2053,16 @@ pub struct GameplayTraceStep {
     /// Durable notices and chronicle entries emitted by the selected action's
     /// command path, limited to the first few stable entries for readability.
     pub command_feedback: Vec<GameplayFeedbackEvent>,
+    /// Days the campaign advanced after the command commit when
+    /// [`Self::simulation_feedback`] was collected. Zero on terminal cycles.
+    pub simulation_window_days: u32,
     /// Durable notices and chronicle entries emitted while the campaign branch
     /// advanced to the next decision point.
     pub simulation_feedback: Vec<GameplayFeedbackEvent>,
+    /// Days the no-action branch advanced when [`Self::ambient_feedback`] was
+    /// collected. This is the attribution horizon for substantive cycles and
+    /// the ordinary decision interval for quiet cycles, which never branch.
+    pub ambient_window_days: u32,
     /// Durable notices and chronicle entries emitted by the no-action branch at
     /// the attribution horizon. This makes ambient change explainable rather
     /// than leaving it as a checksum-only difference.
@@ -3619,9 +3626,11 @@ fn run_decision_cycle_internal(
         registry,
         action.as_ref(),
         consequence_horizon,
-        after_time.clone(),
+        &after_time,
         baseline_state,
         &before,
+        state,
+        feedback_after_command,
     )?;
     accumulator.record_phase_cycle(
         phase,
@@ -3631,6 +3640,12 @@ fn run_decision_cycle_internal(
             ambient_change,
             quiet_cause: quiet_cause(no_action_reason.as_deref()),
         },
+    );
+    let simulation_window = cycle_simulation_window_days(mode);
+    let ambient_window = cycle_ambient_window_days(
+        mode,
+        action.as_ref().map(|action| action.kind),
+        consequence_horizon,
     );
     record_decision_cycle(
         DecisionCycleSnapshots {
@@ -3647,12 +3662,38 @@ fn run_decision_cycle_internal(
             action,
             no_action_reason,
             command_feedback,
+            simulation_window_days: simulation_window,
             simulation_feedback,
+            ambient_window_days: ambient_window,
             ambient_feedback: baseline_feedback,
         },
         accumulator,
     );
     Ok(())
+}
+
+/// Days the action branch advanced after the commit when collecting its
+/// feedback. Terminal cycles never advance the campaign, so their window is
+/// empty and only command-time feedback is retained.
+fn cycle_simulation_window_days(mode: DecisionCycleMode) -> u32 {
+    match mode {
+        DecisionCycleMode::AdvanceCampaign { step_days } => step_days,
+        DecisionCycleMode::Terminal => 0,
+    }
+}
+
+/// Days the no-action branch advanced when collecting ambient feedback.
+/// Substantive cycles attribute over the consequence horizon; quiet cycles
+/// never branch, so their ambient window is the ordinary advance itself.
+fn cycle_ambient_window_days(
+    mode: DecisionCycleMode,
+    action: Option<GameplayCommandKind>,
+    consequence_horizon: u32,
+) -> u32 {
+    match action {
+        Some(_) => consequence_horizon,
+        None => cycle_simulation_window_days(mode),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3671,7 +3712,9 @@ struct DecisionCycleRecord<'a> {
     action: Option<ExecutedAction>,
     no_action_reason: Option<String>,
     command_feedback: Vec<GameplayFeedbackEvent>,
+    simulation_window_days: u32,
     simulation_feedback: Vec<GameplayFeedbackEvent>,
+    ambient_window_days: u32,
     ambient_feedback: Vec<GameplayFeedbackEvent>,
 }
 
@@ -3688,7 +3731,9 @@ fn record_decision_cycle(
         action,
         no_action_reason,
         command_feedback,
+        simulation_window_days,
         simulation_feedback,
+        ambient_window_days,
         ambient_feedback,
     } = record;
     record_cycle(
@@ -3711,7 +3756,9 @@ fn record_decision_cycle(
             action,
             no_action_reason,
             command_feedback,
+            simulation_window_days,
             simulation_feedback,
+            ambient_window_days,
             ambient_feedback,
         },
         accumulator,
@@ -3749,30 +3796,48 @@ fn advance_decision_time(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter is a distinct branch input of the attribution pipeline"
+)]
 fn baseline_observation(
     registry: &Registry,
     action: Option<&ExecutedAction>,
     consequence_horizon: u32,
-    after_time: GameplaySnapshot,
+    after_time: &GameplaySnapshot,
     mut baseline_state: AppState,
     before: &GameplaySnapshot,
+    advanced_state: &AppState,
+    advanced_feedback_cursor: FeedbackCursor,
 ) -> Result<(GameplaySnapshot, bool, Vec<GameplayFeedbackEvent>), GameplayHarnessError> {
     let feedback_before = feedback_cursor(&baseline_state);
-    let baseline_after_time = if action.is_none() {
-        after_time
+    let (baseline_after_time, ambient_feedback) = if action.is_none() {
+        // A quiet cycle never branches: the main advance already is the
+        // no-action path, so its own post-advance events are the ambient
+        // feedback. Collecting from the untouched clone here would always be
+        // empty and hide exactly the world change quiet diagnostics measure.
+        (
+            after_time.clone(),
+            collect_feedback(
+                advanced_state,
+                advanced_feedback_cursor,
+                GameplayFeedbackSource::Ambient,
+            ),
+        )
     } else {
         advance_days(registry, &mut baseline_state, consequence_horizon)?;
-        GameplaySnapshot::capture(&baseline_state)
+        let snapshot = GameplaySnapshot::capture(&baseline_state);
+        let feedback = collect_feedback(
+            &baseline_state,
+            feedback_before,
+            GameplayFeedbackSource::Ambient,
+        );
+        (snapshot, feedback)
     };
     let ambient_change = !before.changed_domains(&baseline_after_time).is_empty()
         || baseline_after_time.outbox_messages > before.outbox_messages
         || baseline_after_time.chronicle_entries > before.chronicle_entries;
-    let feedback = collect_feedback(
-        &baseline_state,
-        feedback_before,
-        GameplayFeedbackSource::Ambient,
-    );
-    Ok((baseline_after_time, ambient_change, feedback))
+    Ok((baseline_after_time, ambient_change, ambient_feedback))
 }
 
 fn advance_and_collect_feedback(
@@ -5535,7 +5600,9 @@ struct CycleObservation<'a> {
     action: Option<ExecutedAction>,
     no_action_reason: Option<String>,
     command_feedback: Vec<GameplayFeedbackEvent>,
+    simulation_window_days: u32,
     simulation_feedback: Vec<GameplayFeedbackEvent>,
+    ambient_window_days: u32,
     ambient_feedback: Vec<GameplayFeedbackEvent>,
 }
 
@@ -5565,7 +5632,9 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         action,
         no_action_reason,
         command_feedback,
+        simulation_window_days,
         simulation_feedback,
+        ambient_window_days,
         ambient_feedback,
     } = observation;
     let immediate_domains = before.changed_domains(after_command);
@@ -5640,7 +5709,9 @@ fn record_cycle(observation: CycleObservation<'_>, accumulator: &mut CampaignAcc
         attributed_consequences,
         ambient_consequences,
         command_feedback,
+        simulation_window_days,
         simulation_feedback,
+        ambient_window_days,
         ambient_feedback,
         immediate_domains,
         delayed_domains,
@@ -6375,7 +6446,12 @@ fn can_afford_crisis_response(
         }
         CrisisResponse::Reform => dynasty.treasury() >= Money::from_copper(1_500),
         CrisisResponse::Suppress => dynasty.treasury() >= Money::from_copper(900),
-        CrisisResponse::Exploit => dynasty.resources.legitimacy_basis_points >= 600,
+        // Profiteering extracts from the panicked market's clearing pool, so an
+        // empty pool makes the attempt a guaranteed rejection.
+        CrisisResponse::Exploit => {
+            dynasty.resources.legitimacy_basis_points >= 600
+                && state.market.clearing_account > Money::ZERO
+        }
     }
 }
 
@@ -8168,7 +8244,10 @@ fn lending_limits(persona: GameplayPersona) -> (Money, usize) {
         GameplayPersona::Steward => (Money::from_copper(40_000), 1),
         GameplayPersona::Entrepreneur => (Money::from_copper(30_000), 2),
         GameplayPersona::PowerBroker => (Money::from_copper(50_000), 1),
-        GameplayPersona::Opportunist => (Money::from_copper(25_000), 2),
+        // Opportunist lending is the persona's signature route: a smaller
+        // reserve keeps high-yield short-term credit reachable at ordinary
+        // dynasty treasuries instead of reserving it for rare surpluses.
+        GameplayPersona::Opportunist => (Money::from_copper(14_000), 2),
     }
 }
 
@@ -17209,15 +17288,37 @@ fn render_trace_deltas(step: &GameplayTraceStep, output: &mut String) {
         format_measure_changes(&step.attributed_consequences),
         format_measure_changes(&step.ambient_consequences),
     );
-    render_feedback_group("command feedback", &step.command_feedback, output);
-    render_feedback_group("simulation feedback", &step.simulation_feedback, output);
-    render_feedback_group("ambient feedback", &step.ambient_feedback, output);
+    render_feedback_group("command feedback", &step.command_feedback, None, output);
+    render_feedback_group(
+        "simulation feedback",
+        &step.simulation_feedback,
+        Some(step.simulation_window_days),
+        output,
+    );
+    render_feedback_group(
+        "ambient feedback",
+        &step.ambient_feedback,
+        Some(step.ambient_window_days),
+        output,
+    );
 }
 
-fn render_feedback_group(label: &str, feedback: &[GameplayFeedbackEvent], output: &mut String) {
+fn render_feedback_group(
+    label: &str,
+    feedback: &[GameplayFeedbackEvent],
+    window_days: Option<u32>,
+    output: &mut String,
+) {
     if feedback.is_empty() {
         return;
     }
+    // The attribution windows differ per branch (a substantive cycle's ambient
+    // horizon can span several decision intervals), so each group states how
+    // much time its events cover instead of leaving readers to infer it.
+    let label = match window_days {
+        Some(days) => format!("{label} over {days}d"),
+        None => label.to_owned(),
+    };
     let summaries = feedback
         .iter()
         .take(3)

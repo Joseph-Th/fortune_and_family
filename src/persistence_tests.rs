@@ -4,7 +4,7 @@ use super::*;
 use crate::core::{
     AuditKind, AuditRecord, CampaignPhase, CivicDebt, CivicDebtStatus, Crisis, CrisisKind,
     CrisisStatus, EnactedLaw, FamilyLinkKind, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus,
-    LegalClaimSource, OfficeDirectiveState, OfficePower,
+    LegalClaimSource, Loan, LoanStatus, OfficeDirectiveState, OfficePower,
 };
 use crate::ids::DynastyId;
 use crate::money::{Money, Quantity};
@@ -95,6 +95,55 @@ mod round_trip {
             &state,
             &loaded,
             "save/load round-trip must preserve the complete deterministic state",
+        );
+    }
+
+    #[test]
+    fn preserves_midweek_issued_loan_due_dates() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        advance_days(registry, &mut state, 3).expect("campaign must advance to a mid-week day");
+        assert_eq!(state.clock.day() % 7, 3, "fixture must sit mid-week");
+
+        // Mirror canonical issuance: a schedule signed mid-week stores its
+        // nominal one-week date before any boundary settlement snaps it onto
+        // the global weekly cadence.
+        let loan_id = state.next_ids.loan();
+        let [lender_id, borrower_id] = state
+            .dynasties
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+            .get(2..4)
+            .expect("campaign must contain at least four dynasties")
+            .try_into()
+            .expect("dynasty pair slice must convert");
+        state.loans.insert(
+            loan_id,
+            Loan {
+                id: loan_id,
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: borrower_id,
+                principal: Money::from_copper(5_000),
+                balance: Money::from_copper(5_000),
+                weekly_payment: Money::from_copper(150),
+                interest_basis_points: 800,
+                next_due_day: state.clock.day() + 7,
+                missed_payments: 0,
+                collateral_property_id: None,
+                status: LoanStatus::Current,
+            },
+        );
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("midweek-loan-campaign.json");
+
+        save_state(&path, &state).expect("mid-week issued loan state must save");
+        let loaded = load_state(&path).expect("mid-week issued loan state must load");
+
+        assert_state_eq(
+            &state,
+            &loaded,
+            "save/load must preserve schedules signed between week boundaries",
         );
     }
 
@@ -1481,7 +1530,10 @@ mod validation {
     }
 
     #[test]
-    fn rejects_active_weekly_obligation_due_dates_beyond_the_next_settlement_window() {
+    fn rejects_active_weekly_obligation_due_dates_beyond_the_settleable_fortnight() {
+        // The fixture sits on day 8 (weekly boundary 7), so a due day of 22 is
+        // fifteen days out: no canonical signing path can produce it, because
+        // even a mid-week signed schedule settles within a fortnight.
         assert_stale_weekly_due_rejected(
             "deferred-loan-due-day.json",
             |value| {
@@ -1489,7 +1541,7 @@ mod validation {
                     .as_object_mut()
                     .and_then(|loans| loans.values_mut().next())
                     .expect("serialized state must contain a loan")["next_due_day"] =
-                    Value::from(15);
+                    Value::from(22);
             },
             "invalid due date",
         );
@@ -1500,7 +1552,7 @@ mod validation {
                     .as_object_mut()
                     .and_then(|contracts| contracts.values_mut().next())
                     .expect("serialized state must contain a contract")["next_due_day"] =
-                    Value::from(15);
+                    Value::from(22);
             },
             "invalid dates",
         );

@@ -16,14 +16,23 @@ pub(crate) const MAX_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 14_000;
 pub(crate) const OFFICE_TERM_DAYS: i64 = 360;
 pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 120;
 
-pub(crate) fn is_current_weekly_due_day(current_day: i64, due_day: i64) -> bool {
+/// Returns whether a repayment-active schedule's due day is validly settleable
+/// at `current_day`.
+///
+/// Weekly obligations settle at global week boundaries. A schedule signed
+/// mid-week stores its nominal `signed + 7` date and stays on that private
+/// cadence until its first boundary settlement snaps it to the global one, so
+/// a valid due day may sit up to two weeks ahead of the current week's start.
+/// Anything overdue (at or before the current week's start) or beyond the
+/// coming fortnight indicates corrupted scheduling.
+pub(crate) fn is_settleable_weekly_due_day(current_day: i64, due_day: i64) -> bool {
     let Some(latest_weekly_boundary) = current_day.checked_sub(current_day.rem_euclid(7)) else {
         return false;
     };
     due_day != i64::MAX
         && due_day
             .checked_sub(latest_weekly_boundary)
-            .is_some_and(|offset| (1..=7).contains(&offset))
+            .is_some_and(|offset| (1..=14).contains(&offset))
 }
 
 pub(crate) fn is_valid_active_directive_expiry(current_day: i64, expires_day: i64) -> bool {
@@ -233,17 +242,21 @@ pub use transactions::{SimulationError, TimelineError};
 #[cfg(test)]
 mod tests {
     #[test]
-    fn weekly_due_days_stay_inside_the_current_settlement_window() {
-        assert!(super::is_current_weekly_due_day(20, 15));
-        assert!(super::is_current_weekly_due_day(20, 21));
-        assert!(!super::is_current_weekly_due_day(20, 14));
-        assert!(!super::is_current_weekly_due_day(20, 22));
-        assert!(!super::is_current_weekly_due_day(20, i64::MAX));
+    fn weekly_due_days_stay_inside_the_settleable_fortnight() {
+        // Boundary-aligned schedules always sit exactly one week ahead.
+        assert!(super::is_settleable_weekly_due_day(20, 21));
+        assert!(super::is_settleable_weekly_due_day(21, 28));
 
-        assert!(super::is_current_weekly_due_day(21, 22));
-        assert!(super::is_current_weekly_due_day(21, 28));
-        assert!(!super::is_current_weekly_due_day(21, 21));
-        assert!(!super::is_current_weekly_due_day(i64::MIN, 0));
+        // A nominal one-week date signed mid-week is valid until its first
+        // boundary settlement snaps it onto the global cadence.
+        assert!(super::is_settleable_weekly_due_day(20, 22));
+        assert!(super::is_settleable_weekly_due_day(20, 27));
+        assert!(!super::is_settleable_weekly_due_day(20, 28 + 14));
+
+        // Overdue and unschedulable dates stay invalid.
+        assert!(!super::is_settleable_weekly_due_day(20, 21 - 7));
+        assert!(!super::is_settleable_weekly_due_day(20, i64::MAX));
+        assert!(!super::is_settleable_weekly_due_day(i64::MIN, 0));
     }
 
     #[test]

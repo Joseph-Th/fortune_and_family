@@ -380,7 +380,10 @@ fn insert_dynasty(
             id: head_id,
             dynasty_id,
             name: head_name.to_owned(),
-            birth_day: -18_000 - i64::from(state.rng.range_u32(1_080)),
+            // Founders begin near the age at which succession pressure becomes
+            // material, so the first generational transition lands inside the
+            // campaign session that builds the dynasty rather than beyond it.
+            birth_day: -20_160 - i64::from(state.rng.range_u32(720)),
         },
         capabilities: CharacterCapabilities {
             administration: head_administration,

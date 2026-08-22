@@ -871,7 +871,10 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         }
         if !is_schedulable_day(loan.next_due_day)
             || (loan.status.is_repayment_active()
-                && !crate::systems::is_current_weekly_due_day(state.clock.day(), loan.next_due_day))
+                && !crate::systems::is_settleable_weekly_due_day(
+                    state.clock.day(),
+                    loan.next_due_day,
+                ))
         {
             return Err(format!("loan {} has an invalid due date", loan.id));
         }
@@ -891,7 +894,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
             || (matches!(
                 debt.status,
                 crate::core::CivicDebtStatus::Current | crate::core::CivicDebtStatus::Delinquent
-            ) && !crate::systems::is_current_weekly_due_day(
+            ) && !crate::systems::is_settleable_weekly_due_day(
                 state.clock.day(),
                 debt.next_due_day,
             ))
@@ -938,7 +941,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
         if !is_schedulable_day(contract.next_due_day)
             || !is_schedulable_day(contract.end_day)
             || (contract.status == crate::core::ContractStatus::Active
-                && !crate::systems::is_current_weekly_due_day(
+                && !crate::systems::is_settleable_weekly_due_day(
                     state.clock.day(),
                     contract.next_due_day,
                 ))

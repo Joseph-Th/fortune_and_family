@@ -12,7 +12,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Save schema | 22 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 61 |
+| Gameplay report schema | 62 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -79,7 +79,7 @@ All callers use the same command validation and mutation paths.
 - Exact current-schema round trips
 - Explicit rejection of older, future, and missing save schema versions
 - Save loads require paths that resolve to regular files and reject inputs larger than 256 MiB before parsing
-- Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, schedules, and ID allocation
+- Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, schedules, and ID allocation. Active weekly obligations must be settleable within the coming fortnight: schedules signed mid-week keep their nominal one-week due date until the first boundary settlement snaps them onto the global weekly cadence.
 - Preservation of RNG state and generated records required for deterministic continuation
 - Same-directory synchronized temporary writes followed by atomic replacement
 

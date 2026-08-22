@@ -641,6 +641,31 @@ mod harness {
     }
 
     #[test]
+    fn trace_feedback_windows_state_what_each_branch_covered() {
+        let report = cached_focused_report(180);
+        let campaign = report.campaigns.first().expect("one campaign must run");
+
+        for step in &campaign.trace {
+            if step.selected_command.is_some() {
+                assert!(
+                    step.ambient_window_days >= step.simulation_window_days,
+                    "the attribution horizon must cover at least the simulation advance"
+                );
+            } else {
+                assert_eq!(
+                    step.ambient_window_days, step.simulation_window_days,
+                    "quiet cycles never branch, so their feedback windows must agree"
+                );
+            }
+        }
+        let rendered = render_gameplay_report(&report);
+        assert!(
+            rendered.contains("simulation feedback over"),
+            "the decision log must state how much time each feedback window covers"
+        );
+    }
+
+    #[test]
     fn trace_steps_record_no_action_causes_and_render_a_decision_log() {
         let report = cached_focused_report(180);
         let campaign = report.campaigns.first().expect("one campaign must run");

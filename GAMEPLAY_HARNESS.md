@@ -252,9 +252,15 @@ Reports contain:
 Each retained trace step includes its phase, three measured consequence profiles: immediate
 changes at command commit, changes attributable to the selected command at the
 configured horizon versus a no-action branch, and ambient changes from that
-no-action branch. This makes a trace answer both “what did the command do?” and
-“what would have happened anyway?” with concrete before/after values, not only
-domain labels. It also retains bounded command, simulation, and ambient feedback
+no-action branch. Each feedback group also states how much time it covers:
+`simulation_window_days` for the action branch's advance and
+`ambient_window_days` for the attribution branch. Substantive cycles attribute
+over the consequence horizon while the action advance covers one decision
+interval; quiet cycles never branch, so both windows equal the ordinary advance
+and their ambient feedback is collected from the campaign's own post-advance
+state. This makes a trace answer both “what did the command do?” and “what would
+have happened anyway?” with concrete before/after values, not only domain
+labels. It also retains bounded command, simulation, and ambient feedback
 events from the outbox and chronicle, so a state transition can be read with the
 durable explanation the game produced rather than only through checksums.
 Portfolio cash transfers and business-cash withdrawals are
