@@ -11568,7 +11568,7 @@ fn is_institution_support_available(
     {
         return false;
     }
-    institution_support_next_day(state, character_id)
+    institution_support_next_day(state, institution_id, character_id)
         .is_none_or(|next_day| state.clock.day() >= next_day)
 }
 
@@ -12368,7 +12368,11 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::DuplicateActiveLegalCase { .. } => "duplicate active legal case",
         CommandError::LegalCaseCooldown { .. } => "legal-case cooldown",
         CommandError::MissingLegalCase { .. } => "missing legal case",
+        CommandError::MissingCharacter { .. } => "missing character",
         CommandError::LegalSettlementUnavailable { .. } => "legal settlement unavailable",
+        CommandError::LegalSettlementNothingToSettle { .. } => {
+            "legal settlement has nothing left to settle"
+        }
         CommandError::LegalSettlementTreasuryOverflow { .. } => {
             "legal settlement treasury overflow"
         }

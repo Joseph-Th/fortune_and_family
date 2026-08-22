@@ -24,6 +24,7 @@ use crate::money::{
     Money, Quantity, affordable_quantity, checked_cost_for, cost_for, rounded_cost_copper_wide,
 };
 use crate::registry::{InstitutionKind, Registry};
+use crate::systems::INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -2752,8 +2753,56 @@ pub(crate) fn run_daily_strategic_systems(
 ) -> Result<(), SimulationError> {
     apply_route_laws(state);
     apply_crisis_daily_effects(registry, state)?;
+    grant_maturing_institution_support(state)?;
     recover_ai_businesses(registry, state);
     apply_external_route_supply(state)?;
+    Ok(())
+}
+
+/// Patronage earns legitimacy when the supported member's standing actually
+/// matures inside the institution, not when the patronage is paid for: the
+/// reward tracks the established relationship, so paying early cannot front-
+/// run its political consequence.
+fn grant_maturing_institution_support(state: &mut AppState) -> Result<(), SimulationError> {
+    let day = state.clock.day();
+    let mut matured: Vec<(InstitutionId, CharacterId)> = Vec::new();
+    for record in state.audit_log.iter() {
+        if record.kind() != AuditKind::InstitutionPatronage {
+            continue;
+        }
+        if day.checked_sub(record.day()) != Some(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS) {
+            continue;
+        }
+        if let Some((institution_id, character_id)) =
+            record.audit_subject().institution_character_ids()
+        {
+            matured.push((institution_id, character_id));
+        }
+    }
+    matured.sort_unstable();
+    matured.dedup();
+    for (institution_id, character_id) in matured {
+        let Some(character) = state.characters.get(character_id) else {
+            continue;
+        };
+        let dynasty_id = character.dynasty_id();
+        let Some(dynasty) = state.dynasties.get_mut(&dynasty_id) else {
+            continue;
+        };
+        dynasty.resources.legitimacy_basis_points = dynasty
+            .resources
+            .legitimacy_basis_points
+            .saturating_add(250)
+            .min(10_000);
+        try_push_outbox(
+            state,
+            OutboxKind::Politics,
+            format!("Institutional support established for character {character_id}"),
+            format!(
+                "The house's patronage of institution {institution_id} has matured into established standing; the dynasty's legitimacy grows."
+            ),
+        )?;
+    }
     Ok(())
 }
 
@@ -7174,6 +7223,15 @@ fn announce_institution_selections(
                 .get(winner)
                 .expect("selected officeholder must exist")
                 .dynasty_id();
+            // Winning an election is what earns public standing: the
+            // campaign's legitimacy reward lands on victory, not on filing.
+            if let Some(dynasty) = state.dynasties.get_mut(&winner_dynasty_id) {
+                dynasty.resources.legitimacy_basis_points = dynasty
+                    .resources
+                    .legitimacy_basis_points
+                    .saturating_add(150)
+                    .min(10_000);
+            }
             let fees_of_office = if winner_dynasty_id == state.player_dynasty_id {
                 let power_count = state
                     .institutions

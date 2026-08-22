@@ -5824,7 +5824,7 @@ mod legal_cases {
             &TestLegalCase {
                 plaintiff_dynasty_id: plaintiff_id,
                 defendant_dynasty_id: defendant_id,
-                kind: crate::core::LegalCaseKind::Fraud,
+                kind: crate::core::LegalCaseKind::ContractBreach,
                 claim_source: None,
                 evidence_basis_points: 6_500,
                 public_attention_basis_points: 2_000,
@@ -5876,7 +5876,7 @@ mod legal_cases {
             &TestLegalCase {
                 plaintiff_dynasty_id: plaintiff_id,
                 defendant_dynasty_id: defendant_id,
-                kind: crate::core::LegalCaseKind::Fraud,
+                kind: crate::core::LegalCaseKind::ContractBreach,
                 claim_source: None,
                 evidence_basis_points: 6_500,
                 public_attention_basis_points: 2_000,

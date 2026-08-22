@@ -3353,7 +3353,19 @@ mod politics {
             detail: "invalid persisted history fixture".to_owned(),
         });
 
-        assert_eq!(institution_support_next_day(&state, character_id), None);
+        assert_eq!(
+            institution_support_next_day(
+                &state,
+                state
+                    .institutions
+                    .keys()
+                    .copied()
+                    .next()
+                    .expect("campaign must contain an institution"),
+                character_id
+            ),
+            None
+        );
         assert_eq!(office_nomination_next_day(&state, character_id), None);
     }
 
@@ -5518,15 +5530,29 @@ mod crises {
         )
         .expect("relief response must succeed");
 
-        // Relief sends aid down the routes themselves, so the tracked cause
-        // heals alongside the crisis instead of outliving every response.
-        for route in state.external_routes.values() {
-            assert_eq!(
-                route.disruption_basis_points,
-                severity - 2_500,
-                "organized relief must heal route disruption"
-            );
-        }
+        // Relief sends a bounded aid budget (2 500 bp) down the disrupted
+        // routes, deepest disruption first: the total healing equals the
+        // crisis reduction and no longer scales with how many routes exist.
+        let healed_total: u16 = state
+            .external_routes
+            .values()
+            .map(|route| severity - route.disruption_basis_points)
+            .sum();
+        assert_eq!(
+            healed_total, 2_500,
+            "organized relief must heal route disruption up to its aid budget"
+        );
+        let deepest = state
+            .external_routes
+            .values()
+            .map(|route| route.disruption_basis_points)
+            .min()
+            .expect("campaign must contain regional routes");
+        assert_eq!(
+            deepest,
+            severity - 2_500,
+            "the most-disrupted routes receive aid first"
+        );
         let crisis = state
             .crises
             .get(&crisis_id)
@@ -6686,7 +6712,7 @@ mod legal_cases {
                 id: prior_id,
                 plaintiff_dynasty_id: state.player_dynasty_id,
                 defendant_dynasty_id: prior_defendant,
-                kind: LegalCaseKind::Fraud,
+                kind: LegalCaseKind::ContractBreach,
                 claim_source: None,
                 evidence_basis_points: 6_000,
                 public_attention_basis_points: 1_500,
@@ -6715,7 +6741,7 @@ mod legal_cases {
             &mut state,
             PlayerCommand::FileLegalCase {
                 defendant_dynasty_id,
-                kind: LegalCaseKind::Fraud,
+                kind: LegalCaseKind::ContractBreach,
                 evidence_basis_points: 7_000,
                 damages: Money::from_copper(4_000),
             },
@@ -6804,7 +6830,7 @@ mod legal_cases {
             &mut state,
             PlayerCommand::FileLegalCase {
                 defendant_dynasty_id,
-                kind: LegalCaseKind::Fraud,
+                kind: LegalCaseKind::ContractBreach,
                 evidence_basis_points: 7_000,
                 damages: Money::from_copper(2_000),
             },
@@ -6814,7 +6840,7 @@ mod legal_cases {
             result,
             Err(CommandError::LegalClaimNotGrounded {
                 defendant_dynasty_id,
-                kind: LegalCaseKind::Fraud,
+                kind: LegalCaseKind::ContractBreach,
             })
         );
         assert_state_unchanged(

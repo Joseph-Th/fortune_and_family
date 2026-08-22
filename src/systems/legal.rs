@@ -109,10 +109,6 @@ pub(crate) fn quote_grounded_legal_claim(
                     contract.unpaid_breach_penalty, contract.id
                 ),
             }),
-        LegalCaseKind::Property
-        | LegalCaseKind::Corruption
-        | LegalCaseKind::Fraud
-        | LegalCaseKind::Inheritance => None,
     }
 }
 

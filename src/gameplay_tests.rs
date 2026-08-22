@@ -1930,7 +1930,7 @@ mod candidates {
         let recovery_day =
             withdrawal_day.saturating_add(crate::systems::INSTITUTION_WITHDRAWAL_RECOVERY_DAYS);
         assert_eq!(
-            institution_support_next_day(&state, character_id),
+            institution_support_next_day(&state, institution_id, character_id),
             Some(recovery_day)
         );
         let alternate_character_id = state
@@ -1944,7 +1944,7 @@ mod candidates {
             .map(crate::core::Character::id)
             .expect("campaign must contain another active family member");
         assert_eq!(
-            institution_support_next_day(&state, alternate_character_id),
+            institution_support_next_day(&state, institution_id, alternate_character_id),
             Some(recovery_day),
             "an office resignation must create dynasty-wide political recovery rather than inviting an immediate family-member swap"
         );
@@ -6474,7 +6474,7 @@ mod metrics {
                 id: legal_case_id,
                 plaintiff_dynasty_id,
                 defendant_dynasty_id,
-                kind: LegalCaseKind::Fraud,
+                kind: LegalCaseKind::ContractBreach,
                 claim_source: None,
                 evidence_basis_points: 6_500,
                 public_attention_basis_points: 2_000,

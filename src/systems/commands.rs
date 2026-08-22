@@ -24,9 +24,9 @@ use crate::core::{
     OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
-    BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId,
-    IdentifierAllocationError, InformationReportId, InstitutionId, LegalCaseId, OutboxMessageId,
-    PropertyId, PublicWorkId,
+    BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId,
+    ExternalRouteId, GoodId, IdentifierAllocationError, InformationReportId, InstitutionId,
+    LegalCaseId, OutboxMessageId, PropertyId, PublicWorkId,
 };
 use crate::money::Money;
 use crate::registry::Registry;
@@ -511,6 +511,12 @@ pub enum CommandError {
     MissingLegalCase { case_id: LegalCaseId },
     #[error("legal case {case_id} is not an unresolved claim against the player dynasty")]
     LegalSettlementUnavailable { case_id: LegalCaseId },
+    #[error("character {character_id} does not exist")]
+    MissingCharacter { character_id: CharacterId },
+    #[error(
+        "the grounded obligation behind legal case {case_id} no longer exists, so there is nothing to settle"
+    )]
+    LegalSettlementNothingToSettle { case_id: LegalCaseId },
     #[error(
         "legal settlement would overflow plaintiff dynasty {plaintiff_dynasty_id} treasury {current} by {incoming}"
     )]
@@ -823,6 +829,7 @@ fn dispatch_player_command(
             maintenance_basis_points,
             quality_target_basis_points,
         } => apply_business_policy_values(
+            registry,
             state,
             business_id,
             target_input_days,
@@ -1010,14 +1017,10 @@ fn apply_institution_withdrawal(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> Result<CommandOutcome, CommandError> {
-    let character =
-        state
-            .characters
-            .get(character_id)
-            .ok_or(CommandError::InvalidInstitutionWithdrawal {
-                institution_id,
-                character_id,
-            })?;
+    let character = state
+        .characters
+        .get(character_id)
+        .ok_or(CommandError::MissingCharacter { character_id })?;
     if character.dynasty_id() != state.player_dynasty_id {
         return Err(CommandError::InvalidInstitutionWithdrawal {
             institution_id,
@@ -1044,11 +1047,16 @@ fn apply_institution_withdrawal(
         .get_mut(&institution_id)
         .expect("validated institution must exist");
     institution.members.remove(&character_id);
-    if let Some(replacement_selection_day) = replacement_selection_day {
+    if resigned_office {
         institution.office_holder_id = None;
-        institution.next_selection_day = institution
-            .next_selection_day
-            .min(replacement_selection_day);
+        // The departed holder's policy dies with the resignation: a directive
+        // nobody holds office for must not keep shaping the district.
+        institution.active_directive = None;
+        if let Some(replacement_selection_day) = replacement_selection_day {
+            institution.next_selection_day = institution
+                .next_selection_day
+                .min(replacement_selection_day);
+        }
     }
     state.audit_log.push(AuditRecord {
         day,
@@ -1207,6 +1215,7 @@ fn apply_business_investment(
 }
 
 fn apply_business_policy_values(
+    registry: &Registry,
     state: &mut AppState,
     business_id: BusinessId,
     target_input_days: u16,
@@ -1216,6 +1225,7 @@ fn apply_business_policy_values(
     quality_target_basis_points: u16,
 ) -> Result<CommandOutcome, CommandError> {
     apply_business_policy(
+        registry,
         state,
         business_id,
         BusinessPolicyInput {
@@ -1229,6 +1239,7 @@ fn apply_business_policy_values(
 }
 
 fn apply_business_policy(
+    registry: &Registry,
     state: &mut AppState,
     business_id: BusinessId,
     input: BusinessPolicyInput,
@@ -1263,6 +1274,15 @@ fn apply_business_policy(
         .businesses
         .get(business_id)
         .expect("validated business must exist");
+    // The reserve gates every spendable-copper route for the business, so an
+    // unbounded floor would let one policy change permanently lock the firm's
+    // payroll, purchasing, and rescue financing. A reserve beyond the full
+    // recapitalization target has no operating meaning.
+    if minimum_cash_reserve
+        > super::strategic::business_recapitalization_target(registry, state, business)
+    {
+        return Err(CommandError::InvalidBusinessPolicy);
+    }
     if business.policy.target_input_days == target_input_days
         && business.policy.target_output_days == target_output_days
         && business.policy.minimum_cash_reserve == minimum_cash_reserve
@@ -1368,12 +1388,15 @@ fn apply_business_wages(
     // Every agreement must already pay the requested per-worker wage for this
     // to be a genuine no-op: individual agreements drift apart when the
     // market wage system renegotiates them, so keying off one arbitrary
-    // agreement would reject changes the workforce would still feel.
+    // agreement would reject changes the workforce would still feel. The
+    // comparison multiplies the requested per-worker wage back up to the
+    // agreement total, so a renegotiated non-divisible payroll never reads as
+    // an exact match and gets silently re-rounded by a "no-op" rewrite.
     let all_match_requested = agreements.iter().all(|agreement_id| {
         state.employment.get(agreement_id).is_some_and(|agreement| {
-            Money::from_copper(
-                agreement.weekly_wage().copper() / i64::from(agreement.workers().max(1)),
-            ) == weekly_wage_per_worker
+            weekly_wage_per_worker
+                .checked_mul_ratio(i64::from(agreement.workers().max(1)), 1)
+                .is_some_and(|total| total == agreement.weekly_wage())
         })
     });
     if all_match_requested {
@@ -2426,7 +2449,7 @@ pub(crate) fn quote_player_legal_settlement(
         legal_case.damages,
     );
     if exposure <= Money::ZERO {
-        return Err(CommandError::LegalSettlementUnavailable { case_id });
+        return Err(CommandError::LegalSettlementNothingToSettle { case_id });
     }
     let settlement_basis_points = 5_000_i64
         .saturating_add(i64::from(legal_case.evidence_basis_points) / 2)
@@ -3301,7 +3324,8 @@ fn apply_institution_support(
             maximum: MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
         });
     }
-    if let Some(next_support_day) = institution_support_next_day(state, character_id)
+    if let Some(next_support_day) =
+        institution_support_next_day(state, institution_id, character_id)
         && state.clock.day() < next_support_day
     {
         return Err(CommandError::InstitutionSupportCooldown { next_support_day });
@@ -3330,15 +3354,6 @@ fn apply_institution_support(
         .expect("validated institution must exist");
     institution.budget = budget_after;
     institution.members.insert(character_id);
-    let dynasty = state
-        .dynasties
-        .get_mut(&state.player_dynasty_id)
-        .expect("player dynasty must exist");
-    dynasty.resources.legitimacy_basis_points = dynasty
-        .resources
-        .legitimacy_basis_points
-        .saturating_add(250)
-        .min(10_000);
     record_institution_patronage_relationships(
         state,
         institution_id,
@@ -3398,7 +3413,7 @@ fn finish_institution_patronage(
         OutboxKind::Politics,
         format!("Institutional support cultivated for character {character_id}"),
         format!(
-            "The dynasty patronized institution {institution_id}; character {character_id}'s support will be established by day {established_day}."
+            "The dynasty patronized institution {institution_id}; character {character_id}'s support, and the legitimacy it earns the house, will be established by day {established_day}."
         ),
     )?;
     Ok(CommandOutcome {
@@ -3782,15 +3797,6 @@ fn apply_office_nomination(
         .get_mut(&institution_id)
         .expect("validated institution must exist");
     institution.next_selection_day = institution.next_selection_day.min(selection_day);
-    let dynasty = state
-        .dynasties
-        .get_mut(&state.player_dynasty_id)
-        .expect("player dynasty must exist");
-    dynasty.resources.legitimacy_basis_points = dynasty
-        .resources
-        .legitimacy_basis_points
-        .saturating_add(150)
-        .min(10_000);
     let subject = office_nomination_subject(institution_id, character_id);
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
@@ -4167,13 +4173,18 @@ pub(crate) fn institution_support_subject(
 
 pub(crate) fn institution_support_next_day(
     state: &AppState,
+    institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> Option<i64> {
     let patronage =
         latest_character_campaign_day(state, AuditKind::InstitutionPatronage, character_id)
             .map(|day| future_day_or_terminal(day, INSTITUTION_SUPPORT_INTERVAL_DAYS));
+    // Withdrawing from one institution costs standing with that house, not
+    // with the whole city: the recovery cooldown is scoped to the institution
+    // the character walked out of.
     let withdrawal =
         latest_character_campaign_day(state, AuditKind::InstitutionWithdrawal, character_id)
+            .filter(|_| latest_withdrawal_institution(state, character_id) == Some(institution_id))
             .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
     let dynasty_office_resignation = latest_player_office_resignation_day(state)
         .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
@@ -4182,6 +4193,25 @@ pub(crate) fn institution_support_next_day(
         .chain(withdrawal)
         .chain(dynasty_office_resignation)
         .max()
+}
+
+fn latest_withdrawal_institution(
+    state: &AppState,
+    character_id: CharacterId,
+) -> Option<InstitutionId> {
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::InstitutionWithdrawal
+                && record
+                    .audit_subject()
+                    .institution_character_ids()
+                    .is_some_and(|(_, subject_character)| subject_character == character_id)
+        })
+        .and_then(|record| record.audit_subject().institution_character_ids())
+        .map(|(institution_id, _)| institution_id)
 }
 
 fn latest_player_office_resignation_day(state: &AppState) -> Option<i64> {
@@ -4310,11 +4340,7 @@ fn apply_crisis_response(
         }
     }
     if organized_response_severity_reduction > 0 && crisis_kind == CrisisKind::TradeDisruption {
-        for route in state.external_routes.values_mut() {
-            route.disruption_basis_points = route
-                .disruption_basis_points
-                .saturating_sub(organized_response_severity_reduction);
-        }
+        heal_disrupted_routes(state, organized_response_severity_reduction);
     }
     super::strategic::try_push_outbox(
         state,
@@ -4402,6 +4428,11 @@ fn validate_crisis_response_history(
     crisis_id: CrisisId,
     response: CrisisResponse,
 ) -> Result<String, CommandError> {
+    let crisis_kind = state
+        .crises
+        .get(&crisis_id)
+        .map(|crisis| crisis.kind)
+        .ok_or(CommandError::MissingCrisis { crisis_id })?;
     let subject = format!("crisis:{crisis_id}");
     let prior_responses: Vec<_> = state
         .audit_log
@@ -4415,12 +4446,40 @@ fn validate_crisis_response_history(
     let has_exploitation_response = prior_responses
         .iter()
         .any(|record| record.detail() == "response=Exploit");
-    if has_containment_response
-        || (response == CrisisResponse::Exploit && has_exploitation_response)
-    {
+    // A trade disruption is contained by healing its routes, and each response
+    // heals a bounded amount of the tracked disruption. Repeated organized
+    // responses are therefore a real strategy with real costs, not spam; other
+    // crises remain one-organized-response problems.
+    let containment_locked = has_containment_response && crisis_kind != CrisisKind::TradeDisruption;
+    if containment_locked || (response == CrisisResponse::Exploit && has_exploitation_response) {
         return Err(CommandError::CrisisAlreadyAddressed { crisis_id });
     }
     Ok(subject)
+}
+
+/// A trade-disruption response sends aid down the disrupted routes. The aid
+/// budget equals the response's severity reduction and is spent where
+/// disruption runs deepest first, so one response heals a bounded amount of
+/// total disruption instead of magically treating every route at full strength.
+fn heal_disrupted_routes(state: &mut AppState, mut aid_basis_points: u16) {
+    let mut disrupted: Vec<(std::cmp::Reverse<u16>, ExternalRouteId)> = state
+        .external_routes
+        .values()
+        .filter(|route| route.disruption_basis_points > 0)
+        .map(|route| (std::cmp::Reverse(route.disruption_basis_points), route.id))
+        .collect();
+    disrupted.sort_unstable();
+    for (_, route_id) in disrupted {
+        if aid_basis_points == 0 {
+            break;
+        }
+        let Some(route) = state.external_routes.get_mut(&route_id) else {
+            continue;
+        };
+        let healed = route.disruption_basis_points.min(aid_basis_points);
+        route.disruption_basis_points = route.disruption_basis_points.saturating_sub(healed);
+        aid_basis_points = aid_basis_points.saturating_sub(healed);
+    }
 }
 
 fn reduce_crisis(state: &mut AppState, crisis_id: CrisisId, amount: u16) {

@@ -615,10 +615,6 @@ impl PublicWork {
 pub enum LegalCaseKind {
     Debt,
     ContractBreach,
-    Property,
-    Corruption,
-    Fraud,
-    Inheritance,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
