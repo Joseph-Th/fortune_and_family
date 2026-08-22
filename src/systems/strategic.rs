@@ -4513,6 +4513,43 @@ struct LaborEnvironment {
     utilization: u16,
     business_condition: u16,
     maintenance: u16,
+    /// Per-worker weekly wage relative to the market reference wage, in basis
+    /// points. Drives slow loyalty and condition drift toward wage fairness.
+    wage_ratio_basis_points: u16,
+}
+
+/// Weekly per-worker wage the labor market treats as fair at base staple
+/// prices. It tracks the bread price so sustained food inflation or scarcity
+/// turns yesterday's fair wage into a stingy one.
+const REFERENCE_WEEKLY_WORKER_WAGE_COPPER: i64 = 35;
+/// At or above this wage-to-reference ratio a workforce considers its pay
+/// generous and builds loyalty that absorbs operating strain.
+const WAGE_ADEQUACY_GENEROUS_BASIS_POINTS: u16 = 12_000;
+/// Below this ratio a workforce considers its pay stingy and slowly withdraws
+/// cooperation until wages recover or resistance organizes.
+const WAGE_ADEQUACY_STINGY_BASIS_POINTS: u16 = 9_000;
+const WAGE_ADEQUACY_MAX_LOYALTY_LOSS_PER_WEEK: u16 = 150;
+const WAGE_ADEQUACY_MAX_CONDITION_LOSS_PER_WEEK: u16 = 50;
+const WAGE_ADEQUACY_GENEROUS_LOYALTY_GAIN_PER_WEEK: u16 = 40;
+const WAGE_ADEQUACY_GENEROUS_CONDITION_GAIN_PER_WEEK: u16 = 15;
+
+pub(crate) fn market_reference_weekly_wage(registry: &Registry, state: &AppState) -> Option<Money> {
+    let bread_id = registry.get_good_id("bread")?;
+    let base_price = registry.get_good(bread_id)?.base_price();
+    if base_price <= Money::ZERO {
+        return None;
+    }
+    let quote_price = state.market.quotes.get(&bread_id)?.price;
+    let ratio_basis_points = quote_price
+        .copper()
+        .saturating_mul(10_000)
+        .checked_div(base_price.copper())?;
+    let clamped = ratio_basis_points.clamp(6_000, 18_000);
+    Some(Money::from_copper(
+        REFERENCE_WEEKLY_WORKER_WAGE_COPPER
+            .saturating_mul(clamped)
+            .div_euclid(10_000),
+    ))
 }
 
 fn settle_employment_agreement(
@@ -4526,6 +4563,22 @@ fn settle_employment_agreement(
 ) -> Result<(), SimulationError> {
     let utilization_basis_points =
         business_labor_utilization_basis_points(registry, state, business_id);
+    let wage_ratio_basis_points =
+        market_reference_weekly_wage(registry, state).map_or(10_000, |reference| {
+            let agreement = state
+                .employment
+                .get(&employment_id)
+                .expect("employment must exist");
+            let workers = i64::from(agreement.workers().max(1));
+            let per_worker_copper = agreement.weekly_wage().copper().max(0) / workers;
+            let reference_copper = reference.copper().max(1);
+            u16::try_from(
+                per_worker_copper
+                    .saturating_mul(10_000)
+                    .div_euclid(reference_copper),
+            )
+            .unwrap_or(u16::MAX)
+        });
     let labor_environment = {
         let business = state
             .businesses
@@ -4535,6 +4588,7 @@ fn settle_employment_agreement(
             utilization: utilization_basis_points,
             business_condition: business.operations.condition_basis_points,
             maintenance: business.policy.maintenance_basis_points,
+            wage_ratio_basis_points,
         }
     };
     let wage_due = wage.saturating_mul_ratio(i64::from(utilization_basis_points), 10_000);
@@ -4548,6 +4602,98 @@ fn settle_employment_agreement(
         wage_due,
     );
     emit_employment_outcome(state, business_id, recovered, became_disputed)?;
+    if paid == wage_due && prior_status == EmploymentStatus::Active {
+        respond_to_market_wage_pressure(registry, state, employment_id, business_id)?;
+    }
+    Ok(())
+}
+
+/// Rival employers answer market wage pressure the way real competitors do:
+/// when food inflation turns a standing wage unfair and the workforce is
+/// souring, they raise pay toward the fair reference while their cash buffer
+/// allows it. This keeps the city's labor economy adaptive instead of letting
+/// ambient disputes silently erode district employment.
+fn respond_to_market_wage_pressure(
+    registry: &Registry,
+    state: &mut AppState,
+    employment_id: EmploymentId,
+    business_id: BusinessId,
+) -> Result<(), SimulationError> {
+    if state
+        .businesses
+        .get(business_id)
+        .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
+    {
+        // The player sets wage posture deliberately through
+        // `SetBusinessWages`; the simulation never renegotiates for them.
+        return Ok(());
+    }
+    let Some(reference) = market_reference_weekly_wage(registry, state) else {
+        return Ok(());
+    };
+    let (current_per_worker, workers) = {
+        let agreement = state
+            .employment
+            .get(&employment_id)
+            .expect("employment must exist");
+        if agreement.status != EmploymentStatus::Active || agreement.loyalty_basis_points >= 5_000 {
+            return Ok(());
+        }
+        (
+            agreement.weekly_wage.copper().max(0) / i64::from(agreement.workers.max(1)),
+            i64::from(agreement.workers.max(1)),
+        )
+    };
+    if current_per_worker >= reference.copper()
+        || current_per_worker.saturating_mul(10_000)
+            >= i64::from(WAGE_ADEQUACY_STINGY_BASIS_POINTS)
+                .saturating_mul(reference.copper().max(1))
+    {
+        return Ok(());
+    }
+    let target_per_worker = reference
+        .copper()
+        .min(current_per_worker.saturating_add(current_per_worker / 10 + 1));
+    let new_total = Money::from_copper(target_per_worker.saturating_mul(workers));
+    let old_total = Money::from_copper(current_per_worker.saturating_mul(workers));
+    let weekly_increase = new_total.saturating_sub(old_total);
+    if weekly_increase <= Money::ZERO {
+        return Ok(());
+    }
+    let next_finance_version = {
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("employment business must exist");
+        let recipe = registry
+            .get_recipe(business.recipe_id())
+            .expect("employment business recipe must exist");
+        let payroll_reserve = recipe.daily_operating_cost().saturating_mul(7);
+        let required_buffer = payroll_reserve.saturating_add(weekly_increase.saturating_mul(6));
+        if business.cash() < required_buffer {
+            return Ok(());
+        }
+        next_business_finance_version(business)?
+    };
+    let agreement = state
+        .employment
+        .get_mut(&employment_id)
+        .expect("employment must exist");
+    agreement.weekly_wage = new_total;
+    let business = state
+        .businesses
+        .get_mut(business_id)
+        .expect("employment business must exist");
+    business.finance.version = next_finance_version;
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::LaborSettlement,
+        subject: format!("business:{business_id}").into(),
+        detail: format!(
+            "market_wage_adjustment={}; per_worker={old_total}/{new_total}",
+            weekly_increase.copper()
+        ),
+    });
     Ok(())
 }
 
@@ -4672,6 +4818,11 @@ fn update_fully_paid_employment(
     environment: LaborEnvironment,
 ) -> (bool, bool) {
     if prior_status != EmploymentStatus::Disputed {
+        let wage_dispute =
+            apply_wage_adequacy_drift(agreement, environment.wage_ratio_basis_points);
+        if wage_dispute {
+            return (false, true);
+        }
         let strain = labor_strain_basis_points(agreement, environment);
         if strain > 0 {
             agreement.conditions_basis_points =
@@ -4698,13 +4849,21 @@ fn update_fully_paid_employment(
         }
         return (false, false);
     }
+    // Disputed workforces reconcile toward fair pay: stingy wages stall the
+    // recovery that full payment would otherwise buy.
+    let wage_ratio = environment.wage_ratio_basis_points;
+    let (loyalty_gain, condition_gain) = if wage_ratio < WAGE_ADEQUACY_STINGY_BASIS_POINTS {
+        (40, 10)
+    } else {
+        (180, 60)
+    };
     agreement.loyalty_basis_points = agreement
         .loyalty_basis_points
-        .saturating_add(180)
+        .saturating_add(loyalty_gain)
         .min(10_000);
     agreement.conditions_basis_points = agreement
         .conditions_basis_points
-        .saturating_add(60)
+        .saturating_add(condition_gain)
         .min(10_000);
     let recovered = agreement.loyalty_basis_points >= super::EMPLOYMENT_RECOVERY_BASIS_POINTS
         && agreement.conditions_basis_points >= super::EMPLOYMENT_RECOVERY_BASIS_POINTS;
@@ -4712,6 +4871,49 @@ fn update_fully_paid_employment(
         agreement.status = EmploymentStatus::Active;
     }
     (recovered, false)
+}
+
+/// Weekly loyalty and condition drift from wage fairness. Stingy wages erode
+/// cooperation and can eventually provoke a dispute on their own; generous
+/// wages build the loyal buffer that absorbs periods of operating strain.
+/// Returns whether the drift alone pushed an active workforce into dispute.
+fn apply_wage_adequacy_drift(
+    agreement: &mut EmploymentAgreement,
+    wage_ratio_basis_points: u16,
+) -> bool {
+    if wage_ratio_basis_points >= WAGE_ADEQUACY_GENEROUS_BASIS_POINTS {
+        agreement.loyalty_basis_points = agreement
+            .loyalty_basis_points
+            .saturating_add(WAGE_ADEQUACY_GENEROUS_LOYALTY_GAIN_PER_WEEK)
+            .min(10_000);
+        agreement.conditions_basis_points = agreement
+            .conditions_basis_points
+            .saturating_add(WAGE_ADEQUACY_GENEROUS_CONDITION_GAIN_PER_WEEK)
+            .min(10_000);
+        return false;
+    }
+    if wage_ratio_basis_points >= WAGE_ADEQUACY_STINGY_BASIS_POINTS {
+        return false;
+    }
+    let deficit = WAGE_ADEQUACY_STINGY_BASIS_POINTS
+        .saturating_sub(wage_ratio_basis_points)
+        .max(1);
+    agreement.loyalty_basis_points = agreement.loyalty_basis_points.saturating_sub(
+        deficit
+            .saturating_div(25)
+            .min(WAGE_ADEQUACY_MAX_LOYALTY_LOSS_PER_WEEK),
+    );
+    agreement.conditions_basis_points = agreement.conditions_basis_points.saturating_sub(
+        deficit
+            .saturating_div(75)
+            .min(WAGE_ADEQUACY_MAX_CONDITION_LOSS_PER_WEEK),
+    );
+    let became_disputed = agreement.status == EmploymentStatus::Active
+        && (agreement.conditions_basis_points < 3_000 || agreement.loyalty_basis_points < 2_000);
+    if became_disputed {
+        agreement.status = EmploymentStatus::Disputed;
+    }
+    became_disputed
 }
 
 fn labor_strain_basis_points(

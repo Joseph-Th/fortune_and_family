@@ -18,7 +18,7 @@ use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
     CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry,
     ChronicleKind, CivicDebt, CivicDebtStatus, ContractStatus, CrisisStatus, DynastyPair,
-    EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind, HouseGovernance,
+    EmploymentAgreement, EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind, HouseGovernance,
     InformationConfidence, InformationReport, InformationTarget, LawKind, LegalCase, LegalCaseKind,
     LegalCaseStatus, LoanStatus, OfficeDirectiveState, OfficePower, OutboxKind, PublicWork,
     PublicWorkKind, PublicWorkStatus,
@@ -91,6 +91,10 @@ pub enum PlayerCommand {
         minimum_cash_reserve: Money,
         maintenance_basis_points: u16,
         quality_target_basis_points: u16,
+    },
+    SetBusinessWages {
+        business_id: BusinessId,
+        weekly_wage_per_worker: Money,
     },
     CreateSupplyContract {
         terms: SupplyContractTerms,
@@ -195,6 +199,12 @@ struct BusinessPolicyInput {
 }
 
 pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 180;
+/// Weeks between wage renegotiations for one business. Wage posture is a
+/// standing labor commitment, so it changes on a slower cadence than policy.
+pub(crate) const BUSINESS_WAGE_CHANGE_INTERVAL_DAYS: i64 = 90;
+/// Upper bound on the weekly wage per worker the command accepts. It keeps
+/// checked arithmetic unreachable while still allowing generous wages.
+pub(crate) const MAX_WEEKLY_WAGE_PER_WORKER: Money = Money::from_copper(400);
 pub(crate) const LAW_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
 pub(crate) const LAW_SPONSORSHIP_COST: Money = Money::from_copper(2_000);
 pub(crate) const LAW_LEGITIMACY_REQUIREMENT: u16 = 3_000;
@@ -387,6 +397,17 @@ pub enum CommandError {
         business_id: BusinessId,
         next_change_day: i64,
     },
+    #[error("weekly wage per worker is zero or above the supported maximum {maximum}")]
+    InvalidBusinessWage { maximum: Money },
+    #[error("business {business_id} already pays the requested weekly wage")]
+    UnchangedBusinessWage { business_id: BusinessId },
+    #[error("business {business_id} cannot change wages again before day {next_change_day}")]
+    BusinessWageCooldown {
+        business_id: BusinessId,
+        next_change_day: i64,
+    },
+    #[error("business {business_id} has no workforce to recompense")]
+    BusinessHasNoWorkforce { business_id: BusinessId },
     #[error("business investment must be positive")]
     InvalidBusinessInvestment,
     #[error("law {kind:?} does not support value {value}")]
@@ -807,6 +828,10 @@ fn dispatch_player_command(
             maintenance_basis_points,
             quality_target_basis_points,
         ),
+        PlayerCommand::SetBusinessWages {
+            business_id,
+            weekly_wage_per_worker,
+        } => apply_business_wages(state, business_id, weekly_wage_per_worker),
         PlayerCommand::CreateSupplyContract { terms } => apply_contract(registry, state, &terms),
         PlayerCommand::IssueLoan { terms } => apply_loan(registry, state, &terms),
         PlayerCommand::BuyProperty { property_id } => apply_property_purchase(state, property_id),
@@ -1286,6 +1311,104 @@ fn apply_business_policy(
     )?;
     Ok(CommandOutcome {
         summary: format!("Updated operating policy for business {business_id}."),
+    })
+}
+
+/// Sets the standing weekly wage for every workforce agreement of one owned
+/// business. Wage posture is the player's proactive labor lever: wages below
+/// the market reference erode workforce loyalty and eventually provoke
+/// disputes, while generous wages build loyalty that absorbs operating strain.
+fn apply_business_wages(
+    state: &mut AppState,
+    business_id: BusinessId,
+    weekly_wage_per_worker: Money,
+) -> Result<CommandOutcome, CommandError> {
+    ensure_owned_business(state, business_id)?;
+    if state.businesses.get(business_id).is_some_and(|business| {
+        matches!(
+            business.status(),
+            BusinessStatus::Insolvent | BusinessStatus::Closed
+        )
+    }) {
+        return Err(CommandError::Strategic(StrategicError::BusinessInactive {
+            business_id,
+        }));
+    }
+    if weekly_wage_per_worker <= Money::ZERO || weekly_wage_per_worker > MAX_WEEKLY_WAGE_PER_WORKER
+    {
+        return Err(CommandError::InvalidBusinessWage {
+            maximum: MAX_WEEKLY_WAGE_PER_WORKER,
+        });
+    }
+    let subject = format!("business:{business_id}");
+    if let Some(last_change_day) =
+        latest_audit_day_for_subject(state, AuditKind::BusinessWageChange, &subject)
+    {
+        let next_change_day =
+            checked_future_day(last_change_day, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS)?;
+        if state.clock.day() < next_change_day {
+            return Err(CommandError::BusinessWageCooldown {
+                business_id,
+                next_change_day,
+            });
+        }
+    }
+    let agreements: Vec<EmploymentId> = state
+        .employment
+        .values()
+        .filter(|agreement| agreement.business_id() == business_id)
+        .map(EmploymentAgreement::id)
+        .collect();
+    let Some(&first_agreement) = agreements.first() else {
+        return Err(CommandError::BusinessHasNoWorkforce { business_id });
+    };
+    let current_per_worker =
+        state
+            .employment
+            .get(&first_agreement)
+            .map_or(Money::ZERO, |agreement| {
+                Money::from_copper(
+                    agreement.weekly_wage().copper() / i64::from(agreement.workers().max(1)),
+                )
+            });
+    if current_per_worker == weekly_wage_per_worker {
+        return Err(CommandError::UnchangedBusinessWage { business_id });
+    }
+    for agreement_id in &agreements {
+        let agreement = state
+            .employment
+            .get_mut(agreement_id)
+            .expect("collected employment agreement must exist");
+        let total = weekly_wage_per_worker
+            .checked_mul_ratio(i64::from(agreement.workers().max(1)), 1)
+            .ok_or(CommandError::InvalidBusinessWage {
+                maximum: MAX_WEEKLY_WAGE_PER_WORKER,
+            })?;
+        agreement.weekly_wage = total;
+    }
+    state.audit_log.push(AuditRecord {
+        day: state.clock.day(),
+        kind: AuditKind::BusinessWageChange,
+        subject: subject.into(),
+        detail: format!(
+            "wage_per_worker={}; agreements={}",
+            weekly_wage_per_worker.copper(),
+            agreements.len()
+        ),
+    });
+    super::strategic::try_push_outbox(
+        state,
+        OutboxKind::District,
+        format!("Business {business_id} wage terms updated"),
+        format!(
+            "The enterprise now pays {weekly_wage_per_worker} per worker each week across {} workforce agreement(s).",
+            agreements.len()
+        ),
+    )?;
+    Ok(CommandOutcome {
+        summary: format!(
+            "Set the weekly wage of business {business_id} to {weekly_wage_per_worker} per worker."
+        ),
     })
 }
 

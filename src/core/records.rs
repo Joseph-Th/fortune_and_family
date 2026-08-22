@@ -609,6 +609,7 @@ pub enum AuditKind {
     InformationCommission,
     InformationLeverage,
     HouseholdUpkeep,
+    BusinessWageChange,
 }
 
 /// Serialized audit subject text wrapped as a domain type so runtime identity is not represented

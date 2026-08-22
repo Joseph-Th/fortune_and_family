@@ -7243,13 +7243,164 @@ mod labor {
             cash_before.saturating_sub(LABOR_REPLACEMENT_COST)
         );
     }
+
+    fn active_player_wage_target(state: &AppState) -> (EmploymentId, BusinessId, u16, i64) {
+        let agreement = state
+            .employment
+            .values()
+            .find(|agreement| {
+                agreement.status == EmploymentStatus::Active
+                    && state
+                        .businesses
+                        .get(agreement.business_id)
+                        .is_some_and(|business| {
+                            business.owner_dynasty_id() == state.player_dynasty_id
+                        })
+            })
+            .expect("player business must have an active employment agreement");
+        (
+            agreement.id,
+            agreement.business_id,
+            agreement.workers,
+            agreement.weekly_wage.copper() / i64::from(agreement.workers.max(1)),
+        )
+    }
+
+    #[test]
+    fn set_business_wages_updates_workforce_terms_with_audit_and_notification() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (employment_id, business_id, workers, current_per_worker) =
+            active_player_wage_target(&state);
+        let raised = Money::from_copper(current_per_worker + 7);
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetBusinessWages {
+                business_id,
+                weekly_wage_per_worker: raised,
+            },
+        )
+        .expect("a fair raise must commit");
+
+        let agreement = state
+            .employment
+            .get(&employment_id)
+            .expect("employment must remain present");
+        assert_eq!(
+            agreement.weekly_wage,
+            raised.checked_mul_ratio(i64::from(workers), 1).unwrap()
+        );
+        assert!(state.audit_log.iter().any(|record| {
+            record.kind() == AuditKind::BusinessWageChange
+                && record
+                    .detail()
+                    .contains(&format!("wage_per_worker={}", raised.copper()))
+        }));
+        assert_eq!(
+            state.outbox.last().map(crate::core::OutboxMessage::kind),
+            Some(OutboxKind::District)
+        );
+    }
+
+    #[test]
+    fn set_business_wages_rejects_invalid_terms_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let before = state.clone();
+        let (_, business_id, _, current) = active_player_wage_target(&state);
+
+        for (wage, expected) in [
+            (
+                Money::ZERO,
+                CommandError::InvalidBusinessWage {
+                    maximum: MAX_WEEKLY_WAGE_PER_WORKER,
+                },
+            ),
+            (
+                Money::from_copper(MAX_WEEKLY_WAGE_PER_WORKER.copper() + 1),
+                CommandError::InvalidBusinessWage {
+                    maximum: MAX_WEEKLY_WAGE_PER_WORKER,
+                },
+            ),
+            (
+                Money::from_copper(current),
+                CommandError::UnchangedBusinessWage { business_id },
+            ),
+        ] {
+            let result = apply_player_command(
+                registry,
+                &mut state,
+                PlayerCommand::SetBusinessWages {
+                    business_id,
+                    weekly_wage_per_worker: wage,
+                },
+            );
+            assert_eq!(result, Err(expected));
+            assert_state_unchanged(
+                &before,
+                &state,
+                "invalid wage terms must leave state untouched",
+            );
+        }
+    }
+
+    #[test]
+    fn set_business_wages_enforces_cooldown() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let (_, business_id, _, current) = active_player_wage_target(&state);
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetBusinessWages {
+                business_id,
+                weekly_wage_per_worker: Money::from_copper(current + 5),
+            },
+        )
+        .expect("the first wage change must commit");
+
+        for day in [1_u32, 45] {
+            crate::systems::advance_days(registry, &mut state, day).expect("campaign must advance");
+            let result = apply_player_command(
+                registry,
+                &mut state,
+                PlayerCommand::SetBusinessWages {
+                    business_id,
+                    weekly_wage_per_worker: Money::from_copper(current + 9),
+                },
+            );
+            assert!(
+                matches!(result, Err(CommandError::BusinessWageCooldown { .. })),
+                "renegotiating inside the cooldown window must be rejected"
+            );
+        }
+
+        crate::systems::advance_days(
+            registry,
+            &mut state,
+            u32::try_from(BUSINESS_WAGE_CHANGE_INTERVAL_DAYS).expect("interval fits u32"),
+        )
+        .expect("campaign must advance");
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetBusinessWages {
+                business_id,
+                weekly_wage_per_worker: Money::from_copper(current + 9),
+            },
+        )
+        .expect("after the cooldown a renegotiation must commit");
+    }
 }
 
 mod serialization {
     use super::*;
     use std::collections::BTreeSet;
 
-    const COMMAND_KINDS: [&str; 29] = [
+    const COMMAND_KINDS: [&str; 30] = [
         "acquire-business",
         "acknowledge-notification",
         "adopt-ward",
@@ -7274,6 +7425,7 @@ mod serialization {
         "respond-to-crisis",
         "settle-legal-case",
         "set-business-policy",
+        "set-business-wages",
         "set-house-governance",
         "start-public-work",
         "transfer-business-cash",
@@ -7288,6 +7440,7 @@ mod serialization {
             PlayerCommand::AcquireBusiness { .. } => "acquire-business",
             PlayerCommand::InvestInBusiness { .. } => "invest-in-business",
             PlayerCommand::SetBusinessPolicy { .. } => "set-business-policy",
+            PlayerCommand::SetBusinessWages { .. } => "set-business-wages",
             PlayerCommand::CreateSupplyContract { .. } => "create-supply-contract",
             PlayerCommand::IssueLoan { .. } => "issue-loan",
             PlayerCommand::BuyProperty { .. } => "buy-property",
@@ -7370,6 +7523,10 @@ mod serialization {
                 minimum_cash_reserve: Money::from_copper(500),
                 maintenance_basis_points: 700,
                 quality_target_basis_points: 8_000,
+            },
+            PlayerCommand::SetBusinessWages {
+                business_id: BusinessId::new(1),
+                weekly_wage_per_worker: Money::from_copper(42),
             },
             PlayerCommand::CreateSupplyContract {
                 terms: SupplyContractTerms {

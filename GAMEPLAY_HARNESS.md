@@ -197,12 +197,12 @@ BuyProperty, EnactLaw, StartPublicWork, FundPublicWork, SetHouseGovernance,
 ConveneFamilyCouncil, DesignateHeir, AdoptWard, EducateFamilyMember,
 CultivateInstitutionSupport, EndowInstitution, NominateForOffice,
 ExerciseOfficePower, CommissionInformation, LeverageInformation, BorrowFunds,
-AcknowledgeNotification, and the business families -- so that an activation is
-recorded whenever the canonical game would accept some concrete action of that
-kind, regardless of whether the candidate generator built it. The diagnosis
-records an activation even when no candidate is generated, so a quiet cycle is
-never misread as dormant just because the agent's generator declined an action
-the world offered.
+SetBusinessWages, AcknowledgeNotification, and the business families -- so that
+an activation is recorded whenever the canonical game would accept some concrete
+action of that kind, regardless of whether the candidate generator built it. The
+diagnosis records an activation even when no candidate is generated, so a quiet
+cycle is never misread as dormant just because the agent's generator declined an
+action the world offered.
 
 This keeps the `triggers` column and the generator-gap diagnosis meaningful for all command families without treating unaffordable or cooling-down work as a generator gap.
 

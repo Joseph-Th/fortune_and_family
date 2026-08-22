@@ -3472,6 +3472,7 @@ mod employment {
             utilization: 10_000,
             business_condition: 8_000,
             maintenance: 400,
+            wage_ratio_basis_points: 10_000,
         };
         let mut became_disputed = false;
 
@@ -3505,6 +3506,7 @@ mod employment {
             utilization: 10_000,
             business_condition: 8_000,
             maintenance: 800,
+            wage_ratio_basis_points: 10_000,
         };
 
         for _ in 0..360 {
@@ -3534,6 +3536,7 @@ mod employment {
             utilization: 10_000,
             business_condition: 8_000,
             maintenance: 1_200,
+            wage_ratio_basis_points: 10_000,
         };
 
         for _ in 0..120 {
@@ -3544,6 +3547,138 @@ mod employment {
 
         assert_eq!(agreement.status, EmploymentStatus::Active);
         assert!(agreement.conditions_basis_points >= 6_800);
+    }
+
+    #[test]
+    fn stingy_wages_erode_loyalty_until_resistance_organizes() {
+        let state = make_test_campaign();
+        let mut agreement = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment")
+            .clone();
+        let environment = LaborEnvironment {
+            utilization: 5_000,
+            business_condition: 9_000,
+            maintenance: 1_300,
+            wage_ratio_basis_points: 6_000,
+        };
+        let mut became_disputed = false;
+
+        for _ in 0..120 {
+            let (_, disputed) =
+                update_fully_paid_employment(&mut agreement, EmploymentStatus::Active, environment);
+            if disputed {
+                became_disputed = true;
+                break;
+            }
+        }
+
+        assert!(
+            became_disputed,
+            "sustained underpayment must eventually provoke organized resistance even without operating strain"
+        );
+        assert_eq!(agreement.status, EmploymentStatus::Disputed);
+    }
+
+    #[test]
+    fn fair_wages_leave_the_workforce_stable_without_strain() {
+        let state = make_test_campaign();
+        let mut agreement = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment")
+            .clone();
+        let loyalty_before = agreement.loyalty_basis_points;
+        let conditions_before = agreement.conditions_basis_points;
+        let environment = LaborEnvironment {
+            utilization: 5_000,
+            business_condition: 9_000,
+            maintenance: 1_300,
+            wage_ratio_basis_points: 10_000,
+        };
+
+        for _ in 0..150 {
+            let (_, disputed) =
+                update_fully_paid_employment(&mut agreement, EmploymentStatus::Active, environment);
+            assert!(!disputed);
+        }
+
+        assert_eq!(agreement.status, EmploymentStatus::Active);
+        assert_eq!(agreement.loyalty_basis_points, loyalty_before);
+        assert_eq!(agreement.conditions_basis_points, conditions_before);
+    }
+
+    #[test]
+    fn generous_wages_build_a_loyal_buffer() {
+        let state = make_test_campaign();
+        let mut agreement = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment")
+            .clone();
+        let loyalty_before = agreement.loyalty_basis_points;
+        let environment = LaborEnvironment {
+            utilization: 5_000,
+            business_condition: 9_000,
+            maintenance: 1_300,
+            wage_ratio_basis_points: 12_500,
+        };
+
+        for _ in 0..40 {
+            let (_, disputed) =
+                update_fully_paid_employment(&mut agreement, EmploymentStatus::Active, environment);
+            assert!(!disputed);
+        }
+
+        assert!(
+            agreement.loyalty_basis_points > loyalty_before,
+            "generous pay must build the loyal buffer that absorbs future strain"
+        );
+    }
+
+    #[test]
+    fn stingy_wages_stall_dispute_recovery_that_fair_pay_restores() {
+        let state = make_test_campaign();
+        let mut stingy = state
+            .employment
+            .values()
+            .find(|agreement| agreement.status == EmploymentStatus::Active)
+            .expect("campaign must contain active employment")
+            .clone();
+        let mut fair = stingy.clone();
+        stingy.status = EmploymentStatus::Disputed;
+        fair.status = EmploymentStatus::Disputed;
+
+        let stingy_environment = LaborEnvironment {
+            utilization: 5_000,
+            business_condition: 9_000,
+            maintenance: 1_300,
+            wage_ratio_basis_points: 7_000,
+        };
+        let fair_environment = LaborEnvironment {
+            utilization: 5_000,
+            business_condition: 9_000,
+            maintenance: 1_300,
+            wage_ratio_basis_points: 10_000,
+        };
+
+        for _ in 0..30 {
+            update_fully_paid_employment(
+                &mut stingy,
+                EmploymentStatus::Disputed,
+                stingy_environment,
+            );
+            update_fully_paid_employment(&mut fair, EmploymentStatus::Disputed, fair_environment);
+        }
+
+        assert!(
+            fair.loyalty_basis_points > stingy.loyalty_basis_points,
+            "restoring fair wages must reconcile a disputed workforce faster than keeping them underpaid"
+        );
     }
 
     #[test]

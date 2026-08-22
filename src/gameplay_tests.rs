@@ -2645,9 +2645,11 @@ mod candidates {
                     .expect("player business must exist"),
                 &mut other_candidates,
             );
+            // Every persona considers healthy modernization; persona weights,
+            // not a hard gate, decide how often each one pursues it.
             assert!(
-                other_candidates.is_empty(),
-                "healthy generic modernization should remain an entrepreneur specialization; other personas still use need-driven recapitalization"
+                !other_candidates.is_empty(),
+                "healthy generic modernization must stay reachable for every persona so the commercial loop is measurable"
             );
         }
 
@@ -5238,6 +5240,78 @@ mod candidates {
                 .expect("office-power statistics must exist")
                 .activation_opportunities,
             1
+        );
+    }
+
+    #[test]
+    fn wage_posture_candidates_repair_strained_workforces() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = *player_business_ids_for_test(&state)
+            .first()
+            .expect("player business must exist");
+        let employment_id = state
+            .employment
+            .values()
+            .find(|agreement| agreement.business_id == business_id)
+            .expect("player business must have an employment agreement")
+            .id;
+        {
+            let agreement = state
+                .employment
+                .get_mut(&employment_id)
+                .expect("employment must exist");
+            let workers = i64::from(agreement.workers.max(1));
+            agreement.weekly_wage = Money::from_copper(20 * workers);
+            agreement.loyalty_basis_points = 3_200;
+            agreement.conditions_basis_points = 4_000;
+        }
+
+        let mut candidates = Vec::new();
+        generate_business_wage_candidates(
+            registry,
+            &state,
+            GameplayPersona::Steward,
+            &mut candidates,
+        );
+
+        let candidate = single_candidate(&candidates, "wage repair posture");
+        assert!(matches!(
+            candidate.command,
+            PlayerCommand::SetBusinessWages {
+                weekly_wage_per_worker,
+                ..
+            } if weekly_wage_per_worker.copper() >= 35
+        ));
+    }
+
+    #[test]
+    fn wage_activation_predicate_mirrors_the_canonical_cooldown_route() {
+        let mut state = make_test_campaign();
+        assert!(
+            has_business_wage_opportunity(&state),
+            "a workforceable player business starts off cooldown"
+        );
+
+        let business_id = *player_business_ids_for_test(&state)
+            .first()
+            .expect("player business must exist");
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::BusinessWageChange,
+            subject: format!("business:{business_id}").into(),
+            detail: "wage_per_worker=42; agreements=1".to_owned(),
+        });
+        assert!(
+            !has_business_wage_opportunity(&state),
+            "a fresh renegotiation blocks the route inside the cooldown window"
+        );
+        for _ in 0..BUSINESS_WAGE_CHANGE_INTERVAL_DAYS {
+            state.clock.advance_one_day();
+        }
+        assert!(
+            has_business_wage_opportunity(&state),
+            "the route reopens once the cooldown elapses"
         );
     }
 }
@@ -9377,14 +9451,20 @@ mod findings {
             &report.findings,
             "crisis-response was not exercised in this horizon",
         );
-        // Contract supply routes are canonically available whenever an open
-        // player business has an external counterparty with capacity, so a
-        // short horizon that leaves contracts ambient now reports the route as
-        // player-responsive-but-unused rather than as a route that had not yet
-        // become available.
+        // Contract supply routes are only player-responsive when an executable
+        // route exists: an uncontracted counterparty pair with capacity. The
+        // focused fixture's player business already trades through the ambient
+        // market, so a short horizon reports the domain as not yet
+        // player-connected rather than as a used-but-ambient route.
         let contract_finding = finding_with_title(
             &report.findings,
-            "contracts domain is autonomous but not player-responsive",
+            "contracts domain changed before a player route became available",
+        );
+        assert!(
+            !report.findings.iter().any(|finding| {
+                finding.title == "contracts domain is autonomous but not player-responsive"
+            }),
+            "an activation predicate must not claim player responsiveness without an executable route"
         );
         let legal_finding = finding_with_title(
             &report.findings,
@@ -9396,7 +9476,11 @@ mod findings {
         );
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Info);
-        assert_eq!(contract_finding.severity, GameplayFindingSeverity::Warning);
+        assert_eq!(
+            contract_finding.severity,
+            GameplayFindingSeverity::Info,
+            "a domain that changed only before any player route existed is informational, not a broken player route"
+        );
         assert_eq!(legal_finding.severity, GameplayFindingSeverity::Info);
         assert_eq!(
             crisis_domain_finding.severity,

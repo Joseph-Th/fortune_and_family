@@ -119,7 +119,7 @@ Failure should be recoverable through restructuring, asset sale, recapitalizatio
 | Domain | Design expectation |
 |---|---|
 | Dynasty and family | Family structure changes succession, management capacity, office reach, loyalty, and continuity. Education and governance create strategic specialization. |
-| Households and labor | Households consume, work, pay rent, experience welfare changes, and respond politically. Labor connects business outcomes to people. |
+| Households and labor | Households consume, work, pay rent, experience welfare changes, and respond politically. Wage posture is a standing commitment: fairness is judged against the cost of living, stingy pay erodes loyalty toward dispute, and generous pay buys resilience. Labor connects business outcomes to people. |
 | Businesses | Businesses have distinct cash, inventory, policy, management, capacity, quality, condition, and lifecycle. Growth and recovery require capital and administration. |
 | Markets and contracts | Prices respond to supply, demand, scarcity, policy, and disruption. Contracts create durable counterparties and obligations. |
 | Credit and debt | Credit creates leverage, dependency, collateral risk, restructuring, and enforceable consequences. |

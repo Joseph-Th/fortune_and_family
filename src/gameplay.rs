@@ -10,11 +10,11 @@ use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, InstitutionId};
 use crate::money::{Money, Quantity, checked_cost_for};
 use crate::registry::{GoodCategory, InstitutionKind, Registry};
 use crate::systems::{
-    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, CIVIC_DEBT_CREDITOR_RESERVE,
-    COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST, CRISIS_SUPPRESS_COST, CommandError,
-    CrisisResponse, DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, EducationFocus,
-    FAMILY_COUNCIL_MEETING_COST, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST,
-    HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
+    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS,
+    CIVIC_DEBT_CREDITOR_RESERVE, COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST,
+    CRISIS_SUPPRESS_COST, CommandError, CrisisResponse, DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS,
+    EducationFocus, FAMILY_COUNCIL_MEETING_COST, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS,
+    FAMILY_EDUCATION_COST, HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
     HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, INFORMATION_COMMISSION_COST,
     INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST, INSTITUTION_ENDOWMENT_MAX,
     INSTITUTION_ENDOWMENT_MIN, INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
@@ -23,13 +23,14 @@ use crate::systems::{
     LAW_LEGITIMACY_REQUIREMENT, LAW_SPONSORSHIP_COST, LAW_SPONSORSHIP_INTERVAL_DAYS,
     LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LaborResponse, LoanTerms,
     MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
-    NewGameError, OFFICE_NOMINATION_CAMPAIGN_COST, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
-    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, OFFICE_NOMINATION_RESOLUTION_DAYS,
-    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
-    OFFICE_POWER_ESTABLISHMENT_DAYS, PRIVATE_LOAN_COUNTERPARTY_RESERVE,
-    PROPERTY_COUNTERPARTY_BUYER_RESERVE, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, SimulationError, StrategicError, SupplyContractTerms,
-    WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
+    MAX_WEEKLY_WAGE_PER_WORKER, NewGameError, OFFICE_NOMINATION_CAMPAIGN_COST,
+    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+    OFFICE_NOMINATION_RESOLUTION_DAYS, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS,
+    OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST, OFFICE_POWER_ESTABLISHMENT_DAYS,
+    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
+    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, PlayerCommand, STANDARD_CONTRACT_BATCHES_PER_WEEK,
+    SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
+    WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT,
     active_player_ward_count, advance_days, apply_player_command, available_household_workers,
     available_supply_contract_capacity, build_new_game, business_operating_spendable_cash,
@@ -40,7 +41,8 @@ use crate::systems::{
     has_player_office, institution_capability_score, institution_endowment_next_day,
     institution_membership_count, institution_support_day,
     institution_support_delivery_requirement, institution_support_next_day,
-    office_nomination_delivery_requirement, office_nomination_next_day, player_contract_deliveries,
+    market_reference_weekly_wage, office_nomination_delivery_requirement,
+    office_nomination_next_day, player_contract_deliveries,
     private_loan_borrower_financing_pressure, projected_dynasty_monthly_office_duty,
     projected_dynasty_monthly_office_duty_with_additional_offices,
     public_work_initial_contribution, quote_business_acquisition, quote_information_leverage,
@@ -52,12 +54,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use thiserror::Error;
 
-const ALL_COMMAND_KINDS: [GameplayCommandKind; 31] = [
+const ALL_COMMAND_KINDS: [GameplayCommandKind; 32] = [
     GameplayCommandKind::TransferBusinessCash,
     GameplayCommandKind::WithdrawBusinessCash,
     GameplayCommandKind::AcquireBusiness,
     GameplayCommandKind::InvestInBusiness,
     GameplayCommandKind::SetBusinessPolicy,
+    GameplayCommandKind::SetBusinessWages,
     GameplayCommandKind::SecureSupply,
     GameplayCommandKind::SellOutput,
     GameplayCommandKind::BorrowFunds,
@@ -107,7 +110,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 63;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 64;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -341,6 +344,7 @@ pub enum GameplayCommandKind {
     AcquireBusiness,
     InvestInBusiness,
     SetBusinessPolicy,
+    SetBusinessWages,
     SecureSupply,
     SellOutput,
     BorrowFunds,
@@ -393,6 +397,7 @@ impl GameplayCommandKind {
             Self::AcquireBusiness => "acquire-business",
             Self::InvestInBusiness => "invest-business",
             Self::SetBusinessPolicy => "set-policy",
+            Self::SetBusinessWages => "set-wages",
             Self::SecureSupply => "secure-supply",
             Self::SellOutput => "sell-output",
             Self::BorrowFunds => "borrow-funds",
@@ -428,6 +433,7 @@ impl GameplayCommandKind {
             | Self::WithdrawBusinessCash
             | Self::AcquireBusiness
             | Self::InvestInBusiness
+            | Self::SetBusinessWages
             | Self::SecureSupply
             | Self::SellOutput
             | Self::FileLegalCase
@@ -465,6 +471,7 @@ impl GameplayCommandKind {
                 | Self::WithdrawBusinessCash
                 | Self::AcquireBusiness
                 | Self::InvestInBusiness
+                | Self::SetBusinessWages
                 | Self::SecureSupply
                 | Self::SellOutput
                 | Self::FileLegalCase
@@ -2392,6 +2399,7 @@ fn classify_player_command(
         PlayerCommand::AcquireBusiness { .. } => Some(GameplayCommandKind::AcquireBusiness),
         PlayerCommand::InvestInBusiness { .. } => Some(GameplayCommandKind::InvestInBusiness),
         PlayerCommand::SetBusinessPolicy { .. } => Some(GameplayCommandKind::SetBusinessPolicy),
+        PlayerCommand::SetBusinessWages { .. } => Some(GameplayCommandKind::SetBusinessWages),
         PlayerCommand::CreateSupplyContract { terms } => {
             let buyer_is_player = state
                 .businesses
@@ -2785,6 +2793,7 @@ impl CampaignAccumulator {
             | PlayerCommand::AcquireBusiness { .. }
             | PlayerCommand::InvestInBusiness { .. }
             | PlayerCommand::SetBusinessPolicy { .. }
+            | PlayerCommand::SetBusinessWages { .. }
             | PlayerCommand::CreateSupplyContract { .. }
             | PlayerCommand::IssueLoan { .. }
             | PlayerCommand::BuyProperty { .. }
@@ -4112,6 +4121,7 @@ fn consequence_horizon_days(
             | GameplayCommandKind::EnactLaw
             | GameplayCommandKind::ExerciseOfficePower
             | GameplayCommandKind::RespondToCrisis
+            | GameplayCommandKind::SetBusinessWages
             | GameplayCommandKind::WithdrawFromInstitution,
         ) => 180,
         Some(
@@ -4280,6 +4290,7 @@ fn has_world_opportunity(
 ) -> bool {
     match kind {
         GameplayCommandKind::SecureSupply => has_secure_supply_opportunity(registry, state),
+        GameplayCommandKind::SetBusinessWages => has_business_wage_opportunity(state),
         GameplayCommandKind::SellOutput => has_sell_output_opportunity(registry, state),
         GameplayCommandKind::BuyProperty => has_buy_property_opportunity(state),
         GameplayCommandKind::EnactLaw => has_enact_law_opportunity(registry, state),
@@ -4332,6 +4343,42 @@ fn is_open_business(business: &crate::core::Business) -> bool {
     )
 }
 
+/// Mirrors the canonical route (`apply_business_wages`): an owned, open
+/// business with a workforce is off cooldown and accepts a wage change.
+/// The agent's wage posture and material-change threshold live in the
+/// candidate generator, so a changeable workforce is never misread as dormant.
+fn has_business_wage_opportunity(state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    state
+        .businesses
+        .ids_for_owner(player_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.businesses.get(*id))
+        .filter(|business| is_open_business(business))
+        .any(|business| {
+            let subject = format!("business:{}", business.id());
+            state
+                .audit_log
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.kind() == crate::core::AuditKind::BusinessWageChange
+                        && record.subject() == subject
+                })
+                .is_none_or(|record| {
+                    state.clock.day()
+                        >= record
+                            .day()
+                            .saturating_add(BUSINESS_WAGE_CHANGE_INTERVAL_DAYS)
+                })
+                && state
+                    .employment
+                    .values()
+                    .any(|agreement| agreement.business_id() == business.id())
+        })
+}
+
 fn has_secure_supply_opportunity(registry: &Registry, state: &AppState) -> bool {
     let player_id = state.player_dynasty_id;
     state
@@ -4347,6 +4394,18 @@ fn has_secure_supply_opportunity(registry: &Registry, state: &AppState) -> bool 
                     return false;
                 };
                 contract_sellers(registry, state, input.good_id(), player_id).any(|seller| {
+                    // Mirror the executable route: the generator dedupes active
+                    // contracts per buyer-seller-good pair and offers the same
+                    // weekly batch quantity, so a contracted pair or a pair
+                    // without capacity is not an executable opportunity.
+                    if state.contracts.values().any(|contract| {
+                        contract.status == ContractStatus::Active
+                            && contract.buyer_business_id == business.id()
+                            && contract.seller_business_id == seller
+                            && contract.good_id == input.good_id()
+                    }) {
+                        return false;
+                    }
                     let unit_price =
                         contract_candidate_unit_price(state, business.id(), seller, quote.price);
                     game_accepts_contract_terms(
@@ -4355,7 +4414,9 @@ fn has_secure_supply_opportunity(registry: &Registry, state: &AppState) -> bool 
                         business.id(),
                         seller,
                         input.good_id(),
-                        input.quantity(),
+                        input
+                            .quantity()
+                            .saturating_mul_ratio(secure_supply_batches(business), 1),
                         unit_price,
                     )
                 })
@@ -4377,6 +4438,15 @@ fn has_sell_output_opportunity(registry: &Registry, state: &AppState) -> bool {
                 return false;
             };
             contract_buyers(registry, state, recipe.output_good_id(), player_id).any(|buyer| {
+                // Mirror the executable route (see `has_secure_supply_opportunity`).
+                if state.contracts.values().any(|contract| {
+                    contract.status == ContractStatus::Active
+                        && contract.buyer_business_id == buyer
+                        && contract.seller_business_id == business.id()
+                        && contract.good_id == recipe.output_good_id()
+                }) {
+                    return false;
+                }
                 let unit_price =
                     contract_candidate_unit_price(state, buyer, business.id(), quote.price);
                 game_accepts_contract_terms(
@@ -4385,7 +4455,9 @@ fn has_sell_output_opportunity(registry: &Registry, state: &AppState) -> bool {
                     buyer,
                     business.id(),
                     recipe.output_good_id(),
-                    recipe.output_quantity(),
+                    recipe
+                        .output_quantity()
+                        .saturating_mul_ratio(STANDARD_CONTRACT_BATCHES_PER_WEEK, 1),
                     unit_price,
                 )
             })
@@ -4961,6 +5033,10 @@ fn has_business_acquisition_opportunity(
         GameplayPersona::Steward | GameplayPersona::PowerBroker => 2,
     };
     let player_id = state.player_dynasty_id;
+    let treasury = state
+        .dynasties
+        .get(&player_id)
+        .map_or(Money::ZERO, crate::core::Dynasty::treasury);
     let player_businesses: Vec<_> = state
         .businesses
         .ids_for_owner(player_id)
@@ -4997,7 +5073,16 @@ fn has_business_acquisition_opportunity(
                 business.status(),
                 BusinessStatus::Distressed | BusinessStatus::Insolvent | BusinessStatus::Closed
             )
-            && quote_business_acquisition(registry, state, player_id, business.id()).is_ok()
+            && quote_business_acquisition(registry, state, player_id, business.id()).is_ok_and(
+                |quote| {
+                    // Mirror the canonical affordability route; the agent's
+                    // additional expansion reserve stays in the generator.
+                    let required = quote
+                        .purchase_price
+                        .saturating_add(quote.minimum_recapitalization);
+                    treasury >= required
+                },
+            )
     })
 }
 
@@ -5944,6 +6029,7 @@ fn legal_funding_candidate_adjustment(state: &AppState, candidate: &Candidate) -
         PlayerCommand::AcquireBusiness { .. }
         | PlayerCommand::InvestInBusiness { .. }
         | PlayerCommand::SetBusinessPolicy { .. }
+        | PlayerCommand::SetBusinessWages { .. }
         | PlayerCommand::CreateSupplyContract { .. }
         | PlayerCommand::IssueLoan { .. }
         | PlayerCommand::BuyProperty { .. }
@@ -5987,6 +6073,7 @@ fn candidate_preserves_office_duty_reserve(
         | PlayerCommand::AcquireBusiness { .. }
         | PlayerCommand::InvestInBusiness { .. }
         | PlayerCommand::SetBusinessPolicy { .. }
+        | PlayerCommand::SetBusinessWages { .. }
         | PlayerCommand::CreateSupplyContract { .. }
         | PlayerCommand::IssueLoan { .. }
         | PlayerCommand::BuyProperty { .. }
@@ -6108,6 +6195,7 @@ fn candidate_is_emergency_spending(state: &AppState, candidate: &Candidate) -> b
         | PlayerCommand::WithdrawBusinessCash { .. }
         | PlayerCommand::AcquireBusiness { .. }
         | PlayerCommand::SetBusinessPolicy { .. }
+        | PlayerCommand::SetBusinessWages { .. }
         | PlayerCommand::CreateSupplyContract { .. }
         | PlayerCommand::IssueLoan { .. }
         | PlayerCommand::BuyProperty { .. }
@@ -6268,6 +6356,7 @@ fn candidate_player_treasury_cost(
         PlayerCommand::TransferBusinessCash { .. }
         | PlayerCommand::WithdrawBusinessCash { .. }
         | PlayerCommand::SetBusinessPolicy { .. }
+        | PlayerCommand::SetBusinessWages { .. }
         | PlayerCommand::CreateSupplyContract { .. }
         | PlayerCommand::IssueLoan { .. }
         | PlayerCommand::SellProperty { .. }
@@ -6527,8 +6616,133 @@ fn generate_business_candidates(
         generate_business_investment_candidate(registry, state, persona, business, candidates);
         generate_business_policy_candidates(state, persona, business, candidates);
     }
+    generate_business_wage_candidates(registry, state, persona, candidates);
     generate_cash_rebalance_candidate(registry, state, &player_businesses, candidates);
     generate_owner_distribution_candidate(registry, state, persona, &player_businesses, candidates);
+}
+
+/// Wage-posture policy per persona. Wages are a standing labor commitment:
+/// strained or disputed workforces get restored to at least fair pay,
+/// stewards buy loyalty buffer with generosity, and opportunists squeeze a
+/// healthy workforce for margin while it lasts.
+fn generate_business_wage_candidates(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) {
+    let player_id = state.player_dynasty_id;
+    let reference_copper =
+        market_reference_weekly_wage(registry, state).map_or(35_i64, Money::copper);
+    for business in state
+        .businesses
+        .ids_for_owner(player_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.businesses.get(*id))
+        .filter(|business| is_open_business(business))
+    {
+        let subject = format!("business:{}", business.id());
+        if state
+            .audit_log
+            .iter()
+            .rev()
+            .find(|record| {
+                record.kind() == crate::core::AuditKind::BusinessWageChange
+                    && record.subject() == subject
+            })
+            .is_some_and(|record| {
+                state.clock.day()
+                    < record
+                        .day()
+                        .saturating_add(BUSINESS_WAGE_CHANGE_INTERVAL_DAYS)
+            })
+        {
+            continue;
+        }
+        let Some(agreement) = state
+            .employment
+            .values()
+            .find(|agreement| agreement.business_id() == business.id())
+        else {
+            continue;
+        };
+        let workers = i64::from(agreement.workers().max(1));
+        let current_per_worker =
+            Money::from_copper(agreement.weekly_wage().copper().max(0) / workers);
+        let Some(target_per_worker) = wage_posture_target_copper(
+            persona,
+            agreement,
+            reference_copper,
+            business.finance.lifetime_revenue,
+            business.finance.lifetime_costs,
+        ) else {
+            continue;
+        };
+        let target = Money::from_copper(target_per_worker.min(MAX_WEEKLY_WAGE_PER_WORKER.copper()));
+        let change = (target.copper() - current_per_worker.copper()).abs();
+        if target == current_per_worker || change.saturating_mul(20) < current_per_worker.copper() {
+            continue;
+        }
+        let direction = if target > current_per_worker {
+            "raise"
+        } else {
+            "reduce"
+        };
+        push_candidate(
+            candidates,
+            GameplayCommandKind::SetBusinessWages,
+            PlayerCommand::SetBusinessWages {
+                business_id: business.id(),
+                weekly_wage_per_worker: target,
+            },
+            format!(
+                "{direction} the wage of business {} from {current_per_worker} to {target} per worker",
+                business.id()
+            ),
+            700 + workforce_strain_urgency(state),
+        );
+    }
+}
+
+/// Returns the persona's desired per-worker wage in copper, or `None` when the
+/// current posture already fits.
+fn wage_posture_target_copper(
+    persona: GameplayPersona,
+    agreement: &crate::core::EmploymentAgreement,
+    reference_copper: i64,
+    lifetime_revenue: Money,
+    lifetime_costs: Money,
+) -> Option<i64> {
+    let workers = i64::from(agreement.workers().max(1));
+    let current = agreement.weekly_wage().copper().max(0) / workers;
+    let weakest = agreement
+        .loyalty_basis_points()
+        .min(agreement.conditions_basis_points());
+    let disputed = agreement.status == EmploymentStatus::Disputed;
+    if disputed || weakest < 3_500 {
+        // Repair posture: restore at least fair pay before resistance hardens.
+        return Some(current.max(reference_copper));
+    }
+    match persona {
+        GameplayPersona::Steward => {
+            // Generosity builds the loyal buffer that absorbs operating strain.
+            let generous = reference_copper * 5 / 4;
+            (current < generous).then_some(generous)
+        }
+        GameplayPersona::Opportunist => {
+            // Squeeze a healthy, profitable workforce while it stays calm.
+            let profitable = lifetime_revenue >= lifetime_costs && lifetime_revenue > Money::ZERO;
+            let calm = agreement.loyalty_basis_points() > 7_500
+                && agreement.conditions_basis_points() > 7_500;
+            if profitable && calm && current >= reference_copper * 6 / 5 {
+                Some(current * 4 / 5)
+            } else {
+                None
+            }
+        }
+        GameplayPersona::Entrepreneur | GameplayPersona::PowerBroker => None,
+    }
 }
 
 fn has_transfer_cash_opportunity(state: &AppState) -> bool {
@@ -7081,9 +7295,6 @@ fn generate_planned_business_investment(
     business: &crate::core::Business,
     candidates: &mut Vec<Candidate>,
 ) {
-    if persona != GameplayPersona::Entrepreneur {
-        return;
-    }
     let has_trade_evidence = business.finance.lifetime_revenue > Money::ZERO
         || business.finance.lifetime_costs > Money::ZERO;
     if !has_trade_evidence {
@@ -11257,6 +11468,7 @@ fn institutional_conversion_priority(
         | GameplayCommandKind::AcquireBusiness
         | GameplayCommandKind::InvestInBusiness
         | GameplayCommandKind::SetBusinessPolicy
+        | GameplayCommandKind::SetBusinessWages
         | GameplayCommandKind::SecureSupply
         | GameplayCommandKind::SellOutput
         | GameplayCommandKind::BorrowFunds
@@ -11314,6 +11526,7 @@ fn recovery_priority_adjustment(state: &AppState, kind: GameplayCommandKind) -> 
         | GameplayCommandKind::SellProperty => 3_500,
         GameplayCommandKind::SecureSupply
         | GameplayCommandKind::SellOutput
+        | GameplayCommandKind::SetBusinessWages
         | GameplayCommandKind::ResolveLaborDispute
         | GameplayCommandKind::RespondToCrisis => 500,
         GameplayCommandKind::BuyProperty
@@ -11347,7 +11560,7 @@ fn steward_weight(kind: GameplayCommandKind) -> i64 {
         GameplayCommandKind::ConveneFamilyCouncil => 850,
         GameplayCommandKind::DesignateHeir | GameplayCommandKind::EducateFamilyMember => 650,
         GameplayCommandKind::SetBusinessPolicy | GameplayCommandKind::StartPublicWork => 600,
-        GameplayCommandKind::FundPublicWork => 620,
+        GameplayCommandKind::SetBusinessWages | GameplayCommandKind::FundPublicWork => 620,
         GameplayCommandKind::AdoptWard | GameplayCommandKind::EndowInstitution => 520,
         GameplayCommandKind::CommissionInformation => 480,
         GameplayCommandKind::LeverageInformation => 700,
@@ -11370,6 +11583,10 @@ fn steward_weight(kind: GameplayCommandKind) -> i64 {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the exhaustive persona weight matrix keeps every command-family priority visible"
+)]
 fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
     match persona {
         GameplayPersona::Steward => steward_weight(kind),
@@ -11379,6 +11596,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::AcquireBusiness
             | GameplayCommandKind::InvestInBusiness
             | GameplayCommandKind::SetBusinessPolicy
+            | GameplayCommandKind::SetBusinessWages
             | GameplayCommandKind::BuyProperty
             | GameplayCommandKind::SellProperty
             | GameplayCommandKind::TransferBusinessCash
@@ -11428,6 +11646,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::AcquireBusiness
             | GameplayCommandKind::InvestInBusiness
             | GameplayCommandKind::SetBusinessPolicy
+            | GameplayCommandKind::SetBusinessWages
             | GameplayCommandKind::SecureSupply
             | GameplayCommandKind::SellOutput
             | GameplayCommandKind::BorrowFunds
@@ -11460,6 +11679,7 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::WithdrawBusinessCash
             | GameplayCommandKind::InvestInBusiness
             | GameplayCommandKind::SetBusinessPolicy
+            | GameplayCommandKind::SetBusinessWages
             | GameplayCommandKind::SecureSupply
             | GameplayCommandKind::EnactLaw
             | GameplayCommandKind::StartPublicWork
@@ -11470,6 +11690,31 @@ fn persona_weight(persona: GameplayPersona, kind: GameplayCommandKind) -> i64 {
             | GameplayCommandKind::AcknowledgeNotification => 100,
         },
     }
+}
+
+/// Urgency for proactive wage posture: rises as a player workforce approaches
+/// dispute thresholds, so the agent treats falling loyalty as a live problem
+/// instead of waiting for organized resistance.
+fn workforce_strain_urgency(state: &AppState) -> i64 {
+    let player_id = state.player_dynasty_id;
+    state
+        .employment
+        .values()
+        .filter(|agreement| {
+            agreement.status == EmploymentStatus::Active
+                && state
+                    .businesses
+                    .get(agreement.business_id())
+                    .is_some_and(|business| business.owner_dynasty_id() == player_id)
+        })
+        .map(|agreement| {
+            let weakest = agreement
+                .loyalty_basis_points()
+                .min(agreement.conditions_basis_points());
+            (6_000_i64.saturating_sub(i64::from(weakest))).max(0)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn active_crisis_urgency(state: &AppState) -> i64 {
@@ -11489,6 +11734,7 @@ fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64 {
         GameplayCommandKind::RespondToCrisis => active_crisis_urgency(state),
         GameplayCommandKind::ResolveLaborDispute => labor_dispute_urgency(state),
         GameplayCommandKind::SetBusinessPolicy => business_policy_urgency(state),
+        GameplayCommandKind::SetBusinessWages => workforce_strain_urgency(state),
         GameplayCommandKind::InvestInBusiness => impaired_business_urgency(state, 2_400),
         GameplayCommandKind::AcquireBusiness => acquisition_urgency(state),
         GameplayCommandKind::AcknowledgeNotification => notification_urgency(state),
@@ -11820,6 +12066,11 @@ const fn command_error_category(error: &CommandError) -> &'static str {
         CommandError::InvalidBusinessPolicy | CommandError::InvalidBusinessInvestment => BAD_BIZ,
         CommandError::UnchangedBusinessPolicy { .. } => "unchanged business policy",
         CommandError::BusinessPolicyCooldown { .. } => "business policy cooldown",
+        CommandError::InvalidBusinessWage { .. } | CommandError::BusinessHasNoWorkforce { .. } => {
+            BAD_BIZ
+        }
+        CommandError::UnchangedBusinessWage { .. } => "unchanged business wage",
+        CommandError::BusinessWageCooldown { .. } => "business wage cooldown",
         CommandError::InvalidLawValue { .. } => "invalid law value",
         CommandError::UnchangedLaw { .. } => "unchanged law",
         CommandError::MissingCivicTreasury | CommandError::NoCivicDebtCreditor { .. } => {
@@ -14263,6 +14514,7 @@ const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> bool {
             | GameplayCommandKind::SecureSupply
             | GameplayCommandKind::SellOutput
             | GameplayCommandKind::InvestInBusiness
+            | GameplayCommandKind::AcquireBusiness
             | GameplayCommandKind::WithdrawFromInstitution
             | GameplayCommandKind::FundPublicWork
             | GameplayCommandKind::TransferBusinessCash
@@ -14482,6 +14734,7 @@ const fn commercial_domain_player_commands(
             GameplayCommandKind::AcquireBusiness,
             GameplayCommandKind::InvestInBusiness,
             GameplayCommandKind::SetBusinessPolicy,
+            GameplayCommandKind::SetBusinessWages,
         ],
         GameplayDomain::Market => &[
             GameplayCommandKind::SetBusinessPolicy,
@@ -14505,6 +14758,7 @@ const fn commercial_domain_player_commands(
         GameplayDomain::Labor => &[
             GameplayCommandKind::InvestInBusiness,
             GameplayCommandKind::SetBusinessPolicy,
+            GameplayCommandKind::SetBusinessWages,
             GameplayCommandKind::ResolveLaborDispute,
         ],
         GameplayDomain::Relationships => &[

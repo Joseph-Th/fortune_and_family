@@ -9,10 +9,10 @@ This document defines the current implementation surface, schemas, runtime guara
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 23 |
+| Save schema | 24 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 63 |
+| Gameplay report schema | 64 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -38,13 +38,13 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 |---|---|
 | World | One detailed city with six districts, regional routes, seasonal pressure, and external disruption. |
 | Population | Dynasties, notable characters, grouped households, health, loyalty, family links, wards, education, councils, heirs, and succession. |
-| Businesses | Ownership, management, policy, cash, inventory, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, and protected owner distributions. Recovery from distress requires a deeper cash cushion than distress onset, so borderline firms cannot flap between states. |
+| Businesses | Ownership, management, policy, wages, cash, inventory, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, and protected owner distributions. Recovery from distress requires a deeper cash cushion than distress onset, so borderline firms cannot flap between states. |
 | Markets | Scarce procurement, production, business and household demand, industrial tool demand, tool-constrained production and maintenance, spoilage, price formation, controls, and regional supply. |
 | Contracts | Scheduled supply, payment, penalties, fulfillment, attribution, breach, and termination. |
 | Private finance | Loans, interest, repayment, delinquency, default, collateral, seizure, restructuring, and repayment records. |
 | Municipal finance | Authorizing laws, dynasty creditors, treasury proceeds, debt service, delinquency, default, and civic consequences. |
 | Property | Ownership, value drift with district conditions, tenancy, occupancy, rent, purchase, collateral, liquidation, lien settlement, and distressed civic guarantees. |
-| Labor | Employment agreements, wages, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. |
+| Labor | Employment agreements, player-set wage posture, wage fairness relative to the market reference wage, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. Wages below fair pay erode loyalty and can provoke disputes; generous wages build a loyal buffer, and stingy wages stall dispute recovery. |
 | Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with membership, budgets, legitimacy, member coalitions, powers, terms, endowments, and deterministic selection. |
 | Political office | Commercial and capability gates, patronage, nomination, office powers, directives, recurring duties funded into institutional budgets, monthly fees of office paid back from institutional budgets, administrative load, coalition response, withdrawal, forfeiture, and re-election limits. |
 | Civic systems | Laws, differentiated public works, district conditions, grounded legal cases and settlements, crisis response, municipal debt, and private funding of sponsored public works. |
@@ -58,7 +58,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 
 `PlayerCommand` in `src/systems/commands.rs` is authoritative. Command families include:
 
-- Business capital, acquisition, investment, and operating policy
+- Business capital, acquisition, investment, wage posture, and operating policy
 - Supply contracts and private loans
 - Property purchase and liquidation
 - Laws, public works, legal filing, and legal settlement
