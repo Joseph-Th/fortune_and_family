@@ -5574,7 +5574,10 @@ mod metrics {
     #[test]
     fn quiet_diagnostic_reason_joins_gap_and_gate_causes() {
         let mut accumulator = CampaignAccumulator::new();
-        let activation_delta = BTreeMap::from([(GameplayCommandKind::SellProperty, 1_u32)]);
+        // NominateForOffice is outside the deliberately narrowed route set, so
+        // an activation without a candidate is a true generator gap here;
+        // SellProperty would now classify as agent restraint instead.
+        let activation_delta = BTreeMap::from([(GameplayCommandKind::NominateForOffice, 1_u32)]);
         let raw_generated_kinds = BTreeSet::from([GameplayCommandKind::BuyProperty]);
         let retained_kinds = BTreeSet::from([
             GameplayCommandKind::EnactLaw,
@@ -5614,14 +5617,71 @@ mod metrics {
         )
         .expect("a caused quiet cycle must report a reason");
 
-        assert!(
-            reason.contains("reserved by agent policy [sell-property]"),
-            "sell-property deliberately narrows to strategic-need conditions, so its unfired activation is agent restraint, not a coverage hole"
-        );
+        assert!(reason.contains("activation without candidate [office-nomination]"));
         assert!(reason.contains("declined by agent policy [buy-property]"));
         assert!(reason.contains("rejected by validation [enact-law]"));
         assert!(reason.contains("unverified due to probe budget [public-work-funding]"));
         assert_eq!(accumulator.quiet_diagnostic.dormant_cycles, 0);
+    }
+
+    #[test]
+    fn quiet_diagnostic_classifies_narrowed_routes_as_agent_restraint() {
+        let mut accumulator = CampaignAccumulator::new();
+        // SellProperty is a deliberately narrowed route: the canonical game
+        // accepts a liquidation, but the persona only sells under distress or
+        // committed need. An activation without a candidate there is agent
+        // restraint, not a generator hole.
+        let activation_delta = BTreeMap::from([(GameplayCommandKind::SellProperty, 1_u32)]);
+        let raw_generated_kinds = BTreeSet::new();
+        let retained_kinds = BTreeSet::new();
+        let retained_counts_by_kind = BTreeMap::new();
+        let probed_counts_by_kind = BTreeMap::new();
+        let probe = ProbeResult {
+            selected: None,
+            viable_count: 0,
+            substantive_viable_count: 0,
+            viable_command_kinds: BTreeSet::new(),
+            viable_options: Vec::new(),
+            close_choice_score_gap: None,
+            distinct_immediate_choice_profiles: 0,
+            distinct_projected_choice_profiles: 0,
+            family_close_choice_score_gap: None,
+            distinct_immediate_family_profiles: 0,
+            distinct_projected_family_profiles: 0,
+            rejections: Vec::new(),
+        };
+
+        let reason = record_quiet_diagnostic(
+            &mut accumulator,
+            &probe,
+            &raw_generated_kinds,
+            &retained_kinds,
+            &retained_counts_by_kind,
+            &probed_counts_by_kind,
+            &activation_delta,
+        )
+        .expect("a restrained quiet cycle must report a reason");
+
+        assert!(
+            reason.contains("reserved by agent policy [sell-property]"),
+            "sell-property deliberately narrows to strategic-need conditions, so its unfired activation is agent restraint, not a coverage hole"
+        );
+        assert!(!reason.contains("activation without candidate"));
+        assert_eq!(
+            accumulator
+                .quiet_diagnostic
+                .restrained_routes
+                .get(&GameplayCommandKind::SellProperty),
+            Some(&1),
+            "restrained routes must be counted separately from generator gaps"
+        );
+        assert_eq!(
+            accumulator
+                .quiet_diagnostic
+                .generator_gaps
+                .get(&GameplayCommandKind::SellProperty),
+            None
+        );
     }
 
     #[test]

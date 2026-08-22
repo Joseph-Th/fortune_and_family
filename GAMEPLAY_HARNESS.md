@@ -183,7 +183,8 @@ A no-action cycle happens when the agent has no viable substantive choice. The r
 
 | Cause | Meaning |
 |---|---|
-| Generator gap | An activation opportunity existed but no candidate was built |
+| Generator gap | An activation opportunity existed but no candidate was built, and the generator does not deliberately narrow that route |
+| Agent restraint | An activation opportunity fired for a route the persona's standing policy deliberately narrows to strategic-need conditions; no candidate was built by design |
 | Policy gate | Candidates were built but the persona's spending filters declined every one of them |
 | Validation gate | Candidates were built and probed but canonical validation rejected every one of them |
 | Dormant | No candidate was built and no activation opportunity fired; the game world offered no detected action |
@@ -191,6 +192,15 @@ A no-action cycle happens when the agent has no viable substantive choice. The r
 Quiet cycles with no recorded cause are dormant state: the game world offered no detected opportunity, no candidate was built, and no activation predicate fired. Every quiet cycle either resolves into a cause or is logged as dormant, so no-action play is never silent by accident.
 
 The diagnosis is recorded per campaign and summed in the aggregate and persona aggregates. Each trace step that took no substantive action also carries a human-readable `no_action_reason`, so a chronological decision log explains *why* each quiet gap happened.
+
+A no-action cycle where an activation fired for a command kind whose
+candidate generator deliberately narrows the canonical offer to strategic-need
+conditions (distress sales, wage-fairness cadence, succession-pressure
+designations, commission pacing, and similar thresholds) is recorded as agent
+restraint (`reserved by agent policy`) instead of a generator gap. This keeps
+`generator_gaps` meaning "an offered action with no construction logic", so a
+true coverage hole stays visible instead of drowning in thousands of deliberate
+declines.
 
 Activation opportunities are recorded for every command kind. Commands with a
 reactive world-state predicate (crisis, labor, legal filing, legal settlement,
