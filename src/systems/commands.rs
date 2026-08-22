@@ -17,11 +17,11 @@ use super::{
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
     CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry,
-    ChronicleKind, CivicDebt, CivicDebtStatus, ContractStatus, CrisisStatus, DynastyPair,
-    EmploymentAgreement, EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind, HouseGovernance,
-    InformationConfidence, InformationReport, InformationTarget, LawKind, LegalCase, LegalCaseKind,
-    LegalCaseStatus, LoanStatus, OfficeDirectiveState, OfficePower, OutboxKind, PublicWork,
-    PublicWorkKind, PublicWorkStatus,
+    ChronicleKind, CivicDebt, CivicDebtStatus, ContractStatus, CrisisKind, CrisisStatus,
+    DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind,
+    HouseGovernance, InformationConfidence, InformationReport, InformationTarget, LawKind,
+    LegalCase, LegalCaseKind, LegalCaseStatus, LoanStatus, OfficeDirectiveState, OfficePower,
+    OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId, GoodId,
@@ -237,7 +237,7 @@ const FAMILY_COUNCIL_MEETING_LOYALTY_GAIN: u16 = 600;
 pub(crate) const HEIR_DESIGNATION_INTERVAL_DAYS: i64 = 720;
 pub(crate) const HEIR_DESIGNATION_LEGITIMACY_COST: u16 = 300;
 const HEIR_DESIGNATION_UNITY_COST: u16 = 250;
-const HEIR_MINIMUM_AGE_DAYS: i64 = 18 * 360;
+pub(crate) const HEIR_MINIMUM_AGE_DAYS: i64 = 18 * 360;
 pub(crate) const OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS: i64 = 180;
 pub(crate) const OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST: u16 = 100;
 pub(crate) const INSTITUTION_SUPPORT_INTERVAL_DAYS: i64 = 360;
@@ -1359,19 +1359,21 @@ fn apply_business_wages(
         .filter(|agreement| agreement.business_id() == business_id)
         .map(EmploymentAgreement::id)
         .collect();
-    let Some(&first_agreement) = agreements.first() else {
+    if agreements.is_empty() {
         return Err(CommandError::BusinessHasNoWorkforce { business_id });
-    };
-    let current_per_worker =
-        state
-            .employment
-            .get(&first_agreement)
-            .map_or(Money::ZERO, |agreement| {
-                Money::from_copper(
-                    agreement.weekly_wage().copper() / i64::from(agreement.workers().max(1)),
-                )
-            });
-    if current_per_worker == weekly_wage_per_worker {
+    }
+    // Every agreement must already pay the requested per-worker wage for this
+    // to be a genuine no-op: individual agreements drift apart when the
+    // market wage system renegotiates them, so keying off one arbitrary
+    // agreement would reject changes the workforce would still feel.
+    let all_match_requested = agreements.iter().all(|agreement_id| {
+        state.employment.get(agreement_id).is_some_and(|agreement| {
+            Money::from_copper(
+                agreement.weekly_wage().copper() / i64::from(agreement.workers().max(1)),
+            ) == weekly_wage_per_worker
+        })
+    });
+    if all_match_requested {
         return Err(CommandError::UnchangedBusinessWage { business_id });
     }
     for agreement_id in &agreements {
@@ -2756,14 +2758,22 @@ fn validate_heir_designation(
         )
     };
     let subject = format!("dynasty:{dynasty_id}");
-    let last_designation_day = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::HeirDesignation && record.subject() == subject)
-        .map(AuditRecord::day);
+    let latest_designation =
+        state.audit_log.iter().rev().find(|record| {
+            record.kind() == AuditKind::HeirDesignation && record.subject() == subject
+        });
     let confirmation = prior_heir_id == Some(character_id);
-    if confirmation && last_designation_day.is_some() {
+    // Confirming the sitting heir is a no-op only when the most recent
+    // designation already names them. A later designation of a different
+    // heir must not lock the family out of re-preparing this one.
+    if confirmation
+        && latest_designation.is_some_and(|record| {
+            record
+                .detail()
+                .split(';')
+                .any(|part| part == format!("heir={character_id}"))
+        })
+    {
         return Err(CommandError::UnchangedHeir { character_id });
     }
     let candidate = state
@@ -2789,7 +2799,7 @@ fn validate_heir_designation(
             required: HEIR_DESIGNATION_LEGITIMACY_COST,
         });
     }
-    if let Some(last_designation_day) = last_designation_day {
+    if let Some(last_designation_day) = latest_designation.map(AuditRecord::day) {
         let next_designation_day =
             checked_future_day(last_designation_day, HEIR_DESIGNATION_INTERVAL_DAYS)?;
         if state.clock.day() < next_designation_day {
@@ -4262,6 +4272,17 @@ fn apply_crisis_response(
     let subject = validate_crisis_response_history(state, crisis_id, response)?;
     let severity = crisis.severity_basis_points;
     let district_id = crisis.district_id;
+    let crisis_kind = crisis.kind;
+    // Organized responses to a trade disruption send aid down the routes
+    // themselves, so they heal route disruption by the same amount as crisis
+    // severity; otherwise the tracked cause would outlive every response.
+    // Profiteering heals nothing.
+    let organized_response_severity_reduction = match response {
+        CrisisResponse::Relief => 2_500,
+        CrisisResponse::Reform => 1_800,
+        CrisisResponse::Suppress => 2_000,
+        CrisisResponse::Exploit => 0,
+    };
     match response {
         CrisisResponse::Relief => {
             spend_player_treasury(state, crisis_relief_cost(severity))?;
@@ -4282,60 +4303,14 @@ fn apply_crisis_response(
             adjust_district_unrest(state, district_id, 700, true);
         }
         CrisisResponse::Exploit => {
-            let required_legitimacy = 600;
-            let available_legitimacy = state
-                .dynasties
-                .get(&state.player_dynasty_id)
-                .expect("player dynasty must exist")
-                .resources
-                .legitimacy_basis_points;
-            if available_legitimacy < required_legitimacy {
-                return Err(CommandError::InsufficientPlayerLegitimacy {
-                    available: available_legitimacy,
-                    required: required_legitimacy,
-                });
-            }
-            // Crisis profiteering extracts wealth from the panicked market. The
-            // whole result resolves before any mutation: an empty or overdrawn
-            // clearing pool offers nothing to take, so spending legitimacy on
-            // the attempt must reject up front instead of paying full price
-            // for zero gain.
-            let desired_gain = Money::from_copper(i64::from(severity));
-            let gain = desired_gain.min(state.market.clearing_account);
-            if gain <= Money::ZERO {
-                return Err(CommandError::MarketExtractionUnavailable {
-                    available: state.market.clearing_account,
-                });
-            }
-            let current_treasury = state
-                .dynasties
-                .get(&state.player_dynasty_id)
-                .expect("player dynasty must exist")
-                .treasury();
-            let resulting_treasury =
-                current_treasury
-                    .checked_add(gain)
-                    .ok_or(CommandError::Strategic(
-                        StrategicError::DynastyTreasuryOverflow {
-                            dynasty_id: state.player_dynasty_id,
-                            current: current_treasury,
-                            incoming: gain,
-                        },
-                    ))?;
-            debit_market_clearing_account(state, gain)?;
-            let dynasty = state
-                .dynasties
-                .get_mut(&state.player_dynasty_id)
-                .expect("player dynasty must exist");
-            dynasty.resources.treasury = resulting_treasury;
-            let crisis = state
-                .crises
-                .get_mut(&crisis_id)
-                .expect("validated crisis must exist");
-            crisis.severity_basis_points = severity.saturating_add(500).min(10_000);
-            crisis.status = CrisisStatus::from_severity(crisis.severity_basis_points);
-            adjust_player_legitimacy(state, 600, false);
-            adjust_district_unrest(state, district_id, 600, true);
+            apply_crisis_exploitation(state, crisis_id, severity, district_id)?;
+        }
+    }
+    if organized_response_severity_reduction > 0 && crisis_kind == CrisisKind::TradeDisruption {
+        for route in state.external_routes.values_mut() {
+            route.disruption_basis_points = route
+                .disruption_basis_points
+                .saturating_sub(organized_response_severity_reduction);
         }
     }
     super::strategic::try_push_outbox(
@@ -4353,6 +4328,70 @@ fn apply_crisis_response(
     Ok(CommandOutcome {
         summary: format!("Applied {response:?} response to crisis {crisis_id}."),
     })
+}
+
+/// Crisis profiteering: extracts wealth from the panicked market into the
+/// player treasury. The extraction matches what relief would cost so
+/// profiteering is a genuine liquidity-of-last-resort trade: real money now,
+/// in exchange for a worsened crisis, legitimacy, and unrest. The whole
+/// result resolves before any mutation: an empty or overdrawn clearing pool
+/// offers nothing to take, so spending legitimacy on the attempt must reject
+/// up front instead of paying full price for zero gain.
+fn apply_crisis_exploitation(
+    state: &mut AppState,
+    crisis_id: CrisisId,
+    severity: u16,
+    district_id: Option<DistrictId>,
+) -> Result<(), CommandError> {
+    let required_legitimacy = 600;
+    let available_legitimacy = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .resources
+        .legitimacy_basis_points;
+    if available_legitimacy < required_legitimacy {
+        return Err(CommandError::InsufficientPlayerLegitimacy {
+            available: available_legitimacy,
+            required: required_legitimacy,
+        });
+    }
+    let desired_gain = Money::from_copper(i64::from(severity).saturating_mul(2).max(1));
+    let gain = desired_gain.min(state.market.clearing_account);
+    if gain <= Money::ZERO {
+        return Err(CommandError::MarketExtractionUnavailable {
+            available: state.market.clearing_account,
+        });
+    }
+    let current_treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    let resulting_treasury = current_treasury
+        .checked_add(gain)
+        .ok_or(CommandError::Strategic(
+            StrategicError::DynastyTreasuryOverflow {
+                dynasty_id: state.player_dynasty_id,
+                current: current_treasury,
+                incoming: gain,
+            },
+        ))?;
+    debit_market_clearing_account(state, gain)?;
+    let dynasty = state
+        .dynasties
+        .get_mut(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
+    dynasty.resources.treasury = resulting_treasury;
+    let crisis = state
+        .crises
+        .get_mut(&crisis_id)
+        .expect("validated crisis must exist");
+    crisis.severity_basis_points = severity.saturating_add(500).min(10_000);
+    crisis.status = CrisisStatus::from_severity(crisis.severity_basis_points);
+    adjust_player_legitimacy(state, 600, false);
+    adjust_district_unrest(state, district_id, 600, true);
+    Ok(())
 }
 
 fn validate_crisis_response_history(

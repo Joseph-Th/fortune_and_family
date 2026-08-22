@@ -5466,7 +5466,9 @@ mod crises {
                 StrategicError::DynastyTreasuryOverflow {
                     dynasty_id: state.player_dynasty_id,
                     current: Money::from_copper(i64::MAX),
-                    incoming: Money::from_copper(i64::from(severity)),
+                    // Exploitation extracts twice the severity in copper,
+                    // matching what an equivalent relief response would cost.
+                    incoming: Money::from_copper(i64::from(severity) * 2),
                 }
             ))
         );
@@ -5475,6 +5477,61 @@ mod crises {
             &state,
             "overflowing exploitation must not consume legitimacy or intensify the crisis",
         );
+    }
+
+    #[test]
+    fn organized_trade_crisis_responses_heal_route_disruption() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(1_000_000);
+        let crisis_id = state.next_ids.crisis();
+        let severity = 8_000;
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: crate::core::CrisisKind::TradeDisruption,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: severity,
+                status: CrisisStatus::Active,
+                cause: "test route disruption".to_owned(),
+            },
+        );
+        for route in state.external_routes.values_mut() {
+            route.disruption_basis_points = severity;
+        }
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Relief,
+            },
+        )
+        .expect("relief response must succeed");
+
+        // Relief sends aid down the routes themselves, so the tracked cause
+        // heals alongside the crisis instead of outliving every response.
+        for route in state.external_routes.values() {
+            assert_eq!(
+                route.disruption_basis_points,
+                severity - 2_500,
+                "organized relief must heal route disruption"
+            );
+        }
+        let crisis = state
+            .crises
+            .get(&crisis_id)
+            .expect("crisis must remain recorded");
+        assert!(crisis.severity_basis_points < severity);
+        validate_invariants(registry, &state);
     }
 
     #[test]

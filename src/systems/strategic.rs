@@ -3,7 +3,8 @@
 use super::SimulationError;
 use super::transactions::{
     TimelineError, add_market_supply, checked_future_day, checked_next_business_finance_version,
-    debit_market_clearing_account, next_business_finance_version, next_family_charter_version,
+    credit_market_clearing_account, debit_market_clearing_account, next_business_finance_version,
+    next_family_charter_version,
 };
 use crate::core::{
     AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
@@ -74,6 +75,9 @@ pub enum StrategicError {
     IdentifierAllocation(#[from] IdentifierAllocationError),
     #[error(transparent)]
     Timeline(#[from] TimelineError),
+    /// Simulation-level failure propagated from a shared transaction primitive.
+    #[error(transparent)]
+    Simulation(#[from] super::SimulationError),
     #[error(
         "state scenario {state_scenario:?} does not match registry scenario {registry_scenario:?}"
     )]
@@ -1112,6 +1116,10 @@ fn commit_unowned_property_purchase(
         .treasury()
         .checked_sub(price)
         .expect("validated property buyer must cover the purchase price");
+    // Unowned stock is effectively city real estate, so the purchase price
+    // flows into the market clearing pool like every other payment into the
+    // city's commercial sector instead of vanishing from the economy.
+    credit_market_clearing_account(state, price).map_err(StrategicError::Simulation)?;
     state
         .properties
         .get_mut(&property_id)
@@ -2872,9 +2880,11 @@ fn apply_crisis_daily_effects(
                 );
             }
             CrisisKind::TradeDisruption => {
-                for route in state.external_routes.values_mut() {
-                    route.disruption_basis_points = route.disruption_basis_points.max(severity);
-                }
+                // The crisis tracks disrupted routes rather than driving them:
+                // elevated `disruption_basis_points` already throttles route
+                // supply directly, and re-pinning routes to crisis severity
+                // every day would make the underlying condition impossible to
+                // heal, locking external trade permanently.
             }
             CrisisKind::GuildRevolt => {
                 if let Some(district_id) = district_id
@@ -3081,8 +3091,7 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
         )?;
         settle_fulfilled_contract(state, due, payment, settlement, next_due_day)?;
     } else {
-        let terminal_breach = final_delivery || terminates_for_misses;
-        settle_failed_contract(state, due, settlement, next_due_day, terminal_breach)?;
+        settle_failed_contract(state, due, settlement, next_due_day)?;
     }
     finalize_expired_contract(state, due, settlement, fulfilled, final_delivery)?;
     Ok(())
@@ -3287,7 +3296,6 @@ fn settle_failed_contract(
     due: DueContract,
     settlement: ContractSettlementState,
     next_due_day: Option<i64>,
-    terminal_breach: bool,
 ) -> Result<(), SimulationError> {
     let penalty_parties = match (
         settlement.seller_is_at_fault(),
@@ -3325,8 +3333,19 @@ fn settle_failed_contract(
             contract.breaching_dynasty_id = settlement.breaching_dynasty_id();
             contract.breach_victim_dynasty_id = settlement.breach_victim_dynasty_id();
         }
-        if terminal_breach && settlement.has_attributable_nonperformance() {
-            contract.unpaid_breach_penalty = unpaid_terminal_penalty;
+        if settlement.has_attributable_nonperformance() && unpaid_terminal_penalty > Money::ZERO {
+            // A partially paid penalty accumulates as recoverable breach debt
+            // whether or not this delivery is the terminal one, so the victim
+            // can pursue the full amount through a grounded legal claim.
+            let accumulated = contract
+                .unpaid_breach_penalty
+                .checked_add(unpaid_terminal_penalty)
+                .ok_or(SimulationError::ContractPenaltyOverflow {
+                    contract_id: due.id,
+                    current: contract.unpaid_breach_penalty,
+                    incoming: unpaid_terminal_penalty,
+                })?;
+            contract.unpaid_breach_penalty = accumulated;
         }
         contract.status == ContractStatus::Breached
     };
@@ -3816,7 +3835,15 @@ fn settle_due_loan(
         .get(&due.borrower_id)
         .expect("loan borrower must exist")
         .treasury();
-    if borrower_treasury >= amount_due {
+    let remaining_balance = accrued_balance.saturating_sub(amount_due);
+    // A payment that cannot even cover the week's interest lets the balance
+    // grow while every installment "succeeds", producing a debt that is
+    // mathematically unrepayable yet never flagged. Such an installment
+    // counts as missed so the delinquency and default machinery handles
+    // unsustainable terms instead of collecting interest forever.
+    let payment_is_productive = remaining_balance == Money::ZERO || amount_due >= interest_due;
+    let payable = borrower_treasury >= amount_due && payment_is_productive;
+    if payable {
         let lender_treasury = state
             .dynasties
             .get(&due.lender_id)
@@ -3832,7 +3859,7 @@ fn settle_due_loan(
     }
     let next_due_day = {
         let loan = state.loans.get(&due.id).expect("loan must exist");
-        if borrower_treasury >= amount_due {
+        if payable {
             let remaining_balance = accrued_balance
                 .checked_sub(amount_due)
                 .expect("loan payment cannot exceed accrued balance");
@@ -3852,7 +3879,7 @@ fn settle_due_loan(
         .get_mut(&due.id)
         .expect("loan must exist")
         .balance = accrued_balance;
-    if borrower_treasury >= amount_due {
+    if payable {
         settle_successful_loan_payment(state, due, amount_due, next_due_day)?;
     } else {
         settle_missed_loan_payment(state, due, next_due_day)?;
@@ -4265,6 +4292,34 @@ fn terminate_stale_tenancy(
     Ok(())
 }
 
+/// Vacancy income is an abstraction funded by the market's own clearing
+/// pool; it is bounded by what that pool holds so the weekly settlement can
+/// never overdraw it. Returns the amount actually paid.
+fn collect_vacancy_income(
+    state: &mut AppState,
+    owner_id: DynastyId,
+    rent: Money,
+) -> Result<Money, SimulationError> {
+    let paid = rent.min(state.market.clearing_account);
+    if paid <= Money::ZERO {
+        return Ok(Money::ZERO);
+    }
+    let owner_treasury = state
+        .dynasties
+        .get(&owner_id)
+        .expect("property owner dynasty must exist")
+        .treasury();
+    owner_treasury
+        .checked_add(paid)
+        .ok_or(SimulationError::DynastyTreasuryOverflow {
+            dynasty_id: owner_id,
+            current: owner_treasury,
+            incoming: paid,
+        })?;
+    debit_market_clearing_account(state, paid)?;
+    Ok(paid)
+}
+
 fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
     let rents: Vec<_> = state
         .properties
@@ -4288,6 +4343,14 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
                 )
             })
         });
+        if occupant_is_closed {
+            // A closed or insolvent business no longer occupies its premises:
+            // evict it so the unit genuinely returns to the market instead of
+            // a dead firm blocking vacancy income indefinitely.
+            if let Some(property) = state.properties.get_mut(&property_id) {
+                property.occupant_business_id = None;
+            }
+        }
         let paid = if let Some(tenant_id) = tenant_id {
             if owner_id == tenant_id {
                 continue;
@@ -4326,28 +4389,8 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
                 .checked_sub(paid)
                 .expect("bounded rent payment must not exceed tenant treasury");
             paid
-        } else if occupant_business_id.is_none() || occupant_is_closed {
-            // Vacancy income is an abstraction funded by the market's own
-            // clearing pool; it is bounded by what that pool holds so the
-            // weekly settlement can never overdraw it.
-            let paid = rent.min(state.market.clearing_account);
-            if paid <= Money::ZERO {
-                continue;
-            }
-            let owner_treasury = state
-                .dynasties
-                .get(&owner_id)
-                .expect("property owner dynasty must exist")
-                .treasury();
-            owner_treasury
-                .checked_add(paid)
-                .ok_or(SimulationError::DynastyTreasuryOverflow {
-                    dynasty_id: owner_id,
-                    current: owner_treasury,
-                    incoming: paid,
-                })?;
-            debit_market_clearing_account(state, paid)?;
-            paid
+        } else if occupant_business_id.is_none() {
+            collect_vacancy_income(state, owner_id, rent)?
         } else {
             Money::ZERO
         };
@@ -6821,7 +6864,22 @@ fn update_district_conditions(state: &mut AppState) {
             households.iter().copied(),
         )
         .unwrap_or(5_000);
-        let employment = district_employment_basis_points(state, district_id);
+        // An ongoing guild revolt suppresses formal employment for as long as
+        // it is active, so the monthly model applies the same pressure the
+        // daily crisis effect erodes with instead of resetting it away.
+        let revolt_employment_pressure = state
+            .crises
+            .values()
+            .filter(|crisis| {
+                crisis.kind == CrisisKind::GuildRevolt
+                    && crisis.status.is_active()
+                    && crisis.district_id == Some(district_id)
+            })
+            .map(|crisis| (crisis.severity_basis_points / 100).max(1))
+            .max()
+            .unwrap_or(0);
+        let employment = district_employment_basis_points(state, district_id)
+            .saturating_sub(revolt_employment_pressure);
         let rent_index = {
             let district = state
                 .districts
@@ -8057,7 +8115,7 @@ fn detect_and_advance_crises(
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
     let day = state.clock.day();
-    advance_existing_crises(state)?;
+    advance_existing_crises(registry, state)?;
     let has_grain_crisis = state
         .crises
         .values()
@@ -8131,7 +8189,10 @@ fn detect_and_advance_crises(
     Ok(())
 }
 
-fn advance_existing_crises(state: &mut AppState) -> Result<(), SimulationError> {
+fn advance_existing_crises(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let mut resolved = Vec::new();
     let mut escalated = Vec::new();
     let addressed_subjects: BTreeSet<_> = state
@@ -8140,24 +8201,56 @@ fn advance_existing_crises(state: &mut AppState) -> Result<(), SimulationError> 
         .filter(|record| crisis_response_contains_crisis(record))
         .map(|record| record.subject().to_owned())
         .collect();
+    let day = state.clock.day();
+    // A standing watch directive is an ongoing institutional response in its
+    // district, so crises it is actively suppressing count as addressed even
+    // without a player-issued response record.
+    let watch_directive_districts: BTreeSet<DistrictId> = state
+        .institutions
+        .values()
+        .filter_map(|institution| {
+            let directive = institution.active_directive?;
+            if directive.power != OfficePower::WatchPriorities || directive.expires_day < day {
+                return None;
+            }
+            Some(
+                registry
+                    .get_institution(institution.institution_id)
+                    .expect("institution runtime must remain registered")
+                    .district_id(),
+            )
+        })
+        .collect();
+    let worst_route_disruption = state
+        .external_routes
+        .values()
+        .map(|route| route.disruption_basis_points)
+        .max()
+        .unwrap_or(0);
     for crisis in state.crises.values_mut() {
         if !crisis.status.is_active() {
             continue;
         }
         let previous_status = crisis.status;
         let subject = format!("crisis:{}", crisis.id);
-        // A trade disruption tracks the condition that spawned it: once every
-        // route has healed below the detection threshold, the crisis recovers
-        // instead of escalating against a cause that no longer exists.
-        let cause_healed = crisis.kind == CrisisKind::TradeDisruption
-            && state
-                .external_routes
-                .values()
-                .map(|route| route.disruption_basis_points)
-                .max()
-                .unwrap_or(0)
-                < TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD;
-        crisis.severity_basis_points = if addressed_subjects.contains(&subject) || cause_healed {
+        // A trade disruption tracks the condition that spawned it instead of
+        // escalating on its own: while any route remains above the detection
+        // threshold the crisis holds at that disruption level, and once every
+        // route has healed below it the crisis recovers month over month even
+        // without a player response.
+        let next_severity = if crisis.kind == CrisisKind::TradeDisruption {
+            if worst_route_disruption >= TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD {
+                crisis.severity_basis_points.max(worst_route_disruption)
+            } else {
+                crisis
+                    .severity_basis_points
+                    .saturating_sub(ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS)
+            }
+        } else if addressed_subjects.contains(&subject)
+            || crisis
+                .district_id
+                .is_some_and(|district_id| watch_directive_districts.contains(&district_id))
+        {
             crisis
                 .severity_basis_points
                 .saturating_sub(ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS)
@@ -8167,6 +8260,7 @@ fn advance_existing_crises(state: &mut AppState) -> Result<(), SimulationError> 
                 .saturating_add(UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS)
                 .min(10_000)
         };
+        crisis.severity_basis_points = next_severity;
         crisis.status = CrisisStatus::from_severity(crisis.severity_basis_points);
         if crisis.status == CrisisStatus::Resolved {
             resolved.push((crisis.id, crisis.kind));

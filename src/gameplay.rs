@@ -201,7 +201,11 @@ const AGENT_INFORMATION_DISTRICT_CONDITION_THRESHOLD: u16 = 4_500;
 const AGENT_INFORMATION_DISTRICT_UNREST_THRESHOLD: u16 = 3_500;
 const AGENT_INFORMATION_COUNTERPARTY_TRUST_THRESHOLD: u16 = 4_000;
 const AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD: u16 = 2_500;
-const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 14;
+/// Same-kind commands chain into a streak only when they land within one
+/// default decision cycle (30 days) of each other; a tighter window would
+/// reset the streak on every ordinary cadence step and make the repetitive
+/// command finding unreachable.
+const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 30;
 const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 120;
 /// Fixed budget used by agent-proposed public-work candidates.
 const CANDIDATE_PUBLIC_WORK_BUDGET: Money = Money::from_copper(12_000);
@@ -12166,6 +12170,7 @@ const fn strategic_error_category(error: &StrategicError) -> &'static str {
     match error {
         StrategicError::IdentifierAllocation(_) => "strategic: identifier allocation exhausted",
         StrategicError::Timeline(_) => "strategic: timeline range exhausted",
+        StrategicError::Simulation(error) => simulation_error_category(error),
         StrategicError::RegistryMismatch { .. } => "strategic: registry mismatch",
         StrategicError::MissingBusiness { .. } => "strategic: missing business",
         StrategicError::BusinessInactive { .. } => "strategic: inactive business",
@@ -12298,6 +12303,7 @@ const fn simulation_error_category(error: &SimulationError) -> &'static str {
         SimulationError::CivicDebtBalanceOverflow { .. } => {
             "simulation: civic debt balance overflow"
         }
+        SimulationError::ContractPenaltyOverflow { .. } => "simulation: contract penalty overflow",
         SimulationError::MarketClearingAccountOverflow { .. } => {
             "simulation: market clearing account overflow"
         }
@@ -13113,11 +13119,11 @@ fn add_starting_trade_economic_balance_finding(
     findings: &mut Vec<GameplayFinding>,
 ) {
     let mut averages = Vec::new();
-    for background in [
-        StartingBackground::Baker,
-        StartingBackground::ClothTrader,
-        StartingBackground::Blacksmith,
-    ] {
+    let backgrounds: BTreeSet<StartingBackground> = campaigns
+        .iter()
+        .map(|campaign| campaign.background)
+        .collect();
+    for background in backgrounds {
         let mature: Vec<_> = campaigns
             .iter()
             .filter(|campaign| {
@@ -13842,7 +13848,15 @@ fn add_information_routine_finding(
     let routine_campaigns: Vec<_> = campaigns
         .iter()
         .filter(|campaign| {
-            campaign.maximum_contract_relationship_pressure_basis_points
+            // Political personas also accelerate their commission cadence in
+            // response to relationship strain, which the report cannot
+            // reconstruct after the fact; only the personas whose accelerated
+            // cadence is fully explained by contract pressure are eligible
+            // for the routine-ritual diagnosis.
+            matches!(
+                campaign.persona,
+                GameplayPersona::Steward | GameplayPersona::Entrepreneur
+            ) && campaign.maximum_contract_relationship_pressure_basis_points
                 < AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS
         })
         .collect();
@@ -14101,11 +14115,11 @@ fn add_background_route_coverage_findings(
     campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
 ) {
-    for background in [
-        StartingBackground::Baker,
-        StartingBackground::ClothTrader,
-        StartingBackground::Blacksmith,
-    ] {
+    let backgrounds: BTreeSet<StartingBackground> = campaigns
+        .iter()
+        .map(|campaign| campaign.background)
+        .collect();
+    for background in backgrounds {
         let background_campaigns = campaigns
             .iter()
             .filter(|campaign| {
@@ -14684,7 +14698,14 @@ fn command_route_expected(
             .get(&kind)
             .is_some_and(|stats| stats.activation_opportunities > 0 || stats.offered_cycles > 0)
     } else {
+        // A route whose generator kept finding real activation opportunities
+        // is expected regardless of the nominal horizon: the opportunity
+        // evidence outranks the calendar estimate.
         campaign_days >= u64::from(kind.expected_activation_days())
+            || aggregate
+                .commands
+                .get(&kind)
+                .is_some_and(|stats| stats.activation_opportunities > 0 || stats.offered_cycles > 0)
     }
 }
 

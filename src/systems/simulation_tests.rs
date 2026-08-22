@@ -925,7 +925,16 @@ mod inventory_policy {
             .iter()
             .find(|line| line.business_id == business_id && line.good_id == input.good_id())
             .expect("wide inventory target must expose the remaining shortfall");
-        let target_batches = i64::from(capacity).saturating_mul(i64::from(target_days));
+        // Reorder targets scale to the capacity the business can actually
+        // use rather than raw nameplate capacity.
+        let effective_batches = i64::from(super::effective_capacity_batches(
+            &state,
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist"),
+        ));
+        let target_batches = effective_batches.saturating_mul(i64::from(target_days));
         let expected = input
             .quantity()
             .saturating_mul_ratio(target_batches, 1)
@@ -2357,6 +2366,107 @@ mod maintenance_policy {
     }
 }
 
+mod money_conservation {
+    use super::*;
+
+    #[test]
+    fn production_credits_the_clearing_account_with_every_operating_cost() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let plan = decide_production(registry, &state);
+        assert!(
+            !plan.lines.is_empty(),
+            "fixture campaign must plan production"
+        );
+        let expected_clearing =
+            plan.lines
+                .iter()
+                .fold(state.market.clearing_account, |total, line| {
+                    total
+                        .checked_add(line.operating_cost)
+                        .expect("clearing credit must fit")
+                });
+
+        apply_production(&mut state, plan).expect("production must commit");
+
+        assert_eq!(
+            state.market.clearing_account, expected_clearing,
+            "every copper of charged operating cost must reach the market clearing pool"
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn maintenance_credits_the_clearing_account_with_every_charged_cost() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        for business in state.businesses.iter_mut() {
+            business.finance.cash = Money::from_copper(1_000_000);
+            business.policy.minimum_cash_reserve = Money::ZERO;
+            business.policy.maintenance_basis_points = 10_000;
+        }
+        let plan = decide_maintenance(registry, &mut state);
+        assert!(
+            !plan.lines.is_empty(),
+            "fixture campaign must plan maintenance"
+        );
+        let expected_clearing =
+            plan.lines
+                .iter()
+                .fold(state.market.clearing_account, |total, line| {
+                    total
+                        .checked_add(line.cost.max(line.tool_cost))
+                        .expect("clearing credit must fit")
+                });
+
+        apply_maintenance(&mut state, plan).expect("maintenance must commit");
+
+        assert_eq!(
+            state.market.clearing_account, expected_clearing,
+            "the full maintenance charge, tool-backed or not, must reach the clearing pool"
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn unowned_property_purchases_conserve_the_purchase_price() {
+        let mut state = make_test_campaign();
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| property.owner_dynasty_id.is_none())
+            .map(|property| property.id)
+            .expect("fixture campaign must contain unowned property");
+        let price = state
+            .properties
+            .get(&property_id)
+            .expect("property must exist")
+            .value;
+        let buyer_id = state.player_dynasty_id;
+        {
+            let buyer = state
+                .dynasties
+                .get_mut(&buyer_id)
+                .expect("player dynasty must exist");
+            buyer.resources.treasury = buyer
+                .treasury()
+                .checked_add(price)
+                .expect("test funding must fit treasury");
+        }
+        let clearing_before = state.market.clearing_account;
+
+        crate::systems::buy_unowned_property(&mut state, buyer_id, property_id)
+            .expect("funded purchase must commit");
+
+        assert_eq!(
+            state.market.clearing_account,
+            clearing_before
+                .checked_add(price)
+                .expect("purchase proceeds must fit")
+        );
+    }
+}
+
 mod health_and_succession {
     use super::*;
 
@@ -2993,6 +3103,63 @@ mod health_and_succession {
             .expect("player heir must remain recorded");
         assert_eq!(heir.status(), CharacterStatus::Active);
         assert_eq!(heir.runtime.health_basis_points, 1);
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn collapsing_head_without_heir_designates_an_emergency_successor() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let head_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        // Strip the fixture heir so the house has no designated successor,
+        // then collapse the head's health past any recovery.
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("player dynasty must exist")
+            .relationships
+            .heir_id = None;
+        state
+            .characters
+            .get_mut(head_id)
+            .expect("dynasty head must exist")
+            .runtime
+            .health_basis_points = 0;
+
+        super::process_year_boundary(registry, &mut state)
+            .expect("the annual succession pass must run");
+
+        let successor_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        assert_ne!(successor_id, head_id);
+        let successor = state
+            .characters
+            .get(successor_id)
+            .expect("emergency successor must exist");
+        assert_eq!(successor.dynasty_id(), dynasty_id);
+        assert_eq!(successor.status(), CharacterStatus::Active);
+        assert!(
+            state.clock.day().saturating_sub(successor.birth_day())
+                >= crate::systems::commands::HEIR_MINIMUM_AGE_DAYS,
+            "the emergency successor must be an adult"
+        );
+        assert_eq!(
+            state
+                .characters
+                .get(head_id)
+                .expect("outgoing head must remain recorded")
+                .status(),
+            CharacterStatus::Deceased,
+            "a collapsed head must not keep operating the house"
+        );
         validate_invariants(registry, &state);
     }
 

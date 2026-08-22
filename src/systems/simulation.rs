@@ -250,8 +250,12 @@ fn decide_business_purchases(
             .get_recipe(business.recipe_id())
             .expect("business recipe reference must be valid");
         for input in recipe.inputs() {
-            let target_batches = i64::from(business.operations.capacity_batches_per_day)
-                .saturating_mul(i64::from(business.policy.target_input_days));
+            // Reorder against the capacity the business can actually use,
+            // not nameplate capacity, so struggling firms do not spend their
+            // remaining liquidity stockpiling inputs they cannot process.
+            let effective_batches = i64::from(effective_capacity_batches(state, business));
+            let target_batches =
+                effective_batches.saturating_mul(i64::from(business.policy.target_input_days));
             let desired = input.quantity().saturating_mul_ratio(target_batches, 1);
             let current = business.inventory_quantity(input.good_id());
             if current >= desired {
@@ -602,9 +606,16 @@ fn effective_capacity_batches(state: &AppState, business: &crate::core::Business
         .min(business.operations.condition_basis_points.max(2_500));
     let weighted_batches = u32::from(business.operations.capacity_batches_per_day)
         .saturating_mul(u32::from(effective_basis_points));
-    u16::try_from(weighted_batches.saturating_add(5_000) / 10_000)
-        .expect("effective batches must fit u16")
-        .max(1)
+    let batches = u16::try_from(weighted_batches.saturating_add(5_000) / 10_000)
+        .expect("effective batches must fit u16");
+    // An operating business keeps a minimum viable batch so degraded
+    // administration and condition throttle rather than halt it. A business
+    // with zero status efficiency reports zero capacity, never phantom work.
+    if status_efficiency == 0 {
+        batches
+    } else {
+        batches.max(1)
+    }
 }
 
 fn output_limited_batches(
@@ -726,6 +737,21 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), Si
             tool_cost,
         } = line;
         let market_update = planned_tool_market_update(state, tools_id, tool_quantity, tool_cost)?;
+        // Tool spending reaches the clearing account through the planned
+        // market update. The remaining operating cost pays unmodeled services
+        // and labor, which flow into the same pool so every business debit
+        // has a credited counterparty instead of vanishing from the economy.
+        let tool_backed_clearing = match market_update {
+            Some((_, _, clearing)) => clearing,
+            None => state.market.clearing_account,
+        };
+        let service_residual = operating_cost.saturating_sub(tool_cost);
+        let resulting_clearing = tool_backed_clearing.checked_add(service_residual).ok_or(
+            SimulationError::MarketClearingAccountOverflow {
+                current: tool_backed_clearing,
+                change: service_residual,
+            },
+        )?;
         let business = state
             .businesses
             .get_mut(business_id)
@@ -771,7 +797,7 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), Si
         business.finance.cash = resulting_cash;
         business.finance.lifetime_costs = resulting_lifetime_costs;
         business.finance.version = next_finance_version;
-        if let Some((resulting_stock, resulting_demand, resulting_clearing)) = market_update {
+        if let Some((resulting_stock, resulting_demand, _)) = market_update {
             let quote = state
                 .market
                 .quotes
@@ -779,8 +805,8 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), Si
                 .expect("planned production tools quote must exist");
             quote.stock = resulting_stock;
             quote.demand_today = resulting_demand;
-            state.market.clearing_account = resulting_clearing;
         }
+        state.market.clearing_account = resulting_clearing;
         total_tool_quantity_milliunits += i128::from(tool_quantity.milliunits());
         total_tool_spending_copper += i128::from(tool_cost.copper());
         total_output_milliunits += i128::from(output_quantity.milliunits());
@@ -894,13 +920,15 @@ fn decide_business_sales(
                 total.saturating_add(contract.quantity_per_week)
             });
         let policy_reserve_basis_points = match business.status() {
-            BusinessStatus::Distressed | BusinessStatus::Insolvent | BusinessStatus::Closed => 0,
             BusinessStatus::Active
                 if business.cash() < recipe.daily_operating_cost().saturating_mul(2) =>
             {
                 5_000
             }
             BusinessStatus::Active => 10_000,
+            // Distressed firms liquidate freely; Closed and Insolvent are
+            // unreachable because the loop guard above filters them.
+            BusinessStatus::Distressed | BusinessStatus::Insolvent | BusinessStatus::Closed => 0,
         };
         let adjusted_policy_reserve =
             policy_reserve.saturating_mul_ratio(policy_reserve_basis_points, 10_000);
@@ -1098,6 +1126,9 @@ fn decide_household_consumption(
     for household in state.households.iter() {
         let mut cash = household.cash;
         let mut food_acquired = Quantity::ZERO;
+        // Households prefer finished bread and fall back to cheaper upstream
+        // staples only when bread is unavailable or unaffordable, so processed
+        // food keeps its market while poverty still has a substitution path.
         for good_id in [bread_id, flour_id, grain_id] {
             let remaining_need = household.bread_need_daily.saturating_sub(food_acquired);
             if remaining_need.is_zero() {
@@ -1467,15 +1498,29 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
             quality_delta,
         } = line;
         let market_update = planned_tool_market_update(state, tools_id, tool_quantity, tool_cost)?;
-        let business = state
-            .businesses
-            .get_mut(business_id)
-            .expect("planned maintenance business must exist");
         // A successful maintenance pays its full desired cost, which already
         // includes the consumed tools. A failed maintenance that still consumed
         // partially available tools must pay for exactly those tools;
         // otherwise the market clearing account would receive unbacked money.
         let charge = cost.max(tool_cost);
+        // Whatever part of the charge is not tool spending buys unmodeled
+        // services and materials, so it flows into the clearing pool like
+        // every other business payment instead of vanishing.
+        let tool_backed_clearing = match market_update {
+            Some((_, _, clearing)) => clearing,
+            None => state.market.clearing_account,
+        };
+        let service_residual = charge.saturating_sub(tool_cost);
+        let resulting_clearing = tool_backed_clearing.checked_add(service_residual).ok_or(
+            SimulationError::MarketClearingAccountOverflow {
+                current: tool_backed_clearing,
+                change: service_residual,
+            },
+        )?;
+        let business = state
+            .businesses
+            .get_mut(business_id)
+            .expect("planned maintenance business must exist");
         if charge > Money::ZERO {
             let resulting_cash = business
                 .finance
@@ -1505,7 +1550,7 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
             .clamp(0, 10_000);
         business.operations.quality_basis_points =
             u16::try_from(quality).expect("clamped quality must fit u16");
-        if let Some((resulting_stock, resulting_demand, resulting_clearing)) = market_update {
+        if let Some((resulting_stock, resulting_demand, _)) = market_update {
             let quote = state
                 .market
                 .quotes
@@ -1513,8 +1558,8 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
                 .expect("planned maintenance tools quote must exist");
             quote.stock = resulting_stock;
             quote.demand_today = resulting_demand;
-            state.market.clearing_account = resulting_clearing;
         }
+        state.market.clearing_account = resulting_clearing;
         total_cost_copper += i128::from(cost.copper());
         total_tool_cost_copper += i128::from(tool_cost.copper());
         total_tool_quantity_milliunits += i128::from(tool_quantity.milliunits());
@@ -2000,7 +2045,57 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
     for (character_id, dynasty_id, character_name) in newly_incapacitated {
         synchronize_character_incapacitation(state, character_id, dynasty_id, &character_name)?;
     }
+    // A head whose health has collapsed with no designated heir must not keep
+    // running the house indefinitely: designate the most capable adult member
+    // as emergency heir so this year's succession pass can execute normally.
+    let emergency_candidates: Vec<(DynastyId, CharacterId)> = state
+        .dynasties
+        .values()
+        .filter(|dynasty| {
+            dynasty.heir_id().is_none()
+                && state
+                    .characters
+                    .get(dynasty.head_id())
+                    .is_some_and(|head| head.runtime.health_basis_points == 0)
+        })
+        .filter_map(|dynasty| {
+            emergency_successor(state, dynasty.head_id()).map(|id| (dynasty.id(), id))
+        })
+        .collect();
+    for (dynasty_id, successor_id) in emergency_candidates {
+        let dynasty = state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("emergency succession dynasty must exist");
+        dynasty.relationships.heir_id = Some(successor_id);
+    }
     Ok(())
+}
+
+/// Selects the most capable adult active dynasty member other than the head,
+/// breaking ties by stable ID order.
+fn emergency_successor(state: &AppState, head_id: CharacterId) -> Option<CharacterId> {
+    let head = state.characters.get(head_id)?;
+    state
+        .characters
+        .iter()
+        .filter(|character| {
+            character.dynasty_id() == head.dynasty_id()
+                && character.id() != head_id
+                && character.status() == CharacterStatus::Active
+                && state.clock.day().saturating_sub(character.birth_day())
+                    >= crate::systems::commands::HEIR_MINIMUM_AGE_DAYS
+        })
+        .max_by_key(|character| {
+            (
+                u32::from(character.capabilities.administration)
+                    + u32::from(character.capabilities.commerce)
+                    + u32::from(character.capabilities.social)
+                    + u32::from(character.capabilities.craft),
+                character.id().value(),
+            )
+        })
+        .map(crate::core::Character::id)
 }
 
 fn synchronize_character_incapacitation(
@@ -2229,12 +2324,14 @@ fn heir_was_formally_prepared(
 ) -> bool {
     let subject = format!("dynasty:{dynasty_id}");
     let heir_marker = format!("heir={incoming_head_id}");
+    // Any designation naming the incoming head counts, not just the most
+    // recent one: a later re-designation of a different heir must not erase
+    // an earlier formal preparation of the character who actually succeeds.
     state
         .audit_log
         .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::HeirDesignation && record.subject() == subject)
-        .is_some_and(|record| record.detail().split(';').any(|part| part == heir_marker))
+        .filter(|record| record.kind() == AuditKind::HeirDesignation && record.subject() == subject)
+        .any(|record| record.detail().split(';').any(|part| part == heir_marker))
 }
 
 fn succession_shock(

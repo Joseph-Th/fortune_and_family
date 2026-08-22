@@ -2,7 +2,7 @@
 
 use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};
 use crate::ids::{
-    BusinessId, CivicDebtId, DynastyId, GoodId, HouseholdId, IdentifierAllocationError,
+    BusinessId, CivicDebtId, ContractId, DynastyId, GoodId, HouseholdId, IdentifierAllocationError,
     InstitutionId, LoanId,
 };
 use crate::money::{Money, Quantity};
@@ -207,6 +207,14 @@ pub enum SimulationError {
         incoming: Money,
     },
     #[error(
+        "contract {contract_id} cannot accumulate unpaid penalty {incoming}; current balance {current} would exceed the supported money range"
+    )]
+    ContractPenaltyOverflow {
+        contract_id: ContractId,
+        current: Money,
+        incoming: Money,
+    },
+    #[error(
         "market clearing account {current} cannot apply change {change} within the supported money range"
     )]
     MarketClearingAccountOverflow { current: Money, change: Money },
@@ -224,6 +232,31 @@ pub(crate) fn debit_market_clearing_account(
     state.market.clearing_account = current
         .checked_sub(outgoing)
         .ok_or(SimulationError::MarketClearingAccountOverflow { current, change })?;
+    Ok(())
+}
+
+/// Credits incoming money to the market clearing account so every payment
+/// into the market sector conserves copper against its debited counterparty.
+///
+/// # Errors
+///
+/// Returns [`SimulationError::MarketClearingAccountOverflow`] when the credit
+/// would exceed the supported money range.
+pub(crate) fn credit_market_clearing_account(
+    state: &mut AppState,
+    incoming: Money,
+) -> Result<(), SimulationError> {
+    if incoming < Money::ZERO {
+        return Err(SimulationError::NegativeMarketDebit { outgoing: incoming });
+    }
+    let current = state.market.clearing_account;
+    state.market.clearing_account =
+        current
+            .checked_add(incoming)
+            .ok_or(SimulationError::MarketClearingAccountOverflow {
+                current,
+                change: incoming,
+            })?;
     Ok(())
 }
 

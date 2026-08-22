@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum StartingBackground {
     Baker,
     ClothTrader,

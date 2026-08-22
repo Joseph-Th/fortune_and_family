@@ -4437,6 +4437,83 @@ mod loans {
     }
 
     #[test]
+    fn installments_below_weekly_interest_count_as_missed_payments() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let mut terms = make_test_loan_terms(&state);
+        // Terms whose weekly payment cannot cover the accruing interest are
+        // mathematically unrepayable; settling them must count as missed
+        // payments instead of "successful" negative amortization.
+        terms.principal = Money::from_copper(1_000_000);
+        terms.interest_basis_points = 800;
+        terms.weekly_payment = Money::from_copper(100);
+        {
+            let lender = state
+                .dynasties
+                .get_mut(&terms.lender_dynasty_id)
+                .expect("lender dynasty must exist");
+            lender.resources.treasury = lender
+                .treasury()
+                .checked_add(terms.principal)
+                .expect("test funding must fit treasury");
+        }
+        {
+            let borrower = state
+                .dynasties
+                .get_mut(&terms.borrower_dynasty_id)
+                .expect("borrower dynasty must exist");
+            borrower.resources.treasury = borrower
+                .treasury()
+                .checked_add(Money::from_copper(10_000))
+                .expect("test funding must fit treasury");
+        }
+        let loan_id = issue_loan(&mut state, terms).expect("loan must be issued");
+        let mut due = {
+            let loan = state.loans.get(&loan_id).expect("issued loan must exist");
+            DueLoan {
+                id: loan.id,
+                lender_id: loan.lender_dynasty_id,
+                borrower_id: loan.borrower_dynasty_id,
+                weekly_payment: loan.weekly_payment,
+                balance: loan.balance,
+                interest_basis_points: loan.interest_basis_points,
+                collateral_property_id: loan.collateral_property_id,
+            }
+        };
+
+        settle_due_loan(&mut state, due, None).expect("first settlement must resolve");
+        assert_eq!(
+            state
+                .loans
+                .get(&loan_id)
+                .expect("loan must remain recorded")
+                .status,
+            LoanStatus::Delinquent,
+            "a payment below the week's interest must not count as current"
+        );
+
+        for _ in 0..2 {
+            due.balance = state
+                .loans
+                .get(&loan_id)
+                .expect("loan must remain recorded")
+                .balance;
+            settle_due_loan(&mut state, due, None).expect("repeat settlement must resolve");
+        }
+
+        let loan = state
+            .loans
+            .get(&loan_id)
+            .expect("loan must remain recorded");
+        assert_eq!(loan.status, LoanStatus::Defaulted);
+        assert!(
+            loan.balance > loan.principal,
+            "capitalized interest must leave the balance above principal"
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn issuing_a_loan_creates_relationship_memory_and_counterparty_intelligence() {
         let mut state = make_test_campaign();
         let terms = make_test_loan_terms(&state);
@@ -6688,7 +6765,9 @@ mod routes {
                 .get_mut(&route_id)
                 .expect("selected route must exist");
             route.active = true;
-            route.disruption_basis_points = 0;
+            // The disrupted route is itself the ongoing cause; an active
+            // trade crisis tracks it rather than driving it.
+            route.disruption_basis_points = 8_000;
             route.toll_basis_points = 0;
             (route.good_id, route.daily_capacity)
         };

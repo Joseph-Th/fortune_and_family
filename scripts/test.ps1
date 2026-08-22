@@ -115,6 +115,12 @@ function Format-Duration([double]$Seconds) {
 function Run-Step([string]$Label, [scriptblock]$Action) {
     Write-Host "`n==> $Label" -ForegroundColor Cyan
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    # Native tools (cargo, the CLI) write progress to stderr; under the
+    # script-wide Stop preference Windows PowerShell promotes those records
+    # to terminating errors even when the command succeeds. Every step checks
+    # $LASTEXITCODE explicitly, so relax the preference while the action runs.
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
         & $Action
         $sw.Stop()
@@ -126,6 +132,8 @@ function Run-Step([string]$Label, [scriptblock]$Action) {
         Write-Host "<== $Label FAILED in $duration" -ForegroundColor Red
         Write-Error $_
         exit 1
+    } finally {
+        $ErrorActionPreference = $previousPreference
     }
 }
 
