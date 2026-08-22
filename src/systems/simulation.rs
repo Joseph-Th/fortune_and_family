@@ -1806,14 +1806,32 @@ fn update_business_lifecycle(
         // An insolvent business that receives capital must pass back through
         // `Distressed` rehabilitation before regaining full operation; it may
         // not leap directly from insolvency to `Active`.
+        //
+        // Recovery carries a higher cash bar than distress onset so a business
+        // sitting near the threshold cannot flap between `Distressed` and
+        // `Active` on daily price noise: falling into distress needs two days
+        // of operating cover, but climbing out needs six.
+        const ACTIVE_CASH_DAYS_OF_OPERATING_COST: i64 = 2;
+        const RECOVERY_CASH_DAYS_OF_OPERATING_COST: i64 = 6;
+        let active_status_cash_days = if matches!(
+            prior_status,
+            BusinessStatus::Distressed | BusinessStatus::Insolvent
+        ) {
+            RECOVERY_CASH_DAYS_OF_OPERATING_COST
+        } else {
+            ACTIVE_CASH_DAYS_OF_OPERATING_COST
+        };
         let candidate_status =
             if prior_status == BusinessStatus::Insolvent && cash == Money::ZERO && !has_inventory {
                 BusinessStatus::Closed
             } else if cash == Money::ZERO && !has_inventory {
                 BusinessStatus::Insolvent
             } else if cash
-                < minimum_cash_reserve
-                    .saturating_add(recipe.daily_operating_cost().saturating_mul(2))
+                < minimum_cash_reserve.saturating_add(
+                    recipe
+                        .daily_operating_cost()
+                        .saturating_mul(active_status_cash_days),
+                )
             {
                 BusinessStatus::Distressed
             } else {
@@ -2299,7 +2317,13 @@ fn succession_chance_basis_points(
     if age_years < SUCCESSION_ELIGIBILITY_AGE_YEARS {
         return 0;
     }
-    let age_pressure = (age_years - SUCCESSION_ELIGIBILITY_AGE_YEARS).saturating_mul(300);
+    // The ramp must mature succession pressure inside the session that builds
+    // the dynasty: founders begin at 56-58 years old, so this rate puts the
+    // median first transition near mid-campaign while still leaving most of an
+    // establishment phase untouched.
+    const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 420;
+    let age_pressure = (age_years - SUCCESSION_ELIGIBILITY_AGE_YEARS)
+        .saturating_mul(AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY);
     let governance_pressure = i64::from(succession_risk_basis_points / 2);
     let health_pressure = i64::from(10_000_u16.saturating_sub(health_basis_points) / 2);
     u16::try_from(

@@ -2071,6 +2071,76 @@ mod business_lifecycle {
             ChronicleKind::BusinessRecovered
         );
     }
+
+    #[test]
+    fn distressed_recovery_requires_more_cash_than_distress_onset() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        let recipe = registry
+            .get_recipe(
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("business must exist")
+                    .recipe_id(),
+            )
+            .expect("recipe reference must be valid");
+        let daily_cost = recipe.daily_operating_cost();
+        // Enough cover to avoid distress onset from Active, but not enough to
+        // climb back out of Distressed.
+        let between_thresholds =
+            Money::from_copper(500).saturating_add(daily_cost.saturating_mul(3));
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.policy.minimum_cash_reserve = Money::from_copper(500);
+            business.finance.cash = between_thresholds;
+        }
+
+        update_business_lifecycle(registry, &mut state)
+            .expect("first lifecycle update must succeed");
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .status(),
+            BusinessStatus::Distressed,
+            "cash that would merely avoid distress onset must not end a distressed period"
+        );
+
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.finance.cash =
+                Money::from_copper(500).saturating_add(daily_cost.saturating_mul(6));
+        }
+
+        update_business_lifecycle(registry, &mut state)
+            .expect("second lifecycle update must succeed");
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .status(),
+            BusinessStatus::Active,
+            "six days of operating cover should complete rehabilitation"
+        );
+    }
 }
 
 mod maintenance_policy {

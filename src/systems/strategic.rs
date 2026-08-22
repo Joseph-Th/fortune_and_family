@@ -31,6 +31,10 @@ pub(crate) const OFFICE_ADMINISTRATIVE_LOAD_PER_POWER: u16 = 10;
 pub(crate) const OFFICE_DUTY_COST_PER_POWER: Money = Money::from_copper(100);
 pub(crate) const OFFICE_DUTY_PORTFOLIO_SURCHARGE_PER_ADDITIONAL_OFFICE: Money =
     Money::from_copper(50);
+/// Monthly fees of office paid out of the holding institution's budget to the
+/// officeholder's dynasty. Offices stay a net cost (duties exceed the stipend),
+/// but service should materially compensate the house that performs it.
+const OFFICE_STIPEND_PER_POWER: Money = Money::from_copper(40);
 const AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY: Money = Money::from_copper(500);
 const AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER: Money = Money::from_copper(250);
 const AI_DYNASTY_UPKEEP_PER_BUSINESS: Money = Money::from_copper(400);
@@ -5351,6 +5355,7 @@ pub(crate) fn run_monthly_strategic_systems(
     update_district_conditions(state);
     resolve_institution_selections(registry, state)?;
     apply_office_duties(state)?;
+    apply_office_stipends(state)?;
     apply_office_power_effects(registry, state)?;
     apply_active_office_directives(registry, state)?;
     advance_ai_objectives(registry, state)?;
@@ -6013,6 +6018,58 @@ fn apply_office_duties(state: &mut AppState) -> Result<(), SimulationError> {
             duty.power_count,
             duty.office_count,
         )?;
+    }
+    Ok(())
+}
+
+fn apply_office_stipends(state: &mut AppState) -> Result<(), SimulationError> {
+    let stipends: Vec<_> = state
+        .institutions
+        .values()
+        .filter_map(|institution| {
+            let holder_id = institution.office_holder_id?;
+            let dynasty_id = state.characters.get(holder_id)?.dynasty_id();
+            let power_count = institution.powers.len();
+            Some((
+                institution.institution_id,
+                dynasty_id,
+                OFFICE_STIPEND_PER_POWER
+                    .saturating_mul(i64::try_from(power_count).unwrap_or(i64::MAX)),
+            ))
+        })
+        .collect();
+    for (institution_id, dynasty_id, stipend) in stipends {
+        let paid_stipend = {
+            let institution = state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("stipend institution must exist");
+            let paid = stipend.min(institution.budget);
+            if paid == Money::ZERO {
+                continue;
+            }
+            // The stipend is clamped to the budget above, so the withdrawal is
+            // always representable.
+            institution.budget = institution
+                .budget
+                .checked_sub(paid)
+                .expect("clamped office stipend must not exceed the institutional budget");
+            paid
+        };
+        let dynasty = state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("officeholder dynasty must exist");
+        let treasury = dynasty.treasury();
+        let next_treasury =
+            treasury
+                .checked_add(paid_stipend)
+                .ok_or(SimulationError::DynastyTreasuryOverflow {
+                    dynasty_id,
+                    current: treasury,
+                    incoming: paid_stipend,
+                })?;
+        dynasty.resources.treasury = next_treasury;
     }
     Ok(())
 }
@@ -6755,11 +6812,33 @@ fn resolve_institution_selections(
     for (institution_id, winner, term_number) in selections {
         if let Some(winner) = winner {
             apply_office_concentration_backlash(state, institution_id, winner);
+            let winner_dynasty_id = state
+                .characters
+                .get(winner)
+                .expect("selected officeholder must exist")
+                .dynasty_id();
+            let fees_of_office = if winner_dynasty_id == state.player_dynasty_id {
+                let power_count = state
+                    .institutions
+                    .get(&institution_id)
+                    .expect("selected institution must exist")
+                    .powers
+                    .len();
+                format!(
+                    " The position pays {} in monthly fees of office, funded by the institution's budget.",
+                    OFFICE_STIPEND_PER_POWER
+                        .saturating_mul(i64::try_from(power_count).unwrap_or(i64::MAX)),
+                )
+            } else {
+                String::new()
+            };
             try_push_outbox(
                 state,
                 OutboxKind::Politics,
                 format!("Institution {institution_id} selected a new officeholder"),
-                format!("Character {winner} now holds the office for term {term_number}."),
+                format!(
+                    "Character {winner} now holds the office for term {term_number}.{fees_of_office}"
+                ),
             )?;
         }
     }

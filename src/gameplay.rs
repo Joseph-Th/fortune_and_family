@@ -10146,7 +10146,12 @@ fn office_power_need_bonus(
 }
 
 fn office_power_candidate_need_score(raw_need: i64) -> i64 {
-    const MATERIAL_NEED_THRESHOLD: i64 = 900;
+    // District conditions in ordinary play sit near 6,300-6,600 bp, so a
+    // material-need bar above a few hundred basis points would silence office
+    // directives outside disasters. Directives are scarce through their own
+    // legitimacy cost and cooldown; the need gate should only filter powers
+    // whose district has no visible gap at all.
+    const MATERIAL_NEED_THRESHOLD: i64 = 300;
     const NEED_SCORE_FLOOR: i64 = 300;
     const NEED_SCORE_CAP: i64 = 1_200;
 

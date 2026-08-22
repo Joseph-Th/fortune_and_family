@@ -2800,7 +2800,10 @@ fn apply_heir(
             format!("Character {character_id} designated as heir")
         },
         format!(
-            "The family charter now names character {character_id} as successor. The change cost {HEIR_DESIGNATION_LEGITIMACY_COST} legitimacy and {HEIR_DESIGNATION_UNITY_COST} family unity."
+            "The family charter now names character {character_id} as successor. The change cost \
+             {HEIR_DESIGNATION_LEGITIMACY_COST} legitimacy and {HEIR_DESIGNATION_UNITY_COST} \
+             family unity, but a formally prepared heir will face a far gentler transition when \
+             the head of house dies."
         ),
     )?;
     Ok(CommandOutcome {

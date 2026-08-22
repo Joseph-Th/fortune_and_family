@@ -1677,6 +1677,124 @@ mod gameplay_stability {
     }
 
     #[test]
+    fn office_stipends_pay_fees_of_office_from_the_institution_budget() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let holder_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("institution must exist");
+        let power_count = i64::try_from(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("stipend institution must exist")
+                .powers
+                .len(),
+        )
+        .expect("power count must fit i64");
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("stipend institution must exist")
+            .office_holder_id = Some(holder_id);
+        // Run duties first so the institution budget is funded, then stipends.
+        apply_office_duties(&mut state).expect("office duties must remain representable");
+        let budget_after_duties = state
+            .institutions
+            .get(&institution_id)
+            .expect("stipend institution must exist")
+            .budget;
+        let treasury_after_duties = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        apply_office_stipends(&mut state).expect("office stipends must remain representable");
+
+        let expected_stipend = Money::from_copper(40).saturating_mul(power_count);
+        let paid = expected_stipend.min(budget_after_duties);
+        assert!(
+            paid > Money::ZERO,
+            "a funded institution must pay its stipend"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            treasury_after_duties.saturating_add(paid),
+            "the officeholder's dynasty must collect fees of office"
+        );
+        assert_eq!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("stipend institution must exist")
+                .budget,
+            budget_after_duties.saturating_sub(paid),
+            "the stipend must come out of the institutional budget"
+        );
+    }
+
+    #[test]
+    fn office_stipends_are_clamped_to_a_depleted_institution_budget() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let holder_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("institution must exist");
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("stipend institution must exist")
+            .office_holder_id = Some(holder_id);
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("stipend institution must exist")
+            .budget = Money::ZERO;
+        let treasury_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        apply_office_stipends(&mut state).expect("office stipends must remain representable");
+
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            treasury_before,
+            "an empty institution budget must not create treasury money"
+        );
+    }
+
+    #[test]
     fn multiple_offices_add_portfolio_overhead_to_recurring_duties() {
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;

@@ -38,7 +38,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 |---|---|
 | World | One detailed city with six districts, regional routes, seasonal pressure, and external disruption. |
 | Population | Dynasties, notable characters, grouped households, health, loyalty, family links, wards, education, councils, heirs, and succession. |
-| Businesses | Ownership, management, policy, cash, inventory, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, and protected owner distributions. |
+| Businesses | Ownership, management, policy, cash, inventory, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, and protected owner distributions. Recovery from distress requires a deeper cash cushion than distress onset, so borderline firms cannot flap between states. |
 | Markets | Scarce procurement, production, business and household demand, industrial tool demand, tool-constrained production and maintenance, spoilage, price formation, controls, and regional supply. |
 | Contracts | Scheduled supply, payment, penalties, fulfillment, attribution, breach, and termination. |
 | Private finance | Loans, interest, repayment, delinquency, default, collateral, seizure, restructuring, and repayment records. |
@@ -46,7 +46,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 | Property | Ownership, value drift with district conditions, tenancy, occupancy, rent, purchase, collateral, liquidation, lien settlement, and distressed civic guarantees. |
 | Labor | Employment agreements, wages, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. |
 | Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with membership, budgets, legitimacy, member coalitions, powers, terms, endowments, and deterministic selection. |
-| Political office | Commercial and capability gates, patronage, nomination, office powers, directives, recurring duties, administrative load, coalition response, withdrawal, forfeiture, and re-election limits. |
+| Political office | Commercial and capability gates, patronage, nomination, office powers, directives, recurring duties funded into institutional budgets, monthly fees of office paid back from institutional budgets, administrative load, coalition response, withdrawal, forfeiture, and re-election limits. |
 | Civic systems | Laws, differentiated public works, district conditions, grounded legal cases and settlements, crisis response, municipal debt, and private funding of sponsored public works. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, subject, summary, creation, expiry, passive reports, and paid market/district/counterparty intelligence. |

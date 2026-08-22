@@ -3921,8 +3921,8 @@ mod candidates {
             .districts
             .get_mut(&district_id)
             .expect("institution district must exist");
-        district.employment_basis_points = 6_200;
-        district.sanitation_basis_points = 6_200;
+        district.employment_basis_points = 6_400;
+        district.sanitation_basis_points = 6_400;
         let mut candidates = Vec::new();
 
         generate_office_power_directive_candidates(
@@ -3934,7 +3934,33 @@ mod candidates {
 
         assert!(
             candidates.is_empty(),
-            "small district deficits should not turn office power into routine maintenance"
+            "negligible district deficits should not turn office power into routine maintenance"
+        );
+
+        let district = state
+            .districts
+            .get_mut(&district_id)
+            .expect("institution district must exist");
+        // A moderate deficit is now within the agent's material-need bar:
+        // directives are rationed by legitimacy cost and cooldown, so an
+        // ordinary term should offer one instead of waiting for a crisis.
+        district.employment_basis_points = 6_200;
+        district.sanitation_basis_points = 6_200;
+        generate_office_power_directive_candidates(
+            registry,
+            &state,
+            GameplayPersona::PowerBroker,
+            &mut candidates,
+        );
+
+        let candidate_score = candidates
+            .iter()
+            .find(|candidate| candidate.kind == GameplayCommandKind::ExerciseOfficePower)
+            .expect("a visible district gap should create an office-power candidate")
+            .score;
+        assert!(
+            candidate_score <= 1_700,
+            "need scoring should stay comparable to other strategic families before global rank adjustment"
         );
 
         let district = state
@@ -3943,6 +3969,7 @@ mod candidates {
             .expect("institution district must exist");
         district.employment_basis_points = 4_000;
         district.sanitation_basis_points = 4_000;
+        candidates.clear();
         generate_office_power_directive_candidates(
             registry,
             &state,
@@ -3950,13 +3977,14 @@ mod candidates {
             &mut candidates,
         );
 
-        let candidate = candidates
+        let severe_candidate_score = candidates
             .iter()
             .find(|candidate| candidate.kind == GameplayCommandKind::ExerciseOfficePower)
-            .expect("material district need should create an office-power candidate");
+            .expect("material district need should create an office-power candidate")
+            .score;
         assert!(
-            candidate.score <= 1_700,
-            "need scoring should stay comparable to other strategic families before global rank adjustment: {candidate:?}"
+            severe_candidate_score > candidate_score,
+            "severe need should outrank moderate need: {severe_candidate_score} vs {candidate_score}"
         );
     }
 
