@@ -275,7 +275,10 @@ pub(crate) const FAMILY_EDUCATION_COST: Money = Money::from_copper(2_000);
 pub(crate) const INFORMATION_COMMISSION_INTERVAL_DAYS: i64 = 360;
 pub(crate) const INFORMATION_COMMISSION_COST: Money = Money::from_copper(600);
 pub(crate) const INFORMATION_LEVERAGE_COST: Money = Money::from_copper(600);
-pub(crate) const CRISIS_RELIEF_COST_PER_SEVERITY_POINT: Money = Money::from_copper(2);
+/// Relief mobilization base in copper; see [`crisis_relief_cost`].
+pub(crate) const CRISIS_RELIEF_BASE_COST_COPPER: i64 = 1_200;
+/// Severity points per copper of scaling relief grant; see [`crisis_relief_cost`].
+pub(crate) const CRISIS_RELIEF_SEVERITY_DIVISOR: i64 = 3;
 pub(crate) const CRISIS_REFORM_COST: Money = Money::from_copper(1_500);
 pub(crate) const CRISIS_SUPPRESS_COST: Money = Money::from_copper(900);
 pub(crate) const INFORMATION_REPORT_LIFETIME_DAYS: i64 = 540;
@@ -4356,7 +4359,7 @@ fn apply_crisis_exploitation(
             required: required_legitimacy,
         });
     }
-    let desired_gain = Money::from_copper(i64::from(severity).saturating_mul(2).max(1));
+    let desired_gain = crisis_relief_cost(severity);
     let gain = desired_gain.min(state.market.clearing_account);
     if gain <= Money::ZERO {
         return Err(CommandError::MarketExtractionUnavailable {
@@ -4592,9 +4595,17 @@ fn apply_labor_response(
 }
 
 /// Treasury cost of funding crisis relief for a crisis of the given severity.
+///
+/// Relief is the premium response: a fixed mobilization base plus a scaling
+/// grant per severity point keeps it two to three times the cost of Reform
+/// across the working severity range, instead of an unbounded per-point rate
+/// that priced a single response above a small house's entire treasury.
 #[must_use]
 pub(crate) fn crisis_relief_cost(severity_basis_points: u16) -> Money {
-    CRISIS_RELIEF_COST_PER_SEVERITY_POINT.saturating_mul(i64::from(severity_basis_points).max(1))
+    Money::from_copper(
+        CRISIS_RELIEF_BASE_COST_COPPER
+            + i64::from(severity_basis_points.max(1)) / CRISIS_RELIEF_SEVERITY_DIVISOR,
+    )
 }
 
 /// Initial sponsor contribution demanded for a public work of the given budget.

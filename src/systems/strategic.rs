@@ -6006,11 +6006,17 @@ fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
                 .saturating_sub(AI_BUSINESS_RECOVERY_TREASURY_RESERVE.copper())
                 .max(0),
         );
-        let amount = shortfall.min(available);
-        if amount == Money::ZERO {
+        // A rescue must fund the full operating target in one commit. Trickle
+        // capitalization that only crosses the daily lifecycle recovery bar
+        // produces weekly distressed-to-recovered churn: the firm re-enters
+        // distress as soon as the next wage or input settlement drains the
+        // shallow cushion, and the owner's treasury bleeds without ever
+        // resolving the underlying shortfall. An owner that cannot commit the
+        // whole target lets the firm work through its distress instead.
+        if available < shortfall {
             continue;
         }
-        capitalize_owned_business(state, owner_dynasty_id, business_id, amount)
+        capitalize_owned_business(state, owner_dynasty_id, business_id, shortfall)
             .expect("prevalidated AI business capitalization must commit");
     }
 }

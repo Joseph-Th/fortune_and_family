@@ -6,8 +6,8 @@ use crate::core::{
     HouseGovernance, LawKind, LegalCaseKind, LegalCaseStatus, LoanStatus, NewGameConfig,
     ObjectiveStatus, OfficePower, PublicWorkKind, PublicWorkStatus, StartingBackground,
 };
-use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, InstitutionId};
-use crate::money::{Money, Quantity, checked_cost_for};
+use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, GoodId, InstitutionId};
+use crate::money::{Money, Quantity, checked_cost_for, cost_for};
 use crate::registry::{GoodCategory, InstitutionKind, Registry};
 use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS,
@@ -49,6 +49,7 @@ use crate::systems::{
     quote_player_legal_claim, quote_player_legal_settlement, quote_property_liquidation,
     required_office_power_for_law, validate_invariants,
 };
+use crate::systems::{ceil_div_nonnegative_wide, effective_capacity_batches, maintenance_cost};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -110,7 +111,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 64;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 65;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",
@@ -610,6 +611,8 @@ pub struct GameplaySnapshot {
     pub player_civic_contributions: Money,
     pub player_unmet_office_duties: u32,
     pub player_business_cash: Money,
+    pub player_business_lifetime_revenue: Money,
+    pub player_business_lifetime_costs: Money,
     pub active_businesses: u16,
     pub distressed_businesses: u16,
     pub insolvent_businesses: u16,
@@ -757,6 +760,8 @@ struct BusinessSnapshotPart {
     player_civic_contributions: Money,
     player_unmet_office_duties: u32,
     player_business_cash: Money,
+    player_business_lifetime_revenue: Money,
+    player_business_lifetime_costs: Money,
     active_businesses: u16,
     distressed_businesses: u16,
     insolvent_businesses: u16,
@@ -787,6 +792,16 @@ impl BusinessSnapshotPart {
             player_business_cash: businesses.iter().fold(Money::ZERO, |total, business| {
                 total.saturating_add(business.cash())
             }),
+            player_business_lifetime_revenue: businesses
+                .iter()
+                .fold(Money::ZERO, |total, business| {
+                    total.saturating_add(business.finance.lifetime_revenue)
+                }),
+            player_business_lifetime_costs: businesses
+                .iter()
+                .fold(Money::ZERO, |total, business| {
+                    total.saturating_add(business.finance.lifetime_costs)
+                }),
             active_businesses: count_business_status(&businesses, BusinessStatus::Active),
             distressed_businesses: count_business_status(&businesses, BusinessStatus::Distressed),
             insolvent_businesses: count_business_status(&businesses, BusinessStatus::Insolvent),
@@ -1564,6 +1579,8 @@ macro_rules! assemble_gameplay_snapshot {
             player_civic_contributions: $business.player_civic_contributions,
             player_unmet_office_duties: $business.player_unmet_office_duties,
             player_business_cash: $business.player_business_cash,
+            player_business_lifetime_revenue: $business.player_business_lifetime_revenue,
+            player_business_lifetime_costs: $business.player_business_lifetime_costs,
             active_businesses: $business.active_businesses,
             distressed_businesses: $business.distressed_businesses,
             insolvent_businesses: $business.insolvent_businesses,
@@ -1824,6 +1841,7 @@ pub struct GameplayViableOption {
 pub enum GameplayMeasure {
     PlayerTreasury,
     PlayerBusinessCash,
+    PlayerBusinessLifetimeProfit,
     ActiveBusinesses,
     DistressedBusinesses,
     PlayerActiveContracts,
@@ -1897,6 +1915,22 @@ impl GameplayConsequenceProfile {
         }
         record!(PlayerTreasury, player_treasury, money);
         record!(PlayerBusinessCash, player_business_cash, money);
+        // Lifetime profit is the durable commercial-engine signal: it moves
+        // only when the dynasty's businesses earn more than they spend across
+        // the whole campaign, so a command that merely shuffles cash between
+        // treasury and firms never registers here.
+        record_measure_change(
+            &mut profile,
+            GameplayMeasure::PlayerBusinessLifetimeProfit,
+            baseline
+                .player_business_lifetime_revenue
+                .copper()
+                .saturating_sub(baseline.player_business_lifetime_costs.copper()),
+            outcome
+                .player_business_lifetime_revenue
+                .copper()
+                .saturating_sub(outcome.player_business_lifetime_costs.copper()),
+        );
         record!(ActiveBusinesses, active_businesses);
         record!(DistressedBusinesses, distressed_businesses);
         record!(PlayerActiveContracts, player_active_contracts);
@@ -2183,6 +2217,7 @@ pub struct GameplayPhaseStats {
     pub blocked_cycles: u32,
     pub generator_gap_cycles: u32,
     pub policy_gate_cycles: u32,
+    pub restrained_cycles: u32,
     pub validation_gate_cycles: u32,
     pub budget_gate_cycles: u32,
     pub dormant_cycles: u32,
@@ -2209,6 +2244,13 @@ pub struct GameplayQuietDiagnostic {
     /// spending-discipline filters during no-action cycles. The game built an
     /// option, but the persona's reserve policy declined it.
     pub policy_gates: BTreeMap<GameplayCommandKind, u32>,
+    /// Command kinds where an activation opportunity fired but no candidate was
+    /// built because the persona's standing policy deliberately narrows that
+    /// route to strategic-need conditions (distress sales, wage-fairness
+    /// cadence, succession-pressure designations, and similar thresholds). The
+    /// world offered; the agent declined by design, so these are neither true
+    /// generator holes nor spending-policy vetoes of built options.
+    pub restrained_routes: BTreeMap<GameplayCommandKind, u32>,
     /// Command kinds that generated candidates and passed the agent's filters
     /// where all generated candidates were probed and rejected by canonical validation
     /// during no-action cycles.
@@ -2556,6 +2598,7 @@ struct PhaseCycleObservation {
 enum QuietCause {
     GeneratorGap,
     PolicyGate,
+    Restrained,
     ValidationGate,
     BudgetGate,
     Dormant,
@@ -2929,6 +2972,9 @@ impl CampaignAccumulator {
                 }
                 Some(QuietCause::PolicyGate) => {
                     stats.policy_gate_cycles = stats.policy_gate_cycles.saturating_add(1);
+                }
+                Some(QuietCause::Restrained) => {
+                    stats.restrained_cycles = stats.restrained_cycles.saturating_add(1);
                 }
                 Some(QuietCause::ValidationGate) => {
                     stats.validation_gate_cycles = stats.validation_gate_cycles.saturating_add(1);
@@ -5166,14 +5212,29 @@ fn record_quiet_diagnostic(
         );
     }
     let mut gap_kinds = Vec::new();
+    let mut restrained_kinds = Vec::new();
     for (kind, delta) in activation_delta {
         if *delta > 0 && !raw_generated_kinds.contains(kind) {
-            gap_kinds.push(*kind);
-            *accumulator
-                .quiet_diagnostic
-                .generator_gaps
-                .entry(*kind)
-                .or_default() += 1;
+            // The generator deliberately narrows these routes to strategic-need
+            // conditions, so an unfired activation is the persona declining by
+            // design, not a coverage hole. Keep them separate so a true
+            // generator gap (an offered action with no construction logic)
+            // stays visible in the diagnosis.
+            if is_policy_gated_command_route(*kind) {
+                restrained_kinds.push(*kind);
+                *accumulator
+                    .quiet_diagnostic
+                    .restrained_routes
+                    .entry(*kind)
+                    .or_default() += 1;
+            } else {
+                gap_kinds.push(*kind);
+                *accumulator
+                    .quiet_diagnostic
+                    .generator_gaps
+                    .entry(*kind)
+                    .or_default() += 1;
+            }
         }
     }
     let mut gated_kinds = Vec::new();
@@ -5211,6 +5272,7 @@ fn record_quiet_diagnostic(
         }
     }
     if gap_kinds.is_empty()
+        && restrained_kinds.is_empty()
         && gated_kinds.is_empty()
         && rejected_kinds.is_empty()
         && budget_kinds.is_empty()
@@ -5225,6 +5287,7 @@ fn record_quiet_diagnostic(
         );
     }
     gap_kinds.sort();
+    restrained_kinds.sort();
     gated_kinds.sort();
     rejected_kinds.sort();
     budget_kinds.sort();
@@ -5233,6 +5296,12 @@ fn record_quiet_diagnostic(
         causes.push(format!(
             "activation without candidate [{}]",
             kind_labels(&gap_kinds)
+        ));
+    }
+    if !restrained_kinds.is_empty() {
+        causes.push(format!(
+            "reserved by agent policy [{}]",
+            kind_labels(&restrained_kinds)
         ));
     }
     if !gated_kinds.is_empty() {
@@ -5262,6 +5331,8 @@ fn quiet_cause(reason: Option<&str>) -> Option<QuietCause> {
         Some(QuietCause::GeneratorGap)
     } else if reason.contains("declined by agent policy") {
         Some(QuietCause::PolicyGate)
+    } else if reason.contains("reserved by agent policy") {
+        Some(QuietCause::Restrained)
     } else if reason.contains("rejected by validation") {
         Some(QuietCause::ValidationGate)
     } else if reason.contains("unverified due to probe budget") {
@@ -6226,6 +6297,24 @@ fn candidate_is_emergency_spending(state: &AppState, candidate: &Candidate) -> b
     }
 }
 
+/// Treasury a solvent house keeps before spending on optional standing —
+/// education, wards, endowments, patronage. The floor is an emergency
+/// reserve plus two months of committed loan service; a house that spends
+/// past it converts every surprise into new borrowing, which is how the
+/// credit treadmill starts.
+fn dynasty_discretionary_floor(state: &AppState) -> Money {
+    let two_month_loan_service = state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.borrower_dynasty_id == state.player_dynasty_id && loan.status.is_repayment_active()
+        })
+        .fold(Money::ZERO, |total, loan| {
+            total.saturating_add(loan.weekly_payment.saturating_mul(8))
+        });
+    Money::from_copper(2_000).saturating_add(two_month_loan_service)
+}
+
 fn player_office_duty_reserve(state: &AppState, additional_powers: usize) -> Money {
     let mut additional_offices: Vec<_> = pending_player_nomination_power_counts(state)
         .into_values()
@@ -6397,7 +6486,10 @@ fn generate_reactive_candidates(
                     crisis_id: crisis.id,
                     response,
                 },
-                format!("respond {response:?} to crisis {}", crisis.id),
+                format!(
+                    "respond {response:?} to the {:?} crisis (crisis {})",
+                    crisis.kind, crisis.id
+                ),
                 crisis_response_bonus(persona, response),
             );
         }
@@ -6701,8 +6793,8 @@ fn generate_business_wage_candidates(
                 weekly_wage_per_worker: target,
             },
             format!(
-                "{direction} the wage of business {} from {current_per_worker} to {target} per worker",
-                business.id()
+                "{direction} the wage of {} from {current_per_worker} to {target} per worker",
+                business_label(state, business.id())
             ),
             700 + workforce_strain_urgency(state),
         );
@@ -6844,9 +6936,9 @@ fn generate_business_policy_candidates(
                 quality_target_basis_points: template.quality_target_basis_points,
             },
             format!(
-                "set {} policy on business {}",
+                "set {} policy on {}",
                 template.label,
-                business.id()
+                business_label(state, business.id())
             ),
             template.bonus,
         );
@@ -6965,9 +7057,9 @@ fn generate_cash_rebalance_candidate(
             amount,
         },
         format!(
-            "cover a {amount} liquidity shortfall from business {} to {}",
-            source.id(),
-            target.id()
+            "cover a {amount} liquidity shortfall from {} to {}",
+            business_label(state, source.id()),
+            business_label(state, target.id())
         ),
         urgency,
     );
@@ -7060,8 +7152,8 @@ fn generate_strategic_withdrawal_candidate(
             amount,
         },
         format!(
-            "withdraw {amount} of surplus from business {} to {intent}",
-            source.id()
+            "withdraw {amount} of surplus from {} to {intent}",
+            business_label(state, source.id())
         ),
         2_400_i64
             .saturating_add(amount.copper() / 20)
@@ -7146,8 +7238,8 @@ fn generate_ordinary_distribution_candidate(
             amount,
         },
         format!(
-            "withdraw {amount} of surplus from business {} to restore dynasty liquidity",
-            source.id()
+            "withdraw {amount} of surplus from {} to restore dynasty liquidity",
+            business_label(state, source.id())
         ),
         bonus,
     );
@@ -7286,7 +7378,10 @@ fn generate_business_investment_candidate(
             business_id: business.id(),
             amount,
         },
-        format!("invest {amount} in business {}", business.id()),
+        format!(
+            "invest {amount} in {}",
+            business_label(state, business.id())
+        ),
         persona_bonus
             .saturating_add(1_700)
             .saturating_add(emergency_bonus),
@@ -7350,8 +7445,8 @@ fn generate_planned_business_investment(
             amount,
         },
         format!(
-            "modernize business {} with {amount} of condition and quality investment",
-            business.id()
+            "modernize {} with {amount} of condition and quality investment",
+            business_label(state, business.id())
         ),
         bonus,
     );
@@ -7481,6 +7576,65 @@ fn generate_business_acquisition_candidates(
         if player_treasury < required.saturating_add(expansion_reserve) {
             continue;
         }
+        // A turnaround thesis: recapitalization fixes condition and working
+        // capital, so only acquisitions whose output already sells above the
+        // firm's own break-even are sound. A business whose market price sits
+        // below its sustainable unit cost keeps bleeding no matter how much
+        // capital it is handed, and buying one converts a profitable estate
+        // into a consolidated loss centre.
+        let recipe = registry
+            .get_recipe(business.recipe_id())
+            .expect("acquisition target recipe must exist");
+        let Some(quote_price) = state.market.quotes.get(&recipe.output_good_id()) else {
+            continue;
+        };
+        let weekly_labor_copper = state
+            .employment
+            .values()
+            .filter(|agreement| {
+                agreement.business_id == business.id()
+                    && matches!(
+                        agreement.status,
+                        EmploymentStatus::Active | EmploymentStatus::Disputed
+                    )
+            })
+            .fold(0_i128, |total, agreement| {
+                total + i128::from(agreement.weekly_wage.copper())
+            });
+        let daily_labor = Money::from_copper(
+            i64::try_from(
+                ceil_div_nonnegative_wide(weekly_labor_copper, 7).min(i128::from(i64::MAX)),
+            )
+            .unwrap_or(i64::MAX),
+        );
+        let expected_batches = i64::from(effective_capacity_batches(state, business)).max(1);
+        let overhead_per_batch = daily_labor
+            .saturating_add(maintenance_cost(
+                recipe.daily_operating_cost(),
+                business.policy.maintenance_basis_points,
+            ))
+            .saturating_mul_ratio_ceil_nonnegative(1_000, expected_batches * 1_000);
+        let batch_cost = recipe.inputs().iter().fold(
+            recipe
+                .daily_operating_cost()
+                .saturating_add(overhead_per_batch),
+            |total, input| {
+                let input_price = state
+                    .market
+                    .quotes
+                    .get(&input.good_id())
+                    .expect("recipe input good must have a market quote")
+                    .price;
+                total.saturating_add(cost_for(input.quantity(), input_price))
+            },
+        );
+        let unit_cost = batch_cost.saturating_mul_ratio_ceil_nonnegative(
+            1_000,
+            i64::from(recipe.output_quantity().milliunits()),
+        );
+        if quote_price.price < unit_cost {
+            continue;
+        }
         push_candidate(
             candidates,
             GameplayCommandKind::AcquireBusiness,
@@ -7490,8 +7644,8 @@ fn generate_business_acquisition_candidates(
                 recapitalization,
             },
             format!(
-                "acquire business {} for {} with {} working capital",
-                business.id(),
+                "acquire {} for {} with {} working capital",
+                business_label(state, business.id()),
                 quote.purchase_price,
                 recapitalization
             ),
@@ -7852,7 +8006,10 @@ fn add_contract_candidate(
             },
         },
         format!(
-            "contract good {good_id} from business {seller_business_id} to {buyer_business_id} at {unit_price}; {AGENT_CONTRACT_DURATION_WEEKS}-week term, {weekly_payment}/week ({total_scheduled_value} scheduled value){relationship_note}",
+            "contract {good} from {seller} to {buyer} at {unit_price}; {AGENT_CONTRACT_DURATION_WEEKS}-week term, {weekly_payment}/week ({total_scheduled_value} scheduled value){relationship_note}",
+            good = good_label(registry, good_id),
+            seller = business_label(state, seller_business_id),
+            buyer = business_label(state, buyer_business_id),
         ),
         bonus,
     );
@@ -8183,19 +8340,21 @@ fn add_property_liquidation_candidates(
             },
             if reposition {
                 format!(
-                    "reposition underperforming {:?} property {} to dynasty {} for {} net {}",
+                    "reposition underperforming {:?} property {} in {} to {} for {} net {}",
                     property.kind,
                     property.id,
-                    buyer.id(),
+                    district_label(registry, property.district_id()),
+                    dynasty_label(state, buyer.id()),
                     quote.price,
                     quote.seller_proceeds
                 )
             } else {
                 format!(
-                    "liquidate {:?} property {} to dynasty {} for {} net {}; lien payoff {}; civic guarantee {}",
+                    "liquidate {:?} property {} in {} to {} for {} net {}; lien payoff {}; civic guarantee {}",
                     property.kind,
                     property.id,
-                    buyer.id(),
+                    district_label(registry, property.district_id()),
+                    dynasty_label(state, buyer.id()),
                     quote.price,
                     quote.seller_proceeds,
                     quote.lien_payoff,
@@ -8425,12 +8584,17 @@ fn add_borrow_candidate(
             },
         },
         defaulted_loan.map_or_else(
-            || format!("borrow {principal} from dynasty {}", lender.id()),
+            || {
+                format!(
+                    "borrow {principal} from {}",
+                    dynasty_label(state, lender.id())
+                )
+            },
             |loan| {
                 format!(
-                    "restructure defaulted loan {} with a {principal} recovery advance from dynasty {}",
+                    "restructure defaulted loan {} with a {principal} recovery advance from {}",
                     loan.id,
-                    lender.id()
+                    dynasty_label(state, lender.id())
                 )
             },
         ),
@@ -8660,18 +8824,21 @@ fn add_lend_candidate(
             || {
                 if opportunistic_new_credit {
                     format!(
-                        "offer a high-yield short-term loan of {principal} to dynasty {}",
-                        borrower.id()
+                        "offer a high-yield short-term loan of {principal} to {}",
+                        dynasty_label(state, borrower.id())
                     )
                 } else {
-                    format!("lend {principal} to dynasty {}", borrower.id())
+                    format!(
+                        "lend {principal} to {}",
+                        dynasty_label(state, borrower.id())
+                    )
                 }
             },
             |loan| {
                 format!(
-                    "restructure defaulted loan {} with a {principal} recovery advance to dynasty {}",
+                    "restructure defaulted loan {} with a {principal} recovery advance to {}",
                     loan.id,
-                    borrower.id()
+                    dynasty_label(state, borrower.id())
                 )
             },
         ),
@@ -9181,12 +9348,13 @@ fn generate_civic_candidates(
     candidates: &mut Vec<Candidate>,
 ) {
     generate_law_candidates(registry, state, persona, candidates);
-    generate_public_work_funding_candidates(state, persona, candidates);
+    generate_public_work_funding_candidates(registry, state, persona, candidates);
     generate_public_work_candidates(registry, state, persona, candidates);
     generate_legal_candidates(state, persona, candidates);
 }
 
 fn generate_public_work_funding_candidates(
+    registry: &Registry,
     state: &AppState,
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
@@ -9251,8 +9419,10 @@ fn generate_public_work_funding_candidates(
                 amount,
             },
             format!(
-                "fund {amount} to {intent} {:?} public work {}",
-                work.kind, work.id,
+                "fund {amount} to {intent} the {:?} project in {} ({})",
+                work.kind,
+                district_label(registry, work.district_id),
+                work.id,
             ),
             base_bonus
                 .saturating_add(i64::from(work.progress_basis_points) / 2)
@@ -9753,8 +9923,10 @@ fn generate_legal_candidates(
                 damages: claim.maximum_damages,
             },
             format!(
-                "file {:?} case against dynasty {}: {}",
-                claim.kind, claim.defendant_dynasty_id, claim.description
+                "file {:?} case against {}: {}",
+                claim.kind,
+                dynasty_label(state, claim.defendant_dynasty_id),
+                claim.description
             ),
             bonus,
         );
@@ -9851,7 +10023,7 @@ fn generate_family_candidates(
     generate_heir_designation_candidates(state, persona, candidates);
     generate_ward_adoption_candidates(state, persona, candidates);
     generate_family_education_candidates(registry, state, persona, candidates);
-    generate_institution_withdrawal_candidates(state, persona, candidates);
+    generate_institution_withdrawal_candidates(registry, state, persona, candidates);
     generate_office_power_directive_candidates(registry, state, persona, candidates);
     generate_institution_endowment_candidates(registry, state, persona, candidates);
     generate_institution_ascent_candidates(registry, state, persona, candidates);
@@ -9909,8 +10081,8 @@ fn generate_institution_endowment_candidates(
                 amount,
             },
             format!(
-                "endow institution {} with {amount} to strengthen its capacity and member-house coalition",
-                institution.institution_id
+                "endow {} with {amount} to strengthen its capacity and member-house coalition",
+                institution_label(registry, institution.institution_id)
             ),
             base_bonus
                 .saturating_add(legitimacy_need)
@@ -10110,8 +10282,8 @@ fn generate_heir_designation_candidates(
                     character_id: replacement.id(),
                 },
                 format!(
-                    "designate character {} as {} for the {persona:?} succession strategy",
-                    replacement.id(),
+                    "designate {} as {} for the {persona:?} succession strategy",
+                    character_label(state, replacement.id()),
                     if current_heir.is_some() {
                         "heir"
                     } else {
@@ -10169,7 +10341,8 @@ fn propose_formal_confirmation(
             character_id: current_heir_id,
         },
         format!(
-            "formally confirm character {current_heir_id} as heir for the {persona:?} succession strategy"
+            "formally confirm {} as heir for the {persona:?} succession strategy",
+            character_label(state, current_heir_id)
         ),
         900_i64.saturating_add(head_age.saturating_sub(47).saturating_mul(20)),
     );
@@ -10501,8 +10674,9 @@ fn generate_office_power_directive_candidates(
                 power,
             },
             format!(
-                "exercise {power:?} through institution {} to shape district {district_id}",
-                institution.institution_id
+                "exercise {power:?} through {} to shape {}",
+                institution_label(registry, institution.institution_id),
+                district_label(registry, district_id)
             ),
             priority,
         );
@@ -10552,9 +10726,9 @@ fn generate_institution_ascent_candidates(
                     character_id: character.id(),
                 },
                 format!(
-                    "cultivate support for character {} in institution {}",
-                    character.id(),
-                    institution.institution_id
+                    "cultivate support for {} in {}",
+                    character_label(state, character.id()),
+                    institution_label(registry, institution.institution_id)
                 ),
                 support_bonus
                     .saturating_add(power_bonus)
@@ -10572,9 +10746,9 @@ fn generate_institution_ascent_candidates(
                     character_id: character.id(),
                 },
                 format!(
-                    "nominate character {} to institution {}",
-                    character.id(),
-                    institution.institution_id
+                    "nominate {} to {}",
+                    character_label(state, character.id()),
+                    institution_label(registry, institution.institution_id)
                 ),
                 nomination_bonus.saturating_add(power_bonus),
             );
@@ -10672,6 +10846,7 @@ fn has_player_institutional_foothold(state: &AppState) -> bool {
 }
 
 fn generate_institution_withdrawal_candidates(
+    registry: &Registry,
     state: &AppState,
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
@@ -10728,8 +10903,9 @@ fn generate_institution_withdrawal_candidates(
                 character_id,
             },
             format!(
-                "withdraw character {character_id} from institution {} and surrender its office",
-                institution.institution_id
+                "withdraw {} from {} and surrender its office",
+                character_label(state, character_id),
+                institution_label(registry, institution.institution_id)
             ),
             urgency.saturating_add(persona_bonus),
         );
@@ -10843,7 +11019,8 @@ fn generate_ward_adoption_candidates(
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist");
-    let adoption_available = player.treasury() >= WARD_ADOPTION_COST
+    let adoption_available = player.treasury()
+        >= WARD_ADOPTION_COST.saturating_add(dynasty_discretionary_floor(state))
         && player.resources.legitimacy_basis_points >= WARD_ADOPTION_LEGITIMACY_REQUIREMENT
         && player
             .resources
@@ -10905,7 +11082,8 @@ fn generate_family_education_candidates(
     // The targeted-institution preparation bonus below still rewards an
     // established commercial record; eligibility itself is governed by cost,
     // focus headroom, and cooldowns.
-    let education_available = player.treasury() >= FAMILY_EDUCATION_COST;
+    let education_available = player.treasury()
+        >= FAMILY_EDUCATION_COST.saturating_add(dynasty_discretionary_floor(state));
     if !education_available {
         return;
     }
@@ -10979,6 +11157,8 @@ fn generate_family_education_candidates(
                 focus,
             },
             family_education_candidate_description(
+                registry,
+                state,
                 student,
                 focus,
                 targeted_student,
@@ -10993,6 +11173,8 @@ fn generate_family_education_candidates(
 }
 
 fn family_education_candidate_description(
+    registry: &Registry,
+    state: &AppState,
     student: &crate::core::Character,
     focus: EducationFocus,
     targeted_student: Option<(&crate::core::Character, u32, InstitutionId)>,
@@ -11000,17 +11182,21 @@ fn family_education_candidate_description(
 ) -> String {
     if let Some((_, extra, institution_id)) = targeted_student {
         return format!(
-            "educate character {} in {focus:?} to reduce {extra} extra delivery requirements for institution {institution_id}",
-            student.id()
+            "educate {} in {focus:?} to qualify for {} (saves {extra} delivery requirements)",
+            character_label(state, student.id()),
+            institution_label(registry, institution_id)
         );
     }
     if succession_preparation {
         return format!(
             "educate heir {} in {focus:?} for succession preparation",
-            student.id()
+            character_label(state, student.id())
         );
     }
-    format!("educate character {} in {focus:?}", student.id())
+    format!(
+        "educate {} in {focus:?}",
+        character_label(state, student.id())
+    )
 }
 
 fn succession_family_education_student(
@@ -11371,7 +11557,8 @@ fn is_institution_support_available(
     };
     let required_deliveries =
         institution_support_delivery_requirement(registry, state, institution_id, character_id);
-    if player.treasury() < INSTITUTION_SUPPORT_COST
+    if player.treasury()
+        < INSTITUTION_SUPPORT_COST.saturating_add(dynasty_discretionary_floor(state))
         || player
             .resources
             .reputation_quality_basis_points
@@ -11440,8 +11627,31 @@ fn rank_adjustment(
         .saturating_add(urgency_weight(state, kind))
         .saturating_add(institutional_conversion_priority(state, persona, kind))
         .saturating_add(recovery_priority_adjustment(state, kind))
+        .saturating_add(legacy_rebuild_priority(&accumulator.fantasy_arc, kind))
         .saturating_sub(repetition)
         .saturating_sub(repeat_last)
+}
+
+/// After a succession the incoming head's job is rebuilding the estate and
+/// restoring the house's standing, not idling between crises. Without this
+/// nudge the legacy phase degenerates into crisis whack-a-mole while the
+/// commercial recovery routes sit unexercised. Acquisitions are deliberately
+/// excluded: buying a distressed house mid-recovery has repeatedly turned a
+/// profitable estate into a consolidated loss centre, so expansion stays
+/// persona-driven rather than phase-driven.
+fn legacy_rebuild_priority(arc: &GameplayFantasyArc, kind: GameplayCommandKind) -> i64 {
+    if arc.first_succession_day.is_none() {
+        return 0;
+    }
+    match kind {
+        GameplayCommandKind::InvestInBusiness
+        | GameplayCommandKind::SecureSupply
+        | GameplayCommandKind::BuyProperty => 420,
+        GameplayCommandKind::CultivateInstitutionSupport
+        | GameplayCommandKind::EndowInstitution
+        | GameplayCommandKind::NominateForOffice => 260,
+        _ => 0,
+    }
 }
 
 /// Once the dynasty has earned office, the diagnostic agent should actually
@@ -11910,6 +12120,60 @@ fn institution_withdrawal_urgency(state: &AppState) -> i64 {
     } else {
         0
     }
+}
+
+/// Human-readable labels for the entities named in candidate descriptions and
+/// decision traces. Each label pairs the world's proper name with its stable
+/// identifier so a trace stays readable without becoming ambiguous.
+fn character_label(state: &AppState, character_id: CharacterId) -> String {
+    state
+        .characters
+        .get(character_id)
+        .map(|character| format!("{} ({character_id})", character.name()))
+        .unwrap_or_else(|| format!("character {character_id}"))
+}
+
+fn dynasty_label(state: &AppState, dynasty_id: DynastyId) -> String {
+    state
+        .dynasties
+        .get(&dynasty_id)
+        .map(|dynasty| {
+            if dynasty_id == state.player_dynasty_id {
+                format!("the player house ({dynasty_id})")
+            } else {
+                format!("House {} ({dynasty_id})", dynasty.name())
+            }
+        })
+        .unwrap_or_else(|| format!("dynasty {dynasty_id}"))
+}
+
+fn business_label(state: &AppState, business_id: BusinessId) -> String {
+    state
+        .businesses
+        .get(business_id)
+        .map(|business| format!("{} ({business_id})", business.name()))
+        .unwrap_or_else(|| format!("business {business_id}"))
+}
+
+fn institution_label(registry: &Registry, institution_id: InstitutionId) -> String {
+    registry
+        .get_institution(institution_id)
+        .map(|institution| format!("{} ({institution_id})", institution.name()))
+        .unwrap_or_else(|| format!("institution {institution_id}"))
+}
+
+fn district_label(registry: &Registry, district_id: DistrictId) -> String {
+    registry
+        .get_district(district_id)
+        .map(|district| format!("{} ({district_id})", district.name()))
+        .unwrap_or_else(|| format!("district {district_id}"))
+}
+
+fn good_label(registry: &Registry, good_id: GoodId) -> String {
+    registry
+        .get_good(good_id)
+        .map(|good| good.name().to_owned())
+        .unwrap_or_else(|| format!("good {good_id}"))
 }
 
 fn push_candidate(
@@ -12729,6 +12993,14 @@ fn aggregate_quiet_diagnostics(campaigns: &[GameplayCampaignReport]) -> Gameplay
                 .unwrap_or(0)
                 .saturating_add(*count);
         }
+        for (kind, count) in &campaign.quiet_diagnostic.restrained_routes {
+            *diagnostic.restrained_routes.entry(*kind).or_default() = diagnostic
+                .restrained_routes
+                .get(kind)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(*count);
+        }
         for (kind, count) in &campaign.quiet_diagnostic.validation_gates {
             *diagnostic.validation_gates.entry(*kind).or_default() = diagnostic
                 .validation_gates
@@ -12800,6 +13072,9 @@ fn merge_phase_stats(
         target.policy_gate_cycles = target
             .policy_gate_cycles
             .saturating_add(source.policy_gate_cycles);
+        target.restrained_cycles = target
+            .restrained_cycles
+            .saturating_add(source.restrained_cycles);
         target.validation_gate_cycles = target
             .validation_gate_cycles
             .saturating_add(source.validation_gate_cycles);
@@ -13698,7 +13973,7 @@ fn add_phase_quality_finding(
         severity: GameplayFindingSeverity::Warning,
         title: title.to_owned(),
         evidence: format!(
-            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}% of actionable cycles, and actionable cycles averaged {} viable choices across {} families. Quiet causes: policy gates {}, dormant {}, generator gaps {}, validation gates {}. Thresholds missed: {threshold_evidence}.{worst_streak_evidence}",
+            "Across {} {phase_label} cycles, substantive actions occurred in {action_share}%, {quiet_share}% were quiet, {}% were quiet while the world still changed, {static_quiet_share}% were static, the longest quiet streak lasted {} cycles, multiple command families were viable in {multi_family_share}% of actionable cycles, and actionable cycles averaged {} viable choices across {} families. Quiet causes: policy gates {}, dormant {}, generator gaps {}, restrained routes {}, validation gates {}. Thresholds missed: {threshold_evidence}.{worst_streak_evidence}",
             stats.decision_cycles,
             scaled_ratio_u64(
                 u64::from(stats.quiet_cycles_with_ambient_change),
@@ -13711,6 +13986,7 @@ fn add_phase_quality_finding(
             stats.policy_gate_cycles,
             stats.dormant_cycles,
             stats.generator_gap_cycles,
+            stats.restrained_cycles,
             stats.validation_gate_cycles
         ),
     });
@@ -14533,6 +14809,18 @@ const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> bool {
             | GameplayCommandKind::FundPublicWork
             | GameplayCommandKind::TransferBusinessCash
             | GameplayCommandKind::WithdrawBusinessCash
+            // Threshold-narrowed routes: each generator below only builds when
+            // its own strategic-need condition is stricter than the canonical
+            // validation the activation predicate mirrors.
+            | GameplayCommandKind::SetBusinessWages
+            | GameplayCommandKind::ConveneFamilyCouncil
+            | GameplayCommandKind::AcknowledgeNotification
+            | GameplayCommandKind::DesignateHeir
+            | GameplayCommandKind::EducateFamilyMember
+            | GameplayCommandKind::EndowInstitution
+            | GameplayCommandKind::LeverageInformation
+            | GameplayCommandKind::CommissionInformation
+            | GameplayCommandKind::BuyProperty
     )
 }
 
@@ -16854,7 +17142,7 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             );
         let _ = writeln!(
             output,
-            "  {:<22} cycles {:>5} | action {:>3}% | top {:<24} | campaign admin {:>3}% | multi {:>3}% | close {:>3}% | distinct now {:>3}% / next {:>3}% | choices {}.{} / families {}.{} | quiet {:>5} (ambient {:>5}, longest {:>2}) | blocked {:>5} | causes policy {} / dormant {} / gaps {} / validation {}",
+            "  {:<22} cycles {:>5} | action {:>3}% | top {:<24} | campaign admin {:>3}% | multi {:>3}% | close {:>3}% | distinct now {:>3}% / next {:>3}% | choices {}.{} / families {}.{} | quiet {:>5} (ambient {:>5}, longest {:>2}) | blocked {:>5} | causes policy {} / dormant {} / gaps {} / restrained {} / validation {}",
             phase.label(),
             stats.decision_cycles,
             action_share,
@@ -16875,6 +17163,7 @@ fn render_phase_summary(report: &GameplayHarnessReport, output: &mut String) {
             stats.policy_gate_cycles,
             stats.dormant_cycles,
             stats.generator_gap_cycles,
+            stats.restrained_cycles,
             stats.validation_gate_cycles
         );
     }
@@ -17390,6 +17679,7 @@ fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mut String) {
     let diagnostic = &report.aggregate.quiet_diagnostic;
     if diagnostic.generator_gaps.is_empty()
         && diagnostic.policy_gates.is_empty()
+        && diagnostic.restrained_routes.is_empty()
         && diagnostic.validation_gates.is_empty()
         && diagnostic.budget_gates.is_empty()
         && diagnostic.dormant_cycles == 0
@@ -17397,6 +17687,21 @@ fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mut String) {
         return;
     }
     let _ = writeln!(output, "Quiet cycle diagnosis");
+    if !diagnostic.restrained_routes.is_empty() {
+        let mut restrained: Vec<_> = diagnostic.restrained_routes.iter().collect();
+        restrained.sort_by_key(|(kind, count)| (std::cmp::Reverse(**count), **kind));
+        let restrained_text = restrained
+            .into_iter()
+            .take(8)
+            .map(|(kind, count)| format!("{} {count}", kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(output, "  reserved by agent policy: {restrained_text}");
+        let _ = writeln!(
+            output,
+            "    (an activation opportunity fired but the persona's standing policy deliberately narrows the route to strategic-need conditions; not a game gap)"
+        );
+    }
     if !diagnostic.generator_gaps.is_empty() {
         let mut gaps: Vec<_> = diagnostic.generator_gaps.iter().collect();
         gaps.sort_by_key(|(kind, count)| (std::cmp::Reverse(**count), **kind));
@@ -17407,6 +17712,10 @@ fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mut String) {
             .collect::<Vec<_>>()
             .join(", ");
         let _ = writeln!(output, "  opportunities without candidates: {gap_text}");
+        let _ = writeln!(
+            output,
+            "    (the world offered a route outside the agent's narrowed set and no candidate was built; investigate these as possible coverage holes)"
+        );
     }
     if !diagnostic.policy_gates.is_empty() {
         let mut gates: Vec<_> = diagnostic.policy_gates.iter().collect();
@@ -17490,6 +17799,19 @@ fn render_campaign_summaries(report: &GameplayHarnessReport, output: &mut String
             f64::from(campaign.end.average_district_sanitation) / 100.0,
             f64::from(campaign.end.average_district_safety) / 100.0,
             f64::from(campaign.end.average_district_unrest) / 100.0,
+        );
+        let ledger_margin = campaign
+            .end
+            .player_business_lifetime_revenue
+            .copper()
+            .saturating_sub(campaign.end.player_business_lifetime_costs.copper());
+        let _ = writeln!(
+            output,
+            "      ledger | lifetime revenue {} | costs {} | margin {} | business cash {}",
+            campaign.end.player_business_lifetime_revenue,
+            campaign.end.player_business_lifetime_costs,
+            Money::from_copper(ledger_margin),
+            campaign.end.player_business_cash
         );
         if let Some(transition) = campaign.succession_transition {
             let _ = writeln!(
@@ -17799,6 +18121,7 @@ fn measure_label(measure: GameplayMeasure) -> &'static str {
     match measure {
         GameplayMeasure::PlayerTreasury => "treasury",
         GameplayMeasure::PlayerBusinessCash => "business-cash",
+        GameplayMeasure::PlayerBusinessLifetimeProfit => "business-lifetime-profit",
         GameplayMeasure::ActiveBusinesses => "active-businesses",
         GameplayMeasure::DistressedBusinesses => "distressed-businesses",
         GameplayMeasure::PlayerActiveContracts => "active-contracts",

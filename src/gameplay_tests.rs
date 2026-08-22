@@ -5614,7 +5614,10 @@ mod metrics {
         )
         .expect("a caused quiet cycle must report a reason");
 
-        assert!(reason.contains("activation without candidate [sell-property]"));
+        assert!(
+            reason.contains("reserved by agent policy [sell-property]"),
+            "sell-property deliberately narrows to strategic-need conditions, so its unfired activation is agent restraint, not a coverage hole"
+        );
         assert!(reason.contains("declined by agent policy [buy-property]"));
         assert!(reason.contains("rejected by validation [enact-law]"));
         assert!(reason.contains("unverified due to probe budget [public-work-funding]"));
@@ -5939,7 +5942,12 @@ mod metrics {
             .treasury = Money::from_copper(20_000);
         let mut candidates = Vec::new();
 
-        generate_public_work_funding_candidates(&state, GameplayPersona::Steward, &mut candidates);
+        generate_public_work_funding_candidates(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Steward,
+            &mut candidates,
+        );
 
         let candidate = candidates
             .iter()
@@ -5990,6 +5998,7 @@ mod metrics {
         let mut candidates = Vec::new();
 
         generate_public_work_funding_candidates(
+            rivergate_registry_for_test(),
             &state,
             GameplayPersona::Entrepreneur,
             &mut candidates,
@@ -6008,7 +6017,11 @@ mod metrics {
             })
             .expect("a wealthy sponsor must be able to accelerate an active civic commitment");
         assert_eq!(candidate.kind, GameplayCommandKind::FundPublicWork);
-        assert!(candidate.description.contains("finish Market"));
+        assert!(
+            candidate
+                .description
+                .contains("finish the Market project in")
+        );
     }
 
     #[test]
@@ -9579,7 +9592,7 @@ mod findings {
     }
 
     #[test]
-    fn triggered_information_route_without_a_candidate_is_critical() {
+    fn triggered_information_route_without_a_candidate_is_warning_for_a_policy_gated_route() {
         let mut report = cached_focused_report(30);
         report.aggregate.simulated_days = 7_200;
         let stats = report
@@ -9590,7 +9603,9 @@ mod findings {
         stats.activation_opportunities = 1;
         // Commissioning is canonically available in the focused horizon, so
         // isolate the generator-gap scenario explicitly: the world offered the
-        // route but no candidate was ever built.
+        // route but no candidate was ever built. Commissioning deliberately
+        // narrows to strategic-need conditions, so the finding warns instead
+        // of declaring the route unreachable.
         stats.generated = 0;
         stats.offered_cycles = 0;
         stats.considered = 0;
@@ -9601,6 +9616,30 @@ mod findings {
             &findings,
             "commission-intelligence had no reachable candidate",
         );
+
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+    }
+
+    #[test]
+    fn triggered_ungated_route_without_a_candidate_is_critical() {
+        let mut report = cached_focused_report(30);
+        report.aggregate.simulated_days = 7_200;
+        let stats = report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::RespondToCrisis)
+            .expect("all command statistics must exist");
+        stats.activation_opportunities = 1;
+        // Crisis response has no strategic-need narrowing: when the world
+        // offers it and no candidate is ever constructed, that is a true
+        // coverage hole in the harness's command surface.
+        stats.generated = 0;
+        stats.offered_cycles = 0;
+        stats.considered = 0;
+        stats.viable = 0;
+
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        let finding = finding_with_title(&findings, "crisis-response had no reachable candidate");
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Critical);
     }

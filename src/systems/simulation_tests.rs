@@ -3274,6 +3274,66 @@ mod market_prices {
     }
 
     #[test]
+    fn repeated_shocks_for_the_same_good_do_not_flood_the_chronicle() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let flour_id = registry
+            .get_good_id("flour")
+            .expect("registry must define flour");
+        let oversupply = |state: &mut AppState| {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&flour_id)
+                .expect("flour quote must exist");
+            quote.price = Money::from_copper(40);
+            quote.stock = quote.target_stock.saturating_mul_ratio(4, 1);
+            quote.demand_today = Quantity::ZERO;
+            quote.supply_today = Quantity::from_units(10_000);
+        };
+        let shock_count = |state: &AppState| {
+            state
+                .chronicle
+                .iter()
+                .filter(|entry| {
+                    entry.kind == ChronicleKind::PriceShock && entry.summary.starts_with("Flour")
+                })
+                .count()
+        };
+
+        oversupply(&mut state);
+        update_market_prices(registry, &mut state).expect("first price update must succeed");
+        assert_eq!(
+            shock_count(&state),
+            1,
+            "the first shock for a good must be recorded"
+        );
+
+        // The next day's update still moves flour past the shock threshold, but
+        // a sustained slide must not add a chronicle entry every day.
+        state.clock.advance_one_day();
+        oversupply(&mut state);
+        update_market_prices(registry, &mut state).expect("second price update must succeed");
+        assert_eq!(
+            shock_count(&state),
+            1,
+            "a repeat shock within the suppression window must stay silent"
+        );
+
+        // After the window passes, the trend's continuation is news again.
+        for _ in 0..PRICE_SHOCK_REPEAT_SUPPRESSION_DAYS {
+            state.clock.advance_one_day();
+        }
+        oversupply(&mut state);
+        update_market_prices(registry, &mut state).expect("third price update must succeed");
+        assert_eq!(
+            shock_count(&state),
+            2,
+            "a shock after the suppression window must be recorded again"
+        );
+    }
+
+    #[test]
     fn production_floor_keeps_exact_payroll_before_daily_conversion() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

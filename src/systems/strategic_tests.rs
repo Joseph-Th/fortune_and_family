@@ -6999,6 +6999,81 @@ mod ai {
     }
 
     #[test]
+    fn underfunded_ai_house_does_not_trickle_recapitalize_its_distressed_business() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let owner_dynasty_id = state
+            .businesses
+            .get(business_id)
+            .expect("selected business must exist")
+            .owner_dynasty_id();
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.finance.cash = Money::ZERO;
+        }
+        let target_cash = business_recapitalization_target(
+            registry,
+            &state,
+            state
+                .businesses
+                .get(business_id)
+                .expect("selected business must exist"),
+        );
+        // The owner can cover most of the shortfall but not all of it: exactly
+        // the situation that previously produced daily trickle injections and
+        // weekly distressed-to-recovered churn.
+        state
+            .dynasties
+            .get_mut(&owner_dynasty_id)
+            .expect("business owner must exist")
+            .resources
+            .treasury = target_cash
+            .checked_sub(Money::from_copper(1))
+            .expect("recapitalization target must exceed one copper");
+        let before = state.clone();
+
+        recover_ai_businesses(registry, &mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("selected business must exist")
+                .cash(),
+            Money::ZERO,
+            "AI recovery must not partially fund a rescue it cannot complete"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&owner_dynasty_id)
+                .expect("business owner must exist")
+                .treasury(),
+            before
+                .dynasties
+                .get(&owner_dynasty_id)
+                .expect("business owner must exist")
+                .treasury(),
+            "a declined partial rescue must leave the owner's treasury untouched"
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an underfunded AI rescue must not mutate any state",
+        );
+    }
+
+    #[test]
     fn accumulate_cash_objective_measures_liquidity_net_of_private_debt() {
         let registry = test_registry();
         let mut state = make_test_campaign();

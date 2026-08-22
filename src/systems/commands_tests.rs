@@ -5466,9 +5466,10 @@ mod crises {
                 StrategicError::DynastyTreasuryOverflow {
                     dynasty_id: state.player_dynasty_id,
                     current: Money::from_copper(i64::MAX),
-                    // Exploitation extracts twice the severity in copper,
-                    // matching what an equivalent relief response would cost.
-                    incoming: Money::from_copper(i64::from(severity) * 2),
+                    // Exploitation extracts what an equivalent relief
+                    // response would cost, so profiteering is a genuine
+                    // liquidity trade against the same price scale.
+                    incoming: Money::from_copper(1_200 + i64::from(severity) / 3),
                 }
             ))
         );

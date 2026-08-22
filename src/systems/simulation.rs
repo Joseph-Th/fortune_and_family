@@ -570,7 +570,10 @@ fn tool_limited_batches(
     low
 }
 
-fn effective_capacity_batches(state: &AppState, business: &crate::core::Business) -> u16 {
+pub(crate) fn effective_capacity_batches(
+    state: &AppState,
+    business: &crate::core::Business,
+) -> u16 {
     let dynasty = state
         .dynasties
         .get(&business.owner_dynasty_id())
@@ -937,7 +940,8 @@ fn decide_business_sales(
         let capacity = market_capacity
             .get(&good_id)
             .copied()
-            .unwrap_or(Quantity::ZERO);
+            .unwrap_or(Quantity::ZERO)
+            .max(Quantity::ZERO);
         let quote = state
             .market
             .quotes
@@ -946,9 +950,22 @@ fn decide_business_sales(
         let commerce_efficiency = 9_000_i64
             .saturating_add(i64::from(manager.capabilities.commerce).saturating_mul(10))
             .min(10_000);
-        let quantity = surplus
-            .min(capacity)
-            .saturating_mul_ratio(commerce_efficiency, 10_000);
+        // Skill converts stocked surplus into placed sales: a struggling
+        // sales operation moves less of what it has even when the market has
+        // room. Renown then governs access to genuinely scarce capacity:
+        // households and merchants seek out reputable houses first, so an
+        // established quality reputation claims up to ~17% more of a capped
+        // market while an obscure or disgraced house claims less. Neither
+        // factor can ever place more than the business actually stocked.
+        let owner_reputation = state
+            .dynasties
+            .get(&business.owner_dynasty_id())
+            .map(|dynasty| i64::from(dynasty.resources.reputation_quality_basis_points))
+            .unwrap_or(5_000);
+        let renown_basis_points = (10_000 + (owner_reputation - 5_000) / 3).max(1);
+        let skilled_claim = surplus.saturating_mul_ratio(commerce_efficiency, 10_000);
+        let claimed_capacity = capacity.saturating_mul_ratio(renown_basis_points, 10_000);
+        let quantity = skilled_claim.min(claimed_capacity);
         if quantity.is_zero() {
             continue;
         }
@@ -959,7 +976,14 @@ fn decide_business_sales(
             quantity,
             quote.price,
         )?;
-        market_capacity.insert(good_id, capacity.saturating_sub(quantity));
+        // Remaining shared capacity must stay nonnegative: renown lets a
+        // renowned house claim up to ~17% more than the raw remainder, so
+        // the leftover is floored at zero instead of relying on every
+        // multiplier staying below one.
+        market_capacity.insert(
+            good_id,
+            capacity.saturating_sub(quantity).max(Quantity::ZERO),
+        );
         lines.push(BusinessSaleLine {
             business_id: business.id(),
             good_id,
@@ -1467,7 +1491,10 @@ fn maintenance_line(
     }
 }
 
-fn maintenance_cost(daily_operating_cost: Money, maintenance_basis_points: u16) -> Money {
+pub(crate) fn maintenance_cost(
+    daily_operating_cost: Money,
+    maintenance_basis_points: u16,
+) -> Money {
     if maintenance_basis_points == 0 || daily_operating_cost <= Money::ZERO {
         return Money::ZERO;
     }
@@ -1684,7 +1711,19 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(),
             .cmp(&left.2.unsigned_abs())
             .then_with(|| left.0.cmp(&right.0))
     });
-    for (good_name, price, change_basis_points) in price_shocks.into_iter().take(3) {
+    let recently_shocked = recently_shocked_goods(state);
+    let mut emitted = 0_u32;
+    for (good_name, price, change_basis_points) in price_shocks {
+        if emitted >= PRICE_SHOCKS_PER_DAY {
+            break;
+        }
+        // A sustained slide moves the same good past the shock threshold every
+        // day. The chronicle records the trend's arrival and its turning
+        // points, not each daily tick; the market projection remains the
+        // complete price record.
+        if recently_shocked.contains(&good_name) {
+            continue;
+        }
         let id = state.next_ids.try_chronicle()?;
         state.chronicle.push(ChronicleEntry {
             id,
@@ -1692,12 +1731,36 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(),
             kind: ChronicleKind::PriceShock,
             summary: format!("{good_name} moved by {change_basis_points} basis points to {price}."),
         });
+        emitted += 1;
     }
     Ok(())
 }
 
+/// Days a good stays silent in the chronicle after a recorded price shock.
+const PRICE_SHOCK_REPEAT_SUPPRESSION_DAYS: i64 = 14;
+const PRICE_SHOCKS_PER_DAY: u32 = 3;
+
+fn recently_shocked_goods(state: &AppState) -> BTreeSet<String> {
+    let cutoff_day = state
+        .clock
+        .day()
+        .saturating_sub(PRICE_SHOCK_REPEAT_SUPPRESSION_DAYS);
+    let mut goods = BTreeSet::new();
+    for entry in state.chronicle.iter().rev() {
+        if entry.day < cutoff_day {
+            break;
+        }
+        if entry.kind == ChronicleKind::PriceShock {
+            if let Some(good_name) = entry.summary.split(" moved by ").next() {
+                goods.insert(good_name.to_owned());
+            }
+        }
+    }
+    goods
+}
+
 fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<GoodId, Money> {
-    let mut floors = BTreeMap::new();
+    let mut floors: BTreeMap<GoodId, Vec<Money>> = BTreeMap::new();
     for business in state.businesses.iter().filter(|business| {
         !matches!(
             business.status(),
@@ -1760,13 +1823,29 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
         let sustainable = break_even.saturating_mul_ratio_ceil_nonnegative(11, 10);
         floors
             .entry(recipe.output_good_id())
-            .and_modify(|floor: &mut Money| *floor = (*floor).min(sustainable))
-            .or_insert(sustainable);
+            .or_default()
+            .push(sustainable);
     }
+    // The market's sustainable price is what the TYPICAL producer needs to
+    // keep operating, not the single luckiest one. A pure minimum lets one
+    // wage-starved or hyper-efficient firm anchor staple prices below every
+    // other house's cost, bleeding the whole sector toward distress; the
+    // mean keeps thin-but-real margins in the commodity chain.
     floors
+        .into_iter()
+        .map(|(good_id, producers)| {
+            let total = producers
+                .iter()
+                .fold(0_i128, |sum, price| sum + i128::from(price.copper()));
+            let average =
+                ceil_div_nonnegative_wide(total, i128::try_from(producers.len()).unwrap_or(1));
+            let average = i64::try_from(average).unwrap_or(i64::MAX);
+            (good_id, Money::from_copper(average))
+        })
+        .collect()
 }
 
-fn ceil_div_nonnegative_wide(numerator: i128, denominator: i128) -> i128 {
+pub(crate) fn ceil_div_nonnegative_wide(numerator: i128, denominator: i128) -> i128 {
     debug_assert!(numerator >= 0 && denominator > 0);
     let quotient = numerator / denominator;
     quotient + i128::from(numerator % denominator != 0)

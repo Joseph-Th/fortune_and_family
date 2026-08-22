@@ -246,6 +246,9 @@ pub(crate) use progression::{
     contract_deliveries_for_dynasty, refresh_campaign_phases,
 };
 pub use simulation::advance_days;
+pub(crate) use simulation::{
+    ceil_div_nonnegative_wide, effective_capacity_batches, maintenance_cost,
+};
 pub(crate) use strategic::MAX_RELATIONSHIP_MEMORIES;
 #[cfg(test)]
 pub(crate) use strategic::issue_loan;

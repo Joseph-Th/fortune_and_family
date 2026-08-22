@@ -117,6 +117,11 @@ or target selection without overriding urgency, reserve protection, or persona
 priorities, so repeated matrices sample organic nearby play while remaining
 replayable.
 
+Optional standing expenses — family education, ward adoption, and institution
+patronage — respect a shared discretionary floor: an emergency reserve plus two
+months of committed loan service. A house below the floor defers standing
+spending instead of converting every surprise into new borrowing.
+
 ## Decision cycle
 
 Each decision cycle:
@@ -243,8 +248,15 @@ Reports contain:
 - Phase-level quiet-cause counts, separating agent policy gates from dormant
   world state and generator or validation gaps
 - Immediate, persistent, delayed, and ambient domain attribution
-- Quiet-cycle diagnosis separating generator gaps, agent-policy gates, validation gates, and dormant waiting
+- Quiet-cycle diagnosis separating generator gaps, agent-policy gates,
+  restrained strategic-need routes, validation gates, and dormant waiting.
+  Restrained routes are generators whose activation predicate mirrors the
+  game while the generator itself narrows to strategic-need conditions, so an
+  unfired opportunity there is agent restraint by design rather than a
+  coverage hole; true gaps remain separately visible.
 - Economic, civic, family, institutional, legal, crisis, and information snapshots
+- Per-campaign commercial ledger: player businesses' lifetime revenue, lifetime
+  costs, and implied margin at each snapshot endpoint
 - Representative decision traces
 - A chronological decision log for a configured number of campaigns, each retained step showing context, the selected command and outcome, and the reason no action was taken on quiet cycles
 - Findings and stated limitations
