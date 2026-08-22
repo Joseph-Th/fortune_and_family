@@ -9,7 +9,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Crate version | `0.2.0` |
 | Rust edition | 2024 |
 | Minimum Rust version | 1.97 |
-| Save schema | 24 |
+| Save schema | 25 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
 | Gameplay report schema | 65 |

@@ -23,7 +23,7 @@ This project applies the Universal, Stateful Application, Deterministic System, 
 | Legal/progression | `src/systems/legal.rs`, `src/systems/progression.rs` |
 | Persistence | `src/persistence.rs` |
 | Read models/HTML | `src/projection.rs` |
-| Gameplay analysis | `src/gameplay.rs` |
+| Gameplay analysis | `src/gameplay/` |
 | Procedural art | `src/art/` |
 
 ## Project guardrails

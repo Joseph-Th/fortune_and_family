@@ -139,7 +139,7 @@ src/
     invariants.rs     Runtime invariant checks
   persistence.rs      Current-schema save/load and release validation
   projection.rs       Read-only projections and HTML dashboard
-  gameplay.rs         Deterministic gameplay harness
+  gameplay/           Deterministic gameplay harness (persona, types, harness, candidates, scoring, findings, render)
   art/                Procedural sprite renderer and review harness
   main.rs             CLI adapter
   *_tests.rs          Large sibling test suites

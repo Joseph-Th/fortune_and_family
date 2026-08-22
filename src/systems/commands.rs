@@ -199,6 +199,8 @@ struct BusinessPolicyInput {
 }
 
 pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 180;
+/// Maximum idle cash a policy may hold: one year of operating cover.
+const BUSINESS_RESERVE_MAX_OPERATING_DAYS: i64 = 360;
 /// Weeks between wage renegotiations for one business. Wage posture is a
 /// standing labor commitment, so it changes on a slower cadence than policy.
 pub(crate) const BUSINESS_WAGE_CHANGE_INTERVAL_DAYS: i64 = 90;
@@ -1216,6 +1218,21 @@ fn apply_business_investment(
     })
 }
 
+/// A policy reserve may hold at most one full year of the firm's operating
+/// cover idle: defensive enough for any downturn, bounded against locking a
+/// firm's economy behind an unreachable cash floor.
+fn recipe_daily_operating_cover_ceiling(
+    registry: &Registry,
+    business: &crate::core::Business,
+) -> Money {
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("business recipe reference must be valid");
+    recipe
+        .daily_operating_cost()
+        .saturating_mul(BUSINESS_RESERVE_MAX_OPERATING_DAYS)
+}
+
 fn apply_business_policy(
     registry: &Registry,
     state: &mut AppState,
@@ -1254,11 +1271,12 @@ fn apply_business_policy(
         .expect("validated business must exist");
     // The reserve gates every spendable-copper route for the business, so an
     // unbounded floor would let one policy change permanently lock the firm's
-    // payroll, purchasing, and rescue financing. A reserve beyond the full
-    // recapitalization target has no operating meaning.
-    if minimum_cash_reserve
-        > super::strategic::business_recapitalization_target(registry, state, business)
-    {
+    // payroll, purchasing, and rescue financing. A full year of operating
+    // cover held idle is already an extreme defensive posture; beyond that
+    // the request serves no operating purpose. The bound is deliberately
+    // independent of the firm's current policy, so it never rejects a raise
+    // merely because today's reserve happens to be small.
+    if minimum_cash_reserve > recipe_daily_operating_cover_ceiling(registry, business) {
         return Err(CommandError::InvalidBusinessPolicy);
     }
     if business.policy.target_input_days == target_input_days

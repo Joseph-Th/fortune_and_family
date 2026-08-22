@@ -51,7 +51,7 @@ Dependency direction is one way:
 | `src/systems/invariants.rs` | Runtime cross-record invariants. |
 | `src/persistence.rs` | Current-schema save/load, release validation, atomic writes. |
 | `src/projection.rs` | Immutable read models and self-contained HTML rendering. |
-| `src/gameplay.rs` | Deterministic player agents, counterfactual attribution, scores, findings, traces. |
+| `src/gameplay/` | Deterministic player agents, counterfactual attribution, scores, findings, traces. |
 | `src/art/*` | Deterministic procedural sprite rendering and review. |
 | `src/main.rs` | CLI adapter. |
 
@@ -243,7 +243,7 @@ Important invariant groups include registry references, derived indexes, ownersh
 | Cross-record transaction | Owning system or `src/systems/transactions.rs` | Typed errors, atomicity, stale-token tests. |
 | Read-only output | `src/projection.rs` | Projection/rendering tests. |
 | Save format | `src/persistence.rs` | Current schema, release validation, round trip, status. |
-| Gameplay evaluation | `src/gameplay.rs` | Report schema, tests, `GAMEPLAY_HARNESS.md`. |
+| Gameplay evaluation | `src/gameplay/` | Report schema, tests, `GAMEPLAY_HARNESS.md`. |
 | CLI syntax | `src/main.rs` | CLI smoke, README workflow when relevant. |
 | Art primitive/subject/check | `src/art/*` | Determinism, review coverage, schema/status when serialized output changes. |
 

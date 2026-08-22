@@ -56,7 +56,7 @@ def capture(pattern: str, text: str, source: str) -> str:
 def check_status_contracts() -> None:
     cargo = read("Cargo.toml")
     state = read("src/core/state.rs")
-    gameplay = read("src/gameplay.rs")
+    gameplay = read("src/gameplay/types.rs") + read("src/gameplay/mod.rs")
     art_harness = read("src/art/harness.rs")
     read("scripts/check_gameplay.py")
     status = read("STATUS.md")
@@ -70,7 +70,7 @@ def check_status_contracts() -> None:
     report_schema = capture(
         r"GAMEPLAY_REPORT_SCHEMA_VERSION:\s*u16\s*=\s*(\d+)",
         gameplay,
-        "src/gameplay.rs",
+        "src/gameplay/",
     )
     art_report_schema = capture(
         r"ART_REVIEW_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)",

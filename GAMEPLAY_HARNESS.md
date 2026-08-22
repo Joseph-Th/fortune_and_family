@@ -6,7 +6,7 @@ It complements behavioral tests and human playtesting. It does not replace eithe
 
 ## Source of truth
 
-- Implementation and report schema: `src/gameplay.rs`
+- Implementation and report schema: `src/gameplay/`
 - Behavioral coverage: `src/gameplay_tests.rs`
 - Test tiers: `TESTING.md`
 - Product goals evaluated by the harness: `DESIGN.md`
@@ -69,7 +69,7 @@ The CLI prints a concise progress line to stderr on every run: elapsed time, cam
 
 ## Configuration
 
-`GameplayHarnessConfig::default` in `src/gameplay.rs` is authoritative.
+`GameplayHarnessConfig::default` in `src/gameplay/` is authoritative.
 
 | Option | Meaning | Default |
 |---|---|---|
@@ -155,7 +155,7 @@ Decision cycles are grouped into product phases:
 | Dynastic governance | The dynasty commits a city-shaping law, public work, or active office directive |
 | Succession and legacy | The first succession completes |
 
-Phase diagnostics evaluate actionability, quiet/blocked time, viable choice breadth, consequence differentiation, strategic diversity, civic endpoints, recovery pressure, and post-succession continuity. Exact thresholds belong in `src/gameplay.rs` and their tests.
+Phase diagnostics evaluate actionability, quiet/blocked time, viable choice breadth, consequence differentiation, strategic diversity, civic endpoints, recovery pressure, and post-succession continuity. Exact thresholds belong in `src/gameplay/` and their tests.
 
 ## Counterfactual attribution
 
@@ -246,7 +246,7 @@ than scheduled maintenance while preserving the game's own commission cooldown.
 
 ## Report contract
 
-`GAMEPLAY_REPORT_SCHEMA_VERSION` in `src/gameplay.rs` versions the structured report.
+`GAMEPLAY_REPORT_SCHEMA_VERSION` in `src/gameplay/` versions the structured report.
 
 Reports contain:
 
