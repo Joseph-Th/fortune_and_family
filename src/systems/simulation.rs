@@ -870,6 +870,17 @@ fn planned_tool_market_update(
     )))
 }
 
+/// A business's sellable stock after policy and contract reserves, plus the
+/// market context that bounds how much of it can be placed today.
+struct BusinessSaleCandidate {
+    good_id: GoodId,
+    surplus: Quantity,
+    capacity: Quantity,
+    commerce_efficiency: i64,
+    owner_reputation: i64,
+    price: Money,
+}
+
 fn decide_business_sales(
     registry: &Registry,
     state: &AppState,
@@ -897,102 +908,142 @@ fn decide_business_sales(
         ) {
             continue;
         }
-        let recipe = registry
-            .get_recipe(business.recipe_id())
-            .expect("business recipe reference must be valid");
-        let manager = state
-            .characters
-            .get(business.manager_id())
-            .expect("business manager reference must be valid");
-        let good_id = recipe.output_good_id();
-        let inventory = business.inventory_quantity(good_id);
-        let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
-            .saturating_mul(i64::from(business.policy.target_output_days));
-        let policy_reserve = recipe
-            .output_quantity()
-            .saturating_mul_ratio(reserve_batches, 1);
-        let contract_reserve = state
-            .contracts
-            .values()
-            .filter(|contract| {
-                contract.status == crate::core::ContractStatus::Active
-                    && contract.seller_business_id == business.id()
-                    && contract.good_id == good_id
-            })
-            .fold(Quantity::ZERO, |total, contract| {
-                total.saturating_add(contract.quantity_per_week)
-            });
-        let policy_reserve_basis_points = match business.status() {
-            BusinessStatus::Active
-                if business.cash() < recipe.daily_operating_cost().saturating_mul(2) =>
-            {
-                5_000
-            }
-            BusinessStatus::Active => 10_000,
-            // Distressed firms liquidate freely; Closed and Insolvent are
-            // unreachable because the loop guard above filters them.
-            BusinessStatus::Distressed | BusinessStatus::Insolvent | BusinessStatus::Closed => 0,
+        let candidate = plan_sale_candidate(registry, state, business)?;
+        let Some(candidate) = candidate else {
+            continue;
         };
-        let adjusted_policy_reserve =
-            policy_reserve.saturating_mul_ratio(policy_reserve_basis_points, 10_000);
-        let reserve = adjusted_policy_reserve.saturating_add(contract_reserve);
-        let surplus = inventory.saturating_sub(reserve).max(Quantity::ZERO);
-        let capacity = market_capacity
-            .get(&good_id)
-            .copied()
-            .unwrap_or(Quantity::ZERO)
-            .max(Quantity::ZERO);
-        let quote = state
-            .market
-            .quotes
-            .get(&good_id)
-            .ok_or(SimulationError::MarketQuoteMissing { good_id })?;
-        let commerce_efficiency = 9_000_i64
-            .saturating_add(i64::from(manager.capabilities.commerce).saturating_mul(10))
-            .min(10_000);
-        // Skill converts stocked surplus into placed sales: a struggling
-        // sales operation moves less of what it has even when the market has
-        // room. Renown then governs access to genuinely scarce capacity:
-        // households and merchants seek out reputable houses first, so an
-        // established quality reputation claims up to ~17% more of a capped
-        // market while an obscure or disgraced house claims less. Neither
-        // factor can ever place more than the business actually stocked.
-        let owner_reputation = state
-            .dynasties
-            .get(&business.owner_dynasty_id())
-            .map(|dynasty| i64::from(dynasty.resources.reputation_quality_basis_points))
-            .unwrap_or(5_000);
-        let renown_basis_points = (10_000 + (owner_reputation - 5_000) / 3).max(1);
-        let skilled_claim = surplus.saturating_mul_ratio(commerce_efficiency, 10_000);
-        let claimed_capacity = capacity.saturating_mul_ratio(renown_basis_points, 10_000);
-        let quantity = skilled_claim.min(claimed_capacity);
+        let quantity = sale_quantity(&candidate);
         if quantity.is_zero() {
             continue;
         }
         let revenue = validate_business_sale_revenue(
             business.id(),
             business.cash(),
-            good_id,
+            candidate.good_id,
             quantity,
-            quote.price,
+            candidate.price,
         )?;
         // Remaining shared capacity must stay nonnegative: renown lets a
         // renowned house claim up to ~17% more than the raw remainder, so
         // the leftover is floored at zero instead of relying on every
         // multiplier staying below one.
         market_capacity.insert(
-            good_id,
-            capacity.saturating_sub(quantity).max(Quantity::ZERO),
+            candidate.good_id,
+            candidate
+                .capacity
+                .saturating_sub(quantity)
+                .max(Quantity::ZERO),
         );
         lines.push(BusinessSaleLine {
             business_id: business.id(),
-            good_id,
+            good_id: candidate.good_id,
             quantity,
             revenue,
         });
     }
 
     Ok(BusinessSalePlan { lines })
+}
+
+/// Reserves, skill, and renown for one business's sales decision, or `None`
+/// when the business has no sellable output in its current state.
+fn plan_sale_candidate(
+    registry: &Registry,
+    state: &AppState,
+    business: &crate::core::Business,
+) -> Result<Option<BusinessSaleCandidate>, SimulationError> {
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("business recipe reference must be valid");
+    let manager = state
+        .characters
+        .get(business.manager_id())
+        .expect("business manager reference must be valid");
+    let good_id = recipe.output_good_id();
+    let inventory = business.inventory_quantity(good_id);
+    let reserve_batches = i64::from(business.operations.capacity_batches_per_day)
+        .saturating_mul(i64::from(business.policy.target_output_days));
+    let policy_reserve = recipe
+        .output_quantity()
+        .saturating_mul_ratio(reserve_batches, 1);
+    let contract_reserve = state
+        .contracts
+        .values()
+        .filter(|contract| {
+            contract.status == crate::core::ContractStatus::Active
+                && contract.seller_business_id == business.id()
+                && contract.good_id == good_id
+        })
+        .fold(Quantity::ZERO, |total, contract| {
+            total.saturating_add(contract.quantity_per_week)
+        });
+    let policy_reserve_basis_points = match business.status() {
+        BusinessStatus::Active
+            if business.cash() < recipe.daily_operating_cost().saturating_mul(2) =>
+        {
+            5_000
+        }
+        BusinessStatus::Active => 10_000,
+        // Distressed firms liquidate freely; Closed and Insolvent are
+        // unreachable because the caller filters them out first.
+        BusinessStatus::Distressed | BusinessStatus::Insolvent | BusinessStatus::Closed => 0,
+    };
+    let adjusted_policy_reserve =
+        policy_reserve.saturating_mul_ratio(policy_reserve_basis_points, 10_000);
+    let reserve = adjusted_policy_reserve.saturating_add(contract_reserve);
+    let surplus = inventory.saturating_sub(reserve).max(Quantity::ZERO);
+    if surplus.is_zero() {
+        return Ok(None);
+    }
+    let capacity = state
+        .market
+        .quotes
+        .get(&good_id)
+        .map_or(Quantity::ZERO, |quote| {
+            quote
+                .target_stock
+                .saturating_mul_ratio(3, 2)
+                .saturating_sub(quote.stock)
+                .max(Quantity::ZERO)
+        });
+    let quote = state
+        .market
+        .quotes
+        .get(&good_id)
+        .ok_or(SimulationError::MarketQuoteMissing { good_id })?;
+    Ok(Some(BusinessSaleCandidate {
+        good_id,
+        surplus,
+        capacity,
+        commerce_efficiency: 9_000_i64
+            .saturating_add(i64::from(manager.capabilities.commerce).saturating_mul(10))
+            .min(10_000),
+        owner_reputation: state
+            .dynasties
+            .get(&business.owner_dynasty_id())
+            .map_or(5_000, |dynasty| {
+                i64::from(dynasty.resources.reputation_quality_basis_points)
+            }),
+        price: quote.price,
+    }))
+}
+
+/// Skill converts stocked surplus into placed sales: a struggling sales
+/// operation moves less of what it has even when the market has room. Renown
+/// then governs access to genuinely scarce capacity: households and merchants
+/// seek out reputable houses first, so an established quality reputation
+/// claims up to ~17% more of a capped market while an obscure or disgraced
+/// house claims less. Neither factor can ever place more than the business
+/// actually stocked.
+fn sale_quantity(candidate: &BusinessSaleCandidate) -> Quantity {
+    let renown_basis_points = (10_000 + (candidate.owner_reputation - 5_000) / 3).max(1);
+    let skilled_claim = candidate
+        .surplus
+        .saturating_mul_ratio(candidate.commerce_efficiency, 10_000);
+    let claimed_capacity = candidate
+        .capacity
+        .saturating_mul_ratio(renown_basis_points, 10_000);
+    skilled_claim.min(claimed_capacity)
 }
 
 fn validate_business_sale_revenue(
@@ -1755,10 +1806,10 @@ fn recently_shocked_goods(state: &AppState) -> BTreeSet<String> {
         if entry.day < cutoff_day {
             break;
         }
-        if entry.kind == ChronicleKind::PriceShock {
-            if let Some(good_name) = entry.summary.split(" moved by ").next() {
-                goods.insert(good_name.to_owned());
-            }
+        if entry.kind == ChronicleKind::PriceShock
+            && let Some(good_name) = entry.summary.split(" moved by ").next()
+        {
+            goods.insert(good_name.to_owned());
         }
     }
     goods

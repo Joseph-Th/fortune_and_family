@@ -828,15 +828,17 @@ fn dispatch_player_command(
             minimum_cash_reserve,
             maintenance_basis_points,
             quality_target_basis_points,
-        } => apply_business_policy_values(
+        } => apply_business_policy(
             registry,
             state,
             business_id,
-            target_input_days,
-            target_output_days,
-            minimum_cash_reserve,
-            maintenance_basis_points,
-            quality_target_basis_points,
+            BusinessPolicyInput {
+                target_input_days,
+                target_output_days,
+                minimum_cash_reserve,
+                maintenance_basis_points,
+                quality_target_basis_points,
+            },
         ),
         PlayerCommand::SetBusinessWages {
             business_id,
@@ -1212,30 +1214,6 @@ fn apply_business_investment(
             "Invested {amount} in business {business_id} and restored {rehabilitation} basis points of condition."
         ),
     })
-}
-
-fn apply_business_policy_values(
-    registry: &Registry,
-    state: &mut AppState,
-    business_id: BusinessId,
-    target_input_days: u16,
-    target_output_days: u16,
-    minimum_cash_reserve: Money,
-    maintenance_basis_points: u16,
-    quality_target_basis_points: u16,
-) -> Result<CommandOutcome, CommandError> {
-    apply_business_policy(
-        registry,
-        state,
-        business_id,
-        BusinessPolicyInput {
-            target_input_days,
-            target_output_days,
-            minimum_cash_reserve,
-            maintenance_basis_points,
-            quality_target_basis_points,
-        },
-    )
 }
 
 fn apply_business_policy(

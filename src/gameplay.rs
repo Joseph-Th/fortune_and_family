@@ -7576,63 +7576,7 @@ fn generate_business_acquisition_candidates(
         if player_treasury < required.saturating_add(expansion_reserve) {
             continue;
         }
-        // A turnaround thesis: recapitalization fixes condition and working
-        // capital, so only acquisitions whose output already sells above the
-        // firm's own break-even are sound. A business whose market price sits
-        // below its sustainable unit cost keeps bleeding no matter how much
-        // capital it is handed, and buying one converts a profitable estate
-        // into a consolidated loss centre.
-        let recipe = registry
-            .get_recipe(business.recipe_id())
-            .expect("acquisition target recipe must exist");
-        let Some(quote_price) = state.market.quotes.get(&recipe.output_good_id()) else {
-            continue;
-        };
-        let weekly_labor_copper = state
-            .employment
-            .values()
-            .filter(|agreement| {
-                agreement.business_id == business.id()
-                    && matches!(
-                        agreement.status,
-                        EmploymentStatus::Active | EmploymentStatus::Disputed
-                    )
-            })
-            .fold(0_i128, |total, agreement| {
-                total + i128::from(agreement.weekly_wage.copper())
-            });
-        let daily_labor = Money::from_copper(
-            i64::try_from(
-                ceil_div_nonnegative_wide(weekly_labor_copper, 7).min(i128::from(i64::MAX)),
-            )
-            .unwrap_or(i64::MAX),
-        );
-        let expected_batches = i64::from(effective_capacity_batches(state, business)).max(1);
-        let overhead_per_batch = daily_labor
-            .saturating_add(maintenance_cost(
-                recipe.daily_operating_cost(),
-                business.policy.maintenance_basis_points,
-            ))
-            .saturating_mul_ratio_ceil_nonnegative(1_000, expected_batches * 1_000);
-        let batch_cost = recipe.inputs().iter().fold(
-            recipe
-                .daily_operating_cost()
-                .saturating_add(overhead_per_batch),
-            |total, input| {
-                let input_price = state
-                    .market
-                    .quotes
-                    .get(&input.good_id())
-                    .expect("recipe input good must have a market quote")
-                    .price;
-                total.saturating_add(cost_for(input.quantity(), input_price))
-            },
-        );
-        let unit_cost = batch_cost.saturating_mul_ratio_ceil_nonnegative(
-            1_000,
-            i64::from(recipe.output_quantity().milliunits()),
-        );
-        if quote_price.price < unit_cost {
+        if !acquisition_has_turnaround_thesis(registry, state, business) {
             continue;
         }
         push_candidate(
@@ -7652,6 +7596,66 @@ fn generate_business_acquisition_candidates(
             persona_bonus.saturating_add(recovery_bonus),
         );
     }
+}
+
+/// A turnaround thesis: recapitalization fixes condition and working capital,
+/// so only acquisitions whose output already sells above the firm's own
+/// break-even are sound. A business whose market price sits below its
+/// sustainable unit cost keeps bleeding no matter how much capital it is
+/// handed, and buying one converts a profitable estate into a consolidated
+/// loss centre.
+fn acquisition_has_turnaround_thesis(
+    registry: &Registry,
+    state: &AppState,
+    business: &crate::core::Business,
+) -> bool {
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("acquisition target recipe must exist");
+    let Some(quote_price) = state.market.quotes.get(&recipe.output_good_id()) else {
+        return false;
+    };
+    let weekly_labor_copper = state
+        .employment
+        .values()
+        .filter(|agreement| {
+            agreement.business_id == business.id()
+                && matches!(
+                    agreement.status,
+                    EmploymentStatus::Active | EmploymentStatus::Disputed
+                )
+        })
+        .fold(0_i128, |total, agreement| {
+            total + i128::from(agreement.weekly_wage.copper())
+        });
+    let daily_labor = Money::from_copper(
+        i64::try_from(ceil_div_nonnegative_wide(weekly_labor_copper, 7).min(i128::from(i64::MAX)))
+            .unwrap_or(i64::MAX),
+    );
+    let expected_batches = i64::from(effective_capacity_batches(state, business)).max(1);
+    let overhead_per_batch = daily_labor
+        .saturating_add(maintenance_cost(
+            recipe.daily_operating_cost(),
+            business.policy.maintenance_basis_points,
+        ))
+        .saturating_mul_ratio_ceil_nonnegative(1_000, expected_batches * 1_000);
+    let batch_cost = recipe.inputs().iter().fold(
+        recipe
+            .daily_operating_cost()
+            .saturating_add(overhead_per_batch),
+        |total, input| {
+            let input_price = state
+                .market
+                .quotes
+                .get(&input.good_id())
+                .expect("recipe input good must have a market quote")
+                .price;
+            total.saturating_add(cost_for(input.quantity(), input_price))
+        },
+    );
+    let unit_cost = batch_cost
+        .saturating_mul_ratio_ceil_nonnegative(1_000, recipe.output_quantity().milliunits());
+    quote_price.price >= unit_cost
 }
 
 fn portfolio_ready_for_acquisition(
@@ -8535,41 +8539,20 @@ fn add_borrow_candidate(
         return;
     };
     let defaulted_loan = latest_defaulted_loan(state, lender.id(), player_id);
-    let ordinary_desired_principal = if defaulted_loan.is_some() {
-        Money::from_copper((lender.treasury().copper() / 12).clamp(1_000, 6_000))
-    } else {
-        Money::from_copper((lender.treasury().copper() / 8).clamp(1_000, 12_000))
-    };
     let legal_shortfall = legal_funding_target.saturating_sub(player.treasury());
-    let desired_principal = ordinary_desired_principal.max(legal_shortfall);
-    let lender_available = lender
-        .treasury()
-        .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
-        .expect("eligible lender must retain the negotiated reserve");
-    let principal = desired_principal.min(lender_available);
-    let repayment_balance =
-        defaulted_loan.map_or(principal, |loan| loan.balance.saturating_add(principal));
-    let amortization_weeks = if defaulted_loan.is_some() {
-        AGENT_LOAN_AMORTIZATION_WEEKS.saturating_mul(2)
-    } else {
-        AGENT_LOAN_AMORTIZATION_WEEKS
-    };
-    let collateral = state.properties.values().find(|property| {
-        property.owner_dynasty_id == Some(player_id) && property.collateral_loan_id.is_none()
-    });
-    let base_bonus: i64 = match persona {
-        GameplayPersona::Opportunist => 520,
-        GameplayPersona::Entrepreneur => 380,
-        GameplayPersona::Steward => 80,
-        GameplayPersona::PowerBroker => 120,
-    };
-    let bonus = base_bonus
-        .saturating_add(if defaulted_loan.is_some() { 1_800 } else { 0 })
-        .saturating_add(if legal_shortfall > Money::ZERO {
-            2_000
-        } else {
-            0
-        });
+    let principal = borrow_principal(lender.treasury(), defaulted_loan.is_some()).max(
+        legal_shortfall.min(
+            lender
+                .treasury()
+                .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+                .unwrap_or(Money::ZERO),
+        ),
+    );
+    let bonus = base_bonus(
+        persona,
+        defaulted_loan.is_some(),
+        legal_shortfall > Money::ZERO,
+    );
     push_candidate(
         candidates,
         GameplayCommandKind::BorrowFunds,
@@ -8578,9 +8561,10 @@ fn add_borrow_candidate(
                 lender_dynasty_id: lender.id(),
                 borrower_dynasty_id: player_id,
                 principal,
-                weekly_payment: repayment_balance.ceil_div_positive(amortization_weeks),
+                weekly_payment: restructure_payment_balance(defaulted_loan, principal)
+                    .ceil_div_positive(borrow_amortization_weeks(defaulted_loan.is_some())),
                 interest_basis_points: if defaulted_loan.is_some() { 1_000 } else { 700 },
-                collateral_property_id: collateral.map(|property| property.id),
+                collateral_property_id: unpledged_player_property(state).map(|p| p.id),
             },
         },
         defaulted_loan.map_or_else(
@@ -8600,6 +8584,51 @@ fn add_borrow_candidate(
         ),
         bonus,
     );
+}
+
+/// Ordinary advances size to the lender's treasury; restructuring an existing
+/// default sizes to cover the old balance plus a fresh operating cushion.
+fn restructure_payment_balance(
+    defaulted_loan: Option<&crate::core::Loan>,
+    principal: Money,
+) -> Money {
+    defaulted_loan.map_or(principal, |loan| loan.balance.saturating_add(principal))
+}
+
+const fn borrow_amortization_weeks(restructuring_default: bool) -> i64 {
+    if restructuring_default {
+        AGENT_LOAN_AMORTIZATION_WEEKS.saturating_mul(2)
+    } else {
+        AGENT_LOAN_AMORTIZATION_WEEKS
+    }
+}
+
+fn base_bonus(persona: GameplayPersona, restructuring: bool, legal_need: bool) -> i64 {
+    let base: i64 = match persona {
+        GameplayPersona::Opportunist => 520,
+        GameplayPersona::Entrepreneur => 380,
+        GameplayPersona::Steward => 80,
+        GameplayPersona::PowerBroker => 120,
+    };
+    base.saturating_add(if restructuring { 1_800 } else { 0 })
+        .saturating_add(if legal_need { 2_000 } else { 0 })
+}
+
+fn unpledged_player_property(state: &AppState) -> Option<&crate::core::Property> {
+    state.properties.values().find(|property| {
+        property.owner_dynasty_id == Some(state.player_dynasty_id)
+            && property.collateral_loan_id.is_none()
+    })
+}
+
+/// Ordinary advances scale to the lender's treasury; a restructuring advance
+/// sizes to a tighter recovery range on top of the defaulted balance.
+fn borrow_principal(lender_treasury: Money, restructuring_default: bool) -> Money {
+    if restructuring_default {
+        Money::from_copper((lender_treasury.copper() / 12).clamp(1_000, 6_000))
+    } else {
+        Money::from_copper((lender_treasury.copper() / 8).clamp(1_000, 12_000))
+    }
 }
 
 fn same_pair_credit_blocks_new_loan(
@@ -12126,54 +12155,50 @@ fn institution_withdrawal_urgency(state: &AppState) -> i64 {
 /// decision traces. Each label pairs the world's proper name with its stable
 /// identifier so a trace stays readable without becoming ambiguous.
 fn character_label(state: &AppState, character_id: CharacterId) -> String {
-    state
-        .characters
-        .get(character_id)
-        .map(|character| format!("{} ({character_id})", character.name()))
-        .unwrap_or_else(|| format!("character {character_id}"))
+    state.characters.get(character_id).map_or_else(
+        || format!("character {character_id}"),
+        |character| format!("{} ({character_id})", character.name()),
+    )
 }
 
 fn dynasty_label(state: &AppState, dynasty_id: DynastyId) -> String {
-    state
-        .dynasties
-        .get(&dynasty_id)
-        .map(|dynasty| {
+    state.dynasties.get(&dynasty_id).map_or_else(
+        || format!("dynasty {dynasty_id}"),
+        |dynasty| {
             if dynasty_id == state.player_dynasty_id {
                 format!("the player house ({dynasty_id})")
             } else {
                 format!("House {} ({dynasty_id})", dynasty.name())
             }
-        })
-        .unwrap_or_else(|| format!("dynasty {dynasty_id}"))
+        },
+    )
 }
 
 fn business_label(state: &AppState, business_id: BusinessId) -> String {
-    state
-        .businesses
-        .get(business_id)
-        .map(|business| format!("{} ({business_id})", business.name()))
-        .unwrap_or_else(|| format!("business {business_id}"))
+    state.businesses.get(business_id).map_or_else(
+        || format!("business {business_id}"),
+        |business| format!("{} ({business_id})", business.name()),
+    )
 }
 
 fn institution_label(registry: &Registry, institution_id: InstitutionId) -> String {
-    registry
-        .get_institution(institution_id)
-        .map(|institution| format!("{} ({institution_id})", institution.name()))
-        .unwrap_or_else(|| format!("institution {institution_id}"))
+    registry.get_institution(institution_id).map_or_else(
+        || format!("institution {institution_id}"),
+        |institution| format!("{} ({institution_id})", institution.name()),
+    )
 }
 
 fn district_label(registry: &Registry, district_id: DistrictId) -> String {
-    registry
-        .get_district(district_id)
-        .map(|district| format!("{} ({district_id})", district.name()))
-        .unwrap_or_else(|| format!("district {district_id}"))
+    registry.get_district(district_id).map_or_else(
+        || format!("district {district_id}"),
+        |district| format!("{} ({district_id})", district.name()),
+    )
 }
 
 fn good_label(registry: &Registry, good_id: GoodId) -> String {
     registry
         .get_good(good_id)
-        .map(|good| good.name().to_owned())
-        .unwrap_or_else(|| format!("good {good_id}"))
+        .map_or_else(|| format!("good {good_id}"), |good| good.name().to_owned())
 }
 
 fn push_candidate(

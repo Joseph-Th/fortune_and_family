@@ -7703,7 +7703,8 @@ mod ai {
             "bankrupt AI dynasties must not gain legitimacy for free"
         );
 
-        advance_ai_office_objective(&mut state, dynasty_id);
+        advance_ai_office_objective(&mut state, dynasty_id)
+            .expect("AI office objective must succeed");
         assert_eq!(
             state
                 .dynasties

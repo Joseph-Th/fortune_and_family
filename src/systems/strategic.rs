@@ -2766,7 +2766,7 @@ pub(crate) fn run_daily_strategic_systems(
 fn grant_maturing_institution_support(state: &mut AppState) -> Result<(), SimulationError> {
     let day = state.clock.day();
     let mut matured: Vec<(InstitutionId, CharacterId)> = Vec::new();
-    for record in state.audit_log.iter() {
+    for record in &state.audit_log {
         if record.kind() != AuditKind::InstitutionPatronage {
             continue;
         }
@@ -7559,8 +7559,9 @@ fn advance_ai_office_objective(
     let spend = state
         .dynasties
         .get(&dynasty_id)
-        .map(|dynasty| Money::from_copper(500).min(dynasty.resources.treasury))
-        .unwrap_or(Money::ZERO);
+        .map_or(Money::ZERO, |dynasty| {
+            Money::from_copper(500).min(dynasty.resources.treasury)
+        });
     if spend > Money::ZERO {
         // Campaigning buys food, favors, and visibility through the city's
         // market sector; the pooled clearing account is the counterparty.
@@ -7696,15 +7697,21 @@ fn advance_ai_legitimacy_objective(
     state: &mut AppState,
     dynasty_id: DynastyId,
 ) -> Result<ObjectiveProgress, SimulationError> {
-    let dynasty = state
+    let legitimacy_before = state
         .dynasties
-        .get_mut(&dynasty_id)
-        .expect("AI dynasty must exist");
-    if dynasty.resources.legitimacy_basis_points >= 7_500 {
+        .get(&dynasty_id)
+        .expect("AI dynasty must exist")
+        .resources
+        .legitimacy_basis_points;
+    if legitimacy_before >= 7_500 {
         return Ok(ObjectiveProgress::Achieved);
     }
-    let spend = Money::from_copper(750).min(dynasty.resources.treasury);
-    drop(dynasty);
+    let spend = state
+        .dynasties
+        .get(&dynasty_id)
+        .map_or(Money::ZERO, |dynasty| {
+            Money::from_copper(750).min(dynasty.resources.treasury)
+        });
     if spend > Money::ZERO {
         // Patronage and charity flow through the city's market sector; the
         // pooled clearing account is the credited counterparty for the copper.
@@ -7714,9 +7721,11 @@ fn advance_ai_legitimacy_objective(
         .dynasties
         .get_mut(&dynasty_id)
         .expect("AI dynasty must exist");
-    dynasty.resources.treasury = dynasty.resources.treasury.checked_sub(spend).expect(
-        "bounded AI legitimacy spending must not exceed the treasury it was measured against",
-    );
+    if spend > Money::ZERO {
+        dynasty.resources.treasury = dynasty.resources.treasury.checked_sub(spend).expect(
+            "bounded AI legitimacy spending must not exceed the treasury it was measured against",
+        );
+    }
     let legitimacy_gain = u16::try_from(spend.saturating_mul_ratio(120, 750).copper())
         .unwrap_or(120)
         .min(120);

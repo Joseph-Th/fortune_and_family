@@ -1503,11 +1503,7 @@ fn append_operational_attention(projection: &CampaignProjection, cards: &mut Vec
         cards.push(render_attention_card(
             "urgent",
             "Business",
-            &format!(
-                "{} is {}",
-                business.name,
-                business_status_label(business.status)
-            ),
+            &format!("{} is {}", business.name, business.status.label()),
             &format!(
                 "Business #{} has {} cash and {:.1}% condition.",
                 business.id,
@@ -1536,7 +1532,7 @@ fn append_finance_attention(projection: &CampaignProjection, cards: &mut Vec<Str
         cards.push(render_attention_card(
             "urgent",
             "Private finance",
-            &format!("Loan #{} is {}", loan.id, loan_status_label(loan.status)),
+            &format!("Loan #{} is {}", loan.id, loan.status.label()),
             &format!(
                 "{} remains outstanding with {} missed payments.{}",
                 loan.balance, loan.missed_payments, due
@@ -1589,7 +1585,7 @@ fn append_legal_and_crisis_attention(projection: &CampaignProjection, cards: &mu
         cards.push(render_attention_card(
             "warning",
             "Crisis",
-            &format!("{} {district}", humanize_debug(&crisis.kind)),
+            &format!("{} {district}", crisis.kind.label()),
             &format!(
                 "Crisis #{} is {} at {:.1}% severity. {}",
                 crisis.id,
@@ -1744,7 +1740,7 @@ fn render_loan_rows(loans: &[LoanProjection], player_id: DynastyId) -> String {
             loan.principal,
             loan.weekly_payment,
             f64::from(loan.interest_basis_points) / 100.0,
-            loan_status_label(loan.status),
+            loan.status.label(),
         )
         .expect("writing HTML into a String cannot fail");
     }
@@ -1914,7 +1910,7 @@ fn render_crisis_cards(crises: &[CrisisProjection]) -> String {
             cards,
             "<article><span class=\"badge warning\">{}</span><h3>{}</h3><p>{:.1}% severity · {}</p><p>{}</p><p class=\"action\">Crisis #{}</p></article>",
             crisis_status_label(crisis.status),
-            escape_html(&humanize_debug(&crisis.kind)),
+            escape_html(crisis.kind.label()),
             f64::from(crisis.severity_basis_points) / 100.0,
             escape_html(district),
             escape_html(&crisis.cause),
@@ -1935,7 +1931,7 @@ fn render_information_cards(reports: &[InformationProjection]) -> String {
         write!(
             cards,
             "<article><span class=\"badge info\">{}</span><h3>{}</h3><p>{}</p><p><small>Report #{} · {} · created day {} · expires day {}</small></p><p class=\"action\">Reference report #{} for intelligence actions.</p></article>",
-            information_confidence_label(report.confidence),
+            report.confidence.label(),
             escape_html(&report.subject),
             escape_html(&report.summary),
             report.id,
@@ -1986,7 +1982,7 @@ fn render_acquisition_rows(businesses: &[BusinessProjection]) -> String {
             escape_html(&business.district),
             escape_html(&business.recipe),
             escape_html(&business.owner),
-            business_status_label(business.status),
+            business.status.label(),
             f64::from(business.condition_basis_points) / 100.0,
             quote.purchase_price,
             quote.minimum_recapitalization,
@@ -2061,7 +2057,7 @@ fn render_business_rows(businesses: &[BusinessProjection]) -> String {
             business.id,
             escape_html(&business.district),
             escape_html(&business.recipe),
-            business_status_label(business.status),
+            business.status.label(),
             business.cash,
             f64::from(business.condition_basis_points) / 100.0,
             f64::from(business.quality_basis_points) / 100.0,
@@ -2243,16 +2239,6 @@ const fn employment_status_label(status: EmploymentStatus) -> &'static str {
     }
 }
 
-const fn loan_status_label(status: LoanStatus) -> &'static str {
-    match status {
-        LoanStatus::Current => "Current",
-        LoanStatus::Delinquent => "Delinquent",
-        LoanStatus::Defaulted => "Defaulted",
-        LoanStatus::Repaid => "Repaid",
-        LoanStatus::Restructured => "Restructured",
-    }
-}
-
 const fn public_work_status_label(status: PublicWorkStatus) -> &'static str {
     match status {
         PublicWorkStatus::Planned => "Planned",
@@ -2278,14 +2264,6 @@ const fn crisis_status_label(status: CrisisStatus) -> &'static str {
         CrisisStatus::Active => "Active",
         CrisisStatus::Resolved => "Resolved",
         CrisisStatus::Escalated => "Escalated",
-    }
-}
-
-const fn information_confidence_label(confidence: InformationConfidence) -> &'static str {
-    match confidence {
-        InformationConfidence::Rumored => "Rumored",
-        InformationConfidence::Probable => "Probable",
-        InformationConfidence::Confirmed => "Confirmed",
     }
 }
 
@@ -2317,15 +2295,6 @@ fn humanize_identifier(value: &str) -> String {
         previous_was_lower_or_digit = character.is_ascii_lowercase() || character.is_ascii_digit();
     }
     output
-}
-
-const fn business_status_label(status: BusinessStatus) -> &'static str {
-    match status {
-        BusinessStatus::Active => "Active",
-        BusinessStatus::Distressed => "Distressed",
-        BusinessStatus::Insolvent => "Insolvent",
-        BusinessStatus::Closed => "Closed",
-    }
 }
 
 const fn civic_debt_status_label(status: CivicDebtStatus) -> &'static str {

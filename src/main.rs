@@ -775,7 +775,7 @@ fn print_cli_attention(projection: &civic_dynasty::CampaignProjection) {
             "  ! business #{} {} is {} with {} cash",
             business.id,
             business.name,
-            cli_business_status_label(business.status),
+            business.status.label(),
             business.cash
         );
         found = true;
@@ -784,7 +784,7 @@ fn print_cli_attention(projection: &civic_dynasty::CampaignProjection) {
         println!(
             "  ! loan #{} is {}: {} outstanding, {} missed payments",
             loan.id,
-            cli_loan_status_label(loan.status),
+            loan.status.label(),
             loan.balance,
             loan.missed_payments
         );
@@ -808,47 +808,13 @@ fn print_cli_attention(projection: &civic_dynasty::CampaignProjection) {
         println!(
             "  ! crisis #{} {}: {:.1}% severity",
             crisis.id,
-            cli_crisis_kind_label(crisis.kind),
+            crisis.kind.label(),
             f64::from(crisis.severity_basis_points) / 100.0
         );
         found = true;
     }
     if !found {
         println!("  none flagged by current campaign state");
-    }
-}
-
-const fn cli_business_status_label(status: civic_dynasty::core::BusinessStatus) -> &'static str {
-    use civic_dynasty::core::BusinessStatus;
-    match status {
-        BusinessStatus::Active => "active",
-        BusinessStatus::Distressed => "distressed",
-        BusinessStatus::Insolvent => "insolvent",
-        BusinessStatus::Closed => "closed",
-    }
-}
-
-const fn cli_loan_status_label(status: civic_dynasty::core::LoanStatus) -> &'static str {
-    use civic_dynasty::core::LoanStatus;
-    match status {
-        LoanStatus::Current => "current",
-        LoanStatus::Delinquent => "delinquent",
-        LoanStatus::Defaulted => "defaulted",
-        LoanStatus::Repaid => "repaid",
-        LoanStatus::Restructured => "restructured",
-    }
-}
-
-const fn cli_crisis_kind_label(kind: civic_dynasty::core::CrisisKind) -> &'static str {
-    use civic_dynasty::core::CrisisKind;
-    match kind {
-        CrisisKind::GrainShortage => "grain shortage",
-        CrisisKind::BankingPanic => "banking panic",
-        CrisisKind::UrbanFire => "urban fire",
-        CrisisKind::GuildRevolt => "guild revolt",
-        CrisisKind::NobleDemand => "noble demand",
-        CrisisKind::Epidemic => "epidemic",
-        CrisisKind::TradeDisruption => "trade disruption",
     }
 }
 
@@ -886,17 +852,6 @@ fn print_cli_market(projection: &civic_dynasty::CampaignProjection) {
     }
 }
 
-const fn cli_information_confidence_label(
-    confidence: civic_dynasty::core::InformationConfidence,
-) -> &'static str {
-    use civic_dynasty::core::InformationConfidence;
-    match confidence {
-        InformationConfidence::Rumored => "rumored",
-        InformationConfidence::Probable => "probable",
-        InformationConfidence::Confirmed => "confirmed",
-    }
-}
-
 fn print_cli_intelligence(projection: &civic_dynasty::CampaignProjection) {
     println!("Current intelligence:");
     let mut reports = projection.information.iter().rev().take(4).peekable();
@@ -908,7 +863,7 @@ fn print_cli_intelligence(projection: &civic_dynasty::CampaignProjection) {
         println!(
             "  #{} [{}] {}: {} (expires day {})",
             report.id,
-            cli_information_confidence_label(report.confidence),
+            report.confidence.label(),
             report.subject,
             report.summary,
             report.expires_day

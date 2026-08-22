@@ -661,10 +661,6 @@ impl AppState {
         self.player_dynasty_id
     }
 
-    pub fn dynasties(&self) -> impl Iterator<Item = &Dynasty> {
-        self.dynasties.values()
-    }
-
     #[must_use]
     pub fn get_dynasty(&self, id: DynastyId) -> Option<&Dynasty> {
         self.dynasties.get(&id)
@@ -690,51 +686,9 @@ impl AppState {
         &self.market
     }
 
-    pub fn institutions(&self) -> impl Iterator<Item = &InstitutionRuntime> {
-        self.institutions.values()
-    }
-
-    pub fn contracts(&self) -> impl Iterator<Item = &SupplyContract> {
-        self.contracts.values()
-    }
-
-    pub fn loans(&self) -> impl Iterator<Item = &Loan> {
-        self.loans.values()
-    }
-
-    pub fn civic_debts(&self) -> impl Iterator<Item = &CivicDebt> {
-        self.civic_debts.values()
-    }
-
-    pub fn properties(&self) -> impl Iterator<Item = &Property> {
-        self.properties.values()
-    }
-
-    pub fn employment(&self) -> impl Iterator<Item = &EmploymentAgreement> {
-        self.employment.values()
-    }
-
-    pub fn laws(&self) -> impl Iterator<Item = &EnactedLaw> {
-        self.laws.values()
-    }
-
-    pub fn crises(&self) -> impl Iterator<Item = &Crisis> {
-        self.crises.values()
-    }
-
-    #[must_use]
-    pub fn outbox(&self) -> &[OutboxMessage] {
-        &self.outbox
-    }
-
     #[must_use]
     pub fn chronicle(&self) -> &[ChronicleEntry] {
         &self.chronicle
-    }
-
-    #[must_use]
-    pub fn audit_log(&self) -> &[AuditRecord] {
-        &self.audit_log
     }
 
     pub(crate) fn validate_next_ids(&self) -> Result<(), String> {

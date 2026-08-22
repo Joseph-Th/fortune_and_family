@@ -101,6 +101,19 @@ pub enum BusinessStatus {
     Closed,
 }
 
+impl BusinessStatus {
+    /// Human-readable label shared by every read model.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Distressed => "Distressed",
+            Self::Insolvent => "Insolvent",
+            Self::Closed => "Closed",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SocialClass {
     Laboring,

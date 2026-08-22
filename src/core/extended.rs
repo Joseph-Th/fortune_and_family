@@ -83,6 +83,18 @@ pub enum LoanStatus {
 }
 
 impl LoanStatus {
+    /// Human-readable label shared by every read model.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Current => "Current",
+            Self::Delinquent => "Delinquent",
+            Self::Defaulted => "Defaulted",
+            Self::Repaid => "Repaid",
+            Self::Restructured => "Restructured",
+        }
+    }
+
     /// Returns whether the loan still participates in scheduled repayment.
     #[must_use]
     pub const fn is_repayment_active(self) -> bool {
@@ -488,6 +500,18 @@ pub enum InformationConfidence {
     Confirmed,
 }
 
+impl InformationConfidence {
+    /// Human-readable label shared by every read model.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rumored => "Rumored",
+            Self::Probable => "Probable",
+            Self::Confirmed => "Confirmed",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InformationTarget {
     Market { good_id: GoodId },
@@ -682,6 +706,22 @@ pub enum CrisisKind {
     NobleDemand,
     Epidemic,
     TradeDisruption,
+}
+
+impl CrisisKind {
+    /// Human-readable label shared by every read model.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::GrainShortage => "Grain shortage",
+            Self::BankingPanic => "Banking panic",
+            Self::UrbanFire => "Urban fire",
+            Self::GuildRevolt => "Guild revolt",
+            Self::NobleDemand => "Noble demand",
+            Self::Epidemic => "Epidemic",
+            Self::TradeDisruption => "Trade disruption",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
