@@ -1056,6 +1056,11 @@ fn apply_business_sales(
                 )?,
             )
         };
+        // Sales revenue is paid out of the pooled market sector and may drive
+        // it into a deliberate deficit: households replenish the pool with
+        // their own purchases over the following days, so a negative balance
+        // is short-term consumer credit, not an accounting failure. Only
+        // type-range overflow is an error here.
         let clearing_before = state.market.clearing_account;
         let clearing_change = Money::from_copper(-revenue.copper());
         let resulting_clearing = clearing_before.checked_sub(revenue).ok_or(
@@ -2038,17 +2043,40 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
                 incoming: *paid,
             })?;
     }
-    debit_market_clearing_account(state, total)?;
+    // External regional demand pays what the pooled market sector holds this
+    // week, clamped like vacancy income: a drained clearing account is a
+    // demand slump, not a reason to wedge the whole simulation day.
+    let paid_out = total.min(state.market.clearing_account.max(Money::ZERO));
+    debit_market_clearing_account(state, paid_out)?;
 
-    for (household_id, paid) in payments {
-        let household = state
-            .households
-            .get_mut(household_id)
-            .expect("weekly income household must exist");
-        household.cash = household
-            .cash
-            .checked_add(paid)
-            .expect("bounded weekly income must fit household cash");
+    if paid_out == total {
+        for (household_id, paid) in payments {
+            let household = state
+                .households
+                .get_mut(household_id)
+                .expect("weekly income household must exist");
+            household.cash = household
+                .cash
+                .checked_add(paid)
+                .expect("bounded weekly income must fit household cash");
+        }
+    } else {
+        // Pro-rate the shortfall deterministically in stable household order.
+        let scale = paid_out.copper().saturating_mul(10_000) / total.copper();
+        for (household_id, paid) in payments {
+            let share = paid.saturating_mul_ratio(scale, 10_000);
+            if share <= Money::ZERO {
+                continue;
+            }
+            let household = state
+                .households
+                .get_mut(household_id)
+                .expect("weekly income household must exist");
+            household.cash = household
+                .cash
+                .checked_add(share)
+                .expect("clamped weekly income must fit household cash");
+        }
     }
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),

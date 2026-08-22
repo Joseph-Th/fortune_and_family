@@ -518,6 +518,7 @@ fn insert_business(state: &mut AppState, registry: &Registry, seed: BusinessSeed
         },
         inventory,
         policy: BusinessPolicy::default(),
+        premises_property_id: None,
     });
 
     let dynasty = state

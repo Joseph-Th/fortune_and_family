@@ -4360,7 +4360,7 @@ fn apply_crisis_exploitation(
         });
     }
     let desired_gain = crisis_relief_cost(severity);
-    let gain = desired_gain.min(state.market.clearing_account);
+    let gain = desired_gain.min(state.market.clearing_account.max(Money::ZERO));
     if gain <= Money::ZERO {
         return Err(CommandError::MarketExtractionUnavailable {
             available: state.market.clearing_account,

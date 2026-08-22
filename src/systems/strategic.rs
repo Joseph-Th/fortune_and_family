@@ -2364,6 +2364,13 @@ fn initialize_properties(registry: &Registry, state: &mut AppState) {
                 collateral_loan_id: None,
             },
         );
+        // The premises back-pointer lets a firm evicted during insolvency
+        // re-occupy its purpose-built workshop once it trades again.
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("seeded business must exist")
+            .premises_property_id = Some(property_id);
     }
     for dynasty in state.dynasties.values() {
         let district_id = state
@@ -2927,6 +2934,7 @@ fn apply_crisis_daily_effects(
 }
 
 fn apply_banking_panic_losses(state: &mut AppState, severity: u16) -> Result<(), SimulationError> {
+    let mut total_loss = Money::ZERO;
     for business in state.businesses.iter_mut() {
         let loss = business
             .finance
@@ -2938,19 +2946,21 @@ fn apply_banking_panic_losses(state: &mut AppState, severity: u16) -> Result<(),
                 .cash
                 .checked_sub(loss)
                 .expect("banking-panic loss must not exceed business cash");
-            let resulting_lifetime_costs =
-                business.finance.lifetime_costs.checked_add(loss).ok_or(
-                    SimulationError::BusinessLifetimeCostsOverflow {
-                        business_id: business.id(),
-                        current: business.finance.lifetime_costs,
-                        incoming: loss,
-                    },
-                )?;
             let next_finance_version = next_business_finance_version(business)?;
             business.finance.cash = resulting_cash;
-            business.finance.lifetime_costs = resulting_lifetime_costs;
             business.finance.version = next_finance_version;
+            total_loss = total_loss
+                .checked_add(loss)
+                .expect("total banking-panic loss must fit Money");
         }
+    }
+    if total_loss > Money::ZERO {
+        // Deposits flee to the pooled market sector rather than vanishing:
+        // every business debit keeps a credited counterparty. The loss is also
+        // deliberately kept out of `lifetime_costs`, which measures operating
+        // history — a one-day panic must not permanently brand a recovered
+        // house as structurally unprofitable for dividends and reputation.
+        credit_market_clearing_account(state, total_loss)?;
     }
     Ok(())
 }
@@ -4292,6 +4302,27 @@ fn terminate_stale_tenancy(
     Ok(())
 }
 
+/// A firm evicted during insolvency re-occupies its premises once it trades
+/// again: the workshop was built for it, and leaving it vacant would pay the
+/// owner a vacancy-income windfall for their own tenant's recovery.
+fn reoccupy_recovered_premises(state: &mut AppState) {
+    let reoccupations: Vec<(PropertyId, BusinessId)> = state
+        .businesses
+        .iter()
+        .filter(|business| business.status() == BusinessStatus::Active)
+        .filter_map(|business| {
+            let property_id = business.premises_property_id()?;
+            let property = state.properties.get(&property_id)?;
+            (property.occupant_business_id.is_none()).then_some((property_id, business.id()))
+        })
+        .collect();
+    for (property_id, business_id) in reoccupations {
+        if let Some(property) = state.properties.get_mut(&property_id) {
+            property.occupant_business_id = Some(business_id);
+        }
+    }
+}
+
 /// Vacancy income is an abstraction funded by the market's own clearing
 /// pool; it is bounded by what that pool holds so the weekly settlement can
 /// never overdraw it. Returns the amount actually paid.
@@ -4300,7 +4331,7 @@ fn collect_vacancy_income(
     owner_id: DynastyId,
     rent: Money,
 ) -> Result<Money, SimulationError> {
-    let paid = rent.min(state.market.clearing_account);
+    let paid = rent.min(state.market.clearing_account.max(Money::ZERO));
     if paid <= Money::ZERO {
         return Ok(Money::ZERO);
     }
@@ -4321,6 +4352,7 @@ fn collect_vacancy_income(
 }
 
 fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
+    reoccupy_recovered_premises(state);
     let rents: Vec<_> = state
         .properties
         .values()
@@ -5730,6 +5762,13 @@ fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> 
                 },
             )?;
         }
+    }
+    if total_upkeep > Money::ZERO {
+        // Household upkeep buys goods, staff, and services from the city's
+        // market sector rather than deleting copper: the pooled clearing
+        // account is the credited counterparty, so AI maintenance no longer
+        // deflates private money supplies month after month.
+        credit_market_clearing_account(state, total_upkeep)?;
     }
     if total_upkeep > Money::ZERO || total_shortfall > Money::ZERO {
         state.audit_log.push(AuditRecord {
@@ -7343,12 +7382,12 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) -> Result<()
     for (objective_id, dynasty_id, kind, created_day) in objectives {
         let progress = match kind {
             ObjectiveKind::AcquireProperty => advance_ai_property_objective(state, dynasty_id)?,
-            ObjectiveKind::WinOffice => advance_ai_office_objective(state, dynasty_id),
+            ObjectiveKind::WinOffice => advance_ai_office_objective(state, dynasty_id)?,
             ObjectiveKind::SecureSupply => {
                 advance_ai_supply_objective(registry, state, dynasty_id)?
             }
             ObjectiveKind::ReduceDebt => advance_ai_debt_objective(state, dynasty_id)?,
-            ObjectiveKind::ImproveLegitimacy => advance_ai_legitimacy_objective(state, dynasty_id),
+            ObjectiveKind::ImproveLegitimacy => advance_ai_legitimacy_objective(state, dynasty_id)?,
             ObjectiveKind::AccumulateCash => ObjectiveProgress::from_achieved(
                 ai_net_liquid_position(state, dynasty_id) > i128::from(120_000),
             ),
@@ -7444,7 +7483,10 @@ fn advance_ai_property_objective(
     Ok(ObjectiveProgress::from_achieved(achieved))
 }
 
-fn advance_ai_office_objective(state: &mut AppState, dynasty_id: DynastyId) -> ObjectiveProgress {
+fn advance_ai_office_objective(
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+) -> Result<ObjectiveProgress, SimulationError> {
     let holds_office = state.institutions.values().any(|institution| {
         institution.office_holder_id.is_some_and(|character_id| {
             state
@@ -7454,15 +7496,24 @@ fn advance_ai_office_objective(state: &mut AppState, dynasty_id: DynastyId) -> O
         })
     });
     if holds_office {
-        return ObjectiveProgress::Achieved;
+        return Ok(ObjectiveProgress::Achieved);
     }
-    if let Some(dynasty) = state.dynasties.get_mut(&dynasty_id) {
-        let spend = Money::from_copper(500).min(dynasty.resources.treasury);
-        dynasty.resources.treasury = dynasty
-            .resources
-            .treasury
-            .checked_sub(spend)
-            .expect("bounded AI office spending must not exceed treasury");
+    let spend = state
+        .dynasties
+        .get(&dynasty_id)
+        .map(|dynasty| Money::from_copper(500).min(dynasty.resources.treasury))
+        .unwrap_or(Money::ZERO);
+    if spend > Money::ZERO {
+        // Campaigning buys food, favors, and visibility through the city's
+        // market sector; the pooled clearing account is the counterparty.
+        credit_market_clearing_account(state, spend)?;
+        let dynasty = state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("AI office-campaigning dynasty must exist");
+        dynasty.resources.treasury = dynasty.resources.treasury.checked_sub(spend).expect(
+            "bounded AI office spending must not exceed the treasury it was measured against",
+        );
         let legitimacy_gain = u16::try_from(spend.saturating_mul_ratio(80, 500).copper())
             .unwrap_or(80)
             .min(80);
@@ -7472,7 +7523,7 @@ fn advance_ai_office_objective(state: &mut AppState, dynasty_id: DynastyId) -> O
             .saturating_add(legitimacy_gain)
             .min(10_000);
     }
-    ObjectiveProgress::Pending
+    Ok(ObjectiveProgress::Pending)
 }
 
 fn advance_ai_supply_objective(
@@ -7586,20 +7637,28 @@ fn advance_ai_debt_objective(
 fn advance_ai_legitimacy_objective(
     state: &mut AppState,
     dynasty_id: DynastyId,
-) -> ObjectiveProgress {
+) -> Result<ObjectiveProgress, SimulationError> {
     let dynasty = state
         .dynasties
         .get_mut(&dynasty_id)
         .expect("AI dynasty must exist");
     if dynasty.resources.legitimacy_basis_points >= 7_500 {
-        return ObjectiveProgress::Achieved;
+        return Ok(ObjectiveProgress::Achieved);
     }
     let spend = Money::from_copper(750).min(dynasty.resources.treasury);
-    dynasty.resources.treasury = dynasty
-        .resources
-        .treasury
-        .checked_sub(spend)
-        .expect("bounded AI legitimacy spending must not exceed treasury");
+    drop(dynasty);
+    if spend > Money::ZERO {
+        // Patronage and charity flow through the city's market sector; the
+        // pooled clearing account is the credited counterparty for the copper.
+        credit_market_clearing_account(state, spend)?;
+    }
+    let dynasty = state
+        .dynasties
+        .get_mut(&dynasty_id)
+        .expect("AI dynasty must exist");
+    dynasty.resources.treasury = dynasty.resources.treasury.checked_sub(spend).expect(
+        "bounded AI legitimacy spending must not exceed the treasury it was measured against",
+    );
     let legitimacy_gain = u16::try_from(spend.saturating_mul_ratio(120, 750).copper())
         .unwrap_or(120)
         .min(120);
@@ -7608,7 +7667,7 @@ fn advance_ai_legitimacy_objective(
         .legitimacy_basis_points
         .saturating_add(legitimacy_gain)
         .min(10_000);
-    ObjectiveProgress::Pending
+    Ok(ObjectiveProgress::Pending)
 }
 
 fn advance_ai_rival_objective(

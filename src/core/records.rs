@@ -2,7 +2,7 @@
 
 use crate::ids::{
     BusinessId, CharacterId, ChronicleEntryId, DistrictId, DynastyId, GoodId, InstitutionId,
-    RecipeId,
+    PropertyId, RecipeId,
 };
 use crate::money::{Money, Quantity};
 use serde::{Deserialize, Serialize};
@@ -367,6 +367,11 @@ pub struct Business {
     pub(crate) finance: BusinessFinance,
     pub(crate) inventory: BTreeMap<GoodId, Quantity>,
     pub(crate) policy: BusinessPolicy,
+    /// The workshop premises this business occupies when it operates. Kept on
+    /// the business so an eviction during insolvency can be undone by
+    /// re-occupancy once the firm trades again, instead of stranding a
+    /// purpose-built premises as a vacancy-income windfall for its owner.
+    pub(crate) premises_property_id: Option<PropertyId>,
 }
 
 impl Business {
@@ -378,6 +383,11 @@ impl Business {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.identity.name
+    }
+
+    #[must_use]
+    pub const fn premises_property_id(&self) -> Option<PropertyId> {
+        self.premises_property_id
     }
 
     #[must_use]

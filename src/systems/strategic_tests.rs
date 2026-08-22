@@ -6576,9 +6576,9 @@ mod crises {
             after.cash < before.cash,
             "a banking panic must reduce liquid business cash"
         );
-        assert!(
-            after.lifetime_costs > before.lifetime_costs,
-            "liquidity losses must be recorded as business costs"
+        assert_eq!(
+            after.lifetime_costs, before.lifetime_costs,
+            "a one-day liquidity shock is not operating history and must not permanently brand the business unprofitable"
         );
         assert!(
             after.version > before.version,
@@ -7688,7 +7688,8 @@ mod ai {
         };
 
         assert_eq!(
-            advance_ai_legitimacy_objective(&mut state, dynasty_id),
+            advance_ai_legitimacy_objective(&mut state, dynasty_id)
+                .expect("AI legitimacy objective must succeed"),
             ObjectiveProgress::Pending
         );
         assert_eq!(
