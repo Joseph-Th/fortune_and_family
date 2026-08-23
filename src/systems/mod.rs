@@ -281,6 +281,31 @@ pub(crate) fn synchronize_employment_for_business_status(
 pub use bootstrap::{NewGameError, build_new_game};
 #[cfg(test)]
 pub(crate) use commands::INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT;
+
+/// Canonical `heir={id}` component of a `HeirDesignation` audit detail. The
+/// writer and every reader share this one format, so reformatting the record
+/// cannot silently break heir cooldowns or succession preparation checks.
+#[must_use]
+pub(crate) fn heir_designation_detail_component(character_id: crate::ids::CharacterId) -> String {
+    format!("heir={character_id}")
+}
+
+/// Whether a `HeirDesignation` audit record names `character_id` as heir.
+#[must_use]
+pub(crate) fn heir_audit_detail_matches(
+    record: &crate::core::AuditRecord,
+    character_id: crate::ids::CharacterId,
+) -> bool {
+    record
+        .detail()
+        .split(';')
+        .any(|part| part == heir_designation_detail_component(character_id))
+}
+
+/// Canonical detail marking an institution withdrawal that resigned a held
+/// office. The writer and reader share this one constant.
+pub(crate) const OFFICE_RESIGNATION_AUDIT_DETAIL: &str = "resigned_office=true";
+
 pub(crate) use commands::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS,
     CIVIC_DEBT_CREDITOR_RESERVE, COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST,
@@ -324,17 +349,15 @@ pub(crate) use commands::{
 pub use invariants::validate_invariants;
 pub(crate) use legal::{
     LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LEGAL_CASE_HEARING_DELAY_DAYS,
-    LegalClaimQuote, collect_court_filing_fee, is_valid_legal_hearing_day,
-    quote_grounded_legal_claim,
+    LegalClaimQuote, collect_court_filing_fee, court_filing_fee_headroom,
+    is_valid_legal_hearing_day, quote_grounded_legal_claim,
 };
 pub(crate) use progression::{
     campaign_phase_is_consistent, campaign_phase_is_persistently_consistent,
     contract_deliveries_for_dynasty, refresh_campaign_phases,
 };
 pub use simulation::advance_days;
-pub(crate) use simulation::{
-    ceil_div_nonnegative_wide, effective_capacity_batches, maintenance_cost,
-};
+pub(crate) use simulation::business_sustainable_unit_cost;
 pub(crate) use strategic::MAX_RELATIONSHIP_MEMORIES;
 #[cfg(test)]
 pub(crate) use strategic::issue_loan;
@@ -346,7 +369,7 @@ pub(crate) use strategic::{
     DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, STANDARD_CONTRACT_BATCHES_PER_WEEK,
     acquire_business, available_supply_contract_capacity, business_owner_distribution_reserve,
     business_recapitalization_target, buy_unowned_property, capitalize_owned_business,
-    crisis_response_contains_crisis, distribute_owned_business_cash,
+    crisis_response_contains_crisis, distribute_owned_business_cash, district_unrest_pressures,
     dynasty_office_administrative_load, effective_property_weekly_rent, expire_time_limited_state,
     institution_capability_score, market_reference_weekly_wage,
     projected_dynasty_monthly_office_duty,

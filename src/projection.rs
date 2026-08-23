@@ -14,8 +14,8 @@ use crate::ids::{
 use crate::money::{Money, Quantity};
 use crate::registry::Registry;
 use crate::systems::{
-    dynasty_office_administrative_load, effective_property_weekly_rent, quote_business_acquisition,
-    quote_player_legal_settlement,
+    district_unrest_pressures, dynasty_office_administrative_load, effective_property_weekly_rent,
+    quote_business_acquisition, quote_player_legal_settlement,
 };
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -769,26 +769,31 @@ fn build_district_projections(registry: &Registry, state: &AppState) -> Vec<Dist
 }
 
 fn district_causes(runtime: &crate::core::DistrictRuntime, food: u16) -> Vec<String> {
-    let mut causes = Vec::new();
-    if food < 4_000 {
-        causes.push("Household food access is poor".to_owned());
+    // The drivers come from the simulation's own unrest-pressure model, so the
+    // dashboard and the simulation can never disagree about what strains a
+    // district. Any nonzero pressure contributes to unrest; the strongest
+    // three are surfaced.
+    let pressures = district_unrest_pressures(runtime, food);
+    let mut drivers: Vec<(u16, &str)> = vec![
+        (pressures.food, "Household food access is poor"),
+        (
+            pressures.sanitation,
+            "Sanitation infrastructure is inadequate",
+        ),
+        (pressures.safety, "Public safety is weak"),
+        (pressures.employment, "Formal employment is scarce"),
+        (pressures.rent, "Rents outpace household means"),
+    ];
+    drivers.retain(|(pressure, _)| *pressure > 0);
+    drivers.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
+    if drivers.is_empty() {
+        return vec!["Conditions are broadly stable".to_owned()];
     }
-    if runtime.sanitation_basis_points < 5_000 {
-        causes.push("Sanitation infrastructure is inadequate".to_owned());
-    }
-    if runtime.safety_basis_points < 5_000 {
-        causes.push("Public safety is weak".to_owned());
-    }
-    if runtime.employment_basis_points < 4_000 {
-        causes.push("Formal employment is scarce".to_owned());
-    }
-    if runtime.unrest_basis_points > 5_000 {
-        causes.push("Material hardship and organization are driving unrest".to_owned());
-    }
-    if causes.is_empty() {
-        causes.push("Conditions are broadly stable".to_owned());
-    }
-    causes
+    drivers
+        .into_iter()
+        .take(3)
+        .map(|(_, label)| label.to_owned())
+        .collect()
 }
 
 fn build_business_projections(registry: &Registry, state: &AppState) -> Vec<BusinessProjection> {
@@ -1354,8 +1359,11 @@ pub fn render_campaign_html(
     state: &AppState,
 ) -> Result<String, serde_json::Error> {
     let projection = build_campaign_projection(registry, state);
+    // The script payload travels compact; only the human-readable mirror is
+    // pretty-printed, so the dashboard does not carry two pretty copies.
     let serialized = serde_json::to_string_pretty(&projection)?;
-    let data = escape_json_for_html_script(&serialized);
+    let compact = serde_json::to_string(&projection)?;
+    let data = escape_json_for_html_script(&compact);
     let data_display = escape_html(&serialized);
     let DashboardFragments {
         attention,
@@ -1607,6 +1615,47 @@ fn append_finance_attention(projection: &CampaignProjection, items: &mut Vec<Att
                 .to_owned(),
         ));
     }
+    // Adverse credit the dynasty extended is also a finance exposure: a
+    // delinquent borrower or a defaulted civic debt held by the house needs
+    // attention even though the dynasty owes nothing itself.
+    for loan in projection.loans.iter().filter(|loan| {
+        loan.lender_dynasty_id == player_id
+            && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
+    }) {
+        items.push(attention(
+            AttentionTone::Warning,
+            "Private finance",
+            format!("Loan #{} you extended is {}", loan.id, loan.status.label()),
+            format!(
+                "{} lent to {} is past repayment with {} missed payments.",
+                loan.balance, loan.borrower, loan.missed_payments
+            ),
+            "Review enforcement options, including a grounded debt claim or collateral execution."
+                .to_owned(),
+        ));
+    }
+    for debt in projection.civic_debts.iter().filter(|debt| {
+        debt.creditor_dynasty_id == player_id
+            && matches!(
+                debt.status,
+                CivicDebtStatus::Delinquent | CivicDebtStatus::Defaulted
+            )
+    }) {
+        items.push(attention(
+            AttentionTone::Warning,
+            "Municipal finance",
+            format!(
+                "Civic debt #{} is {}",
+                debt.id,
+                civic_debt_status_label(debt.status)
+            ),
+            format!(
+                "The city owes the house {} with {} missed payments.",
+                debt.balance, debt.missed_payments
+            ),
+            "Weigh civic consequences against enforcement before extending more credit.".to_owned(),
+        ));
+    }
 }
 
 fn append_legal_and_crisis_attention(
@@ -1716,11 +1765,10 @@ fn append_contract_attention(
 }
 
 fn append_notice_attention(projection: &CampaignProjection, items: &mut Vec<AttentionItem>) {
-    let unread = projection
-        .notifications
-        .iter()
-        .filter(|notification| !notification.acknowledged)
-        .count();
+    // The count is the whole-history total so the attention card and the
+    // header metric can never disagree when the recent-notice window is
+    // truncated; the window only picks the latest subject to show.
+    let unread = projection.unread_notifications;
     if unread > 0
         && let Some(latest) = projection
             .notifications

@@ -31,7 +31,9 @@ pub(crate) fn is_valid_legal_hearing_day(filed_day: i64, hearing_day: i64) -> bo
 
 /// Routes a filed case's filing fee into the Civic Court's budget, so the
 /// plaintiff's debit keeps a credited counterparty instead of vanishing from
-/// the economy. Callers must have already debited the plaintiff.
+/// the economy. Callers must have already validated the fee with
+/// [`court_filing_fee_headroom`] and debited the plaintiff, so this credit
+/// cannot fail.
 pub(crate) fn collect_court_filing_fee(registry: &Registry, state: &mut AppState) {
     let court_id = registry
         .get_institution_id("civic_court")
@@ -43,7 +45,31 @@ pub(crate) fn collect_court_filing_fee(registry: &Registry, state: &mut AppState
     court.budget = court
         .budget
         .checked_add(LEGAL_CASE_FILING_COST)
-        .expect("court filing fee must fit the court budget");
+        .expect("validated court filing fee must fit the court budget");
+}
+
+/// Validates that the Civic Court can accept one filing fee before any caller
+/// mutates state, so filing rejects with a typed error instead of failing on a
+/// credit after the plaintiff's debit.
+pub(crate) fn court_filing_fee_headroom(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), super::SimulationError> {
+    let court_id = registry
+        .get_institution_id("civic_court")
+        .expect("civic court institution must be registered");
+    let court = state
+        .institutions
+        .get(&court_id)
+        .expect("civic court runtime must exist");
+    court.budget.checked_add(LEGAL_CASE_FILING_COST).ok_or(
+        super::SimulationError::InstitutionBudgetOverflow {
+            institution_id: court_id,
+            current: court.budget,
+            incoming: LEGAL_CASE_FILING_COST,
+        },
+    )?;
+    Ok(())
 }
 
 pub(crate) fn quote_grounded_legal_claim(

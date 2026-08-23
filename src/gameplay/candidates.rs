@@ -2251,46 +2251,10 @@ pub(crate) fn acquisition_has_turnaround_thesis(
     let Some(quote_price) = state.market.quotes.get(&recipe.output_good_id()) else {
         return false;
     };
-    let weekly_labor_copper = state
-        .employment
-        .values()
-        .filter(|agreement| {
-            agreement.business_id == business.id()
-                && matches!(
-                    agreement.status,
-                    EmploymentStatus::Active | EmploymentStatus::Disputed
-                )
-        })
-        .fold(0_i128, |total, agreement| {
-            total + i128::from(agreement.weekly_wage.copper())
-        });
-    let daily_labor = Money::from_copper(
-        i64::try_from(ceil_div_nonnegative_wide(weekly_labor_copper, 7).min(i128::from(i64::MAX)))
-            .unwrap_or(i64::MAX),
-    );
-    let expected_batches = i64::from(effective_capacity_batches(state, business)).max(1);
-    let overhead_per_batch = daily_labor
-        .saturating_add(maintenance_cost(
-            recipe.daily_operating_cost(),
-            business.policy.maintenance_basis_points,
-        ))
-        .saturating_mul_ratio_ceil_nonnegative(1_000, expected_batches * 1_000);
-    let batch_cost = recipe.inputs().iter().fold(
-        recipe
-            .daily_operating_cost()
-            .saturating_add(overhead_per_batch),
-        |total, input| {
-            let input_price = state
-                .market
-                .quotes
-                .get(&input.good_id())
-                .expect("recipe input good must have a market quote")
-                .price;
-            total.saturating_add(cost_for(input.quantity(), input_price))
-        },
-    );
-    let unit_cost = batch_cost
-        .saturating_mul_ratio_ceil_nonnegative(1_000, recipe.output_quantity().milliunits());
+    // The same sustainable unit cost the market's production price floors are
+    // built from, so the agent's thesis can never drift from the simulation's
+    // own definition of "sells above break-even".
+    let unit_cost = business_sustainable_unit_cost(registry, state, business);
     quote_price.price >= unit_cost
 }
 
@@ -7322,6 +7286,7 @@ pub(crate) const fn simulation_error_category(error: &SimulationError) -> &'stat
         }
         SimulationError::MarketQuoteMissing { .. } => "simulation: missing market quote",
         SimulationError::NegativeMarketDebit { .. } => "simulation: negative market debit",
+        SimulationError::NegativeMarketCredit { .. } => "simulation: negative market credit",
         SimulationError::NegativeMarketSupply { .. } => "simulation: negative market supply",
         SimulationError::MarketDemandOverflow { .. } => "simulation: market demand overflow",
         SimulationError::MarketStockOverflow { .. } => "simulation: market stock overflow",

@@ -4,8 +4,8 @@ use civic_dynasty::core::StartingBackground;
 use civic_dynasty::{
     ArtReviewConfig, ArtReviewError, ArtSeverity, CommandError, GameplayFindingSeverity,
     GameplayHarnessConfig, GameplayHarnessError, GameplayPersona, NewGameConfig, NewGameError,
-    PersistenceError, PlayerCommand, Registry, SaveOutcome, SimulationError, SpriteRole,
-    advance_days, apply_player_command, build_art_review, build_art_review_report,
+    PersistenceError, PlayerCommand, Registry, SaveOutcome, SaveRevision, SimulationError,
+    SpriteRole, advance_days, apply_player_command, build_art_review, build_art_review_report,
     build_campaign_projection, build_new_game, build_rivergate_registry, build_state_summary,
     load_state, load_state_with_revision, render_art_review_html, render_campaign_html,
     render_gameplay_report, run_gameplay_harness, save_state, save_state_cas, save_state_new,
@@ -73,7 +73,8 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Load a campaign and run all debug invariant assertions.
+    /// Load a campaign and validate it: full runtime invariants in debug
+    /// builds, persistence-boundary validation everywhere.
     Validate { input: PathBuf },
     /// Run deterministic player agents and report gameplay reachability and system reactions.
     Playtest(PlaytestArgs),
@@ -299,14 +300,7 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             validate_invariants(registry, &state);
             advance_days(registry, &mut state, days)?;
             let output_path = output.unwrap_or(input);
-            report_save_outcome(
-                output_path.as_path(),
-                if in_place {
-                    save_state_cas(&output_path, &state, &revision)
-                } else {
-                    save_state(&output_path, &state)
-                }?,
-            );
+            save_mutated_state(&output_path, &state, &revision, in_place)?;
             print_human_summary(registry, &state);
             println!("Saved {}", output_path.display());
         }
@@ -347,14 +341,7 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
             let outcome = apply_player_command(registry, &mut state, command)?;
             validate_invariants(registry, &state);
             let output_path = output.unwrap_or(input);
-            report_save_outcome(
-                output_path.as_path(),
-                if in_place {
-                    save_state_cas(&output_path, &state, &revision)
-                } else {
-                    save_state(&output_path, &state)
-                }?,
-            );
+            save_mutated_state(&output_path, &state, &revision, in_place)?;
             println!("{}", outcome.summary);
             print_human_summary(registry, &state);
             println!("Saved {}", output_path.display());
@@ -474,12 +461,7 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
                 source,
             }
         })?;
-        if outcome == SaveOutcome::CommittedWithDegradedDurability {
-            eprintln!(
-                "warning: directory durability synchronization degraded for {}",
-                path.display()
-            );
-        }
+        report_save_outcome(path.as_path(), outcome);
         println!("Wrote {}", path.display());
     } else {
         println!("{rendered}");
@@ -548,12 +530,7 @@ fn run_art(args: ArtArgs) -> Result<(), CliError> {
             source,
         }
     })?;
-    if outcome == SaveOutcome::CommittedWithDegradedDurability {
-        eprintln!(
-            "warning: directory durability synchronization degraded for {}",
-            args.output.display()
-        );
-    }
+    report_save_outcome(args.output.as_path(), outcome);
     println!(
         "Wrote {} ({} subjects, {} critical, {} warning or worse)",
         args.output.display(),
@@ -641,12 +618,24 @@ fn write_dashboard(registry: &Registry, input: &Path, output: &Path) -> Result<(
             source,
         }
     })?;
-    if outcome == SaveOutcome::CommittedWithDegradedDurability {
-        eprintln!(
-            "warning: directory durability synchronization degraded for {}",
-            output.display()
-        );
-    }
+    report_save_outcome(output, outcome);
+    Ok(())
+}
+
+/// Persists a mutated campaign through the in-place compare-and-swap path when
+/// the output is the input file, or a plain fresh save otherwise.
+fn save_mutated_state(
+    output: &Path,
+    state: &civic_dynasty::AppState,
+    revision: &SaveRevision,
+    in_place: bool,
+) -> Result<(), CliError> {
+    let outcome = if in_place {
+        save_state_cas(output, state, revision)?
+    } else {
+        save_state(output, state)?
+    };
+    report_save_outcome(output, outcome);
     Ok(())
 }
 

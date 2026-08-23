@@ -4,8 +4,8 @@ use super::legal::{
     LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LEGAL_CASE_HEARING_DELAY_DAYS,
 };
 use super::transactions::{
-    TimelineError, checked_future_day, debit_market_clearing_account,
-    next_business_finance_version, next_family_charter_version,
+    TimelineError, checked_future_day, credit_market_clearing_account,
+    debit_market_clearing_account, next_business_finance_version, next_family_charter_version,
 };
 use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
@@ -244,7 +244,8 @@ pub(crate) const OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS: i64 = 180;
 pub(crate) const OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST: u16 = 100;
 pub(crate) const INSTITUTION_SUPPORT_INTERVAL_DAYS: i64 = 360;
 pub(crate) const INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS: i64 = 90;
-pub(crate) const INSTITUTION_WITHDRAWAL_RECOVERY_DAYS: i64 = OFFICE_NOMINATION_RECOVERY_DAYS;
+/// Recovery period after a character withdraws from an institution.
+pub(crate) const INSTITUTION_WITHDRAWAL_RECOVERY_DAYS: i64 = 720;
 pub(crate) const INSTITUTION_SUPPORT_COST: Money = Money::from_copper(1_200);
 pub(crate) const INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT: u16 = 5_500;
 pub(crate) const INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT: u32 = 52;
@@ -1075,7 +1076,11 @@ fn apply_institution_withdrawal(
         day,
         kind: AuditKind::InstitutionWithdrawal,
         subject: institution_support_subject(institution_id, character_id).into(),
-        detail: format!("resigned_office={resigned_office}"),
+        detail: if resigned_office {
+            super::OFFICE_RESIGNATION_AUDIT_DETAIL.to_owned()
+        } else {
+            "resigned_office=false".to_owned()
+        },
     });
     super::strategic::try_push_outbox(
         state,
@@ -1127,7 +1132,10 @@ fn apply_cash_transfer(
     to_business_id: BusinessId,
     amount: Money,
 ) -> Result<CommandOutcome, CommandError> {
-    ensure_owned_business(state, from_business_id)?;
+    ensure_operable_owned_business(state, from_business_id)?;
+    // Receiving a cash infusion is allowed for any owned business, including
+    // one under distress the transfer is meant to relieve; only the source
+    // must remain operable.
     ensure_owned_business(state, to_business_id)?;
     // Portfolio transfers honor the same operating-reserve floor as every
     // other player-driven route out of the business, so a firm cannot be
@@ -1754,39 +1762,34 @@ fn deploy_non_player_financing_package(
     if terms.borrower_dynasty_id == state.player_dynasty_id {
         return Ok(());
     }
-    let business_id = state
+    // One pass resolves each candidate's recapitalization shortfall; the
+    // neediest operable firm wins by lifecycle severity, then cash, then ID.
+    let selected = state
         .businesses
         .iter()
         .filter(|business| business.owner_dynasty_id() == terms.borrower_dynasty_id)
         // Closed premises cannot be recapitalized; deploying funds there would
         // fail after the loan itself has committed.
         .filter(|business| business.status() != BusinessStatus::Closed)
-        .filter(|business| {
-            business.cash() < business_recapitalization_target(registry, state, business)
+        .filter_map(|business| {
+            let target_cash = business_recapitalization_target(registry, state, business);
+            let shortfall = target_cash.saturating_sub(business.cash());
+            if shortfall <= Money::ZERO {
+                return None;
+            }
+            // Closed premises are filtered out above; that arm exists for
+            // exhaustiveness only.
+            let severity = match business.status() {
+                BusinessStatus::Insolvent => 0_u8,
+                BusinessStatus::Distressed => 1,
+                BusinessStatus::Active | BusinessStatus::Closed => 2,
+            };
+            Some((severity, business.cash(), business.id(), shortfall))
         })
-        .min_by_key(|business| {
-            (
-                match business.status() {
-                    BusinessStatus::Insolvent => 0_u8,
-                    BusinessStatus::Distressed => 1,
-                    // Closed premises are filtered out above; the arm exists for
-                    // exhaustiveness only.
-                    BusinessStatus::Active | BusinessStatus::Closed => 2,
-                },
-                business.cash(),
-                business.id(),
-            )
-        })
-        .map(crate::core::Business::id);
-    let Some(business_id) = business_id else {
+        .min_by_key(|&(severity, cash, id, _)| (severity, cash, id));
+    let Some((_, _, business_id, shortfall)) = selected else {
         return Ok(());
     };
-    let business = state
-        .businesses
-        .get(business_id)
-        .expect("selected borrower business must exist");
-    let target_cash = business_recapitalization_target(registry, state, business);
-    let shortfall = target_cash.saturating_sub(business.cash());
     // The new principal is the financing package being deployed. The
     // borrower's existing treasury remains its household reserve; requiring
     // the post-loan treasury to clear that reserve would make small, valid
@@ -2119,9 +2122,15 @@ fn apply_public_work(
         return Err(CommandError::PublicWorkPowerNotEstablished { available_day });
     }
     let contribution = public_work_initial_contribution(budget);
-    spend_player_treasury(state, contribution)?;
-    let progress_basis_points = super::public_work_progress_basis_points(contribution, budget);
+    // Resolve every fallible step before the first mutation so a rejected
+    // sponsorship never leaves a debited treasury behind.
     let id = state.next_ids.try_public_work()?;
+    spend_player_treasury(state, contribution)?;
+    // The sponsor pays construction labor and materials directly, so the
+    // contribution keeps a credited counterparty in the market clearing pool
+    // instead of vanishing from the economy.
+    credit_market_clearing_account(state, contribution)?;
+    let progress_basis_points = super::public_work_progress_basis_points(contribution, budget);
     state.public_works.insert(
         id,
         PublicWork {
@@ -2190,6 +2199,9 @@ fn apply_public_work_funding(
             .saturating_add(quote.legitimacy_gain)
             .min(10_000);
     }
+    // Direct funding pays construction costs immediately, so the amount keeps
+    // a credited counterparty in the market clearing pool.
+    credit_market_clearing_account(state, amount)?;
     let work = state
         .public_works
         .get_mut(&public_work_id)
@@ -2560,9 +2572,12 @@ fn apply_legal_case(
         });
     }
     let hearing_day = checked_future_day(state.clock.day(), LEGAL_CASE_HEARING_DELAY_DAYS)?;
+    // Resolve every fallible step before the first mutation so a rejected
+    // filing never leaves a debited plaintiff or a credited court behind.
+    let id = state.next_ids.try_legal_case()?;
+    super::court_filing_fee_headroom(registry, state)?;
     spend_player_treasury(state, LEGAL_CASE_FILING_COST)?;
     super::collect_court_filing_fee(registry, state);
-    let id = state.next_ids.try_legal_case()?;
     state.legal_cases.insert(
         id,
         LegalCase {
@@ -2851,12 +2866,8 @@ fn validate_heir_designation(
     // designation already names them. A later designation of a different
     // heir must not lock the family out of re-preparing this one.
     if confirmation
-        && latest_designation.is_some_and(|record| {
-            record
-                .detail()
-                .split(';')
-                .any(|part| part == format!("heir={character_id}"))
-        })
+        && latest_designation
+            .is_some_and(|record| super::heir_audit_detail_matches(record, character_id))
     {
         return Err(CommandError::UnchangedHeir { character_id });
     }
@@ -2966,8 +2977,9 @@ fn apply_heir(
         kind: AuditKind::HeirDesignation,
         subject: subject.into(),
         detail: format!(
-            "prior_heir={};heir={character_id};confirmation={confirmation};legitimacy_cost={HEIR_DESIGNATION_LEGITIMACY_COST};unity_cost={HEIR_DESIGNATION_UNITY_COST}",
-            prior_heir_id.map_or_else(|| "none".to_owned(), |id| id.to_string())
+            "prior_heir={};{};confirmation={confirmation};legitimacy_cost={HEIR_DESIGNATION_LEGITIMACY_COST};unity_cost={HEIR_DESIGNATION_UNITY_COST}",
+            prior_heir_id.map_or_else(|| "none".to_owned(), |id| id.to_string()),
+            super::heir_designation_detail_component(character_id)
         ),
     });
     let chronicle_id = state.next_ids.try_chronicle()?;
@@ -3023,11 +3035,15 @@ fn apply_adopt_ward(
         head_id,
         dynasty_name,
     } = context;
-    spend_player_treasury(state, WARD_ADOPTION_COST)?;
+    // Resolve every fallible allocation before the first mutation so a
+    // rejected adoption never leaves a debited treasury or orphan record.
     let ward_id = state.next_ids.try_character()?;
+    let family_link_id: crate::ids::FamilyLinkId = state.next_ids.try_family_link()?;
+    let chronicle_id: crate::ids::ChronicleEntryId = state.next_ids.try_chronicle()?;
+    spend_player_treasury(state, WARD_ADOPTION_COST)?;
     let ward_name = format!("{dynasty_name} Ward {ward_id}");
     insert_ward_character(state, dynasty_id, ward_id, ward_name.clone(), focus);
-    insert_ward_family_link(state, head_id, ward_id)?;
+    insert_ward_family_link(state, family_link_id, head_id, ward_id);
     let council = state
         .family_councils
         .get_mut(&dynasty_id)
@@ -3047,7 +3063,7 @@ fn apply_adopt_ward(
         .saturating_sub(WARD_ADOPTION_LEGITIMACY_COST);
     dynasty.resources.administrative_capacity =
         dynasty.resources.administrative_capacity.saturating_add(8);
-    record_ward_adoption(state, dynasty_id, ward_id, &ward_name, focus)?;
+    record_ward_adoption(state, dynasty_id, ward_id, &ward_name, focus, chronicle_id)?;
     Ok(CommandOutcome {
         summary: format!("Adopted ward {ward_id} with {focus:?} training."),
     })
@@ -3077,20 +3093,20 @@ fn validate_ward_adoption(state: &AppState) -> Result<WardAdoptionContext, Comma
             maximum: MAX_ACTIVE_WARDS,
         });
     }
-    ensure_reputation_standing(state, WARD_ADOPTION_REPUTATION_REQUIREMENT).map_err(
-        |(quality, reliability, required)| CommandError::InsufficientWardReputation {
+    ensure_standing(
+        state,
+        WARD_ADOPTION_REPUTATION_REQUIREMENT,
+        WARD_ADOPTION_DELIVERY_REQUIREMENT,
+        |quality, reliability, required| CommandError::InsufficientWardReputation {
             quality,
             reliability,
             required,
         },
-    )?;
-    let delivered = player_contract_deliveries(state);
-    if delivered < WARD_ADOPTION_DELIVERY_REQUIREMENT {
-        return Err(CommandError::InsufficientWardCommercialRecord {
+        |delivered, required| CommandError::InsufficientWardCommercialRecord {
             delivered,
-            required: WARD_ADOPTION_DELIVERY_REQUIREMENT,
-        });
-    }
+            required,
+        },
+    )?;
     if legitimacy < WARD_ADOPTION_LEGITIMACY_REQUIREMENT {
         return Err(CommandError::InsufficientPlayerLegitimacy {
             available: legitimacy,
@@ -3152,10 +3168,10 @@ fn insert_ward_character(
 
 fn insert_ward_family_link(
     state: &mut AppState,
+    family_link_id: crate::ids::FamilyLinkId,
     head_id: CharacterId,
     ward_id: CharacterId,
-) -> Result<(), CommandError> {
-    let family_link_id = state.next_ids.try_family_link()?;
+) {
     state.family_links.insert(
         family_link_id,
         FamilyLink {
@@ -3166,7 +3182,6 @@ fn insert_ward_family_link(
             active: true,
         },
     );
-    Ok(())
 }
 
 fn record_ward_adoption(
@@ -3175,6 +3190,7 @@ fn record_ward_adoption(
     ward_id: CharacterId,
     ward_name: &str,
     focus: EducationFocus,
+    chronicle_id: crate::ids::ChronicleEntryId,
 ) -> Result<(), CommandError> {
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
@@ -3182,7 +3198,6 @@ fn record_ward_adoption(
         subject: format!("dynasty:{dynasty_id}:character:{ward_id}").into(),
         detail: format!("focus={focus:?};cost={}", WARD_ADOPTION_COST.copper()),
     });
-    let chronicle_id = state.next_ids.try_chronicle()?;
     state.chronicle.push(ChronicleEntry {
         id: chronicle_id,
         day: state.clock.day(),
@@ -3744,31 +3759,48 @@ fn ensure_reputation_standing(state: &AppState, required: u16) -> Result<(), (u1
     }
 }
 
+/// Shared standing gate for privileged commands: the house needs both the
+/// required reputation standing and a durable record of fulfilled contract
+/// deliveries before it may act.
+fn ensure_standing(
+    state: &AppState,
+    reputation_required: u16,
+    deliveries_required: u32,
+    insufficient_reputation: impl FnOnce(u16, u16, u16) -> CommandError,
+    insufficient_deliveries: impl FnOnce(u32, u32) -> CommandError,
+) -> Result<(), CommandError> {
+    ensure_reputation_standing(state, reputation_required).map_err(
+        |(quality, reliability, required)| insufficient_reputation(quality, reliability, required),
+    )?;
+    let delivered = player_contract_deliveries(state);
+    if delivered < deliveries_required {
+        return Err(insufficient_deliveries(delivered, deliveries_required));
+    }
+    Ok(())
+}
+
 fn validate_institution_support_standing(
     registry: &Registry,
     state: &AppState,
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> Result<(), CommandError> {
-    ensure_reputation_standing(state, INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT).map_err(
-        |(quality, reliability, required)| CommandError::InsufficientInstitutionSupportReputation {
+    let required =
+        institution_support_delivery_requirement(registry, state, institution_id, character_id);
+    ensure_standing(
+        state,
+        INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT,
+        required,
+        |quality, reliability, required| CommandError::InsufficientInstitutionSupportReputation {
             quality,
             reliability,
             required,
         },
-    )?;
-    let delivered = player_contract_deliveries(state);
-    let required =
-        institution_support_delivery_requirement(registry, state, institution_id, character_id);
-    if delivered < required {
-        return Err(
-            CommandError::InsufficientInstitutionSupportCommercialRecord {
-                delivered,
-                required,
-            },
-        );
-    }
-    Ok(())
+        |delivered, required| CommandError::InsufficientInstitutionSupportCommercialRecord {
+            delivered,
+            required,
+        },
+    )
 }
 
 pub(crate) fn institution_support_delivery_requirement(
@@ -4204,23 +4236,22 @@ fn validate_office_nomination_standing(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> Result<(), CommandError> {
-    ensure_reputation_standing(state, OFFICE_NOMINATION_REPUTATION_REQUIREMENT).map_err(
-        |(quality, reliability, required)| CommandError::InsufficientOfficeReputation {
+    let required =
+        office_nomination_delivery_requirement(registry, state, institution_id, character_id);
+    ensure_standing(
+        state,
+        OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+        required,
+        |quality, reliability, required| CommandError::InsufficientOfficeReputation {
             quality,
             reliability,
             required,
         },
-    )?;
-    let delivered = player_contract_deliveries(state);
-    let required =
-        office_nomination_delivery_requirement(registry, state, institution_id, character_id);
-    if delivered < required {
-        return Err(CommandError::InsufficientOfficeCommercialRecord {
+        |delivered, required| CommandError::InsufficientOfficeCommercialRecord {
             delivered,
             required,
-        });
-    }
-    Ok(())
+        },
+    )
 }
 
 pub(crate) fn office_nomination_delivery_requirement(
@@ -4293,6 +4324,8 @@ pub(crate) fn institution_support_next_day(
         latest_character_campaign_day(state, AuditKind::InstitutionWithdrawal, character_id)
             .filter(|_| latest_withdrawal_institution(state, character_id) == Some(institution_id))
             .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
+    // Resigning a held office, by contrast, is a city-visible act: it pauses
+    // support cultivation everywhere until the same recovery period passes.
     let dynasty_office_resignation = latest_player_office_resignation_day(state)
         .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
     patronage
@@ -4328,7 +4361,7 @@ fn latest_player_office_resignation_day(state: &AppState) -> Option<i64> {
         .rev()
         .find(|record| {
             record.kind() == AuditKind::InstitutionWithdrawal
-                && record.detail() == "resigned_office=true"
+                && record.detail() == super::OFFICE_RESIGNATION_AUDIT_DETAIL
                 && record
                     .audit_subject()
                     .institution_character_ids()
@@ -4424,6 +4457,23 @@ fn apply_crisis_response(
         CrisisResponse::Suppress => 2_000,
         CrisisResponse::Exploit => 0,
     };
+    // Suppression spends standing like every other priced cost: a dynasty
+    // without the legitimacy to pay rejects up front instead of silently
+    // paying what little it has.
+    if response == CrisisResponse::Suppress {
+        let available_legitimacy = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        if available_legitimacy < CRISIS_SUPPRESS_LEGITIMACY_COST {
+            return Err(CommandError::InsufficientPlayerLegitimacy {
+                available: available_legitimacy,
+                required: CRISIS_SUPPRESS_LEGITIMACY_COST,
+            });
+        }
+    }
     match response {
         CrisisResponse::Relief => {
             spend_player_treasury(state, crisis_relief_cost(severity))?;
@@ -4666,14 +4716,25 @@ fn validate_negotiated_weekly_wage(
     response: LaborResponse,
 ) -> Result<Option<Money>, CommandError> {
     match response {
-        LaborResponse::Negotiate => agreement
-            .weekly_wage
-            .checked_mul_ratio(11, 10)
-            .map(Some)
-            .ok_or(CommandError::LaborWageOverflow {
-                employment_id,
-                current: agreement.weekly_wage,
-            }),
+        LaborResponse::Negotiate => {
+            // Negotiation raises the wage by a tenth, but never past the same
+            // per-worker ceiling the direct wage lever enforces, so repeated
+            // dispute cycles cannot ratchet payroll past the supported range.
+            let workers = i64::from(agreement.workers().max(1));
+            let raise = agreement.weekly_wage.checked_mul_ratio(11, 10).ok_or(
+                CommandError::LaborWageOverflow {
+                    employment_id,
+                    current: agreement.weekly_wage,
+                },
+            )?;
+            let ceiling = MAX_WEEKLY_WAGE_PER_WORKER
+                .checked_mul_ratio(workers, 1)
+                .ok_or(CommandError::LaborWageOverflow {
+                    employment_id,
+                    current: agreement.weekly_wage,
+                })?;
+            Ok(Some(raise.min(ceiling)))
+        }
         LaborResponse::ImproveConditions | LaborResponse::ReplaceWorkers => Ok(None),
     }
 }
@@ -5035,22 +5096,24 @@ fn resolve_counterparty_information(
         target: InformationTarget::Counterparty { dynasty_id },
         subject: format!("Commissioned house brief: House {}", dynasty.name()),
         summary: format!(
-            "Treasury {}; reliability {}.{}%; trust {}.{}%; respect {}.{}%; fear {}.{}%; resentment {}.{}%; obligation {}; unsettled bilateral credit {}.",
+            "Treasury {}; reliability {}; trust {}; respect {}; fear {}; resentment {}; obligation {}; unsettled bilateral credit {}.",
             dynasty.treasury(),
-            dynasty.resources.reputation_reliability_basis_points / 100,
-            (dynasty.resources.reputation_reliability_basis_points % 100) / 10,
-            relationship.trust_basis_points / 100,
-            (relationship.trust_basis_points % 100) / 10,
-            relationship.respect_basis_points / 100,
-            (relationship.respect_basis_points % 100) / 10,
-            relationship.fear_basis_points / 100,
-            (relationship.fear_basis_points % 100) / 10,
-            relationship.resentment_basis_points / 100,
-            (relationship.resentment_basis_points % 100) / 10,
+            basis_points_label(dynasty.resources.reputation_reliability_basis_points),
+            basis_points_label(relationship.trust_basis_points),
+            basis_points_label(relationship.respect_basis_points),
+            basis_points_label(relationship.fear_basis_points),
+            basis_points_label(relationship.resentment_basis_points),
             relationship.obligation,
             unsettled_credit
         ),
     })
+}
+
+/// Formats basis points as a percentage with one correctly rounded decimal
+/// digit, so intelligence briefs never truncate their own figures.
+fn basis_points_label(basis_points: u16) -> String {
+    let tenths_of_percent = (basis_points + 5) / 10;
+    format!("{}.{}%", tenths_of_percent / 10, tenths_of_percent % 10)
 }
 
 fn resolve_district_information(
@@ -5069,17 +5132,12 @@ fn resolve_district_information(
         target: InformationTarget::District { district_id },
         subject: format!("Commissioned district brief: {}", district.name()),
         summary: format!(
-            "Rent index {}.{}%; employment {}.{}%; sanitation {}.{}%; safety {}.{}%; unrest {}.{}%; population {}.",
-            runtime.rent_index_basis_points / 100,
-            (runtime.rent_index_basis_points % 100) / 10,
-            runtime.employment_basis_points / 100,
-            (runtime.employment_basis_points % 100) / 10,
-            runtime.sanitation_basis_points / 100,
-            (runtime.sanitation_basis_points % 100) / 10,
-            runtime.safety_basis_points / 100,
-            (runtime.safety_basis_points % 100) / 10,
-            runtime.unrest_basis_points / 100,
-            (runtime.unrest_basis_points % 100) / 10,
+            "Rent index {}; employment {}; sanitation {}; safety {}; unrest {}; population {}.",
+            basis_points_label(runtime.rent_index_basis_points),
+            basis_points_label(runtime.employment_basis_points),
+            basis_points_label(runtime.sanitation_basis_points),
+            basis_points_label(runtime.safety_basis_points),
+            basis_points_label(runtime.unrest_basis_points),
             district.population()
         ),
     })
@@ -5088,7 +5146,6 @@ fn resolve_district_information(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InformationLeverageQuote {
     pub report_id: InformationReportId,
-    pub cost: Money,
     pub description: String,
 }
 
@@ -5224,7 +5281,6 @@ fn resolve_market_information_leverage(
     Ok(InformationLeveragePlan {
         quote: InformationLeverageQuote {
             report_id,
-            cost: INFORMATION_LEVERAGE_COST,
             description,
         },
         effect: InformationLeverageEffect::Contract {
@@ -5299,7 +5355,6 @@ fn resolve_counterparty_information_leverage(
         return Ok(InformationLeveragePlan {
             quote: InformationLeverageQuote {
                 report_id,
-                cost: INFORMATION_LEVERAGE_COST,
                 description: format!(
                     "use report {report_id} to negotiate contract {} with House {} from {} to {} per unit",
                     contract.id,
@@ -5319,7 +5374,6 @@ fn resolve_counterparty_information_leverage(
     Ok(InformationLeveragePlan {
         quote: InformationLeverageQuote {
             report_id,
-            cost: INFORMATION_LEVERAGE_COST,
             description: format!(
                 "use report {report_id} for targeted outreach to House {}",
                 dynasty.name()
@@ -5363,7 +5417,6 @@ fn resolve_district_information_leverage(
     Ok(InformationLeveragePlan {
         quote: InformationLeverageQuote {
             report_id,
-            cost: INFORMATION_LEVERAGE_COST,
             description: format!(
                 "use report {report_id} to fund a targeted {} initiative in {}",
                 initiative.label(),
@@ -5383,7 +5436,7 @@ fn leverage_information(
     report_id: InformationReportId,
 ) -> Result<CommandOutcome, CommandError> {
     let plan = resolve_information_leverage(registry, state, report_id)?;
-    spend_player_treasury(state, plan.quote.cost)?;
+    spend_player_treasury(state, INFORMATION_LEVERAGE_COST)?;
     apply_information_leverage_effect(state, &plan.effect);
     state
         .information_reports
@@ -5400,8 +5453,8 @@ fn leverage_information(
         OutboxKind::Information,
         "Commissioned intelligence converted into action".to_owned(),
         format!(
-            "{} at a cost of {}.",
-            plan.quote.description, plan.quote.cost
+            "{} at a cost of {INFORMATION_LEVERAGE_COST}.",
+            plan.quote.description
         ),
     )?;
     Ok(CommandOutcome {

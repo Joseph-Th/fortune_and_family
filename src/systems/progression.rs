@@ -165,41 +165,17 @@ fn runtime_campaign_phase(state: &AppState, dynasty_id: DynastyId) -> CampaignPh
     if dynasty.runtime.generation > 1 {
         return CampaignPhase::Legacy;
     }
+    // The live phase is the rank-maximum of the persisted phase and a fresh
+    // reconstruction of the durable evidence. Because the derivation IS the
+    // reconstruction (never regressed), the two can never disagree: a house
+    // promoted on evidence keeps its phase when that evidence later softens,
+    // and new evidence promotes it exactly as a save reload would.
     let current = dynasty.runtime.phase;
-    if current == CampaignPhase::Dominion {
-        return current;
-    }
-    if dynasty_city_shaping_history(state, dynasty_id) {
-        return CampaignPhase::Dominion;
-    }
-    if current == CampaignPhase::Ascendancy {
-        return current;
-    }
-    let deliveries = contract_deliveries_for_dynasty(state, dynasty_id);
-    if current == CampaignPhase::Establishment {
-        return if deliveries >= OFFICE_NOMINATION_DELIVERY_REQUIREMENT {
-            CampaignPhase::Ascendancy
-        } else {
-            current
-        };
-    }
-    // Foundation promotion must mirror `reconstructed_campaign_phase` exactly:
-    // either current reputation standing or durable patronage history
-    // evidences an established house.
-    let has_standing_evidence = dynasty_reputation_standing(state, dynasty_id)
-        || audit_kind_references_dynasty_character(
-            state,
-            dynasty_id,
-            AuditKind::InstitutionPatronage,
-        );
-    if has_standing_evidence {
-        if deliveries >= OFFICE_NOMINATION_DELIVERY_REQUIREMENT {
-            CampaignPhase::Ascendancy
-        } else {
-            CampaignPhase::Establishment
-        }
+    let reconstructed = reconstructed_campaign_phase(state, dynasty_id);
+    if campaign_phase_rank(reconstructed) > campaign_phase_rank(current) {
+        reconstructed
     } else {
-        CampaignPhase::Foundation
+        current
     }
 }
 

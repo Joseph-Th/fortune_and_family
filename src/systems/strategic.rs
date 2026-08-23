@@ -410,20 +410,21 @@ impl ContractSettlementState {
         self.buyer_is_at_fault() || self.seller_is_at_fault()
     }
 
+    const fn breach_attribution(self) -> (Option<DynastyId>, Option<DynastyId>) {
+        attribute_contract_breach(
+            self.buyer.owner_id,
+            self.seller.owner_id,
+            self.buyer.can_perform,
+            self.seller.can_perform,
+        )
+    }
+
     const fn breaching_dynasty_id(self) -> Option<DynastyId> {
-        match (self.buyer_is_at_fault(), self.seller_is_at_fault()) {
-            (true, false) => Some(self.buyer.owner_id),
-            (false, true) => Some(self.seller.owner_id),
-            (true, true) | (false, false) => None,
-        }
+        self.breach_attribution().0
     }
 
     const fn breach_victim_dynasty_id(self) -> Option<DynastyId> {
-        match (self.buyer_is_at_fault(), self.seller_is_at_fault()) {
-            (true, false) => Some(self.seller.owner_id),
-            (false, true) => Some(self.buyer.owner_id),
-            (true, true) | (false, false) => None,
-        }
+        self.breach_attribution().1
     }
 }
 
@@ -2788,12 +2789,21 @@ pub(crate) fn run_daily_strategic_systems(
 /// run its political consequence.
 fn grant_maturing_institution_support(state: &mut AppState) -> Result<(), SimulationError> {
     let day = state.clock.day();
+    let Some(establishment_day) = day.checked_sub(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS) else {
+        return Ok(());
+    };
+    // Patronage records mature exactly 90 days after they are appended, and
+    // the audit log is day-ordered: slice to the single establishment day
+    // instead of scanning the whole history every day.
+    let start = state
+        .audit_log
+        .partition_point(|record| record.day() < establishment_day);
     let mut matured: Vec<(InstitutionId, CharacterId)> = Vec::new();
-    for record in &state.audit_log {
-        if record.kind() != AuditKind::InstitutionPatronage {
-            continue;
+    for record in &state.audit_log[start..] {
+        if record.day() > establishment_day {
+            break;
         }
-        if day.checked_sub(record.day()) != Some(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS) {
+        if record.kind() != AuditKind::InstitutionPatronage {
             continue;
         }
         if let Some((institution_id, character_id)) =
@@ -2966,16 +2976,26 @@ fn apply_crisis_daily_effects(
                 // heal, locking external trade permanently.
             }
             CrisisKind::GuildRevolt => {
-                if let Some(district_id) = district_id
-                    && let Some(district) = state.districts.get_mut(&district_id)
-                {
-                    district.employment_basis_points = district
-                        .employment_basis_points
-                        .saturating_sub((severity / 100).max(1));
-                    district.unrest_basis_points = district
-                        .unrest_basis_points
-                        .saturating_add((severity / 200).max(1))
-                        .min(10_000);
+                if let Some(district_id) = district_id {
+                    // Unrest accumulates while the revolt runs; the monthly
+                    // smoothing pass decays it after resolution.
+                    if let Some(district) = state.districts.get_mut(&district_id) {
+                        district.unrest_basis_points = district
+                            .unrest_basis_points
+                            .saturating_add((severity / 200).max(1))
+                            .min(10_000);
+                    }
+                    // Employment is idempotent under the crisis rather than
+                    // compounding: it holds the same crisis-adjusted level the
+                    // monthly recompute derives, so a long revolt cannot grind
+                    // stored employment to zero and then snap back at the
+                    // month boundary.
+                    let pressure = (severity / 100).max(1);
+                    let employment = district_employment_basis_points(state, district_id)
+                        .saturating_sub(pressure);
+                    if let Some(district) = state.districts.get_mut(&district_id) {
+                        district.employment_basis_points = employment;
+                    }
                 }
             }
             CrisisKind::BankingPanic => {
@@ -3003,6 +3023,30 @@ fn apply_crisis_daily_effects(
         }
     }
     Ok(())
+}
+
+/// Demand an active grain shortage injects into the bread quote as pure price
+/// pressure: no household or business stands behind it and no money moves with
+/// it. Wage and utilization math excludes this share, because pay must follow
+/// work that real buyers fund, not scarcity panic.
+fn crisis_phantom_demand(state: &AppState, registry: &Registry, good_id: GoodId) -> Quantity {
+    if Some(good_id) != registry.get_good_id("bread") {
+        return Quantity::ZERO;
+    }
+    let target_stock = state
+        .market
+        .quotes
+        .get(&good_id)
+        .map_or(Quantity::ZERO, |quote| quote.target_stock);
+    state
+        .crises
+        .values()
+        .filter(|crisis| crisis.kind == CrisisKind::GrainShortage && crisis.status.is_active())
+        .fold(Quantity::ZERO, |total, crisis| {
+            total.saturating_add(
+                target_stock.saturating_mul_ratio(i64::from(crisis.severity_basis_points), 100_000),
+            )
+        })
 }
 
 fn apply_banking_panic_losses(state: &mut AppState, severity: u16) -> Result<(), SimulationError> {
@@ -3190,7 +3234,10 @@ fn is_final_contract_delivery(due: DueContract) -> bool {
 /// Attributes a contract breach to the single inactive party and records the
 /// other side as victim; mutual inactivity or no inactivity attributes nobody.
 /// The canonical rule behind `ContractSettlementState` attribution helpers.
-fn attribute_contract_breach(
+/// Canonical breach attribution shared by the termination and settlement
+/// paths: exactly one inactive party breaches; mutual inactivity or full
+/// performance attributes nothing.
+const fn attribute_contract_breach(
     buyer_owner_id: DynastyId,
     seller_owner_id: DynastyId,
     buyer_active: bool,
@@ -3201,6 +3248,26 @@ fn attribute_contract_breach(
         (true, false) => (Some(seller_owner_id), Some(buyer_owner_id)),
         (false, false) | (true, true) => (None, None),
     }
+}
+
+/// Collects the contractual penalty from the at-fault party up to its cash on
+/// hand and returns whatever remains unpayable as recoverable breach debt.
+fn collect_partial_contract_penalty(
+    state: &mut AppState,
+    payer_id: BusinessId,
+    recipient_id: BusinessId,
+    penalty: Money,
+) -> Result<Money, SimulationError> {
+    let available = state
+        .businesses
+        .get(payer_id)
+        .expect("contract penalty payer must exist")
+        .cash();
+    let transferred =
+        transfer_contract_money(state, payer_id, recipient_id, penalty.min(available))?;
+    Ok(penalty
+        .checked_sub(transferred)
+        .expect("bounded contract penalty transfer cannot exceed the contractual penalty"))
 }
 
 fn terminate_inactive_contract(
@@ -3222,16 +3289,7 @@ fn terminate_inactive_contract(
         _ => None,
     };
     let unpaid_penalty = if let Some((payer_id, recipient_id)) = penalty_parties {
-        let available = state
-            .businesses
-            .get(payer_id)
-            .expect("contract penalty payer must exist")
-            .cash();
-        let transferred =
-            transfer_contract_money(state, payer_id, recipient_id, due.penalty.min(available))?;
-        due.penalty
-            .checked_sub(transferred)
-            .expect("bounded contract penalty transfer cannot exceed the contractual penalty")
+        collect_partial_contract_penalty(state, payer_id, recipient_id, due.penalty)?
     } else {
         Money::ZERO
     };
@@ -3423,16 +3481,7 @@ fn settle_failed_contract(
         (false, false) | (true, true) => None,
     };
     let unpaid_terminal_penalty = if let Some((payer_id, recipient_id)) = penalty_parties {
-        let available = state
-            .businesses
-            .get(payer_id)
-            .expect("contract penalty payer must exist")
-            .cash();
-        let transferred =
-            transfer_contract_money(state, payer_id, recipient_id, due.penalty.min(available))?;
-        due.penalty
-            .checked_sub(transferred)
-            .expect("bounded contract penalty transfer cannot exceed the contractual penalty")
+        collect_partial_contract_penalty(state, payer_id, recipient_id, due.penalty)?
     } else {
         Money::ZERO
     };
@@ -5198,13 +5247,19 @@ fn business_labor_utilization_basis_points(
         .saturating_sub(business.inventory_quantity(output_good_id))
         .max(Quantity::ZERO);
     let contract_reserve = super::business_contract_reserve(state, business_id, output_good_id);
+    // Crisis demand is pure price pressure: no buyer stands behind it and no
+    // money moves with it. Wages follow work that real demand funds, so the
+    // phantom share is excluded from the weekly demand estimate.
+    let phantom_daily_demand =
+        crisis_phantom_demand(state, registry, output_good_id).saturating_mul_ratio(7, 1);
     let weekly_market_demand = state
         .market
         .quotes
         .get(&output_good_id)
         .map_or(Quantity::ZERO, |quote| {
             quote.demand_today.saturating_mul_ratio(7, 1)
-        });
+        })
+        .saturating_sub(phantom_daily_demand);
     let required_output = reserve_shortfall
         .saturating_add(contract_reserve)
         .saturating_add(weekly_market_demand);
@@ -7135,6 +7190,28 @@ fn update_district_conditions(state: &mut AppState) {
             district.rent_index_basis_points
         };
         revalue_district_properties(state, district_id, rent_index);
+        repair_district_properties(state, district_id);
+    }
+}
+
+/// Monthly wear reversal: routine upkeep slowly restores condition toward full
+/// repair, so an urban fire's damage heals over the following years instead of
+/// degrading every building in the district permanently. The step is far
+/// smaller than active fire erosion, keeping fires costly while making
+/// condition a two-way statistic.
+fn repair_district_properties(state: &mut AppState, district_id: DistrictId) {
+    const MONTHLY_REPAIR_BASIS_POINTS: u16 = 30;
+    for property in state
+        .properties
+        .values_mut()
+        .filter(|property| property.district_id == district_id)
+    {
+        if property.condition_basis_points < 10_000 {
+            property.condition_basis_points = property
+                .condition_basis_points
+                .saturating_add(MONTHLY_REPAIR_BASIS_POINTS)
+                .min(10_000);
+        }
     }
 }
 
@@ -7219,17 +7296,38 @@ fn district_employment_basis_points(state: &AppState, district_id: DistrictId) -
         .min(10_000)
 }
 
+/// Per-cause unrest pressure shares used by the monthly district model, in
+/// unrest-weighted basis points. Projection reads these same values so the
+/// dashboard's district drivers cannot drift from the simulation's own
+/// definition of what strains a district.
+pub(crate) struct DistrictUnrestPressures {
+    pub food: u16,
+    pub safety: u16,
+    pub employment: u16,
+    pub sanitation: u16,
+    pub rent: u16,
+}
+
+pub(crate) fn district_unrest_pressures(
+    district: &DistrictRuntime,
+    food_satisfaction: u16,
+) -> DistrictUnrestPressures {
+    DistrictUnrestPressures {
+        food: 10_000_u16.saturating_sub(food_satisfaction),
+        safety: 10_000_u16.saturating_sub(district.safety_basis_points) / 3,
+        employment: 6_000_u16.saturating_sub(district.employment_basis_points),
+        sanitation: 7_000_u16.saturating_sub(district.sanitation_basis_points) / 2,
+        rent: district.rent_index_basis_points.saturating_sub(11_000) / 2,
+    }
+}
+
 fn district_unrest_next_basis_points(district: &DistrictRuntime, food_satisfaction: u16) -> u16 {
-    let food_pressure = 10_000_u16.saturating_sub(food_satisfaction);
-    let safety_pressure = 10_000_u16.saturating_sub(district.safety_basis_points) / 3;
-    let employment_pressure = 6_000_u16.saturating_sub(district.employment_basis_points);
-    let sanitation_pressure = 7_000_u16.saturating_sub(district.sanitation_basis_points) / 2;
-    let rent_pressure = district.rent_index_basis_points.saturating_sub(11_000) / 2;
-    let pressure = u32::from(food_pressure)
-        .saturating_add(u32::from(safety_pressure))
-        .saturating_add(u32::from(employment_pressure))
-        .saturating_add(u32::from(sanitation_pressure))
-        .saturating_add(u32::from(rent_pressure));
+    let pressures = district_unrest_pressures(district, food_satisfaction);
+    let pressure = u32::from(pressures.food)
+        .saturating_add(u32::from(pressures.safety))
+        .saturating_add(u32::from(pressures.employment))
+        .saturating_add(u32::from(pressures.sanitation))
+        .saturating_add(u32::from(pressures.rent));
     u16::try_from(
         (u32::from(district.unrest_basis_points)
             .saturating_mul(3)

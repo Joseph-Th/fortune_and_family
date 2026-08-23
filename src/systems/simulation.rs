@@ -1792,15 +1792,19 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(),
             .copper();
         let half_base = Money::from_copper((good.base_price().copper() / 2).max(1));
         let maximum_price = good.base_price().copper().saturating_mul(4).max(1);
+        // A real break-even above the speculative ceiling wins: clamping it
+        // back down would freeze the price exactly at the ceiling while every
+        // producer still loses money per unit, cutting the market off from the
+        // only signal that could restore the sector.
         let minimum_price = production_floors
             .get(&good.id())
             .copied()
             .unwrap_or(half_base)
             .max(half_base)
-            .copper()
-            .min(maximum_price);
+            .copper();
         quote.previous_price = previous_price;
-        quote.price = Money::from_copper(raw_price.clamp(minimum_price, maximum_price));
+        quote.price =
+            Money::from_copper(raw_price.clamp(minimum_price, maximum_price.max(minimum_price)));
         quote.causes = decide_market_causes(quote, seasonal_pressure);
 
         let change_basis_points = if previous_price.copper() == 0 {
@@ -1870,6 +1874,69 @@ fn recently_shocked_goods(state: &AppState) -> BTreeSet<String> {
     goods
 }
 
+/// The sustainable unit cost of one business's output at current market input
+/// prices: input costs plus labor and maintenance overhead spread across the
+/// batches the firm can actually run, with a tenth again for margin. Both the
+/// market's production price floors and acquisition-turnaround analysis read
+/// this one canonical formula.
+pub(crate) fn business_sustainable_unit_cost(
+    registry: &Registry,
+    state: &AppState,
+    business: &crate::core::Business,
+) -> Money {
+    let recipe = registry
+        .get_recipe(business.recipe_id())
+        .expect("business recipe must exist");
+    // Only `Active` and `Disputed` agreements are paid at weekly wage
+    // settlement, so suspended payroll must not inflate the break-even.
+    let weekly_labor_copper = state
+        .employment
+        .values()
+        .filter(|agreement| {
+            agreement.business_id == business.id()
+                && matches!(
+                    agreement.status,
+                    EmploymentStatus::Active | EmploymentStatus::Disputed
+                )
+        })
+        .fold(0_i128, |total, agreement| {
+            total + i128::from(agreement.weekly_wage.copper())
+        });
+    let daily_labor_copper =
+        ceil_div_nonnegative_wide(weekly_labor_copper, 7).min(i128::from(i64::MAX));
+    let daily_labor = Money::from_copper(
+        i64::try_from(daily_labor_copper).expect("clamped daily labor cost must fit i64"),
+    );
+    let daily_maintenance = maintenance_cost(
+        recipe.daily_operating_cost(),
+        business.policy.maintenance_basis_points,
+    );
+    // Labor and maintenance accrue once per day, so unit break-even spreads
+    // them across every batch the business expects to run rather than
+    // charging a full day of overhead to a single batch of output.
+    let expected_batches = i64::from(effective_capacity_batches(state, business)).max(1);
+    let overhead_per_batch = daily_labor
+        .saturating_add(daily_maintenance)
+        .saturating_mul_ratio_ceil_nonnegative(1_000, expected_batches * 1_000);
+    let batch_cost = recipe.inputs().iter().fold(
+        recipe
+            .daily_operating_cost()
+            .saturating_add(overhead_per_batch),
+        |total, input| {
+            let price = state
+                .market
+                .quotes
+                .get(&input.good_id())
+                .expect("recipe input good must have a market quote")
+                .price;
+            total.saturating_add(cost_for(input.quantity(), price))
+        },
+    );
+    let break_even = batch_cost
+        .saturating_mul_ratio_ceil_nonnegative(1_000, recipe.output_quantity().milliunits());
+    break_even.saturating_mul_ratio_ceil_nonnegative(11, 10)
+}
+
 fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<GoodId, Money> {
     let mut floors: BTreeMap<GoodId, Vec<Money>> = BTreeMap::new();
     for business in state.businesses.iter().filter(|business| {
@@ -1881,61 +1948,13 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
         let recipe = registry
             .get_recipe(business.recipe_id())
             .expect("business recipe must exist");
-        let output_milliunits = recipe.output_quantity().milliunits();
-        if output_milliunits <= 0 {
+        if recipe.output_quantity().milliunits() <= 0 {
             continue;
         }
-        // Only `Active` and `Disputed` agreements are paid at weekly wage
-        // settlement, so suspended payroll must not inflate the break-even.
-        let weekly_labor_copper = state
-            .employment
-            .values()
-            .filter(|agreement| {
-                agreement.business_id == business.id()
-                    && matches!(
-                        agreement.status,
-                        EmploymentStatus::Active | EmploymentStatus::Disputed
-                    )
-            })
-            .fold(0_i128, |total, agreement| {
-                total + i128::from(agreement.weekly_wage.copper())
-            });
-        let daily_labor_copper =
-            ceil_div_nonnegative_wide(weekly_labor_copper, 7).min(i128::from(i64::MAX));
-        let daily_labor = Money::from_copper(
-            i64::try_from(daily_labor_copper).expect("clamped daily labor cost must fit i64"),
-        );
-        let daily_maintenance = maintenance_cost(
-            recipe.daily_operating_cost(),
-            business.policy.maintenance_basis_points,
-        );
-        // Labor and maintenance accrue once per day, so unit break-even spreads
-        // them across every batch the business expects to run rather than
-        // charging a full day of overhead to a single batch of output.
-        let expected_batches = i64::from(effective_capacity_batches(state, business));
-        let overhead_per_batch = daily_labor
-            .saturating_add(daily_maintenance)
-            .saturating_mul_ratio_ceil_nonnegative(1_000, expected_batches * 1_000);
-        let batch_cost = recipe.inputs().iter().fold(
-            recipe
-                .daily_operating_cost()
-                .saturating_add(overhead_per_batch),
-            |total, input| {
-                let price = state
-                    .market
-                    .quotes
-                    .get(&input.good_id())
-                    .expect("recipe input good must have a market quote")
-                    .price;
-                total.saturating_add(cost_for(input.quantity(), price))
-            },
-        );
-        let break_even = batch_cost.saturating_mul_ratio_ceil_nonnegative(1_000, output_milliunits);
-        let sustainable = break_even.saturating_mul_ratio_ceil_nonnegative(11, 10);
         floors
             .entry(recipe.output_good_id())
             .or_default()
-            .push(sustainable);
+            .push(business_sustainable_unit_cost(registry, state, business));
     }
     // The market's sustainable price is what the TYPICAL producer needs to
     // keep operating, not the single luckiest one. A pure minimum lets one
@@ -2659,7 +2678,6 @@ fn heir_was_formally_prepared(
     incoming_head_id: CharacterId,
 ) -> bool {
     let subject = format!("dynasty:{dynasty_id}");
-    let heir_marker = format!("heir={incoming_head_id}");
     // Any designation naming the incoming head counts, not just the most
     // recent one: a later re-designation of a different heir must not erase
     // an earlier formal preparation of the character who actually succeeds.
@@ -2667,7 +2685,7 @@ fn heir_was_formally_prepared(
         .audit_log
         .iter()
         .filter(|record| record.kind() == AuditKind::HeirDesignation && record.subject() == subject)
-        .any(|record| record.detail().split(';').any(|part| part == heir_marker))
+        .any(|record| super::heir_audit_detail_matches(record, incoming_head_id))
 }
 
 fn succession_shock(

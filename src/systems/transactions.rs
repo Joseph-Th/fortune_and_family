@@ -152,6 +152,8 @@ pub enum SimulationError {
     MarketQuoteMissing { good_id: GoodId },
     #[error("market clearing debit must be nonnegative, received {outgoing}")]
     NegativeMarketDebit { outgoing: Money },
+    #[error("market clearing credit must be nonnegative, received {incoming}")]
+    NegativeMarketCredit { incoming: Money },
     #[error("market supply for good {good_id} must be nonnegative, received {incoming}")]
     NegativeMarketSupply { good_id: GoodId, incoming: Quantity },
     #[error(
@@ -247,7 +249,7 @@ pub(crate) fn credit_market_clearing_account(
     incoming: Money,
 ) -> Result<(), SimulationError> {
     if incoming < Money::ZERO {
-        return Err(SimulationError::NegativeMarketDebit { outgoing: incoming });
+        return Err(SimulationError::NegativeMarketCredit { incoming });
     }
     let current = state.market.clearing_account;
     state.market.clearing_account =

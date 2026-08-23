@@ -128,6 +128,9 @@ fn normalize_player_name(value: &str) -> Result<String, char> {
 }
 
 fn empty_state(registry: &Registry, seed: u64) -> AppState {
+    // Starting float in the market's internal cash pool. It is part of the
+    // canonical scenario bootstrap, so changing it changes every campaign.
+    const INITIAL_MARKET_CLEARING_COPPER: i64 = 2_000_000;
     let market = MarketState {
         quotes: registry
             .goods()
@@ -148,7 +151,7 @@ fn empty_state(registry: &Registry, seed: u64) -> AppState {
                 )
             })
             .collect(),
-        clearing_account: Money::from_copper(2_000_000),
+        clearing_account: Money::from_copper(INITIAL_MARKET_CLEARING_COPPER),
     };
     AppState {
         schema_version: CURRENT_SCHEMA_VERSION,

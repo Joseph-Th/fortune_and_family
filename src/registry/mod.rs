@@ -284,22 +284,42 @@ impl Registry {
 
     #[must_use]
     pub fn get_district(&self, id: DistrictId) -> Option<&DistrictDef> {
-        self.districts.get(id.value() as usize)
+        let def = self.districts.get(id.value() as usize);
+        debug_assert!(
+            def.is_none_or(|def| def.id() == id),
+            "district definitions are densely indexed by typed ID"
+        );
+        def
     }
 
     #[must_use]
     pub fn get_good(&self, id: GoodId) -> Option<&GoodDef> {
-        self.goods.get(id.value() as usize)
+        let def = self.goods.get(id.value() as usize);
+        debug_assert!(
+            def.is_none_or(|def| def.id() == id),
+            "good definitions are densely indexed by typed ID"
+        );
+        def
     }
 
     #[must_use]
     pub fn get_recipe(&self, id: RecipeId) -> Option<&RecipeDef> {
-        self.recipes.get(id.value() as usize)
+        let def = self.recipes.get(id.value() as usize);
+        debug_assert!(
+            def.is_none_or(|def| def.id() == id),
+            "recipe definitions are densely indexed by typed ID"
+        );
+        def
     }
 
     #[must_use]
     pub fn get_institution(&self, id: InstitutionId) -> Option<&InstitutionDef> {
-        self.institutions.get(id.value() as usize)
+        let def = self.institutions.get(id.value() as usize);
+        debug_assert!(
+            def.is_none_or(|def| def.id() == id),
+            "institution definitions are densely indexed by typed ID"
+        );
+        def
     }
 
     #[must_use]

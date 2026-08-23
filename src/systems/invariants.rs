@@ -893,20 +893,12 @@ fn validate_loans(state: &AppState) {
                         "Ownership Exclusivity: active collateral is not owned by the borrower"
                     );
                 }
-                LoanStatus::Defaulted => {
+                LoanStatus::Defaulted | LoanStatus::Repaid => {
                     debug_assert!(
                         property.is_some_and(|property| {
                             property.collateral_loan_id != Some(*loan_id)
                         }),
-                        "Derived Data Consistency: defaulted collateral remains pledged to its settled loan"
-                    );
-                }
-                LoanStatus::Repaid => {
-                    debug_assert!(
-                        property.is_some_and(|property| {
-                            property.collateral_loan_id != Some(*loan_id)
-                        }),
-                        "Derived Data Consistency: repaid collateral remains pledged to its settled loan"
+                        "Derived Data Consistency: collateral remains pledged to its settled loan"
                     );
                 }
             }
@@ -1441,12 +1433,6 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
             work.progress_basis_points, expected_progress,
             "Derived Data Consistency: public work progress does not match spending"
         );
-        if work.status == PublicWorkStatus::Completed {
-            debug_assert_eq!(
-                work.spent, work.budget,
-                "Lifecycle Validity: completed public work is not fully funded"
-            );
-        }
         if let Some(sponsor_id) = work.sponsor_dynasty_id {
             debug_assert!(
                 state.dynasties.contains_key(&sponsor_id),
@@ -1649,12 +1635,17 @@ fn validate_outbox(state: &AppState) {
 
 fn validate_history(state: &AppState) {
     let mut chronicle_ids = BTreeSet::new();
+    let mut prior_id = None;
     let mut prior_day = i64::MIN;
     for entry in &state.chronicle {
         debug_assert!(
             chronicle_ids.insert(entry.id()),
             "Index Uniqueness: duplicate chronicle entry ID {}",
             entry.id()
+        );
+        debug_assert!(
+            prior_id.is_none_or(|prior_id| entry.id() > prior_id),
+            "Deterministic Decision Ordering: chronicle entry IDs are not strictly increasing"
         );
         debug_assert!(
             entry.day() >= prior_day,
@@ -1668,6 +1659,7 @@ fn validate_history(state: &AppState) {
             !entry.summary().trim().is_empty(),
             "No Lost Runtime State: chronicle entry lacks user-facing content"
         );
+        prior_id = Some(entry.id());
         prior_day = entry.day();
     }
     let mut prior_audit_day = i64::MIN;

@@ -160,11 +160,6 @@ impl Property {
     pub const fn district_id(&self) -> DistrictId {
         self.district_id
     }
-
-    #[must_use]
-    pub const fn owner_dynasty_id(&self) -> Option<DynastyId> {
-        self.owner_dynasty_id
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -685,13 +680,6 @@ pub struct Crisis {
     pub(crate) severity_basis_points: u16,
     pub(crate) status: CrisisStatus,
     pub(crate) cause: String,
-}
-
-impl Crisis {
-    #[must_use]
-    pub const fn id(&self) -> CrisisId {
-        self.id
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
