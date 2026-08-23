@@ -2004,9 +2004,10 @@ fn render_law_rows(laws: &[LawProjection]) -> String {
     for law in laws {
         write!(
             rows,
-            "<tr><td>{}<br><small>#{}</small></td><td>{}</td><td>{}</td><td>day {}</td></tr>",
+            "<tr><td>{}<br><small>#{}</small><br><small>{}</small></td><td>{}</td><td>{}</td><td>day {}</td></tr>",
             escape_html(&humanize_debug(&law.kind)),
             law.id,
+            escape_html(&law_effect_summary(law.kind, law.value)),
             law.value,
             law.sponsor.as_deref().map_or("—".to_owned(), escape_html),
             law.enacted_day,
@@ -2014,6 +2015,44 @@ fn render_law_rows(laws: &[LawProjection]) -> String {
         .expect("writing HTML into a String cannot fail");
     }
     rows
+}
+
+/// One-line player-facing summary of what an enacted kind actually does in
+/// the simulation, so a raw law row answers "what does this change?" without
+/// forcing the reader through the systems code.
+fn law_effect_summary(kind: LawKind, value: i64) -> String {
+    match kind {
+        LawKind::BreadPriceCeiling => {
+            format!("Caps bread at {} copper while active.", value.max(0))
+        }
+        LawKind::ForeignMerchantToll => {
+            "Tolls every regional trade route, discouraging imports.".to_owned()
+        }
+        LawKind::InterestLimit => {
+            format!(
+                "Caps private loan interest at {} basis points.",
+                value.clamp(0, 10_000)
+            )
+        }
+        LawKind::FireCode => "Lowers the chance and severity of urban fires.".to_owned(),
+        LawKind::RentRestriction => {
+            "Caps weekly rents below their district-indexed level.".to_owned()
+        }
+        LawKind::GuildEntryRestriction => {
+            "Reserves craft-market access for chartered guild members, raises the cost of \
+             joining a guild, and breeds revolt pressure."
+                .to_owned()
+        }
+        LawKind::EmergencyImports => {
+            format!(
+                "Adds {} units of grain to the market each day.",
+                value.max(0)
+            )
+        }
+        LawKind::PublicDebtAuthorization => {
+            "Authorizes the civic treasury to borrow from dynasty creditors.".to_owned()
+        }
+    }
 }
 
 fn render_acquisition_rows(businesses: &[BusinessProjection]) -> String {

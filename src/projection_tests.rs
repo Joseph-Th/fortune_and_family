@@ -879,4 +879,57 @@ mod html {
             "embedded JSON must escape script-delimiter characters"
         );
     }
+
+    #[test]
+    fn law_rows_explain_each_enacted_kind() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let day = state.clock.day();
+        for (index, kind) in [
+            LawKind::BreadPriceCeiling,
+            LawKind::ForeignMerchantToll,
+            LawKind::InterestLimit,
+            LawKind::FireCode,
+            LawKind::RentRestriction,
+            LawKind::GuildEntryRestriction,
+            LawKind::EmergencyImports,
+            LawKind::PublicDebtAuthorization,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let law_id = state.next_ids.law();
+            state.laws.insert(
+                law_id,
+                EnactedLaw {
+                    id: law_id,
+                    kind,
+                    enacted_day: day,
+                    sponsor_dynasty_id: Some(state.player_dynasty_id),
+                    value: 5_000,
+                    active: true,
+                },
+            );
+            let _ = index;
+        }
+
+        let html = render_campaign_html(registry, &state).expect("dashboard must render");
+
+        assert!(
+            html.contains("Caps bread at 5"),
+            "a bread price ceiling row must state its cap"
+        );
+        assert!(
+            html.contains("Tolls every regional trade route"),
+            "a merchant toll row must state its route effect"
+        );
+        assert!(
+            html.contains("Reserves craft-market access for chartered guild members"),
+            "an entry restriction row must state its market-access and patronage effects"
+        );
+        assert!(
+            html.contains("units of grain to the market each day"),
+            "an emergency imports row must state its daily grain supply"
+        );
+    }
 }

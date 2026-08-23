@@ -1330,7 +1330,10 @@ fn affordable_cloth_demand(registry: &Registry, state: &AppState, need: Quantity
     let Some(cloth_id) = registry.get_good_id("cloth") else {
         return need;
     };
-    let Some(reference) = registry.get_good(cloth_id).map(|good| good.base_price()) else {
+    let Some(reference) = registry
+        .get_good(cloth_id)
+        .map(crate::registry::GoodDef::base_price)
+    else {
         return need;
     };
     let Some(quote) = state.market.quotes.get(&cloth_id) else {
