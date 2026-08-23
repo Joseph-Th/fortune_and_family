@@ -1539,9 +1539,16 @@ pub(crate) fn distribute_owned_business_cash(
             dynasty_id,
         });
     }
-    if business.status() != BusinessStatus::Active {
+    if matches!(
+        business.status(),
+        BusinessStatus::Insolvent | BusinessStatus::Closed
+    ) {
         return Err(StrategicError::BusinessInactive { business_id });
     }
+    // An operating but Distressed firm may still return true surplus to its
+    // owner: the distribution reserve below already protects 21 days of
+    // operating cost on top of the minimum cash reserve, so withdrawal cannot
+    // strip the cushion its recovery depends on.
     let reserve = business_owner_distribution_reserve(registry, business);
     let available = business.cash().saturating_sub(reserve).max(Money::ZERO);
     if amount > available {
@@ -2451,7 +2458,7 @@ fn initialize_employment(state: &mut AppState) {
             .ids_for_district(district_id)
             .and_then(|ids| {
                 ids.iter().find(|id| {
-                    super::available_household_workers(state, **id, None) >= u32::from(workers)
+                    super::available_household_workers(state, **id) >= u32::from(workers)
                 })
             })
             .copied()
@@ -2653,7 +2660,15 @@ fn initialize_contracts(registry: &Registry, state: &mut AppState) {
 }
 
 fn initialize_loans(state: &mut AppState) {
-    let dynasty_ids: Vec<_> = state.dynasties.keys().copied().collect();
+    // Opening credit is flavor between NPC houses only: player lending is a
+    // deliberate player command, never an autonomous counterparty position
+    // created before the player has acted.
+    let dynasty_ids: Vec<_> = state
+        .dynasties
+        .keys()
+        .copied()
+        .filter(|id| *id != state.player_dynasty_id)
+        .collect();
     for pair in dynasty_ids.windows(2).take(2) {
         let [lender, borrower] = pair else {
             continue;
@@ -3099,7 +3114,7 @@ fn settle_due_contract(state: &mut AppState, due: DueContract) -> Result<(), Sim
     if !seller_active || !buyer_active {
         terminate_inactive_contract(
             state,
-            due.id,
+            &due,
             buyer_owner_id,
             seller_owner_id,
             buyer_active,
@@ -3190,23 +3205,45 @@ fn attribute_contract_breach(
 
 fn terminate_inactive_contract(
     state: &mut AppState,
-    contract_id: crate::ids::ContractId,
+    due: &DueContract,
     buyer_owner_id: DynastyId,
     seller_owner_id: DynastyId,
     buyer_active: bool,
     seller_active: bool,
 ) -> Result<(), SimulationError> {
-    let contract = state
-        .contracts
-        .get_mut(&contract_id)
-        .expect("contract must exist");
-    contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
     let (breaching_dynasty_id, breach_victim_dynasty_id) =
         attribute_contract_breach(buyer_owner_id, seller_owner_id, buyer_active, seller_active);
+    // The victim collects whatever the inactive party can still pay before the
+    // termination is recorded; only the genuinely unpayable remainder
+    // accumulates as recoverable breach debt.
+    let penalty_parties = match (!buyer_active, !seller_active) {
+        (true, false) => Some((due.buyer_id, due.seller_id)),
+        (false, true) => Some((due.seller_id, due.buyer_id)),
+        _ => None,
+    };
+    let unpaid_penalty = if let Some((payer_id, recipient_id)) = penalty_parties {
+        let available = state
+            .businesses
+            .get(payer_id)
+            .expect("contract penalty payer must exist")
+            .cash();
+        let transferred =
+            transfer_contract_money(state, payer_id, recipient_id, due.penalty.min(available))?;
+        due.penalty
+            .checked_sub(transferred)
+            .expect("bounded contract penalty transfer cannot exceed the contractual penalty")
+    } else {
+        Money::ZERO
+    };
+    let contract = state
+        .contracts
+        .get_mut(&due.id)
+        .expect("contract must exist");
+    contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
     contract.breaching_dynasty_id = breaching_dynasty_id;
     contract.breach_victim_dynasty_id = breach_victim_dynasty_id;
     contract.unpaid_breach_penalty = if contract.breach_victim_dynasty_id.is_some() {
-        contract.penalty
+        unpaid_penalty
     } else {
         Money::ZERO
     };
@@ -3228,7 +3265,10 @@ fn terminate_inactive_contract(
             state,
             buyer_owner_id,
             seller_owner_id,
-            &format!("Supply contract {contract_id} ended because a party became inactive."),
+            &format!(
+                "Supply contract {} ended because a party became inactive.",
+                due.id
+            ),
         );
         try_record_counterparty_information(
             state,
@@ -3240,7 +3280,7 @@ fn terminate_inactive_contract(
     try_push_outbox(
         state,
         OutboxKind::Contract,
-        format!("Contract {contract_id} terminated"),
+        format!("Contract {} terminated", due.id),
         "An inactive contract party could no longer perform the scheduled obligation.".to_owned(),
     )?;
     Ok(())
@@ -4386,8 +4426,21 @@ fn reoccupy_recovered_premises(state: &mut AppState) {
         })
         .collect();
     for (property_id, business_id) in reoccupations {
+        let Some(business_owner_id) = state
+            .businesses
+            .get(business_id)
+            .map(crate::core::Business::owner_dynasty_id)
+        else {
+            continue;
+        };
         if let Some(property) = state.properties.get_mut(&property_id) {
             property.occupant_business_id = Some(business_id);
+            // An outside owner must keep collecting rent from the recovered
+            // occupant; only owner-occupied premises trade without a tenancy.
+            property.tenant_dynasty_id = property
+                .owner_dynasty_id
+                .filter(|property_owner_id| *property_owner_id != business_owner_id)
+                .map(|_| business_owner_id);
         }
     }
 }
@@ -4512,25 +4565,28 @@ fn settle_property_rents(state: &mut AppState) -> Result<(), SimulationError> {
 }
 
 pub(crate) fn effective_property_weekly_rent(state: &AppState, property: &Property) -> Money {
-    let indexed_rent =
-        if property.tenant_dynasty_id.is_none() && property.occupant_business_id.is_none() {
-            let rent_index = state
-                .districts
-                .get(&property.district_id)
-                .expect("property district runtime must exist")
-                .rent_index_basis_points;
-            property
-                .weekly_rent
-                .saturating_mul_ratio(i64::from(rent_index), 10_000)
-        } else {
-            property.weekly_rent
-        };
+    // District desirability reprices every lease, occupied or vacant: the
+    // same premises cannot sit at a flat rent while everything around them
+    // moves with the district's fortunes.
+    let rent_index = state
+        .districts
+        .get(&property.district_id)
+        .expect("property district runtime must exist")
+        .rent_index_basis_points;
+    let indexed_rent = property
+        .weekly_rent
+        .saturating_mul_ratio(i64::from(rent_index), 10_000);
     active_law_value(state, LawKind::RentRestriction).map_or(indexed_rent, |limit| {
         let annual_cap = property
             .value
             .saturating_mul_ratio(limit.clamp(0, 10_000), 10_000);
+        // The canonical calendar is a 360-day year settled weekly, matching
+        // loan interest accrual.
         let weekly_cap = if annual_cap.copper() > 0 {
-            Money::from_copper(crate::money::ceil_div_nonnegative(annual_cap.copper(), 52))
+            Money::from_copper(crate::money::ceil_div_nonnegative(
+                annual_cap.copper().saturating_mul(7),
+                360,
+            ))
         } else {
             Money::ZERO
         };
@@ -5159,10 +5215,25 @@ fn business_labor_utilization_basis_points(
     if weekly_capacity_batches <= 0 {
         return 0;
     }
+    // Wages follow the work the present workforce can actually run: a firm
+    // whose counted workers cannot assemble one batch produces nothing and
+    // pays nothing, and a partially staffed firm pays proportionally.
+    let workforce_coverage = (i64::from(super::simulation::worker_limited_batches(
+        state,
+        business_id,
+    ))
+    .saturating_mul(10_000)
+        / i64::from(business.operations.capacity_batches_per_day))
+    .min(10_000);
+    if workforce_coverage == 0 {
+        return 0;
+    }
     let utilization_numerator = required_batches.saturating_mul(10_000);
     let utilization =
         crate::money::ceil_div_nonnegative(utilization_numerator, weekly_capacity_batches)
-            .clamp(RETAINER_BASIS_POINTS, 10_000);
+            .clamp(RETAINER_BASIS_POINTS, 10_000)
+            .saturating_mul(workforce_coverage)
+            / 10_000;
     u16::try_from(utilization).expect("clamped utilization must fit u16")
 }
 
@@ -5725,7 +5796,7 @@ pub(crate) fn run_monthly_strategic_systems(
     apply_active_office_directives(registry, state)?;
     advance_ai_objectives(registry, state)?;
     apply_ai_dynasty_upkeep(state)?;
-    advance_ai_credit_participation(registry, state);
+    advance_ai_credit_participation(registry, state)?;
     update_information_reports(registry, state)?;
     file_grounded_ai_legal_cases(registry, state)?;
     advance_legal_case_hearings(state)?;
@@ -5859,9 +5930,13 @@ fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> 
 /// rival houses (a) lend a portion of idle treasury to a house whose businesses need
 /// working capital, and (b) borrow when their own businesses need capital and their
 /// treasury is thin, mirroring `ensure_non_player_loan_counterparty_accepts`.
-fn advance_ai_credit_participation(registry: &Registry, state: &mut AppState) {
+fn advance_ai_credit_participation(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     advance_ai_credit_lending(registry, state);
-    advance_ai_credit_borrowing(registry, state);
+    advance_ai_credit_borrowing(registry, state)?;
+    Ok(())
 }
 
 /// The lending half of AI credit participation: a liquid house may fund a borrower's
@@ -5957,29 +6032,39 @@ fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
 
 /// The borrowing half of AI credit participation: a house whose businesses need capital
 /// and whose treasury is thin seeks a working-capital loan from a liquid rival house.
-/// Player lending is a deliberate player command, never an autonomous AI counterparty.
-fn advance_ai_credit_borrowing(registry: &Registry, state: &mut AppState) {
+/// The borrowed principal then capitalizes the short business immediately — a house
+/// must not pay interest to hold idle treasury cash while the need that motivated
+/// the loan persists. Player lending is a deliberate player command, never an
+/// autonomous AI counterparty.
+fn advance_ai_credit_borrowing(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let player_id = state.player_dynasty_id;
     let dynasties: Vec<_> = state.dynasties.keys().copied().collect();
     for borrower_id in dynasties.iter().copied().filter(|id| *id != player_id) {
         let Some(borrower) = state.dynasties.get(&borrower_id) else {
             continue;
         };
-        let portfolio_needs_capital = state
+        let neediest_business = state
             .businesses
             .ids_for_owner(borrower_id)
             .into_iter()
             .flatten()
-            .any(|business_id| {
-                state.businesses.get(*business_id).is_some_and(|business| {
-                    !matches!(
-                        business.status(),
-                        BusinessStatus::Insolvent | BusinessStatus::Closed
-                    ) && business.cash()
-                        < business_recapitalization_target(registry, state, business)
-                })
-            });
-        if !portfolio_needs_capital || borrower.treasury() >= Money::from_copper(20_000) {
+            .filter_map(|business_id| state.businesses.get(*business_id))
+            .filter(|business| {
+                !matches!(
+                    business.status(),
+                    BusinessStatus::Insolvent | BusinessStatus::Closed
+                )
+            })
+            .filter_map(|business| {
+                let shortfall = business_recapitalization_target(registry, state, business)
+                    .saturating_sub(business.cash());
+                (shortfall > Money::ZERO).then_some((business.id(), shortfall))
+            })
+            .max_by_key(|(_, shortfall)| *shortfall);
+        if neediest_business.is_none() || borrower.treasury() >= Money::from_copper(20_000) {
             continue;
         }
         if state.loans.values().any(|loan| {
@@ -6030,10 +6115,28 @@ fn advance_ai_credit_borrowing(registry: &Registry, state: &mut AppState) {
                 })
                 .map(|property| property.id),
         };
-        let _ = ai_strategic_attempt(
+        let committed = ai_strategic_attempt(
             &validate_loan(state, terms).and_then(|token| token.commit(state)),
-        );
+        )?;
+        if !committed {
+            continue;
+        }
+        // Deploy the borrowed working capital exactly where the shortfall that
+        // motivated the loan lives.
+        if let Some((business_id, shortfall)) = neediest_business
+            && let Some(business) = state.businesses.get_mut(business_id)
+            && business.owner_dynasty_id() == borrower_id
+            && business.status() != BusinessStatus::Closed
+        {
+            let _ = capitalize_owned_business(
+                state,
+                borrower_id,
+                business_id,
+                principal.min(shortfall),
+            );
+        }
     }
+    Ok(())
 }
 
 /// Ceil-divides a money amount into a per-week payment without overflow.
@@ -6719,6 +6822,9 @@ fn forfeit_office_for_unmet_duties(
         .get_mut(&institution_id)
         .expect("office institution must exist");
     institution.office_holder_id = None;
+    // A forfeited office leaves no ghost administration: its active directive
+    // ends with the officeholder instead of continuing without a holder.
+    institution.active_directive = None;
     institution.next_selection_day = next_selection_day;
     state.audit_log.push(AuditRecord {
         day,
@@ -6855,12 +6961,20 @@ fn apply_office_power(
                 .min(10_000);
         }
         OfficePower::MarketTolls | OfficePower::Taxation => {
+            // Like vacancy income, toll and taxation revenue is funded by the
+            // market's own clearing pool; it is bounded by what that pool
+            // holds so a depleted pool degrades the office's take instead of
+            // aborting the monthly settlement.
+            let revenue =
+                Money::from_copper(100).min(state.market.clearing_account.max(Money::ZERO));
+            if revenue <= Money::ZERO {
+                return Ok(());
+            }
             let institution_budget = state
                 .institutions
                 .get(&institution_id)
                 .expect("office institution must exist")
                 .budget;
-            let revenue = Money::from_copper(100);
             let next_budget = institution_budget.checked_add(revenue).ok_or(
                 SimulationError::InstitutionBudgetOverflow {
                     institution_id,
@@ -7034,20 +7148,22 @@ fn revalue_district_properties(state: &mut AppState, district_id: DistrictId, re
         .values_mut()
         .filter(|property| property.district_id == district_id)
     {
-        let baseline_multiplier = match property.kind {
-            PropertyKind::Workshop => 82,
-            PropertyKind::Warehouse => 393,
-            // Residences do not anchor on district rent; they keep their
-            // recorded market value and drift with the rent index directly.
-            PropertyKind::Residence => continue,
+        // Workshops and warehouses anchor on the district rent applied to
+        // their rent multiple; residences do not anchor on district rent at
+        // all — they keep their recorded market value and drift with the rent
+        // index directly.
+        let anchored_baseline = match property.kind {
+            PropertyKind::Workshop => Some(property.weekly_rent.saturating_mul(82)),
+            PropertyKind::Warehouse => Some(property.weekly_rent.saturating_mul(393)),
+            PropertyKind::Residence => None,
         };
-        let baseline_value = property.weekly_rent.saturating_mul(baseline_multiplier);
-        let target_value = if baseline_value > Money::ZERO {
-            baseline_value.saturating_mul_ratio(i64::from(rent_index), 10_000)
-        } else {
-            property
+        let target_value = match anchored_baseline {
+            Some(baseline) if baseline > Money::ZERO => {
+                baseline.saturating_mul_ratio(i64::from(rent_index), 10_000)
+            }
+            _ => property
                 .value
-                .saturating_mul_ratio(i64::from(rent_index), 10_000)
+                .saturating_mul_ratio(i64::from(rent_index), 10_000),
         };
         // A small monthly step toward the target prevents wild swings while still
         // letting sustained district decay pull values down. Cap the step so a
@@ -7483,9 +7599,9 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) -> Result<()
             }
             ObjectiveKind::ReduceDebt => advance_ai_debt_objective(state, dynasty_id)?,
             ObjectiveKind::ImproveLegitimacy => advance_ai_legitimacy_objective(state, dynasty_id)?,
-            ObjectiveKind::AccumulateCash => ObjectiveProgress::from_achieved(
-                ai_net_liquid_position(state, dynasty_id) > i128::from(120_000),
-            ),
+            ObjectiveKind::AccumulateCash => {
+                advance_ai_accumulation_objective(registry, state, dynasty_id)?
+            }
             ObjectiveKind::ContainRival => advance_ai_rival_objective(state, dynasty_id)?,
         };
         let terminal = match progress {
@@ -7547,6 +7663,66 @@ fn ai_net_liquid_position(state: &AppState, dynasty_id: DynastyId) -> i128 {
     treasury - outstanding_debt
 }
 
+/// Accumulating cash is an active posture, not an ambient threshold: the house
+/// skims each operating business's surplus above its distribution reserve into
+/// the treasury, and completes once its net liquid position crosses a level
+/// its income streams can actually reach within a review window.
+fn advance_ai_accumulation_objective(
+    registry: &Registry,
+    state: &mut AppState,
+    dynasty_id: DynastyId,
+) -> Result<ObjectiveProgress, SimulationError> {
+    const ACCUMULATION_TARGET_COPPER: i128 = 60_000;
+    const AI_ACCUMULATION_MONTHLY_SKIM_CAP: Money = Money::from_copper(2_000);
+    if ai_net_liquid_position(state, dynasty_id) > ACCUMULATION_TARGET_COPPER {
+        return Ok(ObjectiveProgress::Achieved);
+    }
+    let mut remaining_skim = AI_ACCUMULATION_MONTHLY_SKIM_CAP;
+    let business_ids: Vec<_> = state
+        .businesses
+        .ids_for_owner(dynasty_id)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|business_id| {
+            state.businesses.get(*business_id).is_some_and(|business| {
+                !matches!(
+                    business.status(),
+                    BusinessStatus::Insolvent | BusinessStatus::Closed
+                )
+            })
+        })
+        .collect();
+    for business_id in business_ids {
+        if remaining_skim <= Money::ZERO {
+            break;
+        }
+        let Some(business) = state.businesses.get(business_id) else {
+            continue;
+        };
+        let excess = business
+            .cash()
+            .saturating_sub(business_owner_distribution_reserve(registry, business))
+            .max(Money::ZERO);
+        // `distribute_owned_business_cash` revalidates ownership, lifecycle,
+        // reserve, and overflow before committing; a failed skim is skipped.
+        if excess <= Money::ZERO {
+            continue;
+        }
+        let skim = excess.min(remaining_skim);
+        if ai_strategic_attempt(&distribute_owned_business_cash(
+            registry,
+            state,
+            dynasty_id,
+            business_id,
+            skim,
+        ))? {
+            remaining_skim = remaining_skim.saturating_sub(skim);
+        }
+    }
+    Ok(ObjectiveProgress::Pending)
+}
+
 const fn next_objective_kind(kind: ObjectiveKind) -> ObjectiveKind {
     match kind {
         ObjectiveKind::AccumulateCash => ObjectiveKind::AcquireProperty,
@@ -7563,10 +7739,22 @@ fn advance_ai_property_objective(
     state: &mut AppState,
     dynasty_id: DynastyId,
 ) -> Result<ObjectiveProgress, SimulationError> {
+    let treasury = state
+        .dynasties
+        .get(&dynasty_id)
+        .map_or(Money::ZERO, crate::core::Dynasty::treasury);
     let property_id = state
         .properties
         .values()
         .filter(|property| property.owner_dynasty_id.is_none())
+        // A purchase must leave the house's business-rescue reserve intact:
+        // spending the whole treasury on real estate bankrupts the portfolio
+        // and disables the recovery machinery this same house relies on.
+        .filter(|property| {
+            treasury
+                .checked_sub(property.value)
+                .is_some_and(|remaining| remaining >= AI_BUSINESS_RECOVERY_TREASURY_RESERVE)
+        })
         .min_by_key(|property| (property.value, property.id))
         .map(|property| property.id);
     let achieved = match property_id {
@@ -7740,7 +7928,10 @@ fn advance_ai_legitimacy_objective(
         .expect("AI dynasty must exist")
         .resources
         .legitimacy_basis_points;
-    if legitimacy_before >= 7_500 {
+    // Bootstrap houses start near 4,500 bp and this objective's own patronage
+    // yields at most +120 bp per month within a two-year review window, so the
+    // target must stay inside that envelope (4,500 + 24 x 120 = 7,380).
+    if legitimacy_before >= 7_000 {
         return Ok(ObjectiveProgress::Achieved);
     }
     let spend = state
@@ -7840,7 +8031,9 @@ fn update_information_reports(
         let quote = state.market.get_quote(good.id())?;
         let prior = quote.previous_price().copper().max(1);
         let change = (quote.price().copper() - prior).unsigned_abs();
-        Some((
+        // A month with no price movement anywhere is a non-event: publishing
+        // "identified causes" for it would manufacture intelligence noise.
+        (change > 0).then_some((
             change,
             good.id(),
             good.name().to_owned(),
@@ -8093,11 +8286,16 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
         let (awarded, paid) = if plaintiff_wins {
             let awarded = recoverable_legal_damages(state, claim_source, damages);
             let paid = settle_legal_damages(state, plaintiff_id, defendant_id, awarded)?;
-            settle_legal_claim_source(state, claim_source, plaintiff_id, defendant_id);
+            settle_legal_claim_source(state, claim_source, plaintiff_id, defendant_id, paid, false);
             (awarded, paid)
         } else {
             (Money::ZERO, Money::ZERO)
         };
+        // Winning a grounded claim over an obligation that no longer exists is
+        // a hollow victory: the court rules on the paperwork, but a dispute
+        // over a cured debt must not poison the relationship as if real
+        // damages had been suffered.
+        let hollow_victory = plaintiff_wins && claim_source.is_some() && awarded == Money::ZERO;
         state
             .legal_cases
             .get_mut(&id)
@@ -8111,14 +8309,26 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
             state,
             plaintiff_id,
             defendant_id,
-            RelationshipDelta::new(-60, 20, 50, 120, 0),
+            if hollow_victory {
+                RelationshipDelta::new(-5, 5, 5, 20, 0)
+            } else {
+                RelationshipDelta::new(-60, 20, 50, 120, 0)
+            },
         );
         if plaintiff_id == state.player_dynasty_id || defendant_id == state.player_dynasty_id {
             try_push_outbox(
                 state,
                 OutboxKind::Legal,
                 format!("Legal case {id} decided"),
-                if plaintiff_wins {
+                if !plaintiff_wins {
+                    format!(
+                        "The court decided the {kind:?} claim for dynasty {defendant_id}; no damages were awarded."
+                    )
+                } else if hollow_victory {
+                    format!(
+                        "The court decided the {kind:?} claim for dynasty {plaintiff_id}, but the underlying obligation had already been cured, so no damages were due."
+                    )
+                } else {
                     let settlement_note = if claim_source.is_some() {
                         " The grounded source obligation is settled by the judgment."
                     } else {
@@ -8126,10 +8336,6 @@ fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
                     };
                     format!(
                         "The court decided the {kind:?} claim for dynasty {plaintiff_id}, awarded {awarded}, and recovered {paid} immediately.{settlement_note}"
-                    )
-                } else {
-                    format!(
-                        "The court decided the {kind:?} claim for dynasty {defendant_id}; no damages were awarded."
                     )
                 },
             )?;
@@ -8207,6 +8413,8 @@ pub(crate) fn settle_legal_claim_source(
     claim_source: Option<LegalClaimSource>,
     plaintiff_id: DynastyId,
     defendant_id: DynastyId,
+    discharged: Money,
+    full_satisfaction: bool,
 ) {
     match claim_source {
         Some(LegalClaimSource::Loan { loan_id }) => {
@@ -8219,12 +8427,31 @@ pub(crate) fn settle_legal_claim_source(
                 {
                     return;
                 }
-                loan.balance = Money::ZERO;
-                loan.status = LoanStatus::Repaid;
-                loan.missed_payments = 0;
+                // A negotiated settlement extinguishes the whole claim; a
+                // court judgment discharges only what it actually recovered,
+                // never more: a judgment-proof defendant cannot have the debt
+                // erased cleaner than a bankruptcy.
+                if full_satisfaction {
+                    loan.balance = Money::ZERO;
+                } else {
+                    loan.balance = loan.balance.saturating_sub(discharged);
+                }
+                if loan.balance == Money::ZERO {
+                    loan.status = LoanStatus::Repaid;
+                    loan.missed_payments = 0;
+                }
                 loan.collateral_property_id
             };
-            if let Some(property_id) = collateral_property_id
+            let outstanding = state
+                .loans
+                .get(&loan_id)
+                .map_or(Money::ZERO, |loan| loan.balance);
+            if outstanding > Money::ZERO {
+                // The unpaid remainder executes against pledged collateral;
+                // only when that still leaves a deficiency does the lender
+                // retain a live claim against the borrower.
+                execute_judgment_against_collateral(state, loan_id);
+            } else if let Some(property_id) = collateral_property_id
                 && let Some(property) = state.properties.get_mut(&property_id)
                 && property.collateral_loan_id == Some(loan_id)
             {
@@ -8240,9 +8467,85 @@ pub(crate) fn settle_legal_claim_source(
             {
                 return;
             }
-            contract.unpaid_breach_penalty = Money::ZERO;
+            // Only the discharged part of the penalty leaves the recoverable
+            // breach debt unless the parties agreed to a full settlement.
+            if full_satisfaction {
+                contract.unpaid_breach_penalty = Money::ZERO;
+            } else {
+                contract.unpaid_breach_penalty =
+                    contract.unpaid_breach_penalty.saturating_sub(discharged);
+            }
         }
         None => {}
+    }
+}
+
+/// Executes a won debt judgment against the loan's pledged collateral when
+/// immediate payment could not cover it: ownership of the premises passes to
+/// the creditor and its liquidation value credits the outstanding balance,
+/// mirroring the extrajudicial default-seizure path.
+fn execute_judgment_against_collateral(state: &mut AppState, loan_id: crate::ids::LoanId) {
+    let (lender_id, property_id, balance) = {
+        let loan = state.loans.get(&loan_id).expect("judgment loan must exist");
+        match loan.collateral_property_id {
+            Some(property_id) => (loan.lender_dynasty_id, property_id, loan.balance),
+            None => return,
+        }
+    };
+    if balance <= Money::ZERO {
+        return;
+    }
+    let pledged = state
+        .properties
+        .get(&property_id)
+        .is_some_and(|property| property.collateral_loan_id == Some(loan_id));
+    if !pledged {
+        return;
+    }
+    let (occupant_owner_id, existing_tenant_id) = {
+        let property = state
+            .properties
+            .get(&property_id)
+            .expect("loan collateral must exist");
+        let occupant_owner_id = property.occupant_business_id.map(|business_id| {
+            state
+                .businesses
+                .get(business_id)
+                .expect("collateral occupant business must exist")
+                .owner_dynasty_id()
+        });
+        (occupant_owner_id, property.tenant_dynasty_id)
+    };
+    let (liquidation_value, equity_surplus) = {
+        let property = state
+            .properties
+            .get_mut(&property_id)
+            .expect("loan collateral must exist");
+        property.owner_dynasty_id = Some(lender_id);
+        property.tenant_dynasty_id = occupant_owner_id
+            .or(existing_tenant_id)
+            .filter(|tenant_id| *tenant_id != lender_id);
+        property.collateral_loan_id = None;
+        let liquidation_value = property
+            .value
+            .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000);
+        (liquidation_value, liquidation_value.saturating_sub(balance))
+    };
+    if equity_surplus > Money::ZERO {
+        let _ = return_collateral_equity_surplus(state, loan_id, equity_surplus);
+    }
+    let credited = liquidation_value.min(balance);
+    let loan = state
+        .loans
+        .get_mut(&loan_id)
+        .expect("judgment loan must exist");
+    loan.balance = loan
+        .balance
+        .checked_sub(credited)
+        .expect("collateral recovery must not exceed the judgment balance");
+    if loan.balance == Money::ZERO {
+        loan.status = LoanStatus::Repaid;
+        loan.missed_payments = 0;
     }
 }
 
@@ -8366,15 +8669,22 @@ fn advance_existing_crises(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
+    // A response counts as an ongoing containment effort only for a bounded
+    // window: one cheap response years ago must not grant a crisis permanent
+    // immunity while its underlying condition persists or worsens.
+    const CRISIS_RESPONSE_WINDOW_DAYS: i64 = OFFICE_DUTY_FORFEITURE_WINDOW_DAYS;
     let mut resolved = Vec::new();
     let mut escalated = Vec::new();
+    let day = state.clock.day();
     let addressed_subjects: BTreeSet<_> = state
         .audit_log
         .iter()
-        .filter(|record| crisis_response_contains_crisis(record))
+        .filter(|record| {
+            crisis_response_contains_crisis(record)
+                && day - record.day <= CRISIS_RESPONSE_WINDOW_DAYS
+        })
         .map(|record| record.subject().to_owned())
         .collect();
-    let day = state.clock.day();
     // A standing watch directive is an ongoing institutional response in its
     // district, so crises it is actively suppressing count as addressed even
     // without a player-issued response record.

@@ -109,15 +109,27 @@ mod round_trip {
         // nominal one-week date before any boundary settlement snaps it onto
         // the global weekly cadence.
         let loan_id = state.next_ids.loan();
-        let [lender_id, borrower_id] = state
-            .dynasties
-            .keys()
-            .copied()
-            .collect::<Vec<_>>()
-            .get(2..4)
-            .expect("campaign must contain at least four dynasties")
-            .try_into()
-            .expect("dynasty pair slice must convert");
+        let dynasty_ids: Vec<_> = state.dynasties.keys().copied().collect();
+        let has_active_pair_loan =
+            |lender_id: crate::ids::DynastyId, borrower_id: crate::ids::DynastyId| {
+                state.loans.values().any(|loan| {
+                    loan.status.is_repayment_active()
+                        && ((loan.lender_dynasty_id == lender_id
+                            && loan.borrower_dynasty_id == borrower_id)
+                            || (loan.lender_dynasty_id == borrower_id
+                                && loan.borrower_dynasty_id == lender_id))
+                })
+            };
+        let [lender_id, borrower_id] = dynasty_ids
+            .iter()
+            .enumerate()
+            .find_map(|(index, lender_id)| {
+                dynasty_ids.iter().skip(index + 1).find_map(|borrower_id| {
+                    (!has_active_pair_loan(*lender_id, *borrower_id))
+                        .then_some([*lender_id, *borrower_id])
+                })
+            })
+            .expect("campaign must contain a dynasty pair without active credit");
         state.loans.insert(
             loan_id,
             Loan {

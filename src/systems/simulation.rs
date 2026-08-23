@@ -249,12 +249,16 @@ fn decide_business_purchases(
             .get_recipe(business.recipe_id())
             .expect("business recipe reference must be valid");
         for input in recipe.inputs() {
-            // Reorder against the capacity the business can actually use,
-            // not nameplate capacity, so struggling firms do not spend their
-            // remaining liquidity stockpiling inputs they cannot process.
-            let effective_batches = i64::from(effective_capacity_batches(state, business));
-            let target_batches =
-                effective_batches.saturating_mul(i64::from(business.policy.target_input_days));
+            // Reorder against the capacity the business can actually use —
+            // administrative/status capacity further limited by its workforce
+            // and sellable output headroom — so struggling or blocked firms do
+            // not spend their remaining liquidity stockpiling inputs they
+            // cannot process.
+            let effective_batches = effective_capacity_batches(state, business)
+                .min(output_limited_batches(state, business, recipe))
+                .min(worker_limited_batches(state, business.id()));
+            let target_batches = i64::from(effective_batches)
+                .saturating_mul(i64::from(business.policy.target_input_days));
             let desired = input.quantity().saturating_mul_ratio(target_batches, 1);
             let current = business.inventory_quantity(input.good_id());
             if current >= desired {
@@ -644,7 +648,7 @@ fn output_limited_batches(
     u16::try_from((output_headroom.milliunits() / output_per_batch).max(0)).unwrap_or(u16::MAX)
 }
 
-fn worker_limited_batches(state: &AppState, business_id: BusinessId) -> u16 {
+pub(crate) fn worker_limited_batches(state: &AppState, business_id: BusinessId) -> u16 {
     let active_workers = super::saturating_worker_count(
         state
             .employment
@@ -1425,12 +1429,16 @@ fn apply_household_consumption(
             .expect("planned household satisfaction target must exist")
             .food_satisfaction_basis_points = satisfaction;
     }
-    state.audit_log.push(AuditRecord {
-        day: state.clock.day(),
-        kind: AuditKind::HouseholdConsumption,
-        subject: "households".into(),
-        detail: format!("quantity={total_quantity_milliunits}; spending={total_cost_copper}"),
-    });
+    if total_quantity_milliunits > 0 {
+        // Like every other economic phase, days with no activity leave the
+        // audit trail untouched instead of recording zero-traffic entries.
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::HouseholdConsumption,
+            subject: "households".into(),
+            detail: format!("quantity={total_quantity_milliunits}; spending={total_cost_copper}"),
+        });
+    }
     Ok(())
 }
 
@@ -1747,23 +1755,27 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(),
             .get_mut(&good.id())
             .expect("every registry good must have a market quote");
         let target = quote.target_stock.milliunits().max(1);
-        let stock_pressure =
-            Quantity::from_milliunits(target.saturating_sub(quote.stock.milliunits()))
-                .saturating_mul_ratio(1_000, target)
-                .milliunits();
+        // Stock pressure is signed: scarcity below target pushes prices up and
+        // overstock above target pushes them down, so a glutted market cannot
+        // ratchet upward.
+        let stock_gap = target - quote.stock.milliunits();
+        let stock_pressure = (stock_gap.saturating_mul(1_000) / target).clamp(-1_000, 1_000);
         let total_flow = quote
             .demand_today
             .milliunits()
             .saturating_add(quote.supply_today.milliunits())
             .max(1);
-        let flow_pressure = Quantity::from_milliunits(
-            quote
-                .demand_today
-                .milliunits()
-                .saturating_sub(quote.supply_today.milliunits()),
-        )
-        .saturating_mul_ratio(500, total_flow)
-        .milliunits();
+        let flow_gap = quote
+            .demand_today
+            .milliunits()
+            .saturating_sub(quote.supply_today.milliunits());
+        let mut flow_pressure = (flow_gap.saturating_mul(500) / total_flow).clamp(-500, 500);
+        // Cleared trade volume understates available supply whenever the
+        // absorption ceiling blocks sales into an overstocked market, so
+        // excess demand never lifts a price while shelves sit above target.
+        if flow_pressure > 0 && quote.stock.milliunits() >= target {
+            flow_pressure = 0;
+        }
         let seasonal_pressure = seasonal_pressure_basis_points(good.category(), day_of_year);
         let total_pressure = i128::from(stock_pressure)
             .saturating_add(i128::from(flow_pressure))
@@ -1778,13 +1790,15 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(),
                 10_000,
             )
             .copper();
+        let half_base = Money::from_copper((good.base_price().copper() / 2).max(1));
+        let maximum_price = good.base_price().copper().saturating_mul(4).max(1);
         let minimum_price = production_floors
             .get(&good.id())
             .copied()
-            .unwrap_or_else(|| Money::from_copper((good.base_price().copper() / 2).max(1)))
+            .unwrap_or(half_base)
+            .max(half_base)
             .copper()
-            .max((good.base_price().copper() / 2).max(1));
-        let maximum_price = good.base_price().copper().saturating_mul(4);
+            .min(maximum_price);
         quote.previous_price = previous_price;
         quote.price = Money::from_copper(raw_price.clamp(minimum_price, maximum_price));
         quote.causes = decide_market_causes(quote, seasonal_pressure);
@@ -1983,7 +1997,9 @@ fn decide_market_causes(
     } else if quote.stock > quote.target_stock {
         causes.push(MarketCause::StockAboveTarget);
     }
-    if quote.demand_today > quote.supply_today {
+    // Cleared trade volume understates available supply into an overstocked
+    // market, so demand can only "exceed supply" while stocks sit below target.
+    if quote.demand_today > quote.supply_today && quote.stock < quote.target_stock {
         causes.push(MarketCause::DemandExceededSupply);
     } else if quote.supply_today > quote.demand_today {
         causes.push(MarketCause::SupplyExceededDemand);
@@ -2182,7 +2198,9 @@ fn regional_demand_availability_basis_points(state: &AppState) -> u16 {
         .filter(|route| route.active)
         .collect::<Vec<_>>();
     if routes.is_empty() {
-        return 10_000;
+        // No active trade route means no external regional trade at all, not
+        // a perfectly healthy one.
+        return 0;
     }
     let total = routes
         .iter()

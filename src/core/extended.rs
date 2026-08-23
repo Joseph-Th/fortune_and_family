@@ -38,11 +38,6 @@ pub struct SupplyContract {
 }
 
 impl SupplyContract {
-    #[must_use]
-    pub const fn id(&self) -> ContractId {
-        self.id
-    }
-
     /// Whether per-dynasty delivery attribution agrees with total fulfillment:
     /// every attributed dynasty delivered at least once and no more than the
     /// fulfilled total, and attribution covers fulfillment within a factor of
@@ -128,11 +123,6 @@ pub struct Loan {
 
 impl Loan {
     #[must_use]
-    pub const fn id(&self) -> LoanId {
-        self.id
-    }
-
-    #[must_use]
     pub const fn status(&self) -> LoanStatus {
         self.status
     }
@@ -209,11 +199,6 @@ impl EmploymentAgreement {
     }
 
     #[must_use]
-    pub const fn household_id(&self) -> crate::ids::HouseholdId {
-        self.household_id
-    }
-
-    #[must_use]
     pub const fn workers(&self) -> u16 {
         self.workers
     }
@@ -231,11 +216,6 @@ impl EmploymentAgreement {
     #[must_use]
     pub const fn conditions_basis_points(&self) -> u16 {
         self.conditions_basis_points
-    }
-
-    #[must_use]
-    pub const fn status(&self) -> EmploymentStatus {
-        self.status
     }
 }
 
@@ -256,13 +236,6 @@ pub struct FamilyLink {
     pub(crate) second_character_id: CharacterId,
     pub(crate) kind: FamilyLinkKind,
     pub(crate) active: bool,
-}
-
-impl FamilyLink {
-    #[must_use]
-    pub const fn id(&self) -> FamilyLinkId {
-        self.id
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,28 +346,6 @@ pub struct CivicDebt {
     pub(crate) status: CivicDebtStatus,
 }
 
-impl CivicDebt {
-    #[must_use]
-    pub const fn id(&self) -> CivicDebtId {
-        self.id
-    }
-
-    #[must_use]
-    pub const fn creditor_dynasty_id(&self) -> DynastyId {
-        self.creditor_dynasty_id
-    }
-
-    #[must_use]
-    pub const fn balance(&self) -> Money {
-        self.balance
-    }
-
-    #[must_use]
-    pub const fn status(&self) -> CivicDebtStatus {
-        self.status
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnactedLaw {
     pub(crate) id: LawId,
@@ -403,13 +354,6 @@ pub struct EnactedLaw {
     pub(crate) sponsor_dynasty_id: Option<DynastyId>,
     pub(crate) value: i64,
     pub(crate) active: bool,
-}
-
-impl EnactedLaw {
-    #[must_use]
-    pub const fn id(&self) -> LawId {
-        self.id
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -566,13 +510,6 @@ pub struct AiObjective {
     pub(crate) rationale: String,
 }
 
-impl AiObjective {
-    #[must_use]
-    pub const fn id(&self) -> ObjectiveId {
-        self.id
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DistrictRuntime {
     pub(crate) district_id: DistrictId,
@@ -624,13 +561,6 @@ pub struct PublicWork {
     pub(crate) status: PublicWorkStatus,
 }
 
-impl PublicWork {
-    #[must_use]
-    pub const fn id(&self) -> PublicWorkId {
-        self.id
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum LegalCaseKind {
     Debt,
@@ -667,13 +597,6 @@ pub struct LegalCase {
     pub(crate) status: LegalCaseStatus,
 }
 
-impl LegalCase {
-    #[must_use]
-    pub const fn id(&self) -> LegalCaseId {
-        self.id
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalRoute {
     pub(crate) id: ExternalRouteId,
@@ -684,13 +607,6 @@ pub struct ExternalRoute {
     pub(crate) disruption_basis_points: u16,
     pub(crate) toll_basis_points: u16,
     pub(crate) active: bool,
-}
-
-impl ExternalRoute {
-    #[must_use]
-    pub const fn id(&self) -> ExternalRouteId {
-        self.id
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

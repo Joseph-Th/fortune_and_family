@@ -3236,11 +3236,41 @@ mod contracts {
         );
     }
 
+    /// Snapshots the finances and stock that an inactive-seller settlement
+    /// must reconcile against.
+    fn termination_penalty_snapshot(
+        state: &AppState,
+        contract_id: crate::ids::ContractId,
+        buyer_id: BusinessId,
+        seller_id: BusinessId,
+        good_id: GoodId,
+    ) -> (DynastyId, Money, Money, Money, Money, Quantity) {
+        let seller = state.businesses.get(seller_id).expect("seller must exist");
+        let buyer_finance = &state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .finance;
+        let penalty = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist")
+            .penalty;
+        (
+            seller.owner_dynasty_id(),
+            penalty,
+            buyer_finance.cash,
+            buyer_finance.lifetime_costs,
+            seller.finance.cash,
+            seller.inventory_quantity(good_id),
+        )
+    }
+
     #[test]
-    fn inactive_contract_party_terminates_without_mutating_business_finances() {
+    fn inactive_party_pays_what_it_can_toward_the_termination_penalty() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);
-        let (buyer_id, seller_id, good_id, quantity) = {
+        let (buyer_id, seller_id, good_id) = {
             let contract = state
                 .contracts
                 .get_mut(&contract_id)
@@ -3250,9 +3280,13 @@ mod contracts {
                 contract.buyer_business_id,
                 contract.seller_business_id,
                 contract.good_id,
-                contract.quantity_per_week,
             )
         };
+        let quantity = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist")
+            .quantity_per_week;
         state
             .businesses
             .get_mut(seller_id)
@@ -3264,28 +3298,14 @@ mod contracts {
             .expect("seller must exist")
             .operations
             .status = BusinessStatus::Closed;
-        let seller_dynasty_id = state
-            .businesses
-            .get(seller_id)
-            .expect("seller must exist")
-            .owner_dynasty_id();
-        let buyer_before = state
-            .businesses
-            .get(buyer_id)
-            .expect("buyer must exist")
-            .finance
-            .clone();
-        let seller_before = state
-            .businesses
-            .get(seller_id)
-            .expect("seller must exist")
-            .finance
-            .clone();
-        let seller_inventory_before = state
-            .businesses
-            .get(seller_id)
-            .expect("seller must exist")
-            .inventory_quantity(good_id);
+        let (
+            seller_dynasty_id,
+            penalty,
+            buyer_cash_before,
+            buyer_costs_before,
+            seller_cash_before,
+            seller_inventory_before,
+        ) = termination_penalty_snapshot(&state, contract_id, buyer_id, seller_id, good_id);
 
         settle_contracts(&mut state).expect("contract settlement must succeed");
 
@@ -3306,23 +3326,38 @@ mod contracts {
             Some(seller_dynasty_id),
             "closing the seller must attribute the breach to the seller's dynasty"
         );
+        // The inactive party settles what it can toward the contractual
+        // penalty; only a genuinely unpayable remainder accumulates as
+        // recoverable breach debt.
+        let paid = penalty.min(seller_cash_before);
+        assert!(paid > Money::ZERO, "a solvent closed firm must still pay");
+        let buyer_finance = &state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .finance;
         assert_eq!(
-            &state
-                .businesses
-                .get(buyer_id)
-                .expect("buyer must exist")
-                .finance,
-            &buyer_before,
-            "inactive-party termination must not charge the other business"
+            buyer_finance.cash,
+            buyer_cash_before
+                .checked_add(paid)
+                .expect("penalty receipt must not overflow"),
+            "the performing counterparty collects the affordable penalty"
         );
         assert_eq!(
-            &state
-                .businesses
-                .get(seller_id)
-                .expect("seller must exist")
-                .finance,
-            &seller_before,
-            "a closed business must not be financially mutated by settlement"
+            buyer_finance.lifetime_costs, buyer_costs_before,
+            "inactive-party termination must never charge the other business"
+        );
+        let seller_finance = &state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .finance;
+        assert_eq!(
+            seller_finance.cash,
+            seller_cash_before
+                .checked_sub(paid)
+                .expect("affordable penalty must fit seller cash"),
+            "the inactive party pays the affordable penalty"
         );
         assert_eq!(
             state
@@ -5745,13 +5780,15 @@ mod laws {
 
         settle_property_rents(&mut state).expect("property rent settlement must succeed");
 
+        // Annual cap: 52,000 x 10% = 5,200 copper; on the canonical 360-day
+        // calendar settled weekly that bounds one week at ceil(5,200 x 7 / 360).
         assert_eq!(
             state
                 .dynasties
                 .get(&owner_id)
                 .expect("owner must exist")
                 .treasury(),
-            owner_before.saturating_add(Money::from_copper(100))
+            owner_before.saturating_add(Money::from_copper(102))
         );
         assert_eq!(
             state
@@ -6167,7 +6204,7 @@ mod legal_cases {
     }
 
     #[test]
-    fn debt_judgment_settles_source_even_when_immediate_recovery_is_partial() {
+    fn debt_judgment_discharges_only_what_the_defendant_actually_paid() {
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
         let borrower_id = state
@@ -6217,10 +6254,17 @@ mod legal_cases {
 
         resolve_legal_cases(&mut state).expect("grounded debt judgment must resolve");
 
+        // A judgment-proof defendant cannot have the debt erased cleaner than
+        // a bankruptcy: only the copper actually recovered discharges the
+        // obligation, and the unsecured remainder stays live.
         let loan = state.loans.get(&loan_id).expect("source loan must remain");
-        assert_eq!(loan.balance, Money::ZERO);
-        assert_eq!(loan.status, LoanStatus::Repaid);
-        assert_eq!(loan.missed_payments, 0);
+        assert_eq!(
+            loan.balance,
+            balance.saturating_sub(immediately_collectible),
+            "only the paid part of the judgment discharges the debt"
+        );
+        assert_eq!(loan.status, LoanStatus::Defaulted);
+        assert_eq!(loan.missed_payments, 3);
         assert_eq!(
             state
                 .dynasties
@@ -6321,8 +6365,8 @@ mod legal_cases {
                 .get(&contract_id)
                 .expect("source contract must remain")
                 .unpaid_breach_penalty,
-            Money::ZERO,
-            "the judgment must extinguish only the unpaid source obligation"
+            Money::from_copper(200),
+            "the judgment extinguishes only the part of the penalty it actually recovered"
         );
         assert_eq!(
             state
@@ -7073,6 +7117,124 @@ mod ai {
     use super::*;
 
     #[test]
+    fn ai_property_purchase_preserves_the_business_recovery_reserve() {
+        let mut state = make_test_campaign();
+        let dynasty_id = *state
+            .dynasties
+            .keys()
+            .find(|dynasty_id| **dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a rival dynasty");
+        let target_value = state
+            .properties
+            .values()
+            .filter(|property| property.owner_dynasty_id.is_none())
+            .map(|property| property.value)
+            .min()
+            .expect("campaign must contain an unowned property");
+        // Exactly enough to buy, nothing left for the rescue reserve.
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("rival dynasty must exist")
+            .resources
+            .treasury = target_value;
+
+        let progress = advance_ai_property_objective(&mut state, dynasty_id)
+            .expect("AI property objective advancement must succeed");
+
+        assert_eq!(progress, ObjectiveProgress::Pending);
+        assert!(
+            state
+                .properties
+                .values()
+                .any(|property| property.owner_dynasty_id.is_none()),
+            "a purchase that would strip the treasury below the business-recovery reserve must be declined"
+        );
+    }
+
+    #[test]
+    fn recovered_premises_reoccupy_with_a_tenancy_for_the_outside_owner() {
+        let mut state = make_test_campaign();
+        let business = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a rival business")
+            .clone();
+        let business_owner_id = business.owner_dynasty_id();
+        let property_id = business
+            .premises_property_id()
+            .expect("bootstrap business must occupy premises");
+        // An outside investor bought the premises while the tenant firm was
+        // insolvent and evicted; the firm has since recovered.
+        {
+            let property = state
+                .properties
+                .get_mut(&property_id)
+                .expect("premises must exist");
+            property.owner_dynasty_id = Some(state.player_dynasty_id);
+            property.occupant_business_id = None;
+            property.tenant_dynasty_id = None;
+        }
+        state
+            .businesses
+            .get_mut(business.id())
+            .expect("business must exist")
+            .operations
+            .status = BusinessStatus::Active;
+
+        reoccupy_recovered_premises(&mut state);
+
+        let property = state
+            .properties
+            .get(&property_id)
+            .expect("premises must remain");
+        assert_eq!(
+            property.occupant_business_id,
+            Some(business.id()),
+            "the recovered firm must re-occupy its premises"
+        );
+        assert_eq!(
+            property.tenant_dynasty_id,
+            Some(business_owner_id),
+            "an outside owner must keep collecting rent from the recovered occupant"
+        );
+    }
+
+    #[test]
+    fn forfeited_office_clears_its_active_directive() {
+        let mut state = make_test_campaign();
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        let expires_day = state.clock.day() + 30;
+        {
+            let institution = state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("institution runtime must exist");
+            institution.office_holder_id = None;
+            institution.active_directive = Some(crate::core::OfficeDirectiveState {
+                power: crate::core::OfficePower::PublicWorks,
+                expires_day,
+            });
+        }
+
+        forfeit_office_for_unmet_duties(&mut state, institution_id, "test-forfeit", 3)
+            .expect("office forfeiture must succeed");
+
+        let institution = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution runtime must exist");
+        assert!(
+            institution.active_directive.is_none(),
+            "a forfeited office must not leave a ghost administration running its directive"
+        );
+    }
+    #[test]
     fn solvent_ai_house_recapitalizes_its_distressed_business() {
         let registry = test_registry();
         let mut state = make_test_campaign();
@@ -7318,7 +7480,7 @@ mod ai {
             .get_mut(&dynasty_id)
             .expect("borrower dynasty must exist")
             .resources
-            .treasury = Money::from_copper(130_000);
+            .treasury = Money::from_copper(70_000);
         state
             .loans
             .get_mut(&loan_id)
@@ -8242,7 +8404,8 @@ mod ai {
             business.cash()
         };
 
-        advance_ai_credit_participation(registry, &mut state);
+        advance_ai_credit_participation(registry, &mut state)
+            .expect("AI credit participation must succeed");
 
         assert!(
             state.loans.len() > loans_before,
@@ -8288,7 +8451,8 @@ mod ai {
             .treasury = Money::from_copper(60_000);
         let loans_before = state.loans.len();
 
-        advance_ai_credit_participation(registry, &mut state);
+        advance_ai_credit_participation(registry, &mut state)
+            .expect("AI credit participation must succeed");
 
         assert_eq!(
             state.loans.len(),

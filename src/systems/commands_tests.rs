@@ -1032,12 +1032,15 @@ mod validation {
         )
         .expect("portfolio fixture acquisition must succeed");
         let amount = Money::from_copper(100);
-        state
-            .businesses
-            .get_mut(source_id)
-            .expect("source business must exist")
-            .finance
-            .cash = amount;
+        {
+            let source = state
+                .businesses
+                .get_mut(source_id)
+                .expect("source business must exist");
+            // Fund the transfer on top of the operating reserve every
+            // player-driven route out of a business must respect.
+            source.finance.cash = source.policy.minimum_cash_reserve.saturating_add(amount);
+        }
         let outbox_before = state.outbox.len();
 
         apply_player_command(
@@ -6758,6 +6761,21 @@ mod information {
                         .contains_key(&DynastyPair::new(player_id, *dynasty_id))
             })
             .expect("campaign must contain a known counterparty");
+        // Keep this test on the pure-outreach branch: strip any bilateral
+        // contract that would turn the leverage into a forced renegotiation.
+        let pair_businesses: Vec<_> = state
+            .businesses
+            .iter()
+            .filter(|business| {
+                business.owner_dynasty_id() == player_id
+                    || business.owner_dynasty_id() == counterparty_id
+            })
+            .map(crate::core::Business::id)
+            .collect();
+        state.contracts.retain(|_, contract| {
+            !pair_businesses.contains(&contract.buyer_business_id)
+                || !pair_businesses.contains(&contract.seller_business_id)
+        });
         let pair = DynastyPair::new(player_id, counterparty_id);
         let before = state
             .relationships
@@ -6848,15 +6866,21 @@ mod information {
             .relationships
             .get(&fixture.pair)
             .expect("counterparty relationship must remain present");
-        assert!(relationship.trust_basis_points > fixture.relationship_before.trust_basis_points);
+        // Forcing a price concession with commissioned intelligence costs
+        // goodwill: the target trusts the player less and resents the squeeze,
+        // mirroring the market-brief renegotiation signature.
+        assert!(relationship.trust_basis_points < fixture.relationship_before.trust_basis_points);
         assert!(
             relationship.respect_basis_points > fixture.relationship_before.respect_basis_points
         );
         assert!(
             relationship.resentment_basis_points
-                < fixture.relationship_before.resentment_basis_points
+                > fixture.relationship_before.resentment_basis_points
         );
-        assert!(relationship.obligation > fixture.relationship_before.obligation);
+        assert_eq!(
+            relationship.obligation,
+            fixture.relationship_before.obligation
+        );
         validate_invariants(registry, &state);
     }
 

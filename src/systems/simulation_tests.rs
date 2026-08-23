@@ -953,7 +953,7 @@ mod inventory_policy {
     use super::*;
 
     #[test]
-    fn input_reserve_uses_a_wide_capacity_day_product() {
+    fn input_reserve_does_not_stockpile_inputs_usable_batches_cannot_process() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let business_id = state
@@ -975,9 +975,8 @@ mod inventory_policy {
             .inputs()
             .first()
             .expect("business recipe must consume an input");
-        let capacity = u16::MAX;
         let target_days = 30_u16;
-        let narrow_limit_inventory = input
+        let stocked_inventory = input
             .quantity()
             .saturating_mul_ratio(i64::from(u16::MAX), 1);
         {
@@ -985,13 +984,13 @@ mod inventory_policy {
                 .businesses
                 .get_mut(business_id)
                 .expect("business must exist");
-            business.operations.capacity_batches_per_day = capacity;
+            business.operations.capacity_batches_per_day = u16::MAX;
             business.policy.target_input_days = target_days;
             business.policy.minimum_cash_reserve = Money::ZERO;
             business.finance.cash = Money::from_copper(i64::MAX);
             business
                 .inventory
-                .insert(input.good_id(), narrow_limit_inventory);
+                .insert(input.good_id(), stocked_inventory);
         }
         let quote = state
             .market
@@ -1003,27 +1002,39 @@ mod inventory_policy {
 
         let plan = decide_business_purchases(registry, &state)
             .expect("business purchase plan must resolve");
-        let purchase = plan
-            .lines
-            .iter()
-            .find(|line| line.business_id == business_id && line.good_id == input.good_id())
-            .expect("wide inventory target must expose the remaining shortfall");
-        // Reorder targets scale to the capacity the business can actually
-        // use rather than raw nameplate capacity.
-        let effective_batches = i64::from(super::effective_capacity_batches(
+        // Reorder targets scale to the batches the business can actually run:
+        // administrative/status capacity further limited by its workforce and
+        // sellable output headroom. A maximal nameplate capacity with an
+        // ordinary workforce and saturated output headroom must not order
+        // against the wide capacity-by-days product.
+        let usable_batches = super::effective_capacity_batches(
             &state,
             state
                 .businesses
                 .get(business_id)
                 .expect("business must exist"),
-        ));
-        let target_batches = effective_batches.saturating_mul(i64::from(target_days));
-        let expected = input
-            .quantity()
-            .saturating_mul_ratio(target_batches, 1)
-            .saturating_sub(narrow_limit_inventory);
+        )
+        .min(super::output_limited_batches(
+            &state,
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist"),
+            recipe,
+        ))
+        .min(super::worker_limited_batches(&state, business_id));
+        let target_batches = i64::from(usable_batches).saturating_mul(i64::from(target_days));
+        assert!(
+            input.quantity().saturating_mul_ratio(target_batches, 1) < stocked_inventory,
+            "fixture must stock more than the usable-batch reorder target",
+        );
 
-        assert_eq!(purchase.quantity, expected);
+        assert!(
+            plan.lines
+                .iter()
+                .all(|line| !(line.business_id == business_id && line.good_id == input.good_id())),
+            "a firm whose stocked inputs already exceed every usable-batch target must not reorder",
+        );
     }
 
     #[test]
@@ -3581,6 +3592,52 @@ mod market_prices {
             .expect("grain quote must remain present");
         assert_eq!(updated.previous_price(), previous_price);
         assert!(updated.price() > Money::ZERO);
+    }
+
+    #[test]
+    fn oversupplied_market_cannot_ratchet_upward_on_phantom_excess_demand() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let flour_id = registry
+            .get_good_id("flour")
+            .expect("registry must define flour");
+        {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&flour_id)
+                .expect("flour quote must exist");
+            // Shelves overflow while absorption-blocked sellers cleared no
+            // supply against standing household demand.
+            quote.stock = quote.target_stock.saturating_mul_ratio(2, 1);
+            quote.demand_today = Quantity::from_units(50);
+            quote.supply_today = Quantity::ZERO;
+            quote.price = Money::from_copper(
+                registry
+                    .get_good(flour_id)
+                    .expect("flour definition must exist")
+                    .base_price()
+                    .copper()
+                    * 2,
+            );
+        }
+
+        update_market_prices(registry, &mut state).expect("market price update must succeed");
+
+        let updated = state
+            .market
+            .get_quote(flour_id)
+            .expect("flour quote must remain present");
+        assert!(
+            updated.price() <= updated.previous_price(),
+            "an overstocked market must not gain upward pressure from blocked sales"
+        );
+        assert!(
+            !updated
+                .causes()
+                .contains(&MarketCause::DemandExceededSupply),
+            "demand cannot exceed supply while stock sits above target"
+        );
     }
 
     #[test]

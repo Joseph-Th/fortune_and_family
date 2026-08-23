@@ -1316,7 +1316,7 @@ pub(crate) fn can_execute_labor_response(
                     .is_some_and(|ids| {
                         ids.iter().any(|household_id| {
                             *household_id != agreement.household_id
-                                && available_household_workers(state, *household_id, None)
+                                && available_household_workers(state, *household_id)
                                     >= u32::from(agreement.workers)
                         })
                     })

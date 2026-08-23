@@ -212,7 +212,6 @@ pub(crate) fn saturating_worker_count(workers: impl Iterator<Item = u32>) -> u32
 pub(crate) fn available_household_workers(
     state: &crate::core::AppState,
     household_id: crate::ids::HouseholdId,
-    excluding_employment_id: Option<crate::ids::EmploymentId>,
 ) -> u32 {
     let members = state
         .households
@@ -224,7 +223,6 @@ pub(crate) fn available_household_workers(
         .filter(|agreement| {
             agreement.household_id == household_id
                 && agreement.status != crate::core::EmploymentStatus::Ended
-                && Some(agreement.id) != excluding_employment_id
         })
         .fold(0_u32, |total, agreement| {
             total.saturating_add(u32::from(agreement.workers))

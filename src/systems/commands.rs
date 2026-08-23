@@ -1129,6 +1129,21 @@ fn apply_cash_transfer(
 ) -> Result<CommandOutcome, CommandError> {
     ensure_owned_business(state, from_business_id)?;
     ensure_owned_business(state, to_business_id)?;
+    // Portfolio transfers honor the same operating-reserve floor as every
+    // other player-driven route out of the business, so a firm cannot be
+    // hollowed out below the reserve its daily decisions rely on.
+    let spendable = state
+        .businesses
+        .get(from_business_id)
+        .map(business_operating_spendable_cash)
+        .expect("owned business must exist");
+    if spendable < amount {
+        return Err(CommandError::InsufficientBusinessFunds {
+            business_id: from_business_id,
+            available: spendable,
+            required: amount,
+        });
+    }
     transfer_business_cash(state, from_business_id, to_business_id, amount)?;
     super::strategic::try_push_outbox(
         state,
@@ -1370,11 +1385,11 @@ fn apply_business_wages(
             .employment
             .get_mut(agreement_id)
             .expect("collected employment agreement must exist");
+        // The wage is already validated against MAX_WEEKLY_WAGE_PER_WORKER and
+        // workers fit u16, so the product cannot overflow the fixed-point range.
         let total = weekly_wage_per_worker
             .checked_mul_ratio(i64::from(agreement.workers().max(1)), 1)
-            .ok_or(CommandError::InvalidBusinessWage {
-                maximum: MAX_WEEKLY_WAGE_PER_WORKER,
-            })?;
+            .expect("validated wage times u16 workers cannot overflow");
         agreement.weekly_wage = total;
     }
     state.audit_log.push(AuditRecord {
@@ -2300,13 +2315,7 @@ fn quote_public_work_funding(
     let spent_after = spent
         .checked_add(amount)
         .expect("bounded public-work funding must fit project budget");
-    let progress_basis_points = u16::try_from(
-        spent_after
-            .saturating_mul_ratio(10_000, budget.copper())
-            .copper()
-            .clamp(0, 10_000),
-    )
-    .expect("clamped public-work progress must fit u16");
+    let progress_basis_points = super::public_work_progress_basis_points(spent_after, budget);
     // Contributing to a project the dynasty did not sponsor is public spirit
     // the city can see: it earns a bounded legitimacy gain in the same
     // proportion an institution endowment pays, scaled down because the
@@ -2639,6 +2648,8 @@ fn apply_legal_settlement(
         claim_source,
         quote.plaintiff_dynasty_id,
         player_id,
+        quote.amount,
+        true,
     );
     state
         .legal_cases
@@ -3620,10 +3631,14 @@ fn commit_institution_endowment(
         .get_mut(&endowment.institution_id)
         .expect("validated institution must exist");
     institution.budget = endowment.budget_after;
+    // Report the legitimacy the endowment actually bought: a gain absorbed by
+    // the cap must not be recorded as if it had been delivered.
+    let legitimacy_before = institution.legitimacy_basis_points;
     institution.legitimacy_basis_points = institution
         .legitimacy_basis_points
         .saturating_add(endowment.legitimacy_gain)
         .min(10_000);
+    let applied_legitimacy_gain = institution.legitimacy_basis_points - legitimacy_before;
     for member_dynasty_id in &endowment.member_dynasties {
         super::strategic::adjust_dynasty_relationship(
             state,
@@ -3658,7 +3673,7 @@ fn commit_institution_endowment(
         detail: format!(
             "amount={};institution_legitimacy_gain={}",
             endowment.amount.copper(),
-            endowment.legitimacy_gain
+            applied_legitimacy_gain
         ),
     });
     super::strategic::try_push_outbox(
@@ -4105,15 +4120,20 @@ fn apply_office_power_directive_effect(
     }
 }
 
-fn raise_institution_legitimacy(state: &mut AppState, institution_id: InstitutionId, amount: u16) {
+/// Returns the legitimacy actually applied after the 10,000 bp cap, so
+/// callers can report what was delivered rather than what was requested.
+fn raise_institution_legitimacy(
+    state: &mut AppState,
+    institution_id: InstitutionId,
+    amount: u16,
+) -> u16 {
     let institution = state
         .institutions
         .get_mut(&institution_id)
         .expect("validated institution must exist");
-    institution.legitimacy_basis_points = institution
-        .legitimacy_basis_points
-        .saturating_add(amount)
-        .min(10_000);
+    let before = institution.legitimacy_basis_points;
+    institution.legitimacy_basis_points = before.saturating_add(amount).min(10_000);
+    institution.legitimacy_basis_points - before
 }
 
 fn apply_office_power_directive(
@@ -4718,8 +4738,7 @@ fn apply_labor_response(
                 .and_then(|ids| {
                     ids.iter().find(|id| {
                         **id != agreement.household_id
-                            && super::available_household_workers(state, **id, None)
-                                >= u32::from(workers)
+                            && super::available_household_workers(state, **id) >= u32::from(workers)
                     })
                 })
                 .copied()
@@ -5433,13 +5452,17 @@ fn apply_information_leverage_effect(state: &mut AppState, effect: &InformationL
                 .get_mut(&contract_id)
                 .expect("validated counterparty contract must exist")
                 .unit_price = new_price;
+            // Forcing a price concession with commissioned intelligence reads
+            // to the target exactly like the market-brief squeeze: distrust
+            // and resentment, not gratitude. Positive deltas are reserved for
+            // outreach that extracts no price change.
             adjust_information_relationship(
                 state,
                 dynasty_id,
-                200,
-                150,
-                -125,
-                1,
+                -75,
+                50,
+                125,
+                0,
                 &format!(
                     "a commissioned house brief supported a negotiated contract adjustment from {previous_price} to {new_price}"
                 ),
