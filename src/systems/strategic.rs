@@ -4250,10 +4250,12 @@ fn weekly_interest_due(balance: Money, annual_interest_basis_points: u16) -> Mon
     if annual_interest <= Money::ZERO {
         return Money::ZERO;
     }
-    let weekly_interest = annual_interest.copper() / 52;
-    Money::from_copper(
-        weekly_interest.saturating_add(i64::from(annual_interest.copper() % 52 != 0)),
-    )
+    // The calendar year has 360 days settled on a global 7-day cadence, so the
+    // weekly charge is one week's share of the annual interest (rounded up),
+    // not a 52-week approximation of it.
+    let scaled = i128::from(annual_interest.copper()) * 7;
+    let weekly_copper = scaled / 360 + i128::from(scaled % 360 != 0);
+    Money::from_copper(i64::try_from(weekly_copper).unwrap_or(i64::MAX))
 }
 
 fn apply_loan_payment(
@@ -5299,6 +5301,15 @@ fn progress_public_works(registry: &Registry, state: &mut AppState) -> Result<()
         if let Some(tool_purchase) = tool_purchase {
             apply_public_work_tool_purchase(state, tool_purchase);
         }
+        // The share of the weekly spend not spent on tools pays construction
+        // labor and materials from the unmodeled sector, so the residual is
+        // credited to the market clearing pool instead of vanishing from the
+        // economy: every treasury debit keeps a credited counterparty.
+        let tool_cost = tool_purchase.map_or(Money::ZERO, |purchase| purchase.cost);
+        let labor_residual = weekly_spend.saturating_sub(tool_cost);
+        if labor_residual > Money::ZERO {
+            credit_market_clearing_account(state, labor_residual)?;
+        }
 
         let completion = {
             let work = state
@@ -5358,6 +5369,7 @@ struct PublicWorkToolPurchase {
     tools_id: GoodId,
     market_stock_after: Quantity,
     clearing_after: Money,
+    cost: Money,
 }
 
 fn plan_public_work_tool_purchase(
@@ -5399,6 +5411,7 @@ fn plan_public_work_tool_purchase(
         tools_id,
         market_stock_after,
         clearing_after,
+        cost,
     }))
 }
 
@@ -5714,7 +5727,7 @@ pub(crate) fn run_monthly_strategic_systems(
     apply_ai_dynasty_upkeep(state)?;
     advance_ai_credit_participation(registry, state);
     update_information_reports(registry, state)?;
-    file_grounded_ai_legal_cases(state)?;
+    file_grounded_ai_legal_cases(registry, state)?;
     advance_legal_case_hearings(state)?;
     resolve_legal_cases(state)?;
     update_external_route_risk(state);
@@ -7859,7 +7872,10 @@ fn update_information_reports(
     Ok(())
 }
 
-fn file_grounded_ai_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
+fn file_grounded_ai_legal_cases(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<(), SimulationError> {
     let day = state.clock.day();
     let player_id = state.player_dynasty_id;
     let plaintiff_ids: Vec<_> = state
@@ -7894,6 +7910,7 @@ fn file_grounded_ai_legal_cases(state: &mut AppState) -> Result<(), SimulationEr
             .treasury = plaintiff_treasury
             .checked_sub(super::LEGAL_CASE_FILING_COST)
             .expect("prevalidated legal filing cost must fit plaintiff treasury");
+        super::collect_court_filing_fee(registry, state);
         state.legal_cases.insert(
             legal_case_id,
             LegalCase {
@@ -8813,10 +8830,13 @@ fn form_dynastic_marriage(state: &mut AppState) -> Result<(), SimulationError> {
         .values()
         .filter_map(|dynasty| Some((dynasty.id(), dynasty.heir_id()?)))
         .filter(|(_, heir_id)| {
-            state
-                .characters
-                .get(*heir_id)
-                .is_some_and(|character| character.status() == crate::core::CharacterStatus::Active)
+            state.characters.get(*heir_id).is_some_and(|character| {
+                character.status() == crate::core::CharacterStatus::Active
+                    // A marriage compact requires adults, matching the
+                    // minimum age every other family mechanic enforces.
+                    && state.clock.day().saturating_sub(character.birth_day())
+                        >= crate::systems::commands::HEIR_MINIMUM_AGE_DAYS
+            })
         })
         .collect();
     let is_married = |character_id| {

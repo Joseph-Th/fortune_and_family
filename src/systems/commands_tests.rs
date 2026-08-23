@@ -4375,6 +4375,73 @@ mod politics {
     }
 
     #[test]
+    fn governance_change_requires_family_unity_and_pays_it_exactly() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let current = state
+            .family_councils
+            .get(&dynasty_id)
+            .expect("player family council must exist")
+            .governance;
+        let governance = [
+            HouseGovernance::Primogeniture,
+            HouseGovernance::FamilyPartnership,
+            HouseGovernance::BranchFederation,
+        ]
+        .into_iter()
+        .find(|candidate| *candidate != current)
+        .expect("fixture must expose an alternative governance");
+        state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("player family council must exist")
+            .unity_basis_points = HOUSE_GOVERNANCE_UNITY_COST - 1;
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetHouseGovernance { governance },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InsufficientFamilyUnity {
+                available: HOUSE_GOVERNANCE_UNITY_COST - 1,
+                required: HOUSE_GOVERNANCE_UNITY_COST,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a divided house cannot amend its charter for free",
+        );
+
+        // With exactly enough unity the change succeeds and pays the full cost.
+        state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("player family council must exist")
+            .unity_basis_points = HOUSE_GOVERNANCE_UNITY_COST;
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::SetHouseGovernance { governance },
+        )
+        .expect("a house with exactly the unity price must be able to amend its charter");
+        assert_eq!(
+            state
+                .family_councils
+                .get(&dynasty_id)
+                .expect("player family council must exist")
+                .unity_basis_points,
+            0,
+            "the charter amendment must deduct exactly its advertised unity cost"
+        );
+    }
+
+    #[test]
     fn unchanged_house_governance_is_rejected_without_charter_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -5105,6 +5172,52 @@ mod politics {
     }
 
     #[test]
+    fn heir_designation_requires_family_unity_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let heir_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have a designated heir");
+        {
+            let player = state
+                .dynasties
+                .get_mut(&dynasty_id)
+                .expect("player dynasty must exist");
+            player.resources.legitimacy_basis_points = HEIR_DESIGNATION_LEGITIMACY_COST;
+        }
+        state
+            .family_councils
+            .get_mut(&dynasty_id)
+            .expect("player family council must exist")
+            .unity_basis_points = HEIR_DESIGNATION_UNITY_COST - 1;
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::DesignateHeir {
+                character_id: heir_id,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InsufficientFamilyUnity {
+                available: HEIR_DESIGNATION_UNITY_COST - 1,
+                required: HEIR_DESIGNATION_UNITY_COST,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a divided house must not redraw its succession line for free",
+        );
+    }
+
+    #[test]
     fn ward_adoption_expands_the_family_and_creates_a_trainable_officeholder() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -5181,6 +5294,51 @@ mod politics {
                 && record.subject().contains(&ward.id().to_string())
         }));
         validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn ward_adoption_requires_family_unity_without_mutation() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        {
+            let player = state
+                .dynasties
+                .get_mut(&player_id)
+                .expect("player dynasty must exist");
+            player.resources.treasury = Money::from_copper(20_000);
+            player.resources.legitimacy_basis_points = WARD_ADOPTION_LEGITIMACY_REQUIREMENT;
+            player.resources.reputation_reliability_basis_points =
+                WARD_ADOPTION_REPUTATION_REQUIREMENT;
+            state
+                .family_councils
+                .get_mut(&player_id)
+                .expect("player family council must exist")
+                .unity_basis_points = WARD_ADOPTION_UNITY_COST - 1;
+        }
+        grant_office_nomination_record_for_test(&mut state);
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AdoptWard {
+                focus: EducationFocus::Social,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::InsufficientFamilyUnity {
+                available: WARD_ADOPTION_UNITY_COST - 1,
+                required: WARD_ADOPTION_UNITY_COST,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "a divided council must not adopt a ward for free",
+        );
     }
 
     #[test]

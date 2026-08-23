@@ -2927,6 +2927,71 @@ mod validation {
             "invalid or duplicate occupant",
         );
     }
+    #[test]
+    fn rejects_occupant_without_matching_premises_backlink() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let occupant_id = value["properties"]
+            .as_object()
+            .and_then(|properties| {
+                properties
+                    .values()
+                    .filter_map(|property| property.get("occupant_business_id").cloned())
+                    .find(|occupant| !occupant.is_null())
+            })
+            .expect("bootstrap must create an occupied property");
+        let businesses = value["businesses"]["records"]
+            .as_object_mut()
+            .expect("business records must be an object");
+        let business = businesses
+            .values_mut()
+            .find(|business| business["identity"]["id"] == occupant_id)
+            .expect("occupied business must be recorded");
+        business["premises_property_id"] = Value::Null;
+        let (_directory, path) =
+            write_test_json_fixture("occupant-missing-premises-backlink.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "premises",
+        );
+    }
+
+    #[test]
+    fn rejects_dangling_business_premises_reference() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let businesses = value["businesses"]["records"]
+            .as_object_mut()
+            .expect("business records must be an object");
+        let business = businesses
+            .values_mut()
+            .find(|business| !business["premises_property_id"].is_null())
+            .expect("bootstrap must create a business with premises");
+        business["premises_property_id"] = Value::from(999_999);
+        let (_directory, path) = write_test_json_fixture("dangling-premises.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::PrimaryRecords,
+            "missing premises",
+        );
+    }
+
+    #[test]
+    fn rejects_negative_market_clearing_account() {
+        let state = make_test_campaign();
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        value["market"]["clearing_account"] = Value::from(-1);
+        let (_directory, path) = write_test_json_fixture("negative-clearing-account.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::NumericRanges,
+            "clearing account",
+        );
+    }
 }
 
 mod duplicate_json_members {

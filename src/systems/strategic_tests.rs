@@ -138,8 +138,10 @@ mod arithmetic_boundaries {
 
     #[test]
     fn weekly_interest_uses_the_full_supported_balance_range() {
+        // One 7-day week of a 360-day year, rounded up, at full severity.
         let balance = Money::from_copper(i64::MAX);
-        let expected = Money::from_copper(i64::MAX / 52 + i64::from(i64::MAX % 52 != 0));
+        let scaled = (i128::from(i64::MAX) * 7 + 359) / 360;
+        let expected = Money::from_copper(i64::try_from(scaled).expect("weekly share fits i64"));
 
         assert_eq!(weekly_interest_due(balance, 10_000), expected);
     }
@@ -804,6 +806,63 @@ mod public_works {
         assert!(
             state.market.clearing_account > clearing_before,
             "the material share of public-work spending must flow into the market clearing account"
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn public_work_spending_is_fully_conserved_in_counterparty_accounts() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define civic treasury");
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("registry must define tools");
+        let treasury_before = state
+            .institutions
+            .get(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget;
+        let quote_before = state
+            .market
+            .quotes
+            .get(&tools_id)
+            .expect("tools quote must exist")
+            .clone();
+        let clearing_before = state.market.clearing_account;
+
+        progress_public_works(registry, &mut state).expect("public-work progression must succeed");
+
+        let treasury_spend = treasury_before
+            .saturating_sub(
+                state
+                    .institutions
+                    .get(&treasury_id)
+                    .expect("treasury runtime must exist")
+                    .budget,
+            )
+            .max(Money::ZERO);
+        let tool_quantity = quote_before.stock.saturating_sub(
+            state
+                .market
+                .quotes
+                .get(&tools_id)
+                .expect("tools quote")
+                .stock,
+        );
+        assert!(
+            tool_quantity > Quantity::ZERO,
+            "funded construction must buy tools from the shared market"
+        );
+        assert_eq!(
+            state
+                .market
+                .clearing_account
+                .saturating_sub(clearing_before),
+            treasury_spend,
+            "every treasury copper must reach the market pool as tool sellers' proceeds or construction labor/materials pay"
         );
         validate_invariants(registry, &state);
     }
@@ -4693,6 +4752,64 @@ mod loans {
     }
 
     #[test]
+    fn dynastic_marriage_requires_adult_heirs() {
+        let mut state = make_test_campaign();
+        // Force succession can elevate children; the marriage pass must not
+        // conclude compacts between them.
+        let minor_ids: Vec<_> = state
+            .dynasties
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|dynasty_id| {
+                let minor_id = state.next_ids.character();
+                state.characters.insert(crate::core::Character {
+                    identity: crate::core::CharacterIdentity {
+                        id: minor_id,
+                        dynasty_id,
+                        name: format!("Minor Heir {minor_id}"),
+                        birth_day: state.clock.day().saturating_sub(6 * 360),
+                    },
+                    capabilities: crate::core::CharacterCapabilities {
+                        administration: 20,
+                        commerce: 20,
+                        social: 20,
+                        craft: 20,
+                    },
+                    runtime: crate::core::CharacterRuntime {
+                        status: CharacterStatus::Active,
+                        health_basis_points: 9_000,
+                        loyalty_basis_points: 8_000,
+                        role: CharacterRole::Heir,
+                    },
+                });
+                state
+                    .dynasties
+                    .get_mut(&dynasty_id)
+                    .expect("dynasty must exist")
+                    .relationships
+                    .heir_id = Some(minor_id);
+                minor_id
+            })
+            .collect();
+        let links_before = state.family_links.len();
+
+        form_dynastic_marriage(&mut state).expect("the annual marriage pass must run");
+
+        assert_eq!(
+            state.family_links.len(),
+            links_before,
+            "minors must never be wedded by the annual marriage pass"
+        );
+        assert!(!state.family_links.values().any(|link| {
+            link.kind == FamilyLinkKind::Marriage
+                && (minor_ids.contains(&link.first_character_id)
+                    || minor_ids.contains(&link.second_character_id))
+        }));
+    }
+
+    #[test]
     fn rejects_interest_above_one_hundred_percent() {
         let state = make_test_campaign();
         let mut invalid_interest = make_test_loan_terms(&state);
@@ -5078,7 +5195,9 @@ mod loans {
         let loan = state.loans.get(&loan_id).expect("loan must exist");
         assert_eq!(
             loan.balance,
-            Money::from_copper(52_100),
+            // 10% annual interest on 52,000 is one 7/360 week share rounded
+            // up: 52,000 * 0.10 * 7 / 360 = 102 copper.
+            Money::from_copper(52_102),
             "weekly interest must accrue before recording the missed payment"
         );
         assert_eq!(loan.missed_payments, 1, "one due payment was missed");
@@ -5709,6 +5828,7 @@ mod laws {
 
 mod legal_cases {
     use super::*;
+    use crate::test_support::rivergate_registry_for_test;
 
     struct TestLegalCase {
         plaintiff_dynasty_id: DynastyId,
@@ -5802,8 +5922,17 @@ mod legal_cases {
             .get(&lender_id)
             .expect("lender must exist")
             .treasury();
+        let court_id = rivergate_registry_for_test()
+            .get_institution_id("civic_court")
+            .expect("registry must define the civic court");
+        let court_budget_before = state
+            .institutions
+            .get(&court_id)
+            .expect("court runtime must exist")
+            .budget;
 
-        file_grounded_ai_legal_cases(&mut state).expect("rival filing must succeed");
+        file_grounded_ai_legal_cases(rivergate_registry_for_test(), &mut state)
+            .expect("rival filing must succeed");
 
         let legal_case = state
             .legal_cases
@@ -5829,9 +5958,21 @@ mod legal_cases {
                 .checked_sub(crate::systems::LEGAL_CASE_FILING_COST)
                 .expect("fixture lender must afford filing")
         );
+        assert_eq!(
+            state
+                .institutions
+                .get(&court_id)
+                .expect("court runtime must exist")
+                .budget,
+            court_budget_before
+                .checked_add(crate::systems::LEGAL_CASE_FILING_COST)
+                .expect("the filing fee must be conserved into the court budget"),
+            "the plaintiff's filing fee must fund the court, not vanish"
+        );
 
         let case_count = state.legal_cases.len();
-        file_grounded_ai_legal_cases(&mut state).expect("repeat legal review must succeed");
+        file_grounded_ai_legal_cases(rivergate_registry_for_test(), &mut state)
+            .expect("repeat legal review must succeed");
         assert_eq!(
             state.legal_cases.len(),
             case_count,
@@ -5852,7 +5993,8 @@ mod legal_cases {
         let loan_id = make_defaulted_loan(&mut state, lender_id, player_id);
         let outbox_before = state.outbox.len();
 
-        file_grounded_ai_legal_cases(&mut state).expect("rival filing must succeed");
+        file_grounded_ai_legal_cases(rivergate_registry_for_test(), &mut state)
+            .expect("rival filing must succeed");
 
         assert!(state.legal_cases.values().any(|legal_case| {
             legal_case.plaintiff_dynasty_id == lender_id

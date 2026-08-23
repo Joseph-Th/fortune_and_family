@@ -2262,6 +2262,7 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
     for (character_id, dynasty_id, character_name) in newly_incapacitated {
         synchronize_character_incapacitation(state, character_id, dynasty_id, &character_name)?;
     }
+    reconcile_inactive_business_managers(state);
     // A head whose health has collapsed with no designated heir must not keep
     // running the house indefinitely: designate the most capable adult member
     // as emergency heir so this year's succession pass can execute normally.
@@ -2380,6 +2381,68 @@ fn reassign_managed_businesses(
     }
 }
 
+/// Picks the active dynasty member who should take over management duties from
+/// an inactive character. The head is preferred while active; otherwise the
+/// most capable active member takes over, so an operating business is never
+/// left in the hands of an incapacitated or deceased manager.
+fn resolve_active_management_successor(
+    state: &AppState,
+    dynasty_id: DynastyId,
+    departing_character_id: CharacterId,
+) -> Option<CharacterId> {
+    let dynasty = state.dynasties.get(&dynasty_id)?;
+    let head_id = dynasty.head_id();
+    if head_id != departing_character_id
+        && state
+            .characters
+            .get(head_id)
+            .is_some_and(|head| head.status() == CharacterStatus::Active)
+    {
+        return Some(head_id);
+    }
+    state
+        .characters
+        .iter()
+        .filter(|character| {
+            character.dynasty_id() == dynasty_id
+                && character.id() != departing_character_id
+                && character.status() == CharacterStatus::Active
+        })
+        .max_by_key(|character| emergency_successor_rank(character))
+        .map(crate::core::Character::id)
+}
+
+/// Annual reconciliation: no business may keep a manager whose health or
+/// succession has taken them out of active standing. The per-character handoff
+/// in `synchronize_character_incapacitation` can target a head that a later
+/// succession retires in the same pass, so this sweep guarantees the lifecycle
+/// invariant instead of trusting once-per-character ordering.
+fn reconcile_inactive_business_managers(state: &mut AppState) {
+    let stale_managers: Vec<(BusinessId, DynastyId)> = state
+        .businesses
+        .iter()
+        .filter(|business| {
+            state
+                .characters
+                .get(business.manager_id())
+                .is_none_or(|manager| manager.status() != CharacterStatus::Active)
+        })
+        .map(|business| (business.id(), business.owner_dynasty_id()))
+        .collect();
+    for (business_id, dynasty_id) in stale_managers {
+        let departing_manager_id = state
+            .businesses
+            .get(business_id)
+            .map(crate::core::Business::manager_id)
+            .expect("stale-manager business must exist");
+        if let Some(successor_id) =
+            resolve_active_management_successor(state, dynasty_id, departing_manager_id)
+        {
+            reassign_managed_businesses(state, dynasty_id, departing_manager_id, successor_id);
+        }
+    }
+}
+
 fn synchronize_character_incapacitation(
     state: &mut AppState,
     character_id: CharacterId,
@@ -2406,12 +2469,11 @@ fn synchronize_character_incapacitation(
         .members
         .remove(&character_id);
     vacate_character_institutional_roles(state, character_id, replacement_selection_day);
-    let replacement_manager_id = state
-        .dynasties
-        .get(&dynasty_id)
-        .expect("character dynasty must exist")
-        .head_id();
-    reassign_managed_businesses(state, dynasty_id, character_id, replacement_manager_id);
+    if let Some(replacement_manager_id) =
+        resolve_active_management_successor(state, dynasty_id, character_id)
+    {
+        reassign_managed_businesses(state, dynasty_id, character_id, replacement_manager_id);
+    }
     if dynasty_id == state.player_dynasty_id {
         super::strategic::try_push_outbox(
             state,

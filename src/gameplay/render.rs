@@ -481,7 +481,9 @@ pub(crate) fn render_health_summary(report: &GameplayHarnessReport, output: &mut
     );
     let _ = writeln!(
         output,
-        "  peak credit distress in one campaign: private {} delinquent / {} defaulted | player-issued {} delinquent / {} defaulted | player-borrowed {} delinquent / {} defaulted | civic {} delinquent / {} defaulted\n",
+        // Each slot is an independent cross-campaign peak, so the label must
+        // not claim both numbers came from a single campaign.
+        "  campaign peaks of credit distress: private {} delinquent / {} defaulted | player-issued {} delinquent / {} defaulted | player-borrowed {} delinquent / {} defaulted | civic {} delinquent / {} defaulted\n",
         summary.peak_private_credit_distress.0,
         summary.peak_private_credit_distress.1,
         summary.peak_player_lending_distress.0,
@@ -529,11 +531,16 @@ pub(crate) fn render_report_header(report: &GameplayHarnessReport, output: &mut 
         aggregate.scores.feedback,
         aggregate.scores.resilience
     );
+    // Coverage counts only substantive command kinds; the three operational
+    // housekeeping kinds are excluded from both numerator and denominator.
     let _ = writeln!(
         output,
         "coverage: {}/{} command kinds | causal domains {}/{} | ambient domains {}/{} | {} command-domain edges | {} quiet ({} with ambient change) / {} blocked cycles",
         aggregate.command_coverage,
-        ALL_COMMAND_KINDS.len(),
+        ALL_COMMAND_KINDS
+            .iter()
+            .filter(|kind| is_substantive_command_kind(**kind))
+            .count(),
         aggregate.causal_domain_coverage,
         ALL_DOMAINS.len(),
         aggregate.ambient_domain_coverage,
@@ -1168,7 +1175,9 @@ pub(crate) fn format_measure_change(
 ) -> String {
     let values = if matches!(
         measure,
-        GameplayMeasure::PlayerTreasury | GameplayMeasure::PlayerBusinessCash
+        GameplayMeasure::PlayerTreasury
+            | GameplayMeasure::PlayerBusinessCash
+            | GameplayMeasure::PlayerBusinessLifetimeProfit
     ) {
         format!(
             "{}->{}",

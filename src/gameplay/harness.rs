@@ -991,7 +991,10 @@ pub(crate) fn next_campaign_step_days(state: &AppState, configured_step: u32) ->
                 return None;
             }
             let days_to_hearing = legal_case.hearing_day.saturating_sub(state.clock.day());
-            (days_to_hearing > 1).then_some(days_to_hearing)
+            // A hearing tomorrow is exactly the case that most needs an
+            // accelerated funding step; only same-day judgments are past
+            // saving. The `.max(1)` floor below keeps the step positive.
+            (days_to_hearing >= 1).then_some(days_to_hearing)
         })
         .min();
     let legal_step = urgent_funding_window.map_or(u32::MAX, |days_to_hearing| {
@@ -1935,7 +1938,7 @@ pub(crate) fn has_world_opportunity(
         GameplayCommandKind::EnactLaw => has_enact_law_opportunity(registry, state),
         GameplayCommandKind::StartPublicWork => has_start_public_work_opportunity(registry, state),
         GameplayCommandKind::FundPublicWork => has_fund_public_work_opportunity(state),
-        GameplayCommandKind::SetHouseGovernance => has_governance_opportunity(state, persona),
+        GameplayCommandKind::SetHouseGovernance => has_governance_opportunity(state),
         GameplayCommandKind::ConveneFamilyCouncil => has_family_council_opportunity(state),
         GameplayCommandKind::DesignateHeir => has_heir_designation_opportunity(state),
         GameplayCommandKind::AdoptWard => has_ward_adoption_opportunity(state),
@@ -1954,7 +1957,7 @@ pub(crate) fn has_world_opportunity(
         GameplayCommandKind::LeverageInformation => {
             has_information_leverage_opportunity(registry, state)
         }
-        GameplayCommandKind::BorrowFunds => has_borrow_opportunity(state, persona),
+        GameplayCommandKind::BorrowFunds => has_borrow_opportunity(state),
         GameplayCommandKind::AcknowledgeNotification => {
             has_notification_acknowledgement_opportunity(state)
         }
@@ -2225,7 +2228,7 @@ pub(crate) fn has_fund_public_work_opportunity(state: &AppState) -> bool {
     })
 }
 
-pub(crate) fn has_governance_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
+pub(crate) fn has_governance_opportunity(state: &AppState) -> bool {
     let Some(council) = state.family_councils.get(&state.player_dynasty_id) else {
         return false;
     };
@@ -2244,9 +2247,11 @@ pub(crate) fn has_governance_opportunity(state: &AppState, persona: GameplayPers
                 .saturating_add(HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS)
                 <= state.clock.day()
         });
-    governance_available
-        && preferred_house_governance(state, persona)
-            .is_some_and(|governance| governance != council.governance)
+    // The canonical route (`apply_governance`) accepts any change to a
+    // different governance model while the house can pay its unity price and
+    // is off cooldown; which model the agent *prefers* is generator policy,
+    // so the activation predicate stays policy-free.
+    governance_available && council.unity_basis_points >= HOUSE_GOVERNANCE_UNITY_COST
 }
 
 pub(crate) fn has_family_council_opportunity(state: &AppState) -> bool {
@@ -2312,21 +2317,23 @@ pub(crate) fn has_heir_designation_opportunity(state: &AppState) -> bool {
     let head_id = dynasty.head_id();
     // Mirror the canonical route (`validate_heir_designation`): an eligible
     // council member who is not the head, is active, and is at least eighteen
-    // can be designated. Confirming the existing heir is only possible once,
-    // so a prior designation removes the confirmation route but not a genuine
-    // replacement designation; the agent's head-age and succession-risk gates
-    // are policy and live in the candidate generator.
-    council.members.iter().any(|character_id| {
-        state
-            .characters
-            .get(*character_id)
-            .is_some_and(|character| {
-                *character_id != head_id
-                    && character.dynasty_id() == player_id
-                    && character.status() == CharacterStatus::Active
-                    && state.clock.day().saturating_sub(character.birth_day()) >= 18 * 360
-            })
-    })
+    // can be designated when the house can pay the legitimacy and unity costs.
+    // Confirming the existing heir is only possible once, so a prior
+    // designation removes the confirmation route but not a genuine replacement
+    // designation; the agent's head-age and succession-risk gates are policy
+    // and live in the candidate generator.
+    council.unity_basis_points >= HEIR_DESIGNATION_UNITY_COST
+        && council.members.iter().any(|character_id| {
+            state
+                .characters
+                .get(*character_id)
+                .is_some_and(|character| {
+                    *character_id != head_id
+                        && character.dynasty_id() == player_id
+                        && character.status() == CharacterStatus::Active
+                        && state.clock.day().saturating_sub(character.birth_day()) >= 18 * 360
+                })
+        })
 }
 
 pub(crate) fn has_ward_adoption_opportunity(state: &AppState) -> bool {
@@ -2336,6 +2343,10 @@ pub(crate) fn has_ward_adoption_opportunity(state: &AppState) -> bool {
     };
     player.treasury() >= WARD_ADOPTION_COST
         && player.resources.legitimacy_basis_points >= WARD_ADOPTION_LEGITIMACY_REQUIREMENT
+        && state
+            .family_councils
+            .get(&player_id)
+            .is_some_and(|council| council.unity_basis_points >= WARD_ADOPTION_UNITY_COST)
         && player
             .resources
             .reputation_quality_basis_points
@@ -2540,36 +2551,17 @@ pub(crate) fn has_information_leverage_opportunity(registry: &Registry, state: &
     })
 }
 
-pub(crate) fn has_borrow_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
+pub(crate) fn has_borrow_opportunity(state: &AppState) -> bool {
     let player_id = state.player_dynasty_id;
-    let Some(player) = state.dynasties.get(&player_id) else {
-        return false;
-    };
-    let base_borrowing_trigger = match persona {
-        GameplayPersona::Steward => Money::from_copper(4_000),
-        GameplayPersona::Entrepreneur => Money::from_copper(12_000),
-        GameplayPersona::PowerBroker | GameplayPersona::Opportunist => Money::from_copper(8_000),
-    };
-    let office_reserve = player_office_duty_reserve(state, 0);
-    let legal_requirement = active_legal_settlement_requirement(state).unwrap_or(Money::ZERO);
-    let borrowing_trigger = office_reserve
-        .max(base_borrowing_trigger)
-        .max(legal_requirement);
-    if player.treasury() >= borrowing_trigger
-        || state
-            .loans
-            .values()
-            .any(|loan| loan.borrower_dynasty_id == player_id && loan.status.is_repayment_active())
-    {
+    if !state.dynasties.contains_key(&player_id) {
         return false;
     }
-    // The canonical borrow route (`apply_loan`) also requires the non-player
-    // lender to accept the terms: a post-loan reserve, interest at least the
-    // counterparty minimum (400 bp), and a weekly payment covering the exposure
-    // over the maximum amortization. The player, as borrower, is never subject
-    // to a financing-pressure gate, and can always offer in-band terms; the
-    // predicate therefore only needs a solvent, unblocked lender to confirm the
-    // world accepts a borrow.
+    // The canonical borrow route (`apply_loan`) requires only a counterparty
+    // that can fund the loan and is not credit-blocked against the player.
+    // Borrowing triggers, office reserves, and legal requirements are the
+    // generator's persona policy and live in the candidate generator; the
+    // activation predicate mirrors the game so a fundable loan is never
+    // misread as dormant.
     state.dynasties.values().any(|dynasty| {
         dynasty.id() != player_id
             && !same_pair_credit_blocks_new_loan(state, dynasty.id(), player_id)

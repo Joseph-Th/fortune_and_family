@@ -3324,6 +3324,65 @@ mod health_and_succession {
     }
 
     #[test]
+    fn annual_reconciliation_reassigns_stale_managers_past_inactive_heads() {
+        let IncapacitationFixture {
+            mut state,
+            dynasty_id,
+            head_id,
+            character_id,
+            business_id,
+            ..
+        } = make_incapacitation_fixture();
+        // Degenerate pass: the departing manager and the dynasty head are both
+        // inactive, and one further active member can take over.
+        let successor_id = state.next_ids.character();
+        state.characters.insert(Character {
+            identity: CharacterIdentity {
+                id: successor_id,
+                dynasty_id,
+                name: "Capable Kinswoman".to_owned(),
+                birth_day: state.clock.day().saturating_sub(28 * 360),
+            },
+            capabilities: CharacterCapabilities {
+                administration: 55,
+                commerce: 55,
+                social: 55,
+                craft: 55,
+            },
+            runtime: CharacterRuntime {
+                status: CharacterStatus::Active,
+                health_basis_points: 9_000,
+                loyalty_basis_points: 8_000,
+                role: CharacterRole::Clerk,
+            },
+        });
+        state
+            .characters
+            .get_mut(head_id)
+            .expect("head must exist")
+            .runtime
+            .status = CharacterStatus::Incapacitated;
+        state
+            .characters
+            .get_mut(character_id)
+            .expect("departing manager must exist")
+            .runtime
+            .status = CharacterStatus::Incapacitated;
+
+        reconcile_inactive_business_managers(&mut state);
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("player business must exist")
+                .manager_id(),
+            successor_id,
+            "a business must never keep an inactive manager while an active kinsman exists"
+        );
+    }
+
+    #[test]
     fn designated_heir_retains_minimum_health_until_succession_can_replace_them() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

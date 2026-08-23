@@ -1626,6 +1626,11 @@ pub(crate) const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> 
             | GameplayCommandKind::LeverageInformation
             | GameplayCommandKind::CommissionInformation
             | GameplayCommandKind::BuyProperty
+            // Borrowing and charter amendment generators only build when the
+            // persona's strategic-need condition fires, which is stricter than
+            // the canonical acceptance their activation predicate mirrors.
+            | GameplayCommandKind::BorrowFunds
+            | GameplayCommandKind::SetHouseGovernance
             // Sponsorship is gated on office-power establishment, a 360-day
             // cooldown, per-district duplicates, and an upfront contribution;
             // an activation without a candidate there means one of the
@@ -1638,7 +1643,6 @@ pub(crate) fn add_command_findings(
     aggregate: &GameplayAggregate,
     findings: &mut Vec<GameplayFinding>,
 ) {
-    let campaign_days = average_campaign_days(aggregate);
     for kind in ALL_COMMAND_KINDS {
         let stats = aggregate
             .commands
@@ -1646,7 +1650,7 @@ pub(crate) fn add_command_findings(
             .expect("every command kind must have aggregate statistics");
         if stats.executed == 0 {
             let (severity, title) = if stats.generated == 0 {
-                if command_route_expected(aggregate, kind, campaign_days) {
+                if command_route_expected(aggregate, kind) {
                     if is_policy_gated_command_route(kind) {
                         (
                             GameplayFindingSeverity::Warning,
@@ -1729,7 +1733,7 @@ pub(crate) fn add_domain_findings(
             .unwrap_or(0);
         let player_route_expected = domain_player_commands(domain)
             .iter()
-            .any(|kind| command_route_expected(aggregate, *kind, campaign_days));
+            .any(|kind| command_route_expected(aggregate, *kind));
         if causal == 0 && ambient == 0 {
             findings.push(GameplayFinding {
                 severity: if player_route_expected {
@@ -1794,23 +1798,15 @@ pub(crate) fn add_domain_findings(
 pub(crate) fn command_route_expected(
     aggregate: &GameplayAggregate,
     kind: GameplayCommandKind,
-    campaign_days: u64,
 ) -> bool {
-    if kind.is_activation_dependent() {
-        aggregate
-            .commands
-            .get(&kind)
-            .is_some_and(|stats| stats.activation_opportunities > 0 || stats.offered_cycles > 0)
-    } else {
-        // A route whose generator kept finding real activation opportunities
-        // is expected regardless of the nominal horizon: the opportunity
-        // evidence outranks the calendar estimate.
-        campaign_days >= u64::from(kind.expected_activation_days())
-            || aggregate
-                .commands
-                .get(&kind)
-                .is_some_and(|stats| stats.activation_opportunities > 0 || stats.offered_cycles > 0)
-    }
+    // Every route is gated on real world or cooldown conditions, so
+    // expectation is decided by observed opportunity evidence uniformly: a
+    // generator that kept finding real activation opportunities makes the
+    // route expected regardless of any nominal horizon estimate.
+    aggregate
+        .commands
+        .get(&kind)
+        .is_some_and(|stats| stats.activation_opportunities > 0 || stats.offered_cycles > 0)
 }
 
 pub(crate) fn average_campaign_days(aggregate: &GameplayAggregate) -> u64 {

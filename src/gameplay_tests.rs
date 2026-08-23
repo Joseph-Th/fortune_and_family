@@ -9680,12 +9680,17 @@ mod findings {
         );
         let office_finding =
             finding_with_title(&findings, "office-power was not exercised in this horizon");
-        let borrowing_finding =
-            finding_with_title(&findings, "borrow-funds was not exercised in this horizon");
+        // Settlement is only reachable when a case exists against the dynasty
+        // that quotes a settlement; no such event fires in this horizon, so
+        // the unexercised route stays informational.
+        let settlement_finding = finding_with_title(
+            &findings,
+            "legal-settlement was not exercised in this horizon",
+        );
 
         assert_eq!(labor_finding.severity, GameplayFindingSeverity::Info);
         assert_eq!(office_finding.severity, GameplayFindingSeverity::Info);
-        assert_eq!(borrowing_finding.severity, GameplayFindingSeverity::Info);
+        assert_eq!(settlement_finding.severity, GameplayFindingSeverity::Info);
     }
 
     #[test]

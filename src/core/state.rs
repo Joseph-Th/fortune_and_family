@@ -65,9 +65,15 @@ impl SimulationClock {
         start_year.saturating_add(converted)
     }
 
+    /// The one-based day within the 360-day calendar year.
+    ///
+    /// # Panics
+    ///
+    /// Never panics: `rem_euclid(360)` is bounded to 0..=359 for any `i64`
+    /// day, so the one-based result always fits a `u16`.
     #[must_use]
     pub fn day_of_year(self) -> u16 {
-        u16::try_from(self.day.rem_euclid(360) + 1).unwrap_or(1)
+        u16::try_from(self.day.rem_euclid(360) + 1).expect("day-of-year fits a u16")
     }
 
     #[must_use]
@@ -467,9 +473,10 @@ pub(crate) struct NextIds {
 macro_rules! try_next_id_method {
     ($try_method:ident, $field:ident, $id_type:ident, $error:ident) => {
         pub(crate) const fn $try_method(&mut self) -> Result<$id_type, IdentifierAllocationError> {
-            // `u32::MAX` is an invalid exhausted allocator state. Keep
-            // `u32::MAX - 1` as the terminal valid counter value and reject an
-            // allocation that would advance the campaign into that invalid state.
+            // `u32::MAX` is an invalid exhausted allocator state, and so is
+            // `u32::MAX - 1`: both are rejected at allocation and load time.
+            // The terminal valid counter value is `u32::MAX - 2`, whose
+            // increment lands on the last valid ID below the rejected band.
             if self.$field >= u32::MAX - 1 {
                 return Err(IdentifierAllocationError::$error);
             }

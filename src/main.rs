@@ -362,11 +362,21 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
         Command::Validate { input } => {
             let state = load_state(&input)?;
             validate_invariants(registry, &state);
+            // Load-time validation (references, indexes, ranges, accounting)
+            // always runs; the deep runtime invariant audit is compiled in
+            // only when debug assertions are enabled, and this report must
+            // not claim it ran when it did not.
+            let invariant_scope = if cfg!(debug_assertions) {
+                "with full runtime invariants"
+            } else {
+                "at persistence boundaries (debug build adds runtime invariants)"
+            };
             println!(
-                "Validated {} at simulation day {} with schema version {}",
+                "Validated {} at simulation day {} with schema version {} {}",
                 input.display(),
                 state.clock().day(),
-                state.schema_version()
+                state.schema_version(),
+                invariant_scope
             );
         }
         Command::Playtest(args) => run_playtest(registry, args)?,

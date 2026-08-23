@@ -104,7 +104,15 @@ pub(crate) fn probe_candidates_with_parallelism(
                         family_scores.push(candidate.score);
                     }
                     viable_options.push(evaluated.option);
-                    if selected_substantive.is_none() {
+                    // Commit the highest-ranked viable substantive action,
+                    // not merely the first viable one: probe order is
+                    // kind-diversity-first, so a rejected leader must not
+                    // suppress a viable variant with a better score. Ties
+                    // keep the earlier probed candidate, which is stable.
+                    if selected_substantive
+                        .as_ref()
+                        .is_none_or(|current: &Candidate| candidate.score > current.score)
+                    {
                         selected_substantive = Some(candidate);
                     }
                 } else if matches!(
@@ -112,7 +120,10 @@ pub(crate) fn probe_candidates_with_parallelism(
                     GameplayCommandKind::TransferBusinessCash
                         | GameplayCommandKind::WithdrawBusinessCash
                 ) {
-                    if selected_operational.is_none() {
+                    if selected_operational
+                        .as_ref()
+                        .is_none_or(|current: &Candidate| candidate.score > current.score)
+                    {
                         selected_operational = Some(candidate);
                     }
                 } else if housekeeping_fallback.is_none() {
@@ -575,7 +586,6 @@ pub(crate) fn record_action_consequences(
     } = observation;
     let immediate_feedback = signals.contains(&GameplayTraceSignal::ImmediateWorldFeedback);
     let delayed_feedback = signals.contains(&GameplayTraceSignal::DelayedWorldFeedback);
-    let persistent_history_change = signals.contains(&GameplayTraceSignal::PersistentHistoryChange);
     let command_stats = accumulator
         .commands
         .get_mut(&kind)
@@ -591,7 +601,11 @@ pub(crate) fn record_action_consequences(
     if immediate_feedback || delayed_feedback {
         command_stats.actions_with_feedback = command_stats.actions_with_feedback.saturating_add(1);
     }
-    if !persistent.is_empty() || persistent_history_change {
+    // Persistence means an attributable world-state change survived to the
+    // horizon. Every command appends audit records, so an append-only
+    // history checksum cannot distinguish durable consequences from mere
+    // bookkeeping and must not feed this metric.
+    if !persistent.is_empty() {
         command_stats.actions_with_persistent_consequences = command_stats
             .actions_with_persistent_consequences
             .saturating_add(1);
@@ -7037,6 +7051,7 @@ pub(crate) const fn command_error_category(error: &CommandError) -> &'static str
         CommandError::MissingDistrict { .. } | CommandError::MissingDynasty { .. } => NO_TARGET,
         CommandError::InsufficientPlayerFunds { .. } => "insufficient player funds",
         CommandError::InsufficientPlayerLegitimacy { .. } => "insufficient player legitimacy",
+        CommandError::InsufficientFamilyUnity { .. } => "insufficient family unity",
         CommandError::InsufficientBusinessFunds { .. } => "insufficient business funds",
         CommandError::InvalidPublicWorkBudget { .. }
         | CommandError::PublicWorkFunding(_)

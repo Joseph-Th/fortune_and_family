@@ -7,7 +7,6 @@ use crate::core::{
 use crate::ids::{BusinessId, HouseholdId};
 use crate::money::{Money, Quantity, checked_cost_for};
 use crate::systems::is_schedulable_day;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -115,7 +114,7 @@ pub enum PersistenceError {
 }
 
 /// The outcome of a save operation after visibility commit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SaveOutcome {
     /// Save was atomically replaced; parent directory durability was
     /// synchronized on platforms that support directory synchronization.
@@ -126,7 +125,7 @@ pub enum SaveOutcome {
 }
 
 /// A deterministic fingerprint of a save file's committed contents for CAS / optimistic concurrency.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SaveRevision {
     hash: u64,
     size: u64,
@@ -200,12 +199,6 @@ fn save_state_impl(
     expected_revision: Option<&SaveRevision>,
     overwrite: Option<bool>,
 ) -> Result<SaveOutcome, PersistenceError> {
-    validate_state(state).map_err(|error| PersistenceError::InvalidState {
-        path: path.to_path_buf(),
-        kind: error.kind,
-        reason: error.reason,
-    })?;
-
     if let Some(overwrite_allowed) = overwrite
         && !overwrite_allowed
         && (path.exists() || fs::symlink_metadata(path).is_ok())
@@ -215,6 +208,11 @@ fn save_state_impl(
         });
     }
 
+    // Compare-and-swap validation runs before anything else so a stale writer
+    // is reported as a conflict rather than being masked by an unrelated
+    // validation failure. The check-then-write window below is deliberately
+    // narrow but not lock-free: two writers that read the same baseline may
+    // still race, and single-writer callers (the supported usage) are exact.
     if let Some(expected) = expected_revision {
         if path.exists() {
             let current_bytes = read_bounded_save(path)?;
@@ -234,6 +232,12 @@ fn save_state_impl(
             });
         }
     }
+
+    validate_state(state).map_err(|error| PersistenceError::InvalidState {
+        path: path.to_path_buf(),
+        kind: error.kind,
+        reason: error.reason,
+    })?;
 
     let parent = path
         .parent()
@@ -900,6 +904,9 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
             ));
         }
     }
+    if state.market.clearing_account < Money::ZERO {
+        return Err("market clearing account has an invalid value".to_owned());
+    }
     for quote in state.market.quotes.values() {
         if quote.price <= Money::ZERO
             || quote.previous_price <= Money::ZERO
@@ -1351,6 +1358,23 @@ fn validate_business_records(
                 "business {business_id} references an inactive manager"
             ));
         }
+        // A business's premises link is the business-side half of the
+        // occupancy relationship: it must resolve to an existing property
+        // whose occupant is the business itself or nobody (evicted while
+        // insolvent, re-occupiable on recovery).
+        if let Some(premises_id) = business.premises_property_id() {
+            let premises = state.properties.get(&premises_id).ok_or_else(|| {
+                format!("business {business_id} references missing premises property {premises_id}")
+            })?;
+            if premises
+                .occupant_business_id
+                .is_some_and(|existing_id| existing_id != *business_id)
+            {
+                return Err(format!(
+                    "business {business_id} premises {premises_id} are occupied by another business"
+                ));
+            }
+        }
         if business
             .inventory()
             .keys()
@@ -1434,6 +1458,11 @@ fn validate_strategic_records(
             {
                 return Err(format!(
                     "property {property_id} has an invalid or duplicate occupant"
+                ));
+            }
+            if business.premises_property_id() != Some(*property_id) {
+                return Err(format!(
+                    "property {property_id} occupant business does not reference it as its premises"
                 ));
             }
             let expected_tenant = property

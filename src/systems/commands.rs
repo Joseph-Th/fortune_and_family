@@ -231,14 +231,14 @@ pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
 pub(crate) const LABOR_CONDITIONS_IMPROVEMENT_COST: Money = Money::from_copper(1_000);
 pub(crate) const LABOR_NEGOTIATION_COST: Money = Money::from_copper(500);
 pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_080;
-const HOUSE_GOVERNANCE_UNITY_COST: u16 = 250;
+pub(crate) const HOUSE_GOVERNANCE_UNITY_COST: u16 = 250;
 pub(crate) const FAMILY_COUNCIL_MEETING_INTERVAL_DAYS: i64 = 360;
 pub(crate) const FAMILY_COUNCIL_MEETING_COST: Money = Money::from_copper(2_500);
 const FAMILY_COUNCIL_MEETING_UNITY_GAIN: u16 = 1_500;
 const FAMILY_COUNCIL_MEETING_LOYALTY_GAIN: u16 = 600;
 pub(crate) const HEIR_DESIGNATION_INTERVAL_DAYS: i64 = 720;
 pub(crate) const HEIR_DESIGNATION_LEGITIMACY_COST: u16 = 300;
-const HEIR_DESIGNATION_UNITY_COST: u16 = 250;
+pub(crate) const HEIR_DESIGNATION_UNITY_COST: u16 = 250;
 pub(crate) const HEIR_MINIMUM_AGE_DAYS: i64 = 18 * 360;
 pub(crate) const OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS: i64 = 180;
 pub(crate) const OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST: u16 = 100;
@@ -268,7 +268,7 @@ pub(crate) const WARD_ADOPTION_COST: Money = Money::from_copper(6_000);
 pub(crate) const WARD_ADOPTION_LEGITIMACY_REQUIREMENT: u16 = 3_500;
 pub(crate) const WARD_ADOPTION_REPUTATION_REQUIREMENT: u16 = 5_200;
 pub(crate) const WARD_ADOPTION_DELIVERY_REQUIREMENT: u32 = 52;
-const WARD_ADOPTION_UNITY_COST: u16 = 100;
+pub(crate) const WARD_ADOPTION_UNITY_COST: u16 = 100;
 const WARD_ADOPTION_LEGITIMACY_COST: u16 = 250;
 pub(crate) const MAX_ACTIVE_WARDS: usize = 4;
 pub(crate) const FAMILY_EDUCATION_INTERVAL_DAYS: i64 = 360;
@@ -458,6 +458,8 @@ pub enum CommandError {
     InsufficientPlayerFunds { available: Money, required: Money },
     #[error("player legitimacy is {available}, but command requires {required}")]
     InsufficientPlayerLegitimacy { available: u16, required: u16 },
+    #[error("family unity is {available}, but command requires {required}")]
+    InsufficientFamilyUnity { available: u16, required: u16 },
     #[error("the panicked market holds only {available}, so there is nothing left to extract")]
     MarketExtractionUnavailable { available: Money },
     #[error("business {business_id} has {available}, but command requires {required}")]
@@ -877,6 +879,7 @@ fn dispatch_player_command(
             evidence_basis_points,
             damages,
         } => apply_legal_case(
+            registry,
             state,
             defendant_dynasty_id,
             kind,
@@ -1230,21 +1233,7 @@ fn apply_business_policy(
         maintenance_basis_points,
         quality_target_basis_points,
     } = input;
-    ensure_owned_business(state, business_id)?;
-    // Rescue capital (`InvestInBusiness`) is the only player lever an
-    // insolvent firm still accepts; operating controls stay locked while
-    // insolvency runs and unlock again on recovery. The same gate guards
-    // policy, wages, and labor responses.
-    if state.businesses.get(business_id).is_some_and(|business| {
-        matches!(
-            business.status(),
-            BusinessStatus::Insolvent | BusinessStatus::Closed
-        )
-    }) {
-        return Err(CommandError::Strategic(StrategicError::BusinessInactive {
-            business_id,
-        }));
-    }
+    ensure_operable_owned_business(state, business_id)?;
     if target_input_days > 30
         || target_output_days > 30
         || minimum_cash_reserve.is_negative()
@@ -1330,17 +1319,7 @@ fn apply_business_wages(
     business_id: BusinessId,
     weekly_wage_per_worker: Money,
 ) -> Result<CommandOutcome, CommandError> {
-    ensure_owned_business(state, business_id)?;
-    if state.businesses.get(business_id).is_some_and(|business| {
-        matches!(
-            business.status(),
-            BusinessStatus::Insolvent | BusinessStatus::Closed
-        )
-    }) {
-        return Err(CommandError::Strategic(StrategicError::BusinessInactive {
-            business_id,
-        }));
-    }
+    ensure_operable_owned_business(state, business_id)?;
     if weekly_wage_per_worker <= Money::ZERO || weekly_wage_per_worker > MAX_WEEKLY_WAGE_PER_WORKER
     {
         return Err(CommandError::InvalidBusinessWage {
@@ -1363,7 +1342,9 @@ fn apply_business_wages(
     let agreements: Vec<EmploymentId> = state
         .employment
         .values()
-        .filter(|agreement| agreement.business_id() == business_id)
+        .filter(|agreement| {
+            agreement.business_id() == business_id && agreement.status != EmploymentStatus::Ended
+        })
         .map(EmploymentAgreement::id)
         .collect();
     if agreements.is_empty() {
@@ -1431,6 +1412,28 @@ fn ensure_owned_business(state: &AppState, business_id: BusinessId) -> Result<()
         .ok_or(CommandError::MissingBusiness { business_id })?;
     if business.owner_dynasty_id() != state.player_dynasty_id {
         return Err(CommandError::BusinessNotOwned { business_id });
+    }
+    Ok(())
+}
+
+/// Owned-business gate for operating controls. Rescue capital
+/// (`InvestInBusiness`) is the only player lever an insolvent firm still
+/// accepts; policy, wages, and labor responses stay locked while insolvency or
+/// closure runs and unlock again on recovery.
+fn ensure_operable_owned_business(
+    state: &AppState,
+    business_id: BusinessId,
+) -> Result<(), CommandError> {
+    ensure_owned_business(state, business_id)?;
+    if state.businesses.get(business_id).is_some_and(|business| {
+        matches!(
+            business.status(),
+            BusinessStatus::Insolvent | BusinessStatus::Closed
+        )
+    }) {
+        return Err(CommandError::Strategic(StrategicError::BusinessInactive {
+            business_id,
+        }));
     }
     Ok(())
 }
@@ -2448,6 +2451,7 @@ pub(crate) fn quote_player_legal_settlement(
 }
 
 fn apply_legal_case(
+    registry: &Registry,
     state: &mut AppState,
     defendant_dynasty_id: DynastyId,
     kind: LegalCaseKind,
@@ -2506,6 +2510,7 @@ fn apply_legal_case(
     }
     let hearing_day = checked_future_day(state.clock.day(), LEGAL_CASE_HEARING_DELAY_DAYS)?;
     spend_player_treasury(state, LEGAL_CASE_FILING_COST)?;
+    super::collect_court_filing_fee(registry, state);
     let id = state.next_ids.try_legal_case()?;
     state.legal_cases.insert(
         id,
@@ -2649,6 +2654,14 @@ fn apply_governance(
             return Err(CommandError::HouseGovernanceCooldown { next_change_day });
         }
     }
+    // Family unity is a real cost of forcing a governance change: a house
+    // too divided to pay it cannot amend its own charter.
+    if council.unity_basis_points < HOUSE_GOVERNANCE_UNITY_COST {
+        return Err(CommandError::InsufficientFamilyUnity {
+            available: council.unity_basis_points,
+            required: HOUSE_GOVERNANCE_UNITY_COST,
+        });
+    }
     let next_charter_version = next_family_charter_version(dynasty_id, council.charter_version)?;
     let council = state
         .family_councils
@@ -2658,7 +2671,8 @@ fn apply_governance(
     council.charter_version = next_charter_version;
     council.unity_basis_points = council
         .unity_basis_points
-        .saturating_sub(HOUSE_GOVERNANCE_UNITY_COST);
+        .checked_sub(HOUSE_GOVERNANCE_UNITY_COST)
+        .expect("validated family unity must cover the governance cost");
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::HouseGovernanceChange,
@@ -2712,9 +2726,12 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
         .family_councils
         .get_mut(&dynasty_id)
         .expect("validated family council must exist");
+    // A council already at full unity cannot gain more; report what actually
+    // happened instead of claiming a rise that saturation absorbed.
+    let unity_gain = FAMILY_COUNCIL_MEETING_UNITY_GAIN.min(10_000_u16.saturating_sub(unity_before));
     council.unity_basis_points = council
         .unity_basis_points
-        .saturating_add(FAMILY_COUNCIL_MEETING_UNITY_GAIN)
+        .saturating_add(unity_gain)
         .min(10_000);
     let unity_after = council.unity_basis_points;
     state.audit_log.push(AuditRecord {
@@ -2730,9 +2747,15 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
         state,
         OutboxKind::Family,
         "Family council convened".to_owned(),
-        format!(
-            "The dynasty spent {FAMILY_COUNCIL_MEETING_COST} on settlements, hospitality, and internal obligations. Family unity rose from {unity_before} to {unity_after} bp and active council members gained loyalty."
-        ),
+        if unity_gain > 0 {
+            format!(
+                "The dynasty spent {FAMILY_COUNCIL_MEETING_COST} on settlements, hospitality, and internal obligations. Family unity rose from {unity_before} to {unity_after} bp and active council members gained loyalty."
+            )
+        } else {
+            format!(
+                "The dynasty spent {FAMILY_COUNCIL_MEETING_COST} on settlements, hospitality, and internal obligations. Family unity held at {unity_before} bp and active council members gained loyalty."
+            )
+        },
     )?;
     Ok(CommandOutcome {
         summary: format!("Convened the family council; unity is now {unity_after} bp."),
@@ -2807,6 +2830,14 @@ fn validate_heir_designation(
             required: HEIR_DESIGNATION_LEGITIMACY_COST,
         });
     }
+    // Redrawing the succession wounds family cohesion; a divided house cannot
+    // pay the unity price of a new charter line.
+    if council.unity_basis_points < HEIR_DESIGNATION_UNITY_COST {
+        return Err(CommandError::InsufficientFamilyUnity {
+            available: council.unity_basis_points,
+            required: HEIR_DESIGNATION_UNITY_COST,
+        });
+    }
     if let Some(last_designation_day) = latest_designation.map(AuditRecord::day) {
         let next_designation_day =
             checked_future_day(last_designation_day, HEIR_DESIGNATION_INTERVAL_DAYS)?;
@@ -2874,7 +2905,8 @@ fn apply_heir(
         .expect("validated family council must exist");
     council.unity_basis_points = council
         .unity_basis_points
-        .saturating_sub(HEIR_DESIGNATION_UNITY_COST);
+        .checked_sub(HEIR_DESIGNATION_UNITY_COST)
+        .expect("validated family unity must cover the heir designation cost");
     council.charter_version = next_charter_version;
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
@@ -2950,7 +2982,8 @@ fn apply_adopt_ward(
     council.members.insert(ward_id);
     council.unity_basis_points = council
         .unity_basis_points
-        .saturating_sub(WARD_ADOPTION_UNITY_COST);
+        .checked_sub(WARD_ADOPTION_UNITY_COST)
+        .expect("validated family unity must cover the ward adoption cost");
     let dynasty = state
         .dynasties
         .get_mut(&dynasty_id)
@@ -3009,6 +3042,18 @@ fn validate_ward_adoption(state: &AppState) -> Result<WardAdoptionContext, Comma
         return Err(CommandError::InsufficientPlayerLegitimacy {
             available: legitimacy,
             required: WARD_ADOPTION_LEGITIMACY_REQUIREMENT,
+        });
+    }
+    // Bringing a ward into the house strains family cohesion; a divided
+    // council cannot absorb the adoption.
+    let council = state
+        .family_councils
+        .get(&dynasty_id)
+        .expect("validated family council must exist");
+    if council.unity_basis_points < WARD_ADOPTION_UNITY_COST {
+        return Err(CommandError::InsufficientFamilyUnity {
+            available: council.unity_basis_points,
+            required: WARD_ADOPTION_UNITY_COST,
         });
     }
     if let Some(last_adoption_day) =
@@ -4582,17 +4627,7 @@ fn apply_labor_response(
         .ok_or(CommandError::MissingEmployment { employment_id })?;
     let business_id = agreement.business_id;
     let workers = agreement.workers;
-    ensure_owned_business(state, business_id)?;
-    if state.businesses.get(business_id).is_some_and(|business| {
-        matches!(
-            business.status(),
-            BusinessStatus::Insolvent | BusinessStatus::Closed
-        )
-    }) {
-        return Err(CommandError::Strategic(StrategicError::BusinessInactive {
-            business_id,
-        }));
-    }
+    ensure_operable_owned_business(state, business_id)?;
     if agreement.status != EmploymentStatus::Disputed {
         return Err(CommandError::InvalidLaborDispute { employment_id });
     }

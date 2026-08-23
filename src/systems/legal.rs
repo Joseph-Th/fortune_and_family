@@ -3,6 +3,7 @@
 use crate::core::{AppState, ContractStatus, LegalCaseKind, LegalClaimSource, LoanStatus};
 use crate::ids::DynastyId;
 use crate::money::Money;
+use crate::registry::Registry;
 
 pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 90;
 pub(crate) const LEGAL_CASE_FILING_COST: Money = Money::from_copper(300);
@@ -26,6 +27,23 @@ pub(crate) fn is_valid_legal_hearing_day(filed_day: i64, hearing_day: i64) -> bo
         && hearing_day
             .checked_sub(filed_day)
             .is_some_and(|delay| (0..=LEGAL_CASE_HEARING_DELAY_DAYS).contains(&delay))
+}
+
+/// Routes a filed case's filing fee into the Civic Court's budget, so the
+/// plaintiff's debit keeps a credited counterparty instead of vanishing from
+/// the economy. Callers must have already debited the plaintiff.
+pub(crate) fn collect_court_filing_fee(registry: &Registry, state: &mut AppState) {
+    let court_id = registry
+        .get_institution_id("civic_court")
+        .expect("civic court institution must be registered");
+    let court = state
+        .institutions
+        .get_mut(&court_id)
+        .expect("civic court runtime must exist");
+    court.budget = court
+        .budget
+        .checked_add(LEGAL_CASE_FILING_COST)
+        .expect("court filing fee must fit the court budget");
 }
 
 pub(crate) fn quote_grounded_legal_claim(
