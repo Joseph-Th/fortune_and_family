@@ -853,6 +853,10 @@ struct BusinessSaleCandidate {
     capacity: Quantity,
     commerce_efficiency: i64,
     owner_reputation: i64,
+    /// Share of the claimed market capacity the house may place today. An
+    /// active `GuildEntryRestriction` reserves craft-market access for the
+    /// chartered guild's members and scales outsiders down with its value.
+    guild_access_basis_points: i64,
     price: Money,
 }
 
@@ -969,6 +973,25 @@ fn plan_sale_candidate(
         .quotes
         .get(&good_id)
         .ok_or(SimulationError::MarketQuoteMissing { good_id })?;
+    let guild_access_basis_points = match super::strategic::active_law_value(
+        state,
+        crate::core::LawKind::GuildEntryRestriction,
+    ) {
+        Some(value) if value > 0 => {
+            let chartered = super::manager_holds_chartered_guild_membership(
+                registry,
+                state,
+                business.recipe_id(),
+                manager.id(),
+            );
+            if chartered {
+                10_000
+            } else {
+                (10_000 - value.clamp(0, 10_000) / super::GUILD_RESTRICTION_OUTSIDER_DIVISOR).max(1)
+            }
+        }
+        _ => 10_000,
+    };
     Ok(Some(BusinessSaleCandidate {
         good_id,
         surplus,
@@ -982,6 +1005,7 @@ fn plan_sale_candidate(
             .map_or(5_000, |dynasty| {
                 i64::from(dynasty.resources.reputation_quality_basis_points)
             }),
+        guild_access_basis_points,
         price: quote.price,
     }))
 }
@@ -991,8 +1015,9 @@ fn plan_sale_candidate(
 /// then governs access to genuinely scarce capacity: households and merchants
 /// seek out reputable houses first, so an established quality reputation
 /// claims up to ~17% more of a capped market while an obscure or disgraced
-/// house claims less. Neither factor can ever place more than the business
-/// actually stocked.
+/// house claims less. A guild entry restriction narrows that access again for
+/// outsiders to the trade's chartered guild. No factor can place more than
+/// the business actually stocked.
 fn sale_quantity(candidate: &BusinessSaleCandidate) -> Quantity {
     let renown_basis_points = (10_000 + (candidate.owner_reputation - 5_000) / 3).max(1);
     let skilled_claim = candidate
@@ -1000,7 +1025,8 @@ fn sale_quantity(candidate: &BusinessSaleCandidate) -> Quantity {
         .saturating_mul_ratio(candidate.commerce_efficiency, 10_000);
     let claimed_capacity = candidate
         .capacity
-        .saturating_mul_ratio(renown_basis_points, 10_000);
+        .saturating_mul_ratio(renown_basis_points, 10_000)
+        .saturating_mul_ratio(candidate.guild_access_basis_points, 10_000);
     skilled_claim.min(claimed_capacity)
 }
 
@@ -1402,15 +1428,33 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
                 BusinessStatus::Closed | BusinessStatus::Insolvent
             )
         })
-        .map(|business| MaintenanceSnapshot {
-            business_id: business.id(),
-            recipe_id: business.recipe_id(),
-            cash: business.cash(),
-            minimum_cash_reserve: business.policy.minimum_cash_reserve,
-            maintenance_basis_points: business.policy.maintenance_basis_points,
-            quality_target_basis_points: business.policy.quality_target_basis_points,
-            condition_basis_points: business.operations.condition_basis_points,
-            quality_basis_points: business.operations.quality_basis_points,
+        .map(|business| {
+            // A manager who belongs to the trade's chartered guild sustains a
+            // higher quality ceiling: guild training shows in the work, so the
+            // same maintenance budget pushes quality further before it stalls.
+            let guild_quality_bonus = if super::manager_holds_chartered_guild_membership(
+                registry,
+                state,
+                business.recipe_id(),
+                business.manager_id(),
+            ) {
+                super::GUILD_CRAFT_QUALITY_TARGET_BONUS
+            } else {
+                0
+            };
+            MaintenanceSnapshot {
+                business_id: business.id(),
+                recipe_id: business.recipe_id(),
+                cash: business.cash(),
+                minimum_cash_reserve: business.policy.minimum_cash_reserve,
+                maintenance_basis_points: business.policy.maintenance_basis_points,
+                quality_target_basis_points: business
+                    .policy
+                    .quality_target_basis_points
+                    .saturating_add(guild_quality_bonus),
+                condition_basis_points: business.operations.condition_basis_points,
+                quality_basis_points: business.operations.quality_basis_points,
+            }
         })
         .collect();
     let lines = snapshots

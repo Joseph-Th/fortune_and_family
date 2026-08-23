@@ -3700,3 +3700,181 @@ mod time_limited_state {
         );
     }
 }
+
+mod guild_economy {
+    use super::*;
+
+    /// Puts a campaign business's manager into (or removes them from) the
+    /// guild that charters the business's trade, returning the guild.
+    fn set_chartered_membership(
+        registry: &Registry,
+        state: &mut AppState,
+        business_id: BusinessId,
+        member: bool,
+    ) -> InstitutionId {
+        let manager_id;
+        let recipe_id;
+        let institution_id = {
+            let business = state
+                .businesses
+                .get(business_id)
+                .expect("business must exist");
+            manager_id = business.manager_id();
+            recipe_id = business.recipe_id();
+            registry
+                .guild_for_recipe(recipe_id)
+                .expect("every Rivergate trade must have a chartered guild")
+        };
+        let members = &mut state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("chartered institution must exist")
+            .members;
+        if member {
+            members.insert(manager_id);
+        } else {
+            members.remove(&manager_id);
+        }
+        institution_id
+    }
+
+    #[test]
+    fn chartered_guild_membership_raises_the_sustainable_quality_target() {
+        let registry = rivergate_registry_for_test();
+        let mut control = make_test_campaign();
+        let mut member = make_test_campaign();
+        let business_id = control
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        for state in [&mut control, &mut member] {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.finance.cash = Money::from_copper(100_000);
+            business.policy.minimum_cash_reserve = Money::ZERO;
+            business.policy.maintenance_basis_points = 10_000;
+            business.policy.quality_target_basis_points = 7_000;
+            // Above the default target so only the guild bonus can justify
+            // further improvement.
+            business.operations.quality_basis_points = 7_050;
+        }
+        set_chartered_membership(registry, &mut control, business_id, false);
+        set_chartered_membership(registry, &mut member, business_id, true);
+
+        for state in [&mut control, &mut member] {
+            let plan = decide_maintenance(registry, state);
+            apply_maintenance(state, plan).expect("maintenance plan must apply");
+        }
+
+        let control_quality = control
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .operations
+            .quality_basis_points;
+        let member_quality = member
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .operations
+            .quality_basis_points;
+        assert!(
+            control_quality == 7_050,
+            "funded quality above an unchartered target must hold still"
+        );
+        assert!(
+            member_quality > 7_050,
+            "a guild-trained master's charter bonus must sustain quality above the default target"
+        );
+    }
+
+    #[test]
+    fn guild_entry_restriction_reserves_market_access_for_chartered_members() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        set_chartered_membership(registry, &mut state, business_id, false);
+        let good_id = {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.policy.target_output_days = 0;
+            let good_id = registry
+                .get_recipe(business.recipe_id())
+                .expect("business recipe reference must be valid")
+                .output_good_id();
+            business
+                .inventory
+                .insert(good_id, Quantity::from_units(500));
+            good_id
+        };
+        {
+            let law = state
+                .laws
+                .values_mut()
+                .find(|law| law.kind == LawKind::GuildEntryRestriction)
+                .expect("Rivergate campaigns must pre-create the guild entry restriction");
+            law.active = true;
+            law.value = 8_000;
+        }
+        let outsider_access = {
+            let business = state
+                .businesses
+                .get(business_id)
+                .expect("business must exist");
+            plan_sale_candidate(registry, &state, business)
+                .expect("stocked surplus must plan a sale candidate")
+                .expect("sale candidate must be viable")
+        };
+        assert_eq!(
+            outsider_access.guild_access_basis_points, 8_000,
+            "an outsider under an 8 000 restriction keeps four fifths of market access"
+        );
+
+        set_chartered_membership(registry, &mut state, business_id, true);
+        let member_access = {
+            let business = state
+                .businesses
+                .get(business_id)
+                .expect("business must exist");
+            plan_sale_candidate(registry, &state, business)
+                .expect("stocked surplus must plan a sale candidate")
+                .expect("sale candidate must be viable")
+        };
+        assert_eq!(
+            member_access.guild_access_basis_points, 10_000,
+            "a chartered member keeps full market access under the same restriction"
+        );
+
+        // The access share scales placed quantity whenever market capacity,
+        // not stock, is the binding constraint.
+        let unrestricted = BusinessSaleCandidate {
+            good_id,
+            surplus: Quantity::from_units(1_000),
+            capacity: Quantity::from_units(100),
+            commerce_efficiency: 10_000,
+            owner_reputation: 5_000,
+            guild_access_basis_points: 10_000,
+            price: Money::from_copper(10),
+        };
+        let restricted = BusinessSaleCandidate {
+            guild_access_basis_points: 5_000,
+            ..unrestricted
+        };
+        assert_eq!(
+            sale_quantity(&restricted),
+            Quantity::from_milliunits(sale_quantity(&unrestricted).milliunits() / 2),
+            "restriction must scale claimed market capacity proportionally"
+        );
+    }
+}

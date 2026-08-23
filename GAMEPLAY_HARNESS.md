@@ -196,7 +196,8 @@ The diagnosis is recorded per campaign and summed in the aggregate and persona a
 A no-action cycle where an activation fired for a command kind whose
 candidate generator deliberately narrows the canonical offer to strategic-need
 conditions (distress sales, wage-fairness cadence, succession-pressure
-designations, commission pacing, and similar thresholds) is recorded as agent
+designations, commission pacing, standing-expense discretionary floors for
+education, wards, and endowments, and similar thresholds) is recorded as agent
 restraint (`reserved by agent policy`) instead of a generator gap. This keeps
 `generator_gaps` meaning "an offered action with no construction logic", so a
 true coverage hole stays visible instead of drowning in thousands of deliberate

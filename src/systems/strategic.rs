@@ -49,6 +49,13 @@ const OFFICE_DUTY_FORFEITURE_WINDOW_DAYS: i64 = 90;
 const OFFICE_DUTY_REELECTION_BAN_DAYS: i64 = 180;
 const OFFICE_DUTY_FORFEITURE_THRESHOLD: usize = 3;
 const OFFICE_NOMINATION_CAMPAIGN_BONUS: u32 = 2_000;
+
+/// How much extra victory legitimacy each point of institutional standing
+/// grants: winning a default (7,000) guild office pays 150 + 140, and a fully
+/// endowed one up to 150 + 200. The reward lands on the winner's dynasty,
+/// whose legitimacy then feeds every future election score, so endowments and
+/// office stewardship translate into durable political weight.
+const INSTITUTION_STANDING_VICTORY_DIVISOR: u32 = 50;
 const OFFICE_CONCENTRATION_BACKLASH_PER_ADDITIONAL_OFFICE: i16 = 120;
 const MAX_OFFICE_CONCENTRATION_BACKLASH: i16 = 600;
 pub(crate) const DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS: i64 = 180;
@@ -2822,7 +2829,7 @@ pub(crate) fn expire_time_limited_state(state: &mut AppState) {
     }
 }
 
-fn active_law_value(state: &AppState, kind: LawKind) -> Option<i64> {
+pub(crate) fn active_law_value(state: &AppState, kind: LawKind) -> Option<i64> {
     state
         .laws
         .values()
@@ -7231,13 +7238,22 @@ fn announce_institution_selections(
                 .get(winner)
                 .expect("selected officeholder must exist")
                 .dynasty_id();
-            // Winning an election is what earns public standing: the
-            // campaign's legitimacy reward lands on victory, not on filing.
+            // Winning an election is what earns public standing: the reward
+            // lands on victory, not on filing, and scales with the office's
+            // institutional standing so endowed guilds confer more weight.
+            let standing_bonus = state
+                .institutions
+                .get(&institution_id)
+                .expect("selected institution must exist")
+                .legitimacy_basis_points
+                / u16::try_from(INSTITUTION_STANDING_VICTORY_DIVISOR)
+                    .expect("divisor must fit u16");
             if let Some(dynasty) = state.dynasties.get_mut(&winner_dynasty_id) {
                 dynasty.resources.legitimacy_basis_points = dynasty
                     .resources
                     .legitimacy_basis_points
                     .saturating_add(150)
+                    .saturating_add(standing_bonus)
                     .min(10_000);
             }
             let fees_of_office = if winner_dynasty_id == state.player_dynasty_id {
@@ -8325,7 +8341,7 @@ fn detect_and_advance_crises(
             "The regional prince demanded an extraordinary payment from the city.",
         )?;
     }
-    detect_periodic_crises(state, day)?;
+    detect_periodic_crises(registry, state, day)?;
     Ok(())
 }
 
@@ -8465,13 +8481,17 @@ fn has_active_crisis(state: &AppState, kind: CrisisKind) -> bool {
         .any(|crisis| crisis.kind == kind && crisis.status.is_active())
 }
 
-fn detect_periodic_crises(state: &mut AppState, day: i64) -> Result<(), SimulationError> {
+fn detect_periodic_crises(
+    registry: &Registry,
+    state: &mut AppState,
+    day: i64,
+) -> Result<(), SimulationError> {
     if day <= 0 || day % 180 != 0 {
         return Ok(());
     }
     detect_urban_fire(state)?;
     detect_epidemic(state)?;
-    detect_guild_revolt(state)?;
+    detect_guild_revolt(registry, state)?;
     Ok(())
 }
 
@@ -8590,7 +8610,7 @@ fn detect_trade_disruption(state: &mut AppState) -> Result<(), SimulationError> 
     Ok(())
 }
 
-fn detect_guild_revolt(state: &mut AppState) -> Result<(), SimulationError> {
+fn detect_guild_revolt(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     if has_active_crisis(state, CrisisKind::GuildRevolt) {
         return Ok(());
     }
@@ -8608,7 +8628,8 @@ fn detect_guild_revolt(state: &mut AppState) -> Result<(), SimulationError> {
     let restriction = active_law_value(state, LawKind::GuildEntryRestriction)
         .unwrap_or(0)
         .clamp(0, 10_000);
-    let chance = guild_revolt_probability_basis_points(disputed_count, restriction);
+    let guild_deficit = chartered_guild_legitimacy_deficit(registry, state);
+    let chance = guild_revolt_probability_basis_points(disputed_count, restriction, guild_deficit);
     if disputed_count >= 2 || (chance > 0 && state.rng.is_chance_success(chance)) {
         let district_id = disputed_district.or_else(|| {
             state
@@ -8634,12 +8655,90 @@ fn detect_guild_revolt(state: &mut AppState) -> Result<(), SimulationError> {
     Ok(())
 }
 
-fn guild_revolt_probability_basis_points(disputed_count: usize, restriction: i64) -> u16 {
-    if disputed_count == 0 && restriction <= 0 {
+/// Average legitimacy shortfall of the chartered guild institutions, in basis
+/// points. Guilds whose members no longer trust or fund them cannot keep their
+/// trades calm, so a legitimacy deficit feeds the revolt chance just like
+/// labor disputes and entry restrictions do; endowments and office stewardship
+/// that restore guild standing therefore suppress future revolts.
+fn chartered_guild_legitimacy_deficit(registry: &Registry, state: &AppState) -> i64 {
+    let guild_legitimacies: Vec<i64> = chartered_guild_ids(registry, state)
+        .into_iter()
+        .filter_map(|institution_id| state.institutions.get(&institution_id))
+        .map(|institution| i64::from(institution.legitimacy_basis_points))
+        .collect();
+    if guild_legitimacies.is_empty() {
+        return 0;
+    }
+    let total: i64 = guild_legitimacies.iter().sum();
+    (10_000 - total / i64::try_from(guild_legitimacies.len()).unwrap_or(1)).max(0)
+}
+
+/// Runtime IDs of every chartered guild institution: the four craft guilds
+/// and the merchant guild.
+pub(crate) fn chartered_guild_ids(registry: &Registry, state: &AppState) -> Vec<InstitutionId> {
+    use crate::registry::InstitutionKind;
+
+    state
+        .institutions
+        .keys()
+        .copied()
+        .filter(|institution_id| {
+            matches!(
+                registry
+                    .get_institution(*institution_id)
+                    .map(crate::registry::InstitutionDef::kind),
+                Some(InstitutionKind::CraftGuild | InstitutionKind::MerchantGuild)
+            )
+        })
+        .collect()
+}
+
+/// A guild revolt is a crisis of guild standing, so how the dynasty answers
+/// it changes how every chartered guild is seen. Relief and reform restore
+/// trust in the charters; suppression and profiteering spend it. The shift
+/// persists in institutional legitimacy and therefore feeds back into future
+/// revolt pressure.
+pub(crate) fn apply_guild_revolt_standing_response(
+    registry: &Registry,
+    state: &mut AppState,
+    response: CrisisResponse,
+) -> i32 {
+    let delta: i32 = match response {
+        CrisisResponse::Relief => 75,
+        CrisisResponse::Reform => 150,
+        CrisisResponse::Suppress => -200,
+        CrisisResponse::Exploit => -250,
+    };
+    let magnitude = u16::try_from(delta.abs()).unwrap_or(u16::MAX);
+    for institution_id in chartered_guild_ids(registry, state) {
+        let Some(institution) = state.institutions.get_mut(&institution_id) else {
+            continue;
+        };
+        institution.legitimacy_basis_points = if delta > 0 {
+            institution
+                .legitimacy_basis_points
+                .saturating_add(magnitude)
+                .min(10_000)
+        } else {
+            institution
+                .legitimacy_basis_points
+                .saturating_sub(magnitude)
+        };
+    }
+    delta
+}
+
+fn guild_revolt_probability_basis_points(
+    disputed_count: usize,
+    restriction: i64,
+    guild_deficit: i64,
+) -> u16 {
+    if disputed_count == 0 && restriction <= 0 && guild_deficit <= 0 {
         return 0;
     }
     let chance = 400_i64
         .saturating_add(restriction.clamp(0, 10_000) / 5)
+        .saturating_add(guild_deficit.clamp(0, 10_000) / 8)
         .saturating_add(
             i64::try_from(disputed_count)
                 .unwrap_or(i64::MAX)

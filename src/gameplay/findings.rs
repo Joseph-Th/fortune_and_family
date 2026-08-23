@@ -1595,6 +1595,11 @@ pub(crate) fn add_score_findings(
 /// them through its rebalancing cadence, cash targets, and distribution
 /// reserves: an activation opportunity without a candidate there means the
 /// portfolio simply had no shortfall worth acting on.
+///
+/// The standing-expense routes (family education, ward adoption, institution
+/// endowment) are included because their generators require the shared
+/// discretionary floor on top of canonical affordability, so a below-floor
+/// treasury declines them by design instead of by coverage hole.
 pub(crate) const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> bool {
     matches!(
         kind,
@@ -1616,6 +1621,7 @@ pub(crate) const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> 
             | GameplayCommandKind::AcknowledgeNotification
             | GameplayCommandKind::DesignateHeir
             | GameplayCommandKind::EducateFamilyMember
+            | GameplayCommandKind::AdoptWard
             | GameplayCommandKind::EndowInstitution
             | GameplayCommandKind::LeverageInformation
             | GameplayCommandKind::CommissionInformation

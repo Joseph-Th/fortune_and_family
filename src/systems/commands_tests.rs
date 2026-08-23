@@ -5387,6 +5387,89 @@ mod politics {
         );
         validate_invariants(registry, &state);
     }
+
+    #[test]
+    fn guild_entry_restriction_surcharges_institution_patronage() {
+        let registry = rivergate_registry_for_test();
+        let (mut state, player_id, character_id, institution_id, _, _) =
+            make_patronage_fixture(registry);
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        {
+            let law = state
+                .laws
+                .values_mut()
+                .find(|law| law.kind == LawKind::GuildEntryRestriction)
+                .expect("Rivergate campaigns must pre-create the guild entry restriction");
+            law.active = true;
+            law.value = 10_000;
+        }
+        let treasury_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .treasury();
+        let budget_before = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist")
+            .budget;
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::CultivateInstitutionSupport {
+                institution_id,
+                character_id,
+            },
+        )
+        .expect("a qualified candidate may still join a restricted guild");
+
+        // A maximal entry restriction prices the charter at a fifty percent
+        // surcharge: 1 200 copper becomes 1 800.
+        let expected_cost = Money::from_copper(1_800);
+        assert_eq!(
+            treasury_before.copper()
+                - state
+                    .dynasties
+                    .get(&player_id)
+                    .expect("player dynasty must exist")
+                    .treasury()
+                    .copper(),
+            expected_cost.copper(),
+            "a maximal guild entry restriction must surcharge joining by fifty percent"
+        );
+        assert_eq!(
+            state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .budget
+                .copper()
+                - budget_before.copper(),
+            expected_cost.copper(),
+            "the surcharged contribution must still land in the institution budget"
+        );
+        let subject = institution_support_subject(institution_id, character_id);
+        let patronage = state
+            .audit_log
+            .iter()
+            .rev()
+            .find(|record| {
+                record.kind() == AuditKind::InstitutionPatronage && record.subject() == subject
+            })
+            .expect("patronage must be audited");
+        assert_eq!(
+            patronage.detail(),
+            format!("contribution={}", expected_cost.copper()),
+            "the audit trail must record the actual surcharged price"
+        );
+        validate_invariants(registry, &state);
+    }
 }
 
 mod crises {
@@ -5780,6 +5863,123 @@ mod crises {
             Err(CommandError::CrisisAlreadyAddressed { crisis_id })
         );
         assert_state_unchanged(&before, &state, "a crisis must not be exploited repeatedly");
+    }
+
+    fn insert_guild_revolt_crisis(state: &mut AppState) -> crate::ids::CrisisId {
+        let crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: crate::core::CrisisKind::GuildRevolt,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 8_000,
+                status: CrisisStatus::Active,
+                cause: "test guild revolt".to_owned(),
+            },
+        );
+        crisis_id
+    }
+
+    fn chartered_guild_legitimacies(
+        state: &AppState,
+        guild_ids: &BTreeSet<crate::ids::InstitutionId>,
+    ) -> Vec<u16> {
+        guild_ids
+            .iter()
+            .map(|institution_id| {
+                state
+                    .institutions
+                    .get(institution_id)
+                    .expect("guild must exist")
+                    .legitimacy_basis_points
+            })
+            .collect()
+    }
+
+    #[test]
+    fn guild_revolt_responses_shift_chartered_guild_standing() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(1_000_000);
+        let guild_ids: BTreeSet<_> = state
+            .institutions
+            .keys()
+            .copied()
+            .filter(|institution_id| {
+                matches!(
+                    registry
+                        .get_institution(*institution_id)
+                        .map(crate::registry::InstitutionDef::kind),
+                    Some(
+                        crate::registry::InstitutionKind::CraftGuild
+                            | crate::registry::InstitutionKind::MerchantGuild
+                    )
+                )
+            })
+            .collect();
+        for institution_id in &guild_ids {
+            state
+                .institutions
+                .get_mut(institution_id)
+                .expect("guild must exist")
+                .legitimacy_basis_points = 5_000;
+        }
+        let before_reform = chartered_guild_legitimacies(&state, &guild_ids);
+        let crisis_id = insert_guild_revolt_crisis(&mut state);
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Reform,
+            },
+        )
+        .expect("reform response must succeed");
+
+        assert_eq!(
+            chartered_guild_legitimacies(&state, &guild_ids),
+            before_reform.iter().map(|l| l + 150).collect::<Vec<_>>(),
+            "organized reform must restore standing with every chartered guild"
+        );
+
+        // Profiteering off a guild revolt spends guild trust instead.
+        state.market.clearing_account = Money::from_copper(1_000_000);
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points = 10_000;
+        let exploit_crisis_id = insert_guild_revolt_crisis(&mut state);
+        let before_exploit = chartered_guild_legitimacies(&state, &guild_ids);
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id: exploit_crisis_id,
+                response: CrisisResponse::Exploit,
+            },
+        )
+        .expect("exploit response must succeed");
+
+        assert_eq!(
+            chartered_guild_legitimacies(&state, &guild_ids),
+            before_exploit
+                .iter()
+                .map(|legitimacy| legitimacy.saturating_sub(250))
+                .collect::<Vec<_>>(),
+            "profiteering from a guild revolt must cost every chartered guild's standing"
+        );
+        validate_invariants(registry, &state);
     }
 }
 

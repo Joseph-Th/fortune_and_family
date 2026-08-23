@@ -1042,7 +1042,15 @@ pub(crate) fn candidate_player_treasury_cost(
         PlayerCommand::ConveneFamilyCouncil => FAMILY_COUNCIL_MEETING_COST,
         PlayerCommand::AdoptWard { .. } => WARD_ADOPTION_COST,
         PlayerCommand::EducateFamilyMember { .. } => FAMILY_EDUCATION_COST,
-        PlayerCommand::CultivateInstitutionSupport { .. } => INSTITUTION_SUPPORT_COST,
+        PlayerCommand::CultivateInstitutionSupport { .. } => {
+            // Mirror the canonical entry surcharge so ranking and reserve
+            // math see the same price validation will charge.
+            let restriction =
+                crate::systems::active_law_value(state, LawKind::GuildEntryRestriction)
+                    .unwrap_or(0)
+                    .clamp(0, 10_000);
+            INSTITUTION_SUPPORT_COST.saturating_mul_ratio(10_000 + restriction / 2, 10_000)
+        }
         PlayerCommand::NominateForOffice { .. } => OFFICE_NOMINATION_CAMPAIGN_COST,
         PlayerCommand::CommissionInformation { .. } => INFORMATION_COMMISSION_COST,
         PlayerCommand::LeverageInformation { .. } => INFORMATION_LEVERAGE_COST,

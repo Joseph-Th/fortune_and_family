@@ -2266,6 +2266,65 @@ mod gameplay_stability {
     }
 
     #[test]
+    fn office_victory_pays_standing_scaled_legitimacy() {
+        for (standing, expected_gain) in [(0_u16, 150_u16), (10_000, 350)] {
+            let mut state = make_test_campaign();
+            let institution_id = *state
+                .institutions
+                .keys()
+                .next()
+                .expect("campaign must contain an institution");
+            let winner_id = state
+                .institutions
+                .get(&institution_id)
+                .expect("institution must exist")
+                .members
+                .iter()
+                .copied()
+                .find(|character_id| {
+                    state
+                        .characters
+                        .get(*character_id)
+                        .is_some_and(|character| {
+                            character.status() == crate::core::CharacterStatus::Active
+                        })
+                })
+                .expect("institution must have an eligible member");
+            state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("institution must exist")
+                .legitimacy_basis_points = standing;
+            let winner_dynasty_id = state
+                .characters
+                .get(winner_id)
+                .expect("winner must exist")
+                .dynasty_id();
+            state
+                .dynasties
+                .get_mut(&winner_dynasty_id)
+                .expect("winner dynasty must exist")
+                .resources
+                .legitimacy_basis_points = 1_000;
+
+            announce_institution_selections(&mut state, vec![(institution_id, Some(winner_id), 1)])
+                .expect("office announcement must remain representable");
+
+            let gain = state
+                .dynasties
+                .get(&winner_dynasty_id)
+                .expect("winner dynasty must exist")
+                .resources
+                .legitimacy_basis_points
+                - 1_000;
+            assert_eq!(
+                gain, expected_gain,
+                "victory legitimacy must scale with the office's institutional standing"
+            );
+        }
+    }
+
+    #[test]
     fn reserved_institution_term_number_rejects_selection_atomically() {
         let registry = test_registry();
         let mut state = make_test_campaign();
@@ -6646,17 +6705,26 @@ mod crises {
     #[test]
     fn guild_revolt_requires_material_pressure() {
         assert_eq!(
-            guild_revolt_probability_basis_points(0, 0),
+            guild_revolt_probability_basis_points(0, 0, 0),
             0,
-            "a city without disputes or restrictive guild law must not roll for revolt"
+            "a city without disputes, restrictive guild law, or guild disrepute must not roll for revolt"
         );
         assert!(
-            guild_revolt_probability_basis_points(1, 0) > 0,
+            guild_revolt_probability_basis_points(1, 0, 0) > 0,
             "an actual labor dispute must create revolt pressure"
         );
         assert!(
-            guild_revolt_probability_basis_points(0, 5_000) > 0,
+            guild_revolt_probability_basis_points(0, 5_000, 0) > 0,
             "restrictive guild law must create revolt pressure"
+        );
+        assert!(
+            guild_revolt_probability_basis_points(0, 0, 4_000)
+                > guild_revolt_probability_basis_points(0, 0, 0),
+            "discredited chartered guilds must create revolt pressure"
+        );
+        assert!(
+            guild_revolt_probability_basis_points(usize::MAX, 10_000, 10_000) <= 10_000,
+            "revolt pressure must stay a bounded chance"
         );
     }
 }

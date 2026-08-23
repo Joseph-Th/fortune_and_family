@@ -322,6 +322,23 @@ impl Registry {
         self.institution_by_key.get(key).copied()
     }
 
+    /// The chartered guild that governs a recipe's trade, if any. Every
+    /// Rivergate craft and import trade answers to exactly one guild, so a
+    /// business's recipe identifies the institution whose membership carries
+    /// craft standing; unmapped recipes have no chartered trade.
+    #[must_use]
+    pub fn guild_for_recipe(&self, recipe_id: RecipeId) -> Option<InstitutionId> {
+        let key = self.get_recipe(recipe_id)?.key();
+        let institution_key = match key {
+            "baking" | "milling" | "brewing" => "bakers_guild",
+            "weaving" => "weavers_guild",
+            "toolmaking" | "charcoal_burning" => "smiths_guild",
+            "grain_import" | "wool_import" | "timber_import" | "iron_import" => "carters_guild",
+            _ => return None,
+        };
+        self.get_institution_id(institution_key)
+    }
+
     /// Computes a deterministic canonical fingerprint of the behavior-relevant registry definitions
     /// in stable typed-ID order.
     #[must_use]
@@ -1061,5 +1078,35 @@ mod tests {
                 Some(institution.id())
             );
         }
+    }
+
+    #[test]
+    fn every_rivergate_trade_answers_to_one_chartered_guild() {
+        let registry = build_rivergate_registry();
+
+        for recipe in registry.recipes() {
+            let guild = registry
+                .guild_for_recipe(recipe.id())
+                .unwrap_or_else(|| panic!("recipe {} must have a chartered guild", recipe.key()));
+            let kind = registry
+                .get_institution(guild)
+                .expect("chartered guild must exist")
+                .kind();
+            assert!(
+                matches!(
+                    kind,
+                    InstitutionKind::CraftGuild | InstitutionKind::MerchantGuild
+                ),
+                "recipe {} must map to a chartered guild, not {kind:?}",
+                recipe.key()
+            );
+        }
+
+        // An out-of-range recipe id has no chartered guild.
+        let beyond = crate::ids::RecipeId::new(u32::from(
+            u16::try_from(registry.recipes().len()).expect("recipe count must fit u16"),
+        ));
+        assert!(registry.get_recipe(beyond).is_none());
+        assert!(registry.guild_for_recipe(beyond).is_none());
     }
 }

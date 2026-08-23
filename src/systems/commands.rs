@@ -915,7 +915,7 @@ fn dispatch_player_command(
         PlayerCommand::RespondToCrisis {
             crisis_id,
             response,
-        } => apply_crisis_response(state, crisis_id, response),
+        } => apply_crisis_response(registry, state, crisis_id, response),
         PlayerCommand::ResolveLaborDispute {
             employment_id,
             response,
@@ -3310,14 +3310,22 @@ fn apply_institution_support(
     {
         return Err(CommandError::InstitutionSupportCooldown { next_support_day });
     }
-    let budget_after = institution
-        .budget
-        .checked_add(INSTITUTION_SUPPORT_COST)
-        .ok_or(CommandError::InstitutionBudgetOverflow {
+    // An active guild entry restriction prices outsiders out of the charter:
+    // joining costs more as the restriction tightens, up to a fifty percent
+    // surcharge on the standard patronage contribution.
+    let entry_restriction =
+        super::strategic::active_law_value(state, LawKind::GuildEntryRestriction)
+            .unwrap_or(0)
+            .clamp(0, 10_000);
+    let support_cost =
+        INSTITUTION_SUPPORT_COST.saturating_mul_ratio(10_000 + entry_restriction / 2, 10_000);
+    let budget_after = institution.budget.checked_add(support_cost).ok_or(
+        CommandError::InstitutionBudgetOverflow {
             institution_id,
             current: institution.budget,
-            incoming: INSTITUTION_SUPPORT_COST,
-        })?;
+            incoming: support_cost,
+        },
+    )?;
     let member_dynasties: BTreeSet<_> = institution
         .members
         .iter()
@@ -3327,7 +3335,7 @@ fn apply_institution_support(
         .collect();
     let established_day =
         checked_future_day(state.clock.day(), INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)?;
-    spend_player_treasury(state, INSTITUTION_SUPPORT_COST)?;
+    spend_player_treasury(state, support_cost)?;
     let institution = state
         .institutions
         .get_mut(&institution_id)
@@ -3346,6 +3354,7 @@ fn apply_institution_support(
         character_id,
         subject,
         established_day,
+        support_cost,
     )
 }
 
@@ -3380,13 +3389,14 @@ fn finish_institution_patronage(
     character_id: CharacterId,
     subject: String,
     established_day: i64,
+    contribution: Money,
 ) -> Result<CommandOutcome, CommandError> {
     let day = state.clock.day();
     state.audit_log.push(AuditRecord {
         day,
         kind: AuditKind::InstitutionPatronage,
         subject: subject.into(),
-        detail: format!("contribution={}", INSTITUTION_SUPPORT_COST.copper()),
+        detail: format!("contribution={}", contribution.copper()),
     });
     super::strategic::try_push_outbox(
         state,
@@ -4281,6 +4291,7 @@ pub(crate) fn player_contract_deliveries(state: &AppState) -> u32 {
 }
 
 fn apply_crisis_response(
+    registry: &Registry,
     state: &mut AppState,
     crisis_id: CrisisId,
     response: CrisisResponse,
@@ -4332,11 +4343,29 @@ fn apply_crisis_response(
     if organized_response_severity_reduction > 0 && crisis_kind == CrisisKind::TradeDisruption {
         heal_disrupted_routes(state, organized_response_severity_reduction);
     }
+    // A guild revolt is a crisis of guild standing: the answer changes how
+    // every chartered guild is seen, and that standing feeds back into future
+    // revolt pressure.
+    let mut guild_standing_note = String::new();
+    if crisis_kind == CrisisKind::GuildRevolt {
+        let standing_delta =
+            super::strategic::apply_guild_revolt_standing_response(registry, state, response);
+        guild_standing_note = if standing_delta >= 0 {
+            format!(
+                " The chartered guilds' public standing improves by {standing_delta} basis points."
+            )
+        } else {
+            format!(
+                " The chartered guilds' public standing falls by {} basis points.",
+                -standing_delta
+            )
+        };
+    }
     super::strategic::try_push_outbox(
         state,
         OutboxKind::Crisis,
         format!("Response applied to crisis {crisis_id}"),
-        format!("The dynasty chose {response:?}."),
+        format!("The dynasty chose {response:?}.{guild_standing_note}"),
     )?;
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),

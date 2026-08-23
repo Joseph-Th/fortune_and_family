@@ -1,5 +1,8 @@
 //! Canonical validation, decision, commit, and simulation pipelines.
 
+use crate::ids::{CharacterId, RecipeId};
+use crate::registry::Registry;
+
 mod bootstrap;
 mod commands;
 mod invariants;
@@ -8,6 +11,8 @@ mod progression;
 mod simulation;
 mod strategic;
 mod transactions;
+
+pub(crate) use strategic::active_law_value;
 
 pub(crate) const WORKERS_PER_BATCH: u16 = 4;
 pub(crate) const EMPLOYMENT_RECOVERY_BASIS_POINTS: u16 = 3_000;
@@ -68,6 +73,33 @@ pub(crate) fn is_valid_institution_selection_day(
         && next_selection_day
             .checked_sub(term_started_day)
             .is_some_and(|offset| (0..=OFFICE_TERM_DAYS).contains(&offset))
+}
+
+/// Quality a guild-trained master can sustain above the default policy
+/// target: charter membership carries craft training that shows in the work.
+/// Kept deliberately small because Rivergate's incumbent dynasty heads hold
+/// several charters each, so a large bonus would uniformly enrich every
+/// rival house and drain the private credit market of borrowers.
+pub(crate) const GUILD_CRAFT_QUALITY_TARGET_BONUS: u16 = 100;
+
+/// Market-access share a non-member keeps per unit of active
+/// `GuildEntryRestriction` value: at the maximum 10,000 restriction an
+/// outsider still places three quarters of what a chartered member does.
+pub(crate) const GUILD_RESTRICTION_OUTSIDER_DIVISOR: i64 = 4;
+
+/// Whether a business's manager holds membership in the guild that charters
+/// the business's trade. Guild standing is trade-specific, so membership in
+/// any other institution never substitutes for the chartered guild.
+pub(crate) fn manager_holds_chartered_guild_membership(
+    registry: &Registry,
+    state: &crate::core::AppState,
+    recipe_id: RecipeId,
+    manager_id: CharacterId,
+) -> bool {
+    registry
+        .guild_for_recipe(recipe_id)
+        .and_then(|institution_id| state.institutions.get(&institution_id))
+        .is_some_and(|institution| institution.members.contains(&manager_id))
 }
 
 pub(crate) fn institution_powers_for(

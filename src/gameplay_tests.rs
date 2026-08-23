@@ -5685,6 +5685,67 @@ mod metrics {
     }
 
     #[test]
+    fn quiet_diagnostic_classifies_ward_adoption_floor_declines_as_agent_restraint() {
+        let mut accumulator = CampaignAccumulator::new();
+        // Ward adoption is a standing expense whose generator requires the
+        // shared discretionary floor on top of the canonical cost, so a
+        // below-floor treasury declines it by design. An activation without a
+        // candidate there is agent restraint, not a generator hole drowning
+        // real coverage gaps in the succession phase.
+        let activation_delta = BTreeMap::from([(GameplayCommandKind::AdoptWard, 1_u32)]);
+        let raw_generated_kinds = BTreeSet::new();
+        let retained_kinds = BTreeSet::new();
+        let retained_counts_by_kind = BTreeMap::new();
+        let probed_counts_by_kind = BTreeMap::new();
+        let probe = ProbeResult {
+            selected: None,
+            viable_count: 0,
+            substantive_viable_count: 0,
+            viable_command_kinds: BTreeSet::new(),
+            viable_options: Vec::new(),
+            close_choice_score_gap: None,
+            distinct_immediate_choice_profiles: 0,
+            distinct_projected_choice_profiles: 0,
+            family_close_choice_score_gap: None,
+            distinct_immediate_family_profiles: 0,
+            distinct_projected_family_profiles: 0,
+            rejections: Vec::new(),
+        };
+
+        let reason = record_quiet_diagnostic(
+            &mut accumulator,
+            &probe,
+            &raw_generated_kinds,
+            &retained_kinds,
+            &retained_counts_by_kind,
+            &probed_counts_by_kind,
+            &activation_delta,
+        )
+        .expect("a restrained quiet cycle must report a reason");
+
+        assert!(
+            reason.contains("reserved by agent policy [adopt-ward]"),
+            "ward adoption deliberately narrows to above-floor treasuries, so its unfired activation is agent restraint, not a coverage hole"
+        );
+        assert!(!reason.contains("activation without candidate"));
+        assert_eq!(
+            accumulator
+                .quiet_diagnostic
+                .restrained_routes
+                .get(&GameplayCommandKind::AdoptWard),
+            Some(&1),
+            "restrained routes must be counted separately from generator gaps"
+        );
+        assert_eq!(
+            accumulator
+                .quiet_diagnostic
+                .generator_gaps
+                .get(&GameplayCommandKind::AdoptWard),
+            None
+        );
+    }
+
+    #[test]
     fn probe_keeps_target_identity_separate_from_consequence_divergence() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
