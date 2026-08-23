@@ -1707,6 +1707,60 @@ mod household_demand {
             "Rivergate household demand must be able to absorb one normal two-batch weaving shop before additional producers create competition: demand={cloth_demand}, output={standard_daily_output}"
         );
     }
+
+    #[test]
+    fn dear_cloth_scales_household_demand_back_down() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let cloth_id = registry
+            .get_good_id("cloth")
+            .expect("registry must define cloth");
+        let reference_price = registry
+            .get_good(cloth_id)
+            .expect("cloth must exist in the registry")
+            .base_price();
+        for household in state.households.iter_mut() {
+            household.cash = Money::from_copper(100_000);
+        }
+        for quote in state.market.quotes.values_mut() {
+            quote.stock = Quantity::from_units(10_000);
+        }
+        let reference_plan =
+            decide_household_consumption(registry, &state).expect("demand must resolve");
+        let demand_at_reference = cloth_demand_of(&reference_plan, cloth_id);
+        assert!(demand_at_reference > Quantity::ZERO);
+
+        // A price four times the reference drives demand to its quarter-need
+        // floor: households economize instead of ratcheting a shortage.
+        state
+            .market
+            .quotes
+            .get_mut(&cloth_id)
+            .expect("cloth quote must exist")
+            .price = reference_price.saturating_mul(4);
+        let dear_plan =
+            decide_household_consumption(registry, &state).expect("demand must resolve");
+        let demand_when_dear = cloth_demand_of(&dear_plan, cloth_id);
+
+        assert!(
+            demand_when_dear.milliunits() * 2 <= demand_at_reference.milliunits(),
+            "dear cloth must scale household demand back toward the floor: reference={demand_at_reference}, dear={demand_when_dear}"
+        );
+        let floor = demand_at_reference.saturating_mul_ratio(1_500, 10_000);
+        assert!(
+            demand_when_dear >= floor,
+            "price discipline must not collapse cloth demand below roughly a quarter of need: dear={demand_when_dear}"
+        );
+    }
+
+    fn cloth_demand_of(plan: &HouseholdConsumptionPlan, cloth_id: GoodId) -> Quantity {
+        plan.lines
+            .iter()
+            .filter(|line| line.good_id == cloth_id)
+            .fold(Quantity::ZERO, |total, line| {
+                total.saturating_add(line.quantity)
+            })
+    }
 }
 
 mod office_exposure {

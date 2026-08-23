@@ -1211,6 +1211,12 @@ fn decide_household_consumption(
         }
         let (charcoal_need, cloth_need, tools_need) =
             household_secondary_needs(household.social_class());
+        // Cloth is the one secondary staple whose market must stay balanced
+        // against the city's weaving capacity. Households do not pay any
+        // price for it: dear cloth means mending and waiting, so demand
+        // scales down with the going price instead of ratcheting a shortage
+        // ever upward.
+        let cloth_need = affordable_cloth_demand(registry, state, cloth_need);
         for (good_id, need) in [
             (ale_id, household.ale_need_daily),
             (charcoal_id, charcoal_need),
@@ -1305,6 +1311,28 @@ fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, 
         Quantity::from_milliunits(cloth),
         Quantity::from_milliunits(tools),
     )
+}
+
+/// Household cloth demand after price discipline: at or below the good's
+/// registry reference price households buy their full clothing need; above
+/// it they economize proportionally, never falling below a quarter of the
+/// need. Without this response, a crisis- or shortage-driven cloth price
+/// spike ratchets unchecked because fixed demand cannot answer a rising
+/// price, and households burn their food buffer on expensive cloth.
+fn affordable_cloth_demand(registry: &Registry, state: &AppState, need: Quantity) -> Quantity {
+    let Some(cloth_id) = registry.get_good_id("cloth") else {
+        return need;
+    };
+    let Some(reference) = registry.get_good(cloth_id).map(|good| good.base_price()) else {
+        return need;
+    };
+    let Some(quote) = state.market.quotes.get(&cloth_id) else {
+        return need;
+    };
+    let reference_copper = reference.copper().max(1);
+    let current_copper = quote.price.copper().max(1);
+    let ratio_basis_points = (reference_copper * 10_000 / current_copper).clamp(2_500, 10_000);
+    need.saturating_mul_ratio(ratio_basis_points, 10_000)
 }
 
 fn apply_household_consumption(
