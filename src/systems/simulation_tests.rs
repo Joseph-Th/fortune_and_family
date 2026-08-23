@@ -1684,7 +1684,13 @@ mod household_demand {
                     .expect("registry must define weaving"),
             )
             .expect("weaving recipe must exist");
-        let standard_daily_output = weaving.output_quantity().saturating_mul_ratio(2, 1);
+        // Rivergate fields two weaving shops: the player's two-batch loomhouse
+        // and the Veyra workshop. Nominal household clothing demand must sit
+        // between one weaver's output (a solo weaver sells out) and the whole
+        // sector's capacity (both weavers still compete on price), so neither
+        // a structural glut nor a shortage regime is baked into the city.
+        let one_weaver_output = weaving.output_quantity().saturating_mul_ratio(2, 1);
+        let sector_daily_output = one_weaver_output.saturating_add(one_weaver_output);
         for household in state.households.iter_mut() {
             household.cash = Money::from_copper(100_000);
         }
@@ -1703,8 +1709,12 @@ mod household_demand {
             });
 
         assert!(
-            cloth_demand >= standard_daily_output,
-            "Rivergate household demand must be able to absorb one normal two-batch weaving shop before additional producers create competition: demand={cloth_demand}, output={standard_daily_output}"
+            cloth_demand >= one_weaver_output,
+            "Rivergate household demand must let a solo weaver sell its normal output: demand={cloth_demand}, output={one_weaver_output}"
+        );
+        assert!(
+            cloth_demand <= sector_daily_output,
+            "Rivergate household demand must stay under the weaving sector's capacity so two weavers still compete on price instead of rationing households: demand={cloth_demand}, capacity={sector_daily_output}"
         );
     }
 

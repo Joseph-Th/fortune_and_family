@@ -1301,10 +1301,17 @@ fn plan_household_purchase(
 }
 
 fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, Quantity) {
+    // Clothing is a recurring household staple, not a luxury. Rivergate's
+    // nominal cloth needs sit just under the city's weaving capacity (the
+    // player's loomhouse plus the Veyra workshop), so both weavers sell at
+    // viable margins instead of glutting the market into structural losses,
+    // while [`affordable_cloth_demand`] scales need back when prices climb
+    // so a shortage cannot ratchet. The household income in bootstrap is
+    // calibrated to carry this budget alongside food.
     let (charcoal, cloth, tools) = match social_class {
-        SocialClass::Laboring => (180, 200, 30),
-        SocialClass::Artisan => (240, 400, 120),
-        SocialClass::Merchant => (300, 600, 180),
+        SocialClass::Laboring => (180, 400, 30),
+        SocialClass::Artisan => (240, 800, 120),
+        SocialClass::Merchant => (300, 1_200, 180),
     };
     (
         Quantity::from_milliunits(charcoal),
