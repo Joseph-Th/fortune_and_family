@@ -345,11 +345,14 @@ impl CampaignAccumulator {
                 .first_heir_designation_day
                 .get_or_insert(day);
         }
+        // City-shaping means exercising authority or committing a dynasty-
+        // sponsored civic project. Funding someone else's stalled work is
+        // patronage, not governance, so it must not start the governance
+        // phase by itself.
         if matches!(
             kind,
             GameplayCommandKind::EnactLaw
                 | GameplayCommandKind::StartPublicWork
-                | GameplayCommandKind::FundPublicWork
                 | GameplayCommandKind::ExerciseOfficePower
         ) {
             self.fantasy_arc
@@ -2211,8 +2214,9 @@ pub(crate) fn has_start_public_work_opportunity(registry: &Registry, state: &App
 
 pub(crate) fn has_fund_public_work_opportunity(state: &AppState) -> bool {
     // The canonical funding route (`quote_public_work_funding`) accepts any
-    // positive contribution to a player-sponsored, unfinished public work up to
-    // its remaining budget when the dynasty can afford it. Whether the agent
+    // positive contribution to any unfinished public work up to its remaining
+    // budget when the dynasty can afford it — the dynasty's own projects, a
+    // rival house's project, or a city-sponsored one. Whether the agent
     // *chooses* to accelerate or rescue a work is a policy decision kept in the
     // candidate generator; the activation predicate must not hide a world in
     // which the game accepts funding.
@@ -2221,8 +2225,7 @@ pub(crate) fn has_fund_public_work_opportunity(state: &AppState) -> bool {
         .get(&state.player_dynasty_id)
         .map_or(Money::ZERO, crate::core::Dynasty::treasury);
     state.public_works.values().any(|work| {
-        work.sponsor_dynasty_id == Some(state.player_dynasty_id)
-            && work.status.is_unfinished()
+        work.status.is_unfinished()
             && work.budget.saturating_sub(work.spent) > Money::ZERO
             && treasury > Money::ZERO
     })

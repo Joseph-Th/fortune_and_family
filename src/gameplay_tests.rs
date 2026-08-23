@@ -5392,7 +5392,9 @@ mod metrics {
     #[test]
     fn quiet_diagnostic_separates_policy_gates_from_generator_gaps() {
         let mut accumulator = CampaignAccumulator::new();
-        let activation_delta = BTreeMap::from([(GameplayCommandKind::EnactLaw, 1_u32)]);
+        // Office nomination is not a policy-gated route, so an activation
+        // without a built candidate there is a true generator gap.
+        let activation_delta = BTreeMap::from([(GameplayCommandKind::NominateForOffice, 1_u32)]);
         let raw_generated_kinds = BTreeSet::from([
             GameplayCommandKind::StartPublicWork,
             GameplayCommandKind::FileLegalCase,
@@ -5429,9 +5431,13 @@ mod metrics {
             accumulator
                 .quiet_diagnostic
                 .generator_gaps
-                .get(&GameplayCommandKind::EnactLaw),
+                .get(&GameplayCommandKind::NominateForOffice),
             Some(&1),
             "an activation opportunity without any built candidate must be a generator gap"
+        );
+        assert!(
+            accumulator.quiet_diagnostic.restrained_routes.is_empty(),
+            "non-policy-gated activations must not be recorded as restrained routes"
         );
         assert_eq!(
             accumulator
@@ -5681,6 +5687,57 @@ mod metrics {
                 .generator_gaps
                 .get(&GameplayCommandKind::SellProperty),
             None
+        );
+    }
+
+    #[test]
+    fn quiet_diagnostic_classifies_law_sponsorship_narrowing_as_agent_restraint() {
+        let mut accumulator = CampaignAccumulator::new();
+        // The canonical game accepts a broadly valid enactment while the
+        // agent holds office, but each persona only builds laws it ranks as
+        // relevant. An activation without a candidate there is deliberate
+        // narrowing, so it must not read as a generator gap.
+        let activation_delta = BTreeMap::from([(GameplayCommandKind::EnactLaw, 1_u32)]);
+        let raw_generated_kinds = BTreeSet::new();
+        let retained_kinds = BTreeSet::new();
+        let retained_counts_by_kind = BTreeMap::new();
+        let probed_counts_by_kind = BTreeMap::new();
+        let probe = ProbeResult {
+            selected: None,
+            viable_count: 0,
+            substantive_viable_count: 0,
+            viable_command_kinds: BTreeSet::new(),
+            viable_options: Vec::new(),
+            close_choice_score_gap: None,
+            distinct_immediate_choice_profiles: 0,
+            distinct_projected_choice_profiles: 0,
+            family_close_choice_score_gap: None,
+            distinct_immediate_family_profiles: 0,
+            distinct_projected_family_profiles: 0,
+            rejections: Vec::new(),
+        };
+
+        let reason = record_quiet_diagnostic(
+            &mut accumulator,
+            &probe,
+            &raw_generated_kinds,
+            &retained_kinds,
+            &retained_counts_by_kind,
+            &probed_counts_by_kind,
+            &activation_delta,
+        )
+        .expect("a caused quiet cycle must report a reason");
+
+        assert!(
+            reason.contains("reserved by agent policy [enact-law]"),
+            "persona-relevance law sponsorship is agent restraint, got {reason:?}"
+        );
+        assert_eq!(
+            accumulator
+                .quiet_diagnostic
+                .restrained_routes
+                .get(&GameplayCommandKind::EnactLaw),
+            Some(&1)
         );
     }
 
@@ -6142,6 +6199,74 @@ mod metrics {
             candidate
                 .description
                 .contains("finish the Market project in")
+        );
+    }
+
+    #[test]
+    fn stalled_city_public_work_creates_an_external_funding_candidate() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let district_id = state
+            .districts
+            .keys()
+            .copied()
+            .next()
+            .expect("campaign must contain a district");
+        let public_work_id = state.next_ids.public_work();
+        let district = state
+            .districts
+            .get_mut(&district_id)
+            .expect("campaign district must exist");
+        // Visible distress is what justifies patronage: raise unrest and lower
+        // employment so the granary project answers a real deficit.
+        district.unrest_basis_points = 5_000;
+        district.employment_basis_points = 3_500;
+        state.public_works.insert(
+            public_work_id,
+            crate::core::PublicWork {
+                id: public_work_id,
+                district_id,
+                kind: PublicWorkKind::Granary,
+                sponsor_dynasty_id: None,
+                budget: Money::from_copper(10_000),
+                spent: Money::from_copper(8_000),
+                progress_basis_points: 8_000,
+                status: PublicWorkStatus::Suspended,
+            },
+        );
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(20_000);
+        assert!(has_fund_public_work_opportunity(&state));
+        let mut candidates = Vec::new();
+
+        generate_public_work_funding_candidates(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Steward,
+            &mut candidates,
+        );
+
+        let candidate = candidates
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.command,
+                    PlayerCommand::FundPublicWork {
+                        public_work_id: candidate_id,
+                        ..
+                    } if candidate_id == public_work_id
+                )
+            })
+            .expect("a stalled city project must be rescuable by dynastic civic funding");
+        assert_eq!(candidate.kind, GameplayCommandKind::FundPublicWork);
+        assert!(
+            candidate.description.contains("the city's"),
+            "external rescue candidates must describe the civic act, got {:?}",
+            candidate.description
         );
     }
 

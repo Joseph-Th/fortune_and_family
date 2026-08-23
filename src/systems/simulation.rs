@@ -2,8 +2,7 @@
 
 use super::SimulationError;
 use super::transactions::{
-    checked_future_day, debit_market_clearing_account, next_business_finance_version,
-    next_family_charter_version,
+    checked_future_day, next_business_finance_version, next_family_charter_version,
 };
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
@@ -448,8 +447,11 @@ const ACTIVE_CASH_DAYS_OF_OPERATING_COST: i64 = 2;
 const RECOVERY_CASH_DAYS_OF_OPERATING_COST: i64 = 6;
 
 /// Annual succession-chance pressure per year of head age past the
-/// eligibility threshold.
-const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 420;
+/// eligibility threshold. The rate keeps the median first transition inside
+/// the standard multi-year session (roughly the second or third campaign
+/// year), so dynastic continuity is part of ordinary play rather than only
+/// generation-length simulations.
+const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 520;
 
 fn decide_business_production(
     registry: &Registry,
@@ -2110,18 +2112,29 @@ fn update_business_lifecycle(
 }
 
 fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationError> {
+    // Regional households earn part of their living beyond the modeled market:
+    // hauling freight, provisioning caravans, selling crafts and labor to the
+    // outside world. That earning power is outside silver flowing into the
+    // city, not a draw on the pooled market sector, so it is paid in full at
+    // its route-adjusted rate: a disrupted road is lost work, and a healthy
+    // one keeps every household's bread within reach.
+    let availability = regional_demand_availability_basis_points(state);
     let payments: Vec<_> = state
         .households
         .iter()
         .map(|household| {
-            household.cash.checked_add(household.weekly_income).ok_or(
-                SimulationError::HouseholdCashOverflow {
+            let paid = household
+                .weekly_income
+                .saturating_mul_ratio(i64::from(availability), 10_000);
+            household
+                .cash
+                .checked_add(paid)
+                .ok_or(SimulationError::HouseholdCashOverflow {
                     household_id: household.id(),
                     current: household.cash,
-                    incoming: household.weekly_income,
-                },
-            )?;
-            Ok((household.id(), household.weekly_income))
+                    incoming: paid,
+                })?;
+            Ok((household.id(), paid))
         })
         .collect::<Result<_, SimulationError>>()?;
     let mut total = Money::ZERO;
@@ -2133,68 +2146,57 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
                 incoming: *paid,
             })?;
     }
-    // External regional demand pays what the pooled market sector holds this
-    // week, clamped like vacancy income: a drained clearing account is a
-    // demand slump, not a reason to wedge the whole simulation day.
-    let paid_out = total.min(state.market.clearing_account.max(Money::ZERO));
-    debit_market_clearing_account(state, paid_out)?;
-
-    if paid_out == total {
-        for (household_id, paid) in payments {
-            let household = state
-                .households
-                .get_mut(household_id)
-                .expect("weekly income household must exist");
-            household.cash = household
-                .cash
-                .checked_add(paid)
-                .expect("bounded weekly income must fit household cash");
-        }
-    } else {
-        // Pro-rate the shortfall deterministically in stable household order.
-        // Truncated shares would otherwise strand copper between the clearing
-        // account debit and the households, so the first households in stable
-        // order absorb the one-copper rounding remainder until the paid-out
-        // total is fully delivered.
-        let scale = paid_out.copper().saturating_mul(10_000) / total.copper();
-        let mut distributed_copper = 0_i64;
-        let mut shares = Vec::with_capacity(payments.len());
-        for (household_id, paid) in &payments {
-            let share = paid.saturating_mul_ratio(scale, 10_000);
-            distributed_copper = distributed_copper.saturating_add(share.copper());
-            shares.push((*household_id, share));
-        }
-        let mut remainder_copper = paid_out.copper().saturating_sub(distributed_copper);
-        for (household_id, mut share) in shares {
-            if remainder_copper > 0 {
-                let bonus = remainder_copper.min(1);
-                share = Money::from_copper(share.copper().saturating_add(bonus));
-                remainder_copper = remainder_copper.saturating_sub(bonus);
-            }
-            if share <= Money::ZERO {
-                continue;
-            }
-            let household = state
-                .households
-                .get_mut(household_id)
-                .expect("weekly income household must exist");
-            household.cash = household
-                .cash
-                .checked_add(share)
-                .expect("clamped weekly income must fit household cash");
-        }
+    for (household_id, paid) in payments {
+        let household = state
+            .households
+            .get_mut(household_id)
+            .expect("weekly income household must exist");
+        household.cash = household
+            .cash
+            .checked_add(paid)
+            .expect("bounded weekly income must fit household cash");
     }
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::LaborSettlement,
         subject: "external-economy".into(),
         detail: format!(
-            "weekly_income={} paid_out={}",
-            total.copper(),
-            paid_out.copper()
+            "weekly_income={}; regional_availability={availability}",
+            total.copper()
         ),
     });
     Ok(())
+}
+
+/// Regional demand for the city's household labor and crafts, in basis points
+/// of normal earning power: the average availability of the active external
+/// routes, floored so a total blockade still leaves subsistence work.
+/// Campaigns whose regional economy is not modeled through routes keep full
+/// availability.
+const REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS: u16 = 2_500;
+
+fn regional_demand_availability_basis_points(state: &AppState) -> u16 {
+    let routes = state
+        .external_routes
+        .values()
+        .filter(|route| route.active)
+        .collect::<Vec<_>>();
+    if routes.is_empty() {
+        return 10_000;
+    }
+    let total = routes
+        .iter()
+        .map(|route| 10_000_u16.saturating_sub(route.disruption_basis_points))
+        .fold(0_u32, |sum, availability| {
+            sum.saturating_add(u32::from(availability))
+        });
+    let count = u32::try_from(routes.len()).unwrap_or(u32::MAX);
+    let average = total / count;
+    average
+        .max(u32::from(REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS))
+        .min(10_000)
+        .try_into()
+        .unwrap_or(10_000)
 }
 
 fn process_year_boundary(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
@@ -2740,8 +2742,8 @@ fn succession_chance_basis_points(
     }
     // The ramp must mature succession pressure inside the session that builds
     // the dynasty: founders begin at 56-58 years old, so this rate puts the
-    // median first transition near mid-campaign while still leaving most of an
-    // establishment phase untouched.
+    // median first transition in the second or third campaign year while
+    // still leaving most of an establishment phase untouched.
     let age_pressure = (age_years - SUCCESSION_ELIGIBILITY_AGE_YEARS)
         .saturating_mul(AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY);
     let governance_pressure = i64::from(succession_risk_basis_points / 2);

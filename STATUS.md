@@ -12,7 +12,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Save schema | 26 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 65 |
+| Gameplay report schema | 66 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -36,7 +36,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 
 | Domain | Current capability |
 |---|---|
-| World | One detailed city with six districts, regional routes, seasonal pressure, and external disruption. |
+| World | One detailed city with six districts, regional routes, seasonal pressure, and external disruption. Route health scales household regional earning power, so disrupted trade tightens household budgets directly. |
 | Population | Dynasties, notable characters, grouped households, health, loyalty, family links, wards, education, councils, heirs, and succession. A collapsed head with no designated heir designates the most capable adult member as emergency heir so the annual succession pass executes instead of leaving a headless house operating indefinitely, and an annual reconciliation pass guarantees no business keeps an inactive manager. |
 | Businesses | Ownership, management, policy, wages, cash, inventory, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, and protected owner distributions. Recovery from distress requires a deeper cash cushion than distress onset, so borderline firms cannot flap between states. Operating and maintenance costs flow into the market clearing pool, so every business debit has a credited counterparty. |
 | Markets | Scarce procurement, production, business and household demand, industrial tool demand, tool-constrained production and maintenance, spoilage, price formation, controls, and regional supply. Households prefer finished bread and fall back to cheaper upstream staples only under scarcity or poverty, economize on cloth when it trades above its reference price, and unowned property purchases fund the market clearing pool. |
@@ -47,7 +47,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 | Labor | Employment agreements, player-set wage posture, wage fairness relative to the market reference wage, worker capacity, conditions, loyalty, disputes, suspension, recovery, and player responses. Wages below fair pay erode loyalty and can provoke disputes; generous wages build a loyal buffer, and stingy wages stall dispute recovery. |
 | Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with membership, budgets, legitimacy, member coalitions, powers, terms, endowments, and deterministic selection. Every trade answers to one chartered guild: guild-member managers sustain a higher quality target, institutional legitimacy scales office victory rewards, and entry restrictions reserve market access for members while surcharging outsiders. |
 | Political office | Commercial and capability gates, patronage, nomination, office powers, directives, recurring duties funded into institutional budgets, monthly fees of office paid back from institutional budgets, administrative load, coalition response, withdrawal, forfeiture, and re-election limits. |
-| Civic systems | Laws, differentiated public works, district conditions, grounded legal cases and settlements with filing fees funding the Civic Court, crisis response, municipal debt, and private funding of sponsored public works. |
+| Civic systems | Laws, differentiated public works, district conditions, grounded legal cases and settlements with filing fees funding the Civic Court, crisis response, municipal debt, and private funding of any unfinished public work — a dynasty's own project or another house's stalled one, with external contributions earning visible legitimacy and sponsor gratitude. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, subject, summary, creation, expiry, passive reports, and paid market/district/counterparty intelligence. |
 | AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; monthly household upkeep for family and portfolio with standing penalties for shortfalls; dynamic private-credit participation through the canonical loan machinery; recapitalization only for lifetime-profitable businesses; grounded legal filing; and institution selection. |

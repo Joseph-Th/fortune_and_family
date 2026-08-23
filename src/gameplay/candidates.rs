@@ -4056,59 +4056,124 @@ pub(crate) fn generate_public_work_funding_candidates(
         .public_works
         .values()
         .filter(|work| {
-            work.sponsor_dynasty_id == Some(state.player_dynasty_id)
-                && work.status.is_unfinished()
+            work.status.is_unfinished()
+                && work.budget.saturating_sub(work.spent) > Money::ZERO
+                // The agent funds any unfinished project only as a deliberate
+                // civic act: rescuing a stalled project or accelerating one
+                // from clear surplus, never routine dribble spending.
                 && (work.status == PublicWorkStatus::Suspended || wealthy_acceleration)
         })
         .collect::<Vec<_>>();
     works.sort_by_key(|work| (std::cmp::Reverse(work.progress_basis_points), work.id));
     for work in works.into_iter().take(2) {
-        let remaining = work.budget.saturating_sub(work.spent);
-        if remaining <= Money::ZERO {
-            continue;
-        }
-        let amount = if work.status == PublicWorkStatus::Suspended {
-            remaining.min(treasury)
-        } else {
-            remaining
-                .min(discretionary_surplus)
-                .min(AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION)
-        };
-        if amount <= Money::ZERO {
-            continue;
-        }
-        let completes = amount >= remaining;
-        let intent = if work.status == PublicWorkStatus::Suspended && completes {
-            "finish stalled"
-        } else if work.status == PublicWorkStatus::Suspended {
-            "rescue stalled"
-        } else if completes {
-            "finish"
-        } else {
-            "accelerate"
-        };
-        push_candidate(
+        push_public_work_funding_candidate(
+            registry,
+            state,
+            persona,
             candidates,
-            GameplayCommandKind::FundPublicWork,
-            PlayerCommand::FundPublicWork {
-                public_work_id: work.id,
-                amount,
-            },
-            format!(
-                "fund {amount} to {intent} the {:?} project in {} ({})",
-                work.kind,
-                district_label(registry, work.district_id),
-                work.id,
-            ),
-            base_bonus
-                .saturating_add(i64::from(work.progress_basis_points) / 2)
-                .saturating_add(if work.status == PublicWorkStatus::Suspended {
-                    1_000
-                } else {
-                    350
-                }),
+            work,
+            treasury,
+            discretionary_surplus,
+            base_bonus,
         );
     }
+}
+
+/// Builds one funding candidate for an unfinished project, applying the
+/// agent's contribution policy: a stalled own rescue may spend the whole
+/// treasury, while acceleration and external patronage stay bounded by the
+/// discretionary surplus so civic generosity never strips the house.
+#[expect(clippy::too_many_arguments)]
+fn push_public_work_funding_candidate(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+    work: &crate::core::PublicWork,
+    treasury: Money,
+    discretionary_surplus: Money,
+    base_bonus: i64,
+) {
+    let remaining = work.budget.saturating_sub(work.spent);
+    if remaining <= Money::ZERO {
+        return;
+    }
+    let external = work.sponsor_dynasty_id != Some(state.player_dynasty_id);
+    let district_need = state
+        .districts
+        .get(&work.district_id)
+        .map_or(0, |runtime| public_work_need_score(runtime, work.kind));
+    // Patronage answers visible need: a dynasty bankrolls someone else's
+    // project when its district genuinely lacks what the project delivers,
+    // not as an unconditional default action. A stalled project needs less
+    // provocation than accelerating a healthy rival's construction.
+    let patronage_need_floor = if work.status == PublicWorkStatus::Suspended {
+        STALLED_PATRONAGE_MIN_NEED_SCORE
+    } else {
+        EXTERNAL_PATRONAGE_MIN_NEED_SCORE
+    };
+    if external && district_need < patronage_need_floor {
+        return;
+    }
+    let base_bonus = if external {
+        match persona {
+            GameplayPersona::Steward => 1_400,
+            GameplayPersona::PowerBroker => 1_100,
+            GameplayPersona::Entrepreneur => 600,
+            GameplayPersona::Opportunist => 400,
+        }
+    } else {
+        base_bonus
+    };
+    let amount = if !external && work.status == PublicWorkStatus::Suspended {
+        remaining.min(treasury)
+    } else {
+        // Never sink the house treasury into routine acceleration or someone
+        // else's project; both are bounded by discretionary surplus.
+        remaining
+            .min(discretionary_surplus)
+            .min(AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION)
+    };
+    if amount <= Money::ZERO {
+        return;
+    }
+    let completes = amount >= remaining;
+    let stalled = work.status == PublicWorkStatus::Suspended;
+    let intent = match (external, stalled, completes) {
+        (true, true, true) => "finish the city's stalled",
+        (true, true, false) => "rescue the city's stalled",
+        (true, false, true) => "finish a rival's",
+        (true, false, false) => "accelerate a rival's",
+        (false, true, true) => "finish stalled",
+        (false, true, false) => "rescue stalled",
+        (false, false, true) => "finish",
+        (false, false, false) => "accelerate",
+    };
+    let article = if external { "" } else { "the" };
+    let external_civic_bonus: i64 = match persona {
+        GameplayPersona::Steward => 260,
+        GameplayPersona::PowerBroker => 180,
+        GameplayPersona::Entrepreneur | GameplayPersona::Opportunist => 0,
+    };
+    push_candidate(
+        candidates,
+        GameplayCommandKind::FundPublicWork,
+        PlayerCommand::FundPublicWork {
+            public_work_id: work.id,
+            amount,
+        },
+        format!(
+            "fund {amount} to {intent} {article} {:?} project in {} ({})",
+            work.kind,
+            district_label(registry, work.district_id),
+            work.id,
+        ),
+        base_bonus
+            .saturating_add(if external { external_civic_bonus } else { 0 })
+            .saturating_add(district_need / 10)
+            .saturating_add(i64::from(work.progress_basis_points) / 2)
+            .saturating_add(if stalled { 1_000 } else { 350 }),
+    );
 }
 
 pub(crate) fn generate_law_candidates(

@@ -747,8 +747,6 @@ pub enum PublicWorkFundingError {
     InvalidAmount,
     #[error("public work {public_work_id} does not exist")]
     Missing { public_work_id: PublicWorkId },
-    #[error("public work {public_work_id} is not sponsored by the player dynasty")]
-    NotPlayerSponsored { public_work_id: PublicWorkId },
     #[error("public work {public_work_id} is already complete")]
     AlreadyComplete { public_work_id: PublicWorkId },
     #[error(
@@ -2149,10 +2147,12 @@ struct PublicWorkFundingQuote {
     player_id: DynastyId,
     district_id: DistrictId,
     kind: PublicWorkKind,
+    external_sponsor_dynasty_id: Option<DynastyId>,
     treasury_after: Money,
     contributions_after: Money,
     spent_after: Money,
     progress_basis_points: u16,
+    legitimacy_gain: u16,
     completed: bool,
 }
 
@@ -2168,6 +2168,13 @@ fn apply_public_work_funding(
         .expect("validated player dynasty must exist");
     player.resources.treasury = quote.treasury_after;
     player.resources.civic_contributions = quote.contributions_after;
+    if quote.legitimacy_gain > 0 {
+        player.resources.legitimacy_basis_points = player
+            .resources
+            .legitimacy_basis_points
+            .saturating_add(quote.legitimacy_gain)
+            .min(10_000);
+    }
     let work = state
         .public_works
         .get_mut(&public_work_id)
@@ -2178,26 +2185,51 @@ fn apply_public_work_funding(
         work.status = PublicWorkStatus::Completed;
         super::strategic::apply_public_work_completion(state, quote.district_id, quote.kind);
     }
-    super::strategic::try_push_outbox(
-        state,
-        OutboxKind::Politics,
-        if quote.completed {
-            format!("Public work {public_work_id} completed with dynasty funding")
-        } else {
-            format!("Public work {public_work_id} received dynasty funding")
-        },
-        if quote.completed {
+    // A rival house whose project the dynasty bankrolls remembers the favor:
+    // trust and standing rise and the sponsor carries a durable obligation.
+    if let Some(sponsor_dynasty_id) = quote.external_sponsor_dynasty_id {
+        super::strategic::adjust_dynasty_relationship(
+            state,
+            quote.player_id,
+            sponsor_dynasty_id,
+            super::strategic::RelationshipDelta::new(60, 80, 0, 0, 40),
+        );
+        super::strategic::remember_dynasty_interaction(
+            state,
+            quote.player_id,
+            sponsor_dynasty_id,
+            &format!(
+                "the player dynasty contributed {amount} to the sponsor's {:?} project in district {}",
+                quote.kind, quote.district_id
+            ),
+        );
+    }
+    let (title, detail) = if quote.external_sponsor_dynasty_id.is_some() {
+        (
+            format!("Public work {public_work_id} received dynasty funding"),
+            format!(
+                "The dynasty contributed {amount} to another house's {:?} project in district {}; its progress is now {} basis points and the city has taken notice.",
+                quote.kind, quote.district_id, quote.progress_basis_points
+            ),
+        )
+    } else if quote.completed {
+        (
+            format!("Public work {public_work_id} completed with dynasty funding"),
             format!(
                 "The dynasty contributed {amount} directly to finish the {:?} project in district {}.",
                 quote.kind, quote.district_id
-            )
-        } else {
+            ),
+        )
+    } else {
+        (
+            format!("Public work {public_work_id} received dynasty funding"),
             format!(
                 "The dynasty contributed {amount} directly to public work {public_work_id}; project progress is now {} basis points.",
                 quote.progress_basis_points
-            )
-        },
-    )?;
+            ),
+        )
+    };
+    super::strategic::try_push_outbox(state, OutboxKind::Politics, title, detail)?;
     Ok(CommandOutcome {
         summary: if quote.completed {
             format!("Funded and completed public work {public_work_id} with {amount}.")
@@ -2229,9 +2261,6 @@ fn quote_public_work_funding(
             work.kind,
         )
     };
-    if sponsor_dynasty_id != Some(state.player_dynasty_id) {
-        return Err(PublicWorkFundingError::NotPlayerSponsored { public_work_id }.into());
-    }
     if status == PublicWorkStatus::Completed {
         return Err(PublicWorkFundingError::AlreadyComplete { public_work_id }.into());
     }
@@ -2278,14 +2307,27 @@ fn quote_public_work_funding(
             .clamp(0, 10_000),
     )
     .expect("clamped public-work progress must fit u16");
+    // Contributing to a project the dynasty did not sponsor is public spirit
+    // the city can see: it earns a bounded legitimacy gain in the same
+    // proportion an institution endowment pays, scaled down because the
+    // district benefit itself is part of the return.
+    let external_sponsor_dynasty_id = sponsor_dynasty_id.filter(|sponsor| *sponsor != player_id);
+    let legitimacy_gain = if external_sponsor_dynasty_id.is_some() {
+        u16::try_from((amount.copper() / 400).clamp(10, 120))
+            .expect("bounded civic-funding legitimacy gain must fit u16")
+    } else {
+        0
+    };
     Ok(PublicWorkFundingQuote {
         player_id,
         district_id,
         kind,
+        external_sponsor_dynasty_id,
         treasury_after,
         contributions_after,
         spent_after,
         progress_basis_points,
+        legitimacy_gain,
         completed: spent_after == budget,
     })
 }

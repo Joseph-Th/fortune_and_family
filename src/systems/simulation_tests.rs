@@ -459,13 +459,11 @@ mod transfer_boundaries {
     }
 
     #[test]
-    fn clamped_external_income_conserves_the_paid_out_total() {
+    fn healthy_regional_income_is_paid_in_full_regardless_of_the_pool() {
         let mut state = make_test_campaign();
         for household in state.households.iter_mut() {
             household.cash = Money::ZERO;
         }
-        // Deliberately awkward per-household amounts so truncated pro-rated
-        // shares would strand copper if the rounding remainder were dropped.
         let mut income = 1_000_i64;
         for household in state.households.iter_mut() {
             household.weekly_income = Money::from_copper(income);
@@ -476,10 +474,11 @@ mod transfer_boundaries {
             .iter()
             .map(|household| household.weekly_income.copper())
             .sum();
-        let pool_before = promised / 3;
-        state.market.clearing_account = Money::from_copper(pool_before);
+        // A drained market sector must not starve households: regional
+        // earning power is outside silver, not a claim on the city's pool.
+        state.market.clearing_account = Money::ZERO;
 
-        settle_weekly_external_income(&mut state).expect("clamped settlement must commit");
+        settle_weekly_external_income(&mut state).expect("regional settlement must commit");
 
         let total_credited: i64 = state
             .households
@@ -488,13 +487,56 @@ mod transfer_boundaries {
             .sum();
         assert_eq!(
             i128::from(total_credited),
-            i128::from(pool_before),
-            "every copper debited from the clearing account must reach a household"
+            i128::from(promised),
+            "healthy routes must pay every household its full regional income"
         );
         assert_eq!(
             state.market.clearing_account,
             Money::ZERO,
-            "the drained pool must be fully distributed"
+            "regional income must not draw on the market clearing account"
+        );
+        validate_invariants(rivergate_registry_for_test(), &state);
+    }
+
+    #[test]
+    fn disrupted_routes_scale_regional_household_income() {
+        let mut state = make_test_campaign();
+        for household in state.households.iter_mut() {
+            household.cash = Money::ZERO;
+        }
+        let weekly_income = Money::from_copper(1_000);
+        for household in state.households.iter_mut() {
+            household.weekly_income = weekly_income;
+            household.cash = Money::ZERO;
+        }
+        // Four fixture routes with two half-disrupted, so average
+        // availability is 7,500 basis points of normal earning power.
+        let route_ids: Vec<_> = state.external_routes.keys().copied().collect();
+        let [_, _, first_disrupted, second_disrupted] = route_ids.as_slice() else {
+            panic!("campaign fixture must define at least four external routes");
+        };
+        for disrupted_id in [first_disrupted, second_disrupted] {
+            state
+                .external_routes
+                .get_mut(disrupted_id)
+                .expect("disrupted route must exist")
+                .disruption_basis_points = 5_000;
+        }
+
+        let pool_before = state.market.clearing_account;
+
+        settle_weekly_external_income(&mut state).expect("route-scaled settlement must commit");
+
+        let expected_payment = weekly_income.saturating_mul_ratio(7_500, 10_000);
+        for household in state.households.iter() {
+            assert_eq!(
+                household.cash, expected_payment,
+                "every household must be paid the route-adjusted share of its regional income"
+            );
+        }
+        assert_eq!(
+            state.market.clearing_account, pool_before,
+            "regional income must not draw on the market clearing account"
         );
         validate_invariants(rivergate_registry_for_test(), &state);
     }

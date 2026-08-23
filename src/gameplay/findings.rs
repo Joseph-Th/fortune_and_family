@@ -1636,6 +1636,10 @@ pub(crate) const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> 
             // an activation without a candidate there means one of the
             // agent's own affordability or cadence gates declined it.
             | GameplayCommandKind::StartPublicWork
+            // Law sponsorship generators only build kinds the persona ranks
+            // as contextually relevant; a broadly valid enactment the agent's
+            // persona policy declines is restraint, not a coverage hole.
+            | GameplayCommandKind::EnactLaw
     )
 }
 
@@ -1677,6 +1681,14 @@ pub(crate) fn add_command_findings(
                 (
                     GameplayFindingSeverity::Critical,
                     format!("{} was always rejected", kind.label()),
+                )
+            } else if !is_substantive_command_kind(kind) {
+                // Operational liquidity plumbing is deliberately excluded from
+                // substantive-action metrics; an unselected rebalancing route
+                // is routine portfolio discipline, not a design warning.
+                (
+                    GameplayFindingSeverity::Info,
+                    format!("{} was viable but never selected", kind.label()),
                 )
             } else if stats.offered_cycles < 3 {
                 (

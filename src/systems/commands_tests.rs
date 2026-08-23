@@ -626,6 +626,148 @@ mod validation {
     }
 
     #[test]
+    fn dynasty_can_bankroll_another_houses_suspended_public_work() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let sponsor_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival dynasty");
+        let district_id = registry
+            .districts()
+            .first()
+            .expect("registry must contain a district")
+            .id();
+        let public_work_id = state.next_ids.public_work();
+        let budget = Money::from_copper(10_000);
+        let spent = Money::from_copper(4_000);
+        let amount = Money::from_copper(6_000);
+        state.public_works.insert(
+            public_work_id,
+            PublicWork {
+                id: public_work_id,
+                district_id,
+                kind: PublicWorkKind::Drainage,
+                sponsor_dynasty_id: Some(sponsor_id),
+                budget,
+                spent,
+                progress_basis_points: 4_000,
+                status: PublicWorkStatus::Suspended,
+            },
+        );
+        let treasury_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .treasury();
+        let contributions_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .civic_contributions();
+        let legitimacy_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        let relationship_before = state
+            .relationships
+            .get(&DynastyPair::new(player_id, sponsor_id))
+            .expect("every dynasty pair must have a relationship record")
+            .clone();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FundPublicWork {
+                public_work_id,
+                amount,
+            },
+        )
+        .expect("funding another house's stalled work must be a valid civic contribution");
+
+        let work = state
+            .public_works
+            .get(&public_work_id)
+            .expect("funded public work must remain");
+        assert_eq!(work.status, PublicWorkStatus::Completed);
+        let player = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist");
+        assert_eq!(player.treasury(), treasury_before.saturating_sub(amount));
+        assert_eq!(
+            player.civic_contributions(),
+            contributions_before.saturating_add(amount)
+        );
+        assert_eq!(
+            player.resources.legitimacy_basis_points,
+            legitimacy_before
+                + u16::try_from(amount.copper() / 400)
+                    .expect("bounded civic-funding legitimacy gain must fit u16"),
+            "external civic funding must earn bounded legitimacy the city can see"
+        );
+        let relationship_after = state
+            .relationships
+            .get(&DynastyPair::new(player_id, sponsor_id))
+            .expect("every dynasty pair must have a relationship record");
+        assert!(relationship_after.trust_basis_points > relationship_before.trust_basis_points);
+        assert!(relationship_after.respect_basis_points > relationship_before.respect_basis_points);
+        assert!(relationship_after.obligation > relationship_before.obligation);
+    }
+
+    #[test]
+    fn dynasty_cannot_fund_a_completed_public_work() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let public_work_id = state.next_ids.public_work();
+        let district_id = registry
+            .districts()
+            .first()
+            .expect("registry must contain a district")
+            .id();
+        state.public_works.insert(
+            public_work_id,
+            PublicWork {
+                id: public_work_id,
+                district_id,
+                kind: PublicWorkKind::Drainage,
+                sponsor_dynasty_id: None,
+                budget: Money::from_copper(10_000),
+                spent: Money::from_copper(10_000),
+                progress_basis_points: 10_000,
+                status: PublicWorkStatus::Completed,
+            },
+        );
+        let before = state.clone();
+
+        let result = apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::FundPublicWork {
+                public_work_id,
+                amount: Money::from_copper(1_000),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::PublicWorkFunding(
+                PublicWorkFundingError::AlreadyComplete { public_work_id }
+            ))
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "completed works must reject funding without any state change",
+        );
+    }
+
+    #[test]
     fn public_work_private_funding_cannot_exceed_the_remaining_budget() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
