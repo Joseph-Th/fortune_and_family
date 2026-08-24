@@ -189,7 +189,7 @@ A no-action cycle happens when the agent has no viable substantive choice. The r
 | Validation gate | Candidates were built and probed but canonical validation rejected every one of them |
 | Dormant | No candidate was built and no activation opportunity fired; the game world offered no detected action |
 
-Quiet cycles with no recorded cause are dormant state: the game world offered no detected opportunity, no candidate was built, and no activation predicate fired. Every quiet cycle either resolves into a cause or is logged as dormant, so no-action play is never silent by accident.
+Quiet cycles with no recorded cause are dormant state: the world offered no detected opportunity, no candidate was built, and no activation predicate fired. Every quiet cycle either resolves into a cause or is logged as dormant. Operational fallback actions (portfolio cash transfers, withdrawals) are context, not causes: an operational-only cycle carries that note in its `no_action_reason` on top of the classified strategic cause, so a fallback withdrawal never reads as "rejected by validation".
 
 The diagnosis is recorded per campaign and summed in the aggregate and persona aggregates. Each trace step that took no substantive action also carries a human-readable `no_action_reason`, so a chronological decision log explains *why* each quiet gap happened.
 

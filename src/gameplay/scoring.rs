@@ -203,7 +203,14 @@ pub(crate) fn resilience_score(
         } else {
             0
         },
-        100_u16.saturating_sub(accumulator.maximum_disputed_employment.saturating_mul(8)),
+        // Player-facing resilience measures the player's own labor disputes;
+        // city-wide employment waves belong to civic-health findings, where
+        // they do not blame the player for conditions it cannot fix.
+        100_u16.saturating_sub(
+            accumulator
+                .maximum_player_disputed_employment
+                .saturating_mul(8),
+        ),
         100_u16.saturating_sub(accumulator.maximum_active_crises.saturating_mul(15)),
         debt_trajectory,
     ]);

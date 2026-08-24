@@ -98,9 +98,12 @@ pub(crate) fn render_phase_summary(report: &GameplayHarnessReport, output: &mut 
             u64::from(stats.substantive_actions),
             100,
         );
+        // Same denominator as the findings-side measure of this name: the
+        // multi-family share reads as a share of actionable cycles, so the
+        // rendered phase table and the matching finding cannot disagree.
         let multi_family_share = scaled_ratio_u64(
             u64::from(stats.cycles_with_multiple_viable_command_kinds),
-            u64::from(stats.decision_cycles),
+            u64::from(stats.decision_cycles.saturating_sub(stats.quiet_cycles)),
             100,
         );
         let close_choice_share = scaled_ratio_u64(

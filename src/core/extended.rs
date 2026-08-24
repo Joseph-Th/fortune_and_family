@@ -29,6 +29,11 @@ pub struct SupplyContract {
     pub(crate) next_due_day: i64,
     pub(crate) end_day: i64,
     pub(crate) fulfilled_deliveries: u16,
+    /// Per-dynasty delivery attribution. Both the buyer's and the seller's
+    /// owner are credited for each fulfilled week, so a purchasing house can
+    /// qualify for delivery-gated milestones through its commercial
+    /// throughput; `has_consistent_delivery_attribution` tolerates that
+    /// double-attribution deliberately.
     pub(crate) fulfilled_deliveries_by_dynasty: BTreeMap<DynastyId, u16>,
     pub(crate) missed_deliveries: u16,
     pub(crate) breaching_dynasty_id: Option<DynastyId>,

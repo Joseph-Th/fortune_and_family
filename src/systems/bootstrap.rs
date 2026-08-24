@@ -573,7 +573,13 @@ fn insert_household_groups(state: &mut AppState, registry: &Registry) {
                 cash: Money::from_copper(4_800 * income_multiplier),
                 weekly_income: Money::from_copper(1_800 * income_multiplier),
                 bread_need_daily: Quantity::from_milliunits(350 * income_multiplier.min(2)),
-                ale_need_daily: Quantity::from_milliunits(350 * income_multiplier),
+                // Ale need saturates with income like bread: the city's single
+                // brewery covers roughly the capped demand, mirroring how
+                // cloth demand is calibrated just under weaving capacity. An
+                // uncapped ×4 merchant thirst would structurally exceed
+                // supply and permanently bid ale past every household's food
+                // budget.
+                ale_need_daily: Quantity::from_milliunits(350 * income_multiplier.min(2)),
                 food_satisfaction_basis_points: 8_000,
             });
         }

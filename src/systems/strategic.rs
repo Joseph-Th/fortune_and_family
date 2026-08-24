@@ -5943,7 +5943,24 @@ pub(crate) fn run_monthly_strategic_systems(
     update_external_route_risk(state);
     detect_and_advance_crises(registry, state)?;
     recover_external_routes(state);
+    prune_acknowledged_outbox(state);
     Ok(())
+}
+
+/// Acknowledged notices leave the outbox after this long: once flagged they
+/// have no reader, and an append-only notification log would grow without
+/// bound on multi-generation campaigns. Unacknowledged notices are always
+/// retained so nothing actionable is ever dropped.
+const ACKNOWLEDGED_OUTBOX_RETENTION_DAYS: i64 = 360;
+
+fn prune_acknowledged_outbox(state: &mut AppState) {
+    let day = state.clock.day();
+    // Dropping a prefix of the append-only log preserves the strictly
+    // increasing ID and day ordering every reader and validator relies on.
+    state.outbox.retain(|message| {
+        !message.acknowledged
+            || day.saturating_sub(message.day) <= ACKNOWLEDGED_OUTBOX_RETENTION_DAYS
+    });
 }
 
 /// Applies a monthly household upkeep to every non-player dynasty so that rival houses

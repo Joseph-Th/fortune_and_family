@@ -2145,7 +2145,7 @@ pub(crate) fn has_enact_law_opportunity(registry: &Registry, state: &AppState) -
     let treasury_ok = state
         .dynasties
         .get(&player_id)
-        .is_some_and(|dynasty| dynasty.treasury() >= Money::from_copper(2_000));
+        .is_some_and(|dynasty| dynasty.treasury() >= LAW_SPONSORSHIP_COST);
     if !sponsorship_available || !has_legitimacy || !treasury_ok {
         return false;
     }
@@ -2206,10 +2206,9 @@ pub(crate) fn has_start_public_work_opportunity(registry: &Registry, state: &App
                     .saturating_add(PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS)
         });
     sponsorship_available
-        && state
-            .dynasties
-            .get(&player_id)
-            .is_some_and(|dynasty| dynasty.treasury() >= Money::from_copper(1_200))
+        && state.dynasties.get(&player_id).is_some_and(|dynasty| {
+            dynasty.treasury() >= public_work_initial_contribution(CANDIDATE_PUBLIC_WORK_BUDGET)
+        })
 }
 
 pub(crate) fn has_fund_public_work_opportunity(state: &AppState) -> bool {
@@ -2784,17 +2783,16 @@ pub(crate) fn record_quiet_diagnostic(
     if actionable {
         return None;
     }
-    if (raw_generated_kinds.contains(&GameplayCommandKind::TransferBusinessCash)
+    // Portfolio liquidity support (transfers/withdrawals) is operational
+    // context for a quiet cycle, not itself a cause: classify the strategic
+    // causes first and append the note, so every quiet cycle still resolves
+    // into a phase-level cause.
+    let operational_only = (raw_generated_kinds
+        .contains(&GameplayCommandKind::TransferBusinessCash)
         || raw_generated_kinds.contains(&GameplayCommandKind::WithdrawBusinessCash))
         && raw_generated_kinds
             .iter()
-            .all(|kind| !is_substantive_command_kind(*kind))
-    {
-        return Some(
-            "operational-only: portfolio liquidity support was available, but no strategic commitment was viable"
-                .to_owned(),
-        );
-    }
+            .all(|kind| !is_substantive_command_kind(*kind));
     let mut gap_kinds = Vec::new();
     let mut restrained_kinds = Vec::new();
     for (kind, delta) in activation_delta {
@@ -2835,6 +2833,12 @@ pub(crate) fn record_quiet_diagnostic(
     let mut rejected_kinds = Vec::new();
     let mut budget_kinds = Vec::new();
     for kind in retained_kinds {
+        // `viable_command_kinds` records substantive viability only; an
+        // operational kind here was executed as the fallback action, not
+        // rejected by validation.
+        if !is_substantive_command_kind(*kind) {
+            continue;
+        }
         if !probe.viable_command_kinds.contains(kind) {
             let retained_count = retained_counts_by_kind.get(kind).copied().unwrap_or(0);
             let probed_count = probed_counts_by_kind.get(kind).copied().unwrap_or(0);
@@ -2855,26 +2859,6 @@ pub(crate) fn record_quiet_diagnostic(
             }
         }
     }
-    if gap_kinds.is_empty()
-        && restrained_kinds.is_empty()
-        && gated_kinds.is_empty()
-        && rejected_kinds.is_empty()
-        && budget_kinds.is_empty()
-    {
-        accumulator.quiet_diagnostic.dormant_cycles = accumulator
-            .quiet_diagnostic
-            .dormant_cycles
-            .saturating_add(1);
-        return Some(
-            "dormant: no candidate was built and no activation opportunity fired; the world offered no detected action"
-                .to_owned(),
-        );
-    }
-    gap_kinds.sort();
-    restrained_kinds.sort();
-    gated_kinds.sort();
-    rejected_kinds.sort();
-    budget_kinds.sort();
     let mut causes = Vec::new();
     if !gap_kinds.is_empty() {
         causes.push(format!(
@@ -2906,7 +2890,34 @@ pub(crate) fn record_quiet_diagnostic(
             kind_labels(&budget_kinds)
         ));
     }
-    Some(causes.join("; "))
+    if causes.is_empty() {
+        accumulator.quiet_diagnostic.dormant_cycles = accumulator
+            .quiet_diagnostic
+            .dormant_cycles
+            .saturating_add(1);
+        if operational_only {
+            return Some(
+                "dormant: operational-only liquidity support was available, but the world offered no strategic action"
+                    .to_owned(),
+            );
+        }
+        return Some(
+            "dormant: no candidate was built and no activation opportunity fired; the world offered no detected action"
+                .to_owned(),
+        );
+    }
+    gap_kinds.sort();
+    restrained_kinds.sort();
+    gated_kinds.sort();
+    rejected_kinds.sort();
+    budget_kinds.sort();
+    let mut reason = causes.join("; ");
+    if operational_only {
+        reason.push_str(
+            "; operational-only: portfolio liquidity support was available, but no strategic commitment was viable",
+        );
+    }
+    Some(reason)
 }
 
 pub(crate) fn quiet_cause(reason: Option<&str>) -> Option<QuietCause> {

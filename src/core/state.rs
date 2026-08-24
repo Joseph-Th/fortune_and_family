@@ -499,6 +499,9 @@ macro_rules! next_id_method {
     };
 }
 
+/// Generates both the fallible `try_*` allocator (a production path used by
+/// every consequential system) and a panicking twin whose callers are
+/// test-only fixtures that treat identifier exhaustion as unreachable.
 macro_rules! test_next_id_method {
     ($method:ident, $try_method:ident, $field:ident, $id_type:ident, $error:ident) => {
         try_next_id_method!($try_method, $field, $id_type, $error);

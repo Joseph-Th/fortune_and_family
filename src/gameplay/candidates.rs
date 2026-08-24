@@ -1392,19 +1392,34 @@ pub(crate) fn generate_business_wage_candidates(
         {
             continue;
         }
-        let Some(agreement) = state
+        // Canonical wage changes apply to every non-Ended agreement of the
+        // business at once, so the posture reads the whole workforce instead
+        // of one arbitrary agreement whose pay may have drifted.
+        let agreements: Vec<_> = state
             .employment
             .values()
-            .find(|agreement| agreement.business_id() == business.id())
-        else {
+            .filter(|agreement| {
+                agreement.business_id() == business.id()
+                    && agreement.status != EmploymentStatus::Ended
+            })
+            .collect();
+        if agreements.is_empty() {
             continue;
-        };
-        let workers = i64::from(agreement.workers().max(1));
-        let current_per_worker =
-            Money::from_copper(agreement.weekly_wage().copper().max(0) / workers);
+        }
+        let total_workers: i64 = agreements
+            .iter()
+            .map(|agreement| i64::from(agreement.workers().max(1)))
+            .sum();
+        let current_per_worker = Money::from_copper(
+            agreements
+                .iter()
+                .map(|agreement| agreement.weekly_wage().copper().max(0))
+                .sum::<i64>()
+                / total_workers.max(1),
+        );
         let Some(target_per_worker) = wage_posture_target_copper(
             persona,
-            agreement,
+            &agreements,
             reference_copper,
             business.finance.lifetime_revenue,
             business.finance.lifetime_costs,
@@ -1439,19 +1454,39 @@ pub(crate) fn generate_business_wage_candidates(
 
 /// Returns the persona's desired per-worker wage in copper, or `None` when the
 /// current posture already fits.
+/// Returns the persona's desired per-worker wage in copper, or `None` when the
+/// current posture already fits. Reads the business's whole non-Ended
+/// workforce: canonical wage changes apply to every agreement at once.
 pub(crate) fn wage_posture_target_copper(
     persona: GameplayPersona,
-    agreement: &crate::core::EmploymentAgreement,
+    agreements: &[&crate::core::EmploymentAgreement],
     reference_copper: i64,
     lifetime_revenue: Money,
     lifetime_costs: Money,
 ) -> Option<i64> {
-    let workers = i64::from(agreement.workers().max(1));
-    let current = agreement.weekly_wage().copper().max(0) / workers;
-    let weakest = agreement
-        .loyalty_basis_points()
-        .min(agreement.conditions_basis_points());
-    let disputed = agreement.status == EmploymentStatus::Disputed;
+    debug_assert!(!agreements.is_empty());
+    let total_workers = agreements
+        .iter()
+        .map(|agreement| i64::from(agreement.workers().max(1)))
+        .sum::<i64>()
+        .max(1);
+    let current = agreements
+        .iter()
+        .map(|agreement| agreement.weekly_wage().copper().max(0))
+        .sum::<i64>()
+        / total_workers;
+    let weakest = agreements
+        .iter()
+        .map(|agreement| {
+            agreement
+                .loyalty_basis_points()
+                .min(agreement.conditions_basis_points())
+        })
+        .min()
+        .unwrap_or(10_000);
+    let disputed = agreements
+        .iter()
+        .any(|agreement| agreement.status == EmploymentStatus::Disputed);
     if disputed || weakest < 3_500 {
         // Repair posture: restore at least fair pay before resistance hardens.
         return Some(current.max(reference_copper));
@@ -1465,8 +1500,7 @@ pub(crate) fn wage_posture_target_copper(
         GameplayPersona::Opportunist => {
             // Squeeze a healthy, profitable workforce while it stays calm.
             let profitable = lifetime_revenue >= lifetime_costs && lifetime_revenue > Money::ZERO;
-            let calm = agreement.loyalty_basis_points() > 7_500
-                && agreement.conditions_basis_points() > 7_500;
+            let calm = weakest > 7_500;
             if profitable && calm && current >= reference_copper * 6 / 5 {
                 Some(current * 4 / 5)
             } else {
@@ -3143,14 +3177,17 @@ pub(crate) fn add_borrow_candidate(
     };
     let defaulted_loan = latest_defaulted_loan(state, lender.id(), player_id);
     let legal_shortfall = legal_funding_target.saturating_sub(player.treasury());
-    let principal = borrow_principal(lender.treasury(), defaulted_loan.is_some()).max(
-        legal_shortfall.min(
-            lender
-                .treasury()
-                .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
-                .unwrap_or(Money::ZERO),
-        ),
-    );
+    // The canonical route refuses any advance that would strip the lender's
+    // counterparty reserve, so the requested principal is clamped to what this
+    // lender can actually give; otherwise narrow treasury windows would emit a
+    // candidate that validation rejects with certainty.
+    let lender_available = lender
+        .treasury()
+        .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+        .unwrap_or(Money::ZERO);
+    let principal = borrow_principal(lender.treasury(), defaulted_loan.is_some())
+        .max(legal_shortfall.min(lender_available))
+        .min(lender_available);
     let bonus = base_bonus(
         persona,
         defaulted_loan.is_some(),
@@ -4728,6 +4765,7 @@ pub(crate) fn generate_family_candidates(
                 <= state.clock.day()
         });
     if governance_available
+        && council.unity_basis_points >= HOUSE_GOVERNANCE_UNITY_COST
         && let Some(governance) = preferred_house_governance(state, persona)
         && governance != council.governance
     {
@@ -4950,6 +4988,16 @@ pub(crate) fn generate_heir_designation_candidates(
     }
     let current_heir_id = dynasty.heir_id();
     let current_heir = current_heir_id.and_then(|heir_id| state.characters.get(heir_id));
+    // The canonical route charges family unity for a designation, and a
+    // divided council cannot pay: generating a candidate it would certainly
+    // reject only burns a probe slot every cycle.
+    if state
+        .family_councils
+        .get(&state.player_dynasty_id)
+        .is_none_or(|council| council.unity_basis_points < HEIR_DESIGNATION_UNITY_COST)
+    {
+        return;
+    }
     let (head_age, head_health) = character_age_and_health(state, dynasty.head_id());
     // A house without any designated heir wants one as soon as the succession
     // horizon matters at all; with an heir in place, only an aging or at-risk
@@ -5752,6 +5800,12 @@ pub(crate) fn generate_ward_adoption_candidates(
             >= WARD_ADOPTION_REPUTATION_REQUIREMENT
         && player_contract_deliveries(state) >= WARD_ADOPTION_DELIVERY_REQUIREMENT
         && active_player_ward_count(state) < MAX_ACTIVE_WARDS
+        // The canonical route charges family unity for an adoption, and a
+        // divided council cannot pay: skip generation when the house could
+        // not commit.
+        && state.family_councils.get(&state.player_dynasty_id).is_some_and(
+            |council| council.unity_basis_points >= WARD_ADOPTION_UNITY_COST,
+        )
         && state
             .audit_log
             .iter()
@@ -6264,7 +6318,7 @@ pub(crate) fn is_office_nomination_available(
     };
     let required_deliveries =
         office_nomination_delivery_requirement(registry, state, institution_id, character_id);
-    if player.treasury() < Money::from_copper(300)
+    if player.treasury() < OFFICE_NOMINATION_CAMPAIGN_COST
         || player
             .resources
             .reputation_quality_basis_points
