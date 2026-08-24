@@ -19,6 +19,10 @@ pub(crate) const EMPLOYMENT_RECOVERY_BASIS_POINTS: u16 = 3_000;
 pub(crate) const MIN_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 7_000;
 pub(crate) const MAX_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 14_000;
 pub(crate) const OFFICE_TERM_DAYS: i64 = 360;
+/// A temporarily officeless institution retries its election on this cadence
+/// instead of locking its office — and its powers and stipend flow — away for
+/// a full term.
+pub(crate) const OFFICE_VACANCY_RETRY_DAYS: i64 = 30;
 pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 120;
 
 /// Returns whether a scheduled day can still arrive: the terminal sentinel is

@@ -997,7 +997,6 @@ mod public_works {
             sanitation_basis_points: 7_000,
             safety_basis_points: 10_000,
             unrest_basis_points: 1_000,
-            dynasty_support: Vec::new(),
         };
         let stable = district_unrest_next_basis_points(&baseline, 10_000);
 
@@ -1039,7 +1038,6 @@ mod public_works {
             sanitation_basis_points: 7_000,
             safety_basis_points: 10_000,
             unrest_basis_points: 2_000,
-            dynasty_support: Vec::new(),
         };
         let without_market = district_unrest_next_basis_points(&district, 10_000);
         district.employment_basis_points = district.employment_basis_points.saturating_add(800);
@@ -1092,6 +1090,78 @@ mod gameplay_stability {
                 .status,
             EmploymentStatus::Active,
             "reliable payroll must provide a systemic recovery path from labor disputes"
+        );
+    }
+
+    #[test]
+    fn idle_firm_zero_paycheck_neither_heals_nor_punishes_a_dispute() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let employment_id = *state
+            .employment
+            .keys()
+            .next()
+            .expect("campaign must contain employment");
+        state.employment.retain(|id, _| *id == employment_id);
+        let (business_id, household_id) = {
+            let agreement = state
+                .employment
+                .get_mut(&employment_id)
+                .expect("employment must exist");
+            agreement.status = EmploymentStatus::Disputed;
+            agreement.loyalty_basis_points = 2_800;
+            agreement.conditions_basis_points = 2_900;
+            (agreement.business_id, agreement.household_id)
+        };
+        // Zero weekly capacity yields zero utilization: the firm owes no payroll.
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("employment business must exist");
+            business.operations.capacity_batches_per_day = 0;
+            business.finance.cash = Money::from_copper(100_000);
+        }
+        let household_cash_before = state
+            .households
+            .get(household_id)
+            .expect("household must exist")
+            .cash();
+        let business_cash_before = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .cash();
+
+        settle_employment(registry, &mut state).expect("employment settlement must succeed");
+
+        let agreement = state
+            .employment
+            .get(&employment_id)
+            .expect("employment must exist");
+        assert_eq!(agreement.status, EmploymentStatus::Disputed);
+        assert_eq!(
+            agreement.loyalty_basis_points, 2_800,
+            "a zero paycheck must not read as reconciliation"
+        );
+        assert_eq!(agreement.conditions_basis_points, 2_900);
+        assert_eq!(
+            state
+                .households
+                .get(household_id)
+                .expect("household must exist")
+                .cash(),
+            household_cash_before,
+            "no wages may move when no work was due"
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("business must exist")
+                .cash(),
+            business_cash_before,
+            "an idle firm owes no payroll"
         );
     }
 
@@ -2366,8 +2436,16 @@ mod gameplay_stability {
                 .resources
                 .legitimacy_basis_points = 1_000;
 
-            announce_institution_selections(&mut state, vec![(institution_id, Some(winner_id), 1)])
-                .expect("office announcement must remain representable");
+            announce_institution_selections(
+                &mut state,
+                vec![(
+                    institution_id,
+                    Some(winner_id),
+                    1,
+                    crate::systems::OFFICE_TERM_DAYS,
+                )],
+            )
+            .expect("office announcement must remain representable");
 
             let gain = state
                 .dynasties
@@ -2833,6 +2911,118 @@ mod contracts {
                 .expect("fixture seller cash must fit"),
             "the legal claim balance must exclude the part of the final penalty already paid through contract settlement"
         );
+    }
+
+    #[test]
+    fn non_terminal_misses_accumulate_capped_attributed_debt_while_active() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (buyer_id, seller_id, good_id, quantity, buyer_owner_id, seller_owner_id) = {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.unit_price = Money::from_copper(10_000);
+            contract.penalty = Money::from_copper(500);
+            contract.next_due_day = state.clock.day();
+            let buyer_id = contract.buyer_business_id;
+            let seller_id = contract.seller_business_id;
+            (
+                buyer_id,
+                seller_id,
+                contract.good_id,
+                contract.quantity_per_week,
+                state
+                    .businesses
+                    .get(buyer_id)
+                    .expect("buyer must exist")
+                    .owner_dynasty_id(),
+                state
+                    .businesses
+                    .get(seller_id)
+                    .expect("buyer must exist")
+                    .owner_dynasty_id(),
+            )
+        };
+        state
+            .businesses
+            .get_mut(seller_id)
+            .expect("seller must exist")
+            .add_inventory(good_id, quantity);
+        // An empty buyer cannot pay any of this week's penalty.
+        state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist")
+            .finance
+            .cash = Money::ZERO;
+
+        settle_contracts(&mut state).expect("first missed delivery must settle");
+
+        {
+            let contract = state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist");
+            assert_eq!(contract.status, ContractStatus::Active);
+            assert_eq!(contract.missed_deliveries, 1);
+            // Attribution records the defendant from the first attributable
+            // miss even while the contract is still active.
+            assert_eq!(contract.breaching_dynasty_id, Some(buyer_owner_id));
+            assert_eq!(contract.breach_victim_dynasty_id, Some(seller_owner_id));
+            assert_eq!(contract.unpaid_breach_penalty, Money::from_copper(500));
+        }
+        validate_invariants(registry, &state);
+
+        // A second consecutive miss collects the partial cash it can and must
+        // not inflate the recoverable claim past the contractual penalty.
+        {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.next_due_day = state.clock.day();
+        }
+        state
+            .businesses
+            .get_mut(buyer_id)
+            .expect("buyer must exist")
+            .finance
+            .cash = Money::from_copper(100);
+        let seller_cash_before = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .cash();
+
+        settle_contracts(&mut state).expect("second missed delivery must settle");
+
+        let contract = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist");
+        assert_eq!(contract.status, ContractStatus::Active);
+        assert_eq!(contract.missed_deliveries, 2);
+        assert_eq!(contract.breaching_dynasty_id, Some(buyer_owner_id));
+        assert_eq!(contract.breach_victim_dynasty_id, Some(seller_owner_id));
+        assert_eq!(
+            contract.unpaid_breach_penalty,
+            Money::from_copper(500),
+            "recoverable breach debt must stay capped at the contractual penalty"
+        );
+        assert_eq!(
+            state
+                .businesses
+                .get(seller_id)
+                .expect("seller must exist")
+                .cash(),
+            seller_cash_before
+                .checked_add(Money::from_copper(100))
+                .expect("fixture seller cash must fit"),
+            "the partial penalty payment must reach the victim before the rest accrues as recoverable debt"
+        );
+        validate_invariants(registry, &state);
     }
 
     #[test]
@@ -4817,6 +5007,7 @@ mod loans {
                         health_basis_points: 9_000,
                         loyalty_basis_points: 8_000,
                         role: CharacterRole::Heir,
+                        incapacitated_day: None,
                     },
                 });
                 state
@@ -5397,6 +5588,63 @@ mod loans {
             &state,
             "an unrepresentable next loan due date must fail before interest or payment mutation",
         );
+    }
+
+    #[test]
+    fn underwater_civic_installments_count_as_missed_payments() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let (debt_id, creditor_dynasty_id) = insert_test_civic_debt(&mut state);
+        let treasury_id = registry
+            .get_institution_id("treasury")
+            .expect("registry must define a treasury");
+        // Terms whose weekly payment cannot cover the accruing interest are
+        // mathematically unrepayable; settling them must count as missed
+        // payments instead of "successful" negative amortization that grants
+        // legitimacy while the balance compounds.
+        {
+            let debt = state
+                .civic_debts
+                .get_mut(&debt_id)
+                .expect("debt must exist");
+            debt.balance = Money::from_copper(1_000_000);
+            debt.interest_basis_points = 800;
+            debt.weekly_payment = Money::from_copper(100);
+        }
+        state
+            .institutions
+            .get_mut(&treasury_id)
+            .expect("treasury runtime must exist")
+            .budget = Money::from_copper(1_000);
+        let creditor_before = state
+            .dynasties
+            .get(&creditor_dynasty_id)
+            .expect("creditor must exist")
+            .treasury();
+
+        settle_civic_debts(registry, &mut state).expect("civic debt settlement must succeed");
+
+        let debt = state.civic_debts.get(&debt_id).expect("debt must exist");
+        assert_eq!(debt.status, CivicDebtStatus::Delinquent);
+        assert_eq!(
+            debt.missed_payments, 1,
+            "an installment below the week's interest must not count as current"
+        );
+        assert!(
+            debt.balance > Money::from_copper(1_000_000),
+            "capitalized interest must leave the balance above its prior level"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&creditor_dynasty_id)
+                .expect("creditor must exist")
+                .treasury(),
+            creditor_before,
+            "no creditor payment may move on an unproductive installment"
+        );
+        crate::systems::refresh_campaign_phases(&mut state);
+        validate_invariants(registry, &state);
     }
 
     #[test]

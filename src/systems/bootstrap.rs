@@ -405,6 +405,7 @@ fn insert_dynasty(
             health_basis_points: 9_000,
             loyalty_basis_points: 10_000,
             role: CharacterRole::HeadOfHouse,
+            incapacitated_day: None,
         },
     });
 
@@ -432,6 +433,7 @@ fn insert_dynasty(
             health_basis_points: 9_500,
             loyalty_basis_points: 8_500,
             role: CharacterRole::Heir,
+            incapacitated_day: None,
         },
     });
 

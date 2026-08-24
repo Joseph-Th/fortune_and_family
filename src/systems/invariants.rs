@@ -148,6 +148,19 @@ fn validate_characters(state: &AppState) {
             "Lifecycle Validity: active character {} must have positive in-range health",
             character.id()
         );
+        debug_assert_eq!(
+            character.status() == CharacterStatus::Incapacitated,
+            character.runtime.incapacitated_day.is_some(),
+            "Lifecycle Validity: incapacitation state and collapse date must agree for character {}",
+            character.id()
+        );
+        if let Some(collapsed_day) = character.runtime.incapacitated_day {
+            debug_assert!(
+                collapsed_day <= state.clock.day(),
+                "Record Reference Validity: character {} collapsed in the future",
+                character.id()
+            );
+        }
         debug_assert!(
             character.runtime.loyalty_basis_points <= 10_000,
             "Lifecycle Validity: character {} loyalty is outside basis-point range",
@@ -795,16 +808,14 @@ fn contract_breach_attribution_is_valid(
         contract.breach_victim_dynasty_id,
     ) {
         (None, None) => true,
-        (Some(breacher), None) => {
-            contract.status == ContractStatus::Breached && state.dynasties.contains_key(&breacher)
-        }
+        // Attribution records the defendant for recoverable breach debt from
+        // the first attributable miss, so it may outlive any status.
         (Some(breacher), Some(victim)) => {
-            contract.status == ContractStatus::Breached
-                && breacher != victim
+            breacher != victim
                 && state.dynasties.contains_key(&breacher)
                 && state.dynasties.contains_key(&victim)
         }
-        (None, Some(_)) => false,
+        (Some(_), None) | (None, Some(_)) => false,
     }
 }
 
@@ -812,8 +823,7 @@ fn contract_breach_penalty_is_valid(contract: &crate::core::SupplyContract) -> b
     !contract.unpaid_breach_penalty.is_negative()
         && contract.unpaid_breach_penalty <= contract.penalty
         && (contract.unpaid_breach_penalty == crate::money::Money::ZERO
-            || (contract.status == ContractStatus::Breached
-                && contract.breaching_dynasty_id.is_some()
+            || (contract.breaching_dynasty_id.is_some()
                 && contract.breach_victim_dynasty_id.is_some()))
 }
 
@@ -1395,17 +1405,6 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
                 && district.unrest_basis_points <= 10_000,
             "Lifecycle Validity: district measure is outside basis-point range"
         );
-        let mut support_ids = BTreeSet::new();
-        for (dynasty_id, support) in &district.dynasty_support {
-            debug_assert!(
-                support_ids.insert(*dynasty_id),
-                "Index Uniqueness: duplicate district dynasty support entry"
-            );
-            debug_assert!(
-                state.dynasties.contains_key(dynasty_id) && *support <= 10_000,
-                "Record Reference Validity: invalid district dynasty support entry"
-            );
-        }
     }
     let mut active_public_works = BTreeSet::new();
     let mut active_player_sponsored_works = 0_usize;

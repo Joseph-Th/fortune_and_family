@@ -1,6 +1,6 @@
 //! Grounded legal claims shared by player commands and autonomous rival behavior.
 
-use crate::core::{AppState, ContractStatus, LegalCaseKind, LegalClaimSource, LoanStatus};
+use crate::core::{AppState, LegalCaseKind, LegalClaimSource, LoanStatus};
 use crate::ids::DynastyId;
 use crate::money::Money;
 use crate::registry::Registry;
@@ -127,8 +127,11 @@ pub(crate) fn quote_grounded_legal_claim(
             .contracts
             .values()
             .filter(|contract| {
-                contract.status == ContractStatus::Breached
-                    && contract.breaching_dynasty_id == Some(defendant_dynasty_id)
+                // Recoverable breach debt carries its own attributed
+                // breacher/victim pair from the first attributable miss, so
+                // the claim grounds on the debt rather than on the contract's
+                // lifecycle status.
+                contract.breaching_dynasty_id == Some(defendant_dynasty_id)
                     && contract.breach_victim_dynasty_id == Some(plaintiff_dynasty_id)
                     && contract.unpaid_breach_penalty > Money::ZERO
                     && legal_claim_source_unused(
@@ -149,7 +152,7 @@ pub(crate) fn quote_grounded_legal_claim(
                 evidence_basis_points: LEGAL_CONTRACT_BREACH_EVIDENCE_BASIS_POINTS,
                 maximum_damages: contract.unpaid_breach_penalty,
                 description: format!(
-                    "recover {} still unpaid on breached supply contract {}",
+                    "recover {} still unpaid on attributed supply contract {}",
                     contract.unpaid_breach_penalty, contract.id
                 ),
             }),

@@ -157,12 +157,6 @@ impl Skeleton {
         Pose::new(self.joints.iter().map(Joint::rest_angle).collect())
     }
 
-    /// Returns the index of the joint named `name`.
-    #[must_use]
-    pub fn find_joint(&self, name: &str) -> Option<usize> {
-        self.joints.iter().position(|joint| joint.name == name)
-    }
-
     /// Resolves world-space joint segments in sub-pixel units.
     ///
     /// The root joint is placed at `root`, and each joint reports the segment from its parent
@@ -653,7 +647,12 @@ mod tests {
 
         assert_eq!(skeleton.len(), HumanJoint::ALL.len());
         for joint in HumanJoint::ALL {
-            assert_eq!(skeleton.find_joint(joint.name()), Some(joint.index()));
+            assert!(
+                skeleton
+                    .joints
+                    .iter()
+                    .any(|skeleton_joint| skeleton_joint.name == joint.name())
+            );
         }
     }
 

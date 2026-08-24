@@ -513,7 +513,6 @@ pub struct DistrictRuntime {
     pub(crate) sanitation_basis_points: u16,
     pub(crate) safety_basis_points: u16,
     pub(crate) unrest_basis_points: u16,
-    pub(crate) dynasty_support: Vec<(DynastyId, u16)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

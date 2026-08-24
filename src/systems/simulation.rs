@@ -278,7 +278,15 @@ fn decide_business_purchases(
                 .get(&business.id())
                 .copied()
                 .unwrap_or(Money::ZERO);
-            let spendable = cash.saturating_sub(business.policy.minimum_cash_reserve);
+            let cash_reserve = if business.status() == BusinessStatus::Distressed {
+                // A distressed firm may spend through its minimum cash
+                // reserve to keep operating, matching the daily cost limiter;
+                // purchase planning must fence off no more.
+                Money::ZERO
+            } else {
+                business.policy.minimum_cash_reserve
+            };
+            let spendable = cash.saturating_sub(cash_reserve);
             let shortfall = desired.saturating_sub(current);
             let quantity = shortfall
                 .min(stock)
@@ -589,21 +597,26 @@ pub(crate) fn effective_capacity_batches(
         .get(&dynasty.id())
         .expect("business owner dynasty must have family governance")
         .governance;
-    let effective_administrative_capacity = u32::from(dynasty.administrative_capacity())
-        .saturating_mul(governance_administrative_multiplier(governance))
-        / 10_000;
+    // The governance multiplier stays un-truncated so small houses keep their
+    // full bonus: the ratio divides once instead of compounding truncations.
+    let weighted_administrative_capacity = u32::from(dynasty.administrative_capacity())
+        .saturating_mul(governance_administrative_multiplier(governance));
     let effective_administrative_load = dynasty.administrative_load().saturating_add(
         super::strategic::dynasty_office_administrative_load(state, dynasty.id()),
     );
-    let administrative_efficiency = if effective_administrative_load == 0
-        || u32::from(effective_administrative_load) <= effective_administrative_capacity
-    {
+    let administrative_efficiency = if effective_administrative_load == 0 {
+        // Nothing to administer: no load can throttle capacity.
         10_000_u16
     } else {
+        // `weighted_administrative_capacity` is capacity scaled by the
+        // governance multiplier in basis points, so one division by the load
+        // yields basis points directly.
         u16::try_from(
-            effective_administrative_capacity * 10_000 / u32::from(effective_administrative_load),
+            (u64::from(weighted_administrative_capacity)
+                / u64::from(effective_administrative_load))
+            .min(10_000),
         )
-        .expect("administrative efficiency must fit u16")
+        .unwrap_or(10_000)
     };
     let status_efficiency = match business.status() {
         BusinessStatus::Active => 10_000_u16,
@@ -915,10 +928,8 @@ fn decide_business_sales(
             quantity,
             candidate.price,
         )?;
-        // Remaining shared capacity must stay nonnegative: renown lets a
-        // renowned house claim up to ~17% more than the raw remainder, so
-        // the leftover is floored at zero instead of relying on every
-        // multiplier staying below one.
+        // Remaining shared capacity must stay nonnegative; the quantity is
+        // already clamped to the shared remainder in `sale_quantity`.
         market_capacity.insert(
             candidate.good_id,
             candidate
@@ -1020,10 +1031,10 @@ fn plan_sale_candidate(
 /// operation moves less of what it has even when the market has room. Renown
 /// then governs access to genuinely scarce capacity: households and merchants
 /// seek out reputable houses first, so an established quality reputation
-/// claims up to ~17% more of a capped market while an obscure or disgraced
-/// house claims less. A guild entry restriction narrows that access again for
-/// outsiders to the trade's chartered guild. No factor can place more than
-/// the business actually stocked.
+/// claims the shared remainder ahead of an obscure or disgraced house. A guild
+/// entry restriction narrows that access again for outsiders to the trade's
+/// chartered guild. No factor can place more than the business actually
+/// stocked or more than the good's remaining absorption headroom.
 fn sale_quantity(candidate: &BusinessSaleCandidate) -> Quantity {
     let renown_basis_points = (10_000 + (candidate.owner_reputation - 5_000) / 3).max(1);
     let skilled_claim = candidate
@@ -1033,7 +1044,9 @@ fn sale_quantity(candidate: &BusinessSaleCandidate) -> Quantity {
         .capacity
         .saturating_mul_ratio(renown_basis_points, 10_000)
         .saturating_mul_ratio(candidate.guild_access_basis_points, 10_000);
-    skilled_claim.min(claimed_capacity)
+    // Renown prioritizes a claim on the shared remainder; it never places past
+    // it, which would breach the absorption ceiling the remainder enforces.
+    skilled_claim.min(claimed_capacity).min(candidate.capacity)
 }
 
 fn validate_business_sale_revenue(
@@ -1442,8 +1455,6 @@ fn apply_household_consumption(
     Ok(())
 }
 
-const MAINTENANCE_TOOL_SHARE_BASIS_POINTS: i64 = 10_000;
-
 #[derive(Clone, Copy)]
 struct MaintenanceSnapshot {
     business_id: BusinessId,
@@ -1548,7 +1559,9 @@ fn maintenance_line(
     let can_maintain =
         desired_cost > Money::ZERO && cash.saturating_sub(minimum_cash_reserve) >= desired_cost;
     let tool_budget = if can_maintain && recipe.output_good_id() != tools_id {
-        desired_cost.saturating_mul_ratio(MAINTENANCE_TOOL_SHARE_BASIS_POINTS, 10_000)
+        // Maintenance buys its tools with the full budget; the tool share of
+        // production and public works is deliberately smaller.
+        desired_cost
     } else {
         Money::ZERO
     };
@@ -1844,7 +1857,7 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(),
             id,
             day: state.clock.day(),
             kind: ChronicleKind::PriceShock,
-            summary: format!("{good_name} moved by {change_basis_points} basis points to {price}."),
+            summary: price_shock_summary(&good_name, change_basis_points, price),
         });
         emitted += 1;
     }
@@ -1854,6 +1867,23 @@ fn update_market_prices(registry: &Registry, state: &mut AppState) -> Result<(),
 /// Days a good stays silent in the chronicle after a recorded price shock.
 const PRICE_SHOCK_REPEAT_SUPPRESSION_DAYS: i64 = 14;
 const PRICE_SHOCKS_PER_DAY: u32 = 3;
+
+/// One authored sentence shape for price shocks, shared by the writer and the
+/// suppression reader so wording drift can never silently break suppression.
+const PRICE_SHOCK_SUMMARY_SEPARATOR: &str = " moved by ";
+
+fn price_shock_summary(good_name: &str, change_basis_points: i64, price: Money) -> String {
+    format!(
+        "{good_name}{PRICE_SHOCK_SUMMARY_SEPARATOR}{change_basis_points} basis points to {price}."
+    )
+}
+
+fn price_shock_good_name(summary: &str) -> &str {
+    summary
+        .split(PRICE_SHOCK_SUMMARY_SEPARATOR)
+        .next()
+        .unwrap_or(summary)
+}
 
 fn recently_shocked_goods(state: &AppState) -> BTreeSet<String> {
     let cutoff_day = state
@@ -1865,10 +1895,8 @@ fn recently_shocked_goods(state: &AppState) -> BTreeSet<String> {
         if entry.day < cutoff_day {
             break;
         }
-        if entry.kind == ChronicleKind::PriceShock
-            && let Some(good_name) = entry.summary.split(" moved by ").next()
-        {
-            goods.insert(good_name.to_owned());
+        if entry.kind == ChronicleKind::PriceShock {
+            goods.insert(price_shock_good_name(&entry.summary).to_owned());
         }
     }
     goods
@@ -2217,9 +2245,10 @@ fn regional_demand_availability_basis_points(state: &AppState) -> u16 {
         .filter(|route| route.active)
         .collect::<Vec<_>>();
     if routes.is_empty() {
-        // No active trade route means no external regional trade at all, not
-        // a perfectly healthy one.
-        return 0;
+        // No modeled or active route is a total blockade, not a perfectly
+        // healthy one: the subsistence floor still applies, matching the
+        // fully disrupted-route case below.
+        return REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS;
     }
     let total = routes
         .iter()
@@ -2254,6 +2283,10 @@ fn process_year_boundary(registry: &Registry, state: &mut AppState) -> Result<()
 }
 
 fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> {
+    // An incapacitated member has already left every active duty; a bounded
+    // window of collapsed health eventually claims them instead of leaving
+    // an inert record that can neither recover nor die.
+    const INCAPACITATED_DEATH_WINDOW_DAYS: i64 = 3 * 360;
     let epidemic_severity = state
         .crises
         .values()
@@ -2290,6 +2323,9 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
                 resolved_health
             };
         if character.runtime.health_basis_points == 0 && !head_ids.contains(&character.id()) {
+            if character.runtime.incapacitated_day.is_none() {
+                character.runtime.incapacitated_day = Some(state.clock.day());
+            }
             character.runtime.status = CharacterStatus::Incapacitated;
             newly_incapacitated.push((
                 character.id(),
@@ -2300,6 +2336,36 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
     }
     for (character_id, dynasty_id, character_name) in newly_incapacitated {
         synchronize_character_incapacitation(state, character_id, dynasty_id, &character_name)?;
+    }
+    // An incapacitated member has already left every active duty; a bounded
+    // window of collapsed health eventually claims them instead of leaving
+    // an inert record that can neither recover nor die.
+    let day = state.clock.day();
+    let dying_ids: Vec<(CharacterId, DynastyId)> = state
+        .characters
+        .iter()
+        .filter(|character| character.status() == CharacterStatus::Incapacitated)
+        .filter(|character| {
+            character
+                .runtime
+                .incapacitated_day
+                .is_some_and(|collapsed_day| {
+                    day.saturating_sub(collapsed_day) >= INCAPACITATED_DEATH_WINDOW_DAYS
+                })
+        })
+        .map(|character| (character.id(), character.dynasty_id()))
+        .collect();
+    for (character_id, dynasty_id) in dying_ids {
+        retire_incapacitated_member(state, character_id);
+        if dynasty_id == state.player_dynasty_id {
+            super::strategic::try_push_outbox(
+                state,
+                OutboxKind::Family,
+                format!("Character {character_id} passed away"),
+                "A family member who had been incapacitated by collapsed health has died."
+                    .to_owned(),
+            )?;
+        }
     }
     reconcile_inactive_business_managers(state);
     // A head whose health has collapsed with no designated heir must not keep
@@ -2496,7 +2562,7 @@ fn synchronize_character_incapacitation(
         .transpose()?;
     for link in state.family_links.values_mut().filter(|link| {
         link.active
-            && link.kind == FamilyLinkKind::Ward
+            && matches!(link.kind, FamilyLinkKind::Ward | FamilyLinkKind::Marriage)
             && (link.first_character_id == character_id || link.second_character_id == character_id)
     }) {
         link.active = false;
@@ -2524,6 +2590,24 @@ fn synchronize_character_incapacitation(
         )?;
     }
     Ok(())
+}
+
+/// Marks a long-incapacitated member as deceased. Incapacitation already
+/// vacated every council, institutional, and management duty, so only the
+/// status and any surviving active family links need closing.
+fn retire_incapacitated_member(state: &mut AppState, character_id: CharacterId) {
+    state
+        .characters
+        .get_mut(character_id)
+        .expect("incapacitated character must exist")
+        .runtime
+        .status = CharacterStatus::Deceased;
+    for link in state.family_links.values_mut().filter(|link| {
+        link.active
+            && (link.first_character_id == character_id || link.second_character_id == character_id)
+    }) {
+        link.active = false;
+    }
 }
 
 fn resolve_annual_health(current: u16, age_years: i64, epidemic_severity: u16) -> u16 {
@@ -2861,6 +2945,7 @@ fn insert_succession_heir(
             health_basis_points: 9_500,
             loyalty_basis_points: 8_000,
             role: CharacterRole::Heir,
+            incapacitated_day: None,
         },
     });
     state.family_links.insert(

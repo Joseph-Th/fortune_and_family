@@ -674,7 +674,6 @@ fn offset_point(x: i32, y: i32, step_x: i32, step_y: i32) -> Option<(i32, i32)> 
 #[cfg(test)]
 mod tests {
     use super::super::color::{Palette, Ramp, Rgb8, ShadeProfile};
-    use super::super::math::length;
     use super::super::surface::{Material, MaterialTable, Surface};
     use super::*;
 
@@ -692,7 +691,12 @@ mod tests {
     #[test]
     fn normalized_light_has_unit_magnitude() {
         let light = LightDirection::normalized(-3, -4, 5);
-        let magnitude = length(length(light.x, light.y), light.z);
+        let magnitude = {
+            let x = i128::from(light.x);
+            let y = i128::from(light.y);
+            let z = i128::from(light.z);
+            i32::try_from((x * x + y * y + z * z).isqrt()).expect("magnitude must fit i32")
+        };
 
         assert!((magnitude - ONE).abs() <= 64, "magnitude was {magnitude}");
     }

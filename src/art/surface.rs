@@ -7,7 +7,7 @@
 //! restyled without redrawing it.
 
 use super::canvas::Canvas;
-use super::color::{Palette, RampHandle};
+use super::color::RampHandle;
 
 /// Identifies a material slot in a [`MaterialTable`]. Zero means "no material".
 pub type MaterialId = u8;
@@ -361,19 +361,9 @@ fn ordered_threshold(x: i32, y: i32) -> i32 {
     BAYER_4X4[row][column] * PER_MILLE / 16
 }
 
-/// Builds a canvas and its palette in one step.
-#[must_use]
-pub fn resolve_with_palette(
-    surface: &Surface,
-    materials: &MaterialTable,
-    palette: &Palette,
-) -> (Canvas, Palette) {
-    (surface.resolve(materials), palette.clone())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::color::{Ramp, Rgb8, ShadeProfile};
+    use super::super::color::{Palette, Ramp, Rgb8, ShadeProfile};
     use super::*;
 
     fn material_table() -> (Palette, MaterialTable, MaterialId) {
@@ -491,8 +481,8 @@ mod tests {
             surface.plot(step, step, Brush::new(id, step * 150, 0));
         }
 
-        let first = resolve_with_palette(&surface, &materials, &palette);
-        let second = resolve_with_palette(&surface, &materials, &palette);
+        let first = (surface.resolve(&materials), palette.clone());
+        let second = (surface.resolve(&materials), palette.clone());
 
         assert_eq!(first, second);
     }

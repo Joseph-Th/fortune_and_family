@@ -7164,15 +7164,17 @@ mod legal_cases {
                 .get(&loan_id)
                 .expect("source loan must remain")
                 .status,
-            LoanStatus::Repaid
+            LoanStatus::Delinquent
         );
+        // A negotiated settlement discharges exactly what it pays: 4,375 of a
+        // 5,000-copper obligation cannot erase the loan.
         assert_eq!(
             state
                 .loans
                 .get(&loan_id)
                 .expect("source loan must remain")
                 .balance,
-            Money::ZERO
+            Money::from_copper(625)
         );
         assert_eq!(
             state

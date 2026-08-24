@@ -2297,7 +2297,6 @@ fn initialize_districts(registry: &Registry, state: &mut AppState) {
                 } else {
                     1_200
                 },
-                dynasty_support: Vec::new(),
             },
         );
     }
@@ -2717,7 +2716,9 @@ fn initialize_objectives(state: &mut AppState) {
                 id,
                 dynasty_id,
                 kind,
-                target_dynasty_id: Some(state.player_dynasty_id),
+                // Opening objectives are self-directed routes to durable
+                // power, not campaigns against a named rival.
+                target_dynasty_id: None,
                 priority: 60 + u16::try_from(index).unwrap_or(0),
                 created_day: 0,
                 status: ObjectiveStatus::Pursuing,
@@ -3298,13 +3299,27 @@ fn terminate_inactive_contract(
         .get_mut(&due.id)
         .expect("contract must exist");
     contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
-    contract.breaching_dynasty_id = breaching_dynasty_id;
-    contract.breach_victim_dynasty_id = breach_victim_dynasty_id;
-    contract.unpaid_breach_penalty = if contract.breach_victim_dynasty_id.is_some() {
-        unpaid_penalty
-    } else {
-        Money::ZERO
-    };
+    if let Some((breacher, victim)) = breaching_dynasty_id.zip(breach_victim_dynasty_id) {
+        // Preserve any earlier attribution: the defendant for accrued
+        // recoverable debt must remain identifiable even when this
+        // termination is mutually inactive.
+        contract.breaching_dynasty_id = Some(breacher);
+        contract.breach_victim_dynasty_id = Some(victim);
+    }
+    if unpaid_penalty > Money::ZERO {
+        // Termination-time penalties accumulate on top of earlier recoverable
+        // breach debt, capped at the contractual penalty.
+        let accumulated = contract
+            .unpaid_breach_penalty
+            .checked_add(unpaid_penalty)
+            .ok_or(SimulationError::ContractPenaltyOverflow {
+                contract_id: due.id,
+                current: contract.unpaid_breach_penalty,
+                incoming: unpaid_penalty,
+            })?
+            .min(contract.penalty);
+        contract.unpaid_breach_penalty = accumulated;
+    }
     contract.status = ContractStatus::Breached;
     if buyer_owner_id != seller_owner_id {
         if !seller_active {
@@ -3368,16 +3383,16 @@ fn finalize_expired_contract(
     } else {
         ContractStatus::Breached
     };
-    contract.breaching_dynasty_id = if fulfilled {
-        None
-    } else {
-        settlement.breaching_dynasty_id()
-    };
-    contract.breach_victim_dynasty_id = if fulfilled {
-        None
-    } else {
-        settlement.breach_victim_dynasty_id()
-    };
+    if let Some((breacher, victim)) = settlement
+        .breaching_dynasty_id()
+        .zip(settlement.breach_victim_dynasty_id())
+    {
+        // A final-delivery miss attributes its breach without erasing any
+        // earlier attributable miss; fulfillment preserves accrued recoverable
+        // debt because the victim already lost the copper.
+        contract.breaching_dynasty_id = Some(breacher);
+        contract.breach_victim_dynasty_id = Some(victim);
+    }
     if settlement.buyer.owner_id != settlement.seller.owner_id {
         let memory = if fulfilled {
             format!("Supply contract {} completed successfully.", due.id)
@@ -3494,15 +3509,24 @@ fn settle_failed_contract(
         if let Some(next_due_day) = next_due_day {
             contract.next_due_day = next_due_day;
         }
+        if let Some((breacher, victim)) = settlement
+            .breaching_dynasty_id()
+            .zip(settlement.breach_victim_dynasty_id())
+        {
+            // Attribution records who owes the recoverable claim from the
+            // first attributable miss and persists until the claim is
+            // discharged, so later settlements cannot orphan accrued debt.
+            contract.breaching_dynasty_id = Some(breacher);
+            contract.breach_victim_dynasty_id = Some(victim);
+        }
         if contract.missed_deliveries >= 3 {
             contract.status = ContractStatus::Breached;
-            contract.breaching_dynasty_id = settlement.breaching_dynasty_id();
-            contract.breach_victim_dynasty_id = settlement.breach_victim_dynasty_id();
         }
         if settlement.has_attributable_nonperformance() && unpaid_terminal_penalty > Money::ZERO {
             // A partially paid penalty accumulates as recoverable breach debt
-            // whether or not this delivery is the terminal one, so the victim
-            // can pursue the full amount through a grounded legal claim.
+            // whether or not this delivery is the terminal one, capped at the
+            // contractual penalty so repeated misses cannot inflate the claim
+            // beyond what the contract owes.
             let accumulated = contract
                 .unpaid_breach_penalty
                 .checked_add(unpaid_terminal_penalty)
@@ -3510,7 +3534,8 @@ fn settle_failed_contract(
                     contract_id: due.id,
                     current: contract.unpaid_breach_penalty,
                     incoming: unpaid_terminal_penalty,
-                })?;
+                })?
+                .min(contract.penalty);
             contract.unpaid_breach_penalty = accumulated;
         }
         contract.status == ContractStatus::Breached
@@ -3734,7 +3759,18 @@ fn settle_due_civic_debt(
         .get(&treasury_id)
         .expect("civic treasury must exist")
         .budget;
-    if treasury_budget >= amount_due {
+    let remaining_balance = accrued_balance
+        .checked_sub(amount_due)
+        .expect("civic debt payment cannot exceed accrued balance");
+    // The same rule the private-loan machinery enforces: a payment that
+    // cannot even cover the week's interest lets the balance grow while
+    // every installment "succeeds", producing a debt that is mathematically
+    // unrepayable yet never flagged. Such an installment counts as missed so
+    // the delinquency and default machinery handles unsustainable terms
+    // instead of collecting interest forever.
+    let payment_is_productive = remaining_balance == Money::ZERO || amount_due >= interest_due;
+    let payable = treasury_budget >= amount_due && payment_is_productive;
+    if payable {
         let creditor_treasury = state
             .dynasties
             .get(&due.creditor_dynasty_id)
@@ -3753,10 +3789,7 @@ fn settle_due_civic_debt(
             .civic_debts
             .get(&due.id)
             .expect("civic debt must exist");
-        if treasury_budget >= amount_due {
-            let remaining_balance = accrued_balance
-                .checked_sub(amount_due)
-                .expect("civic debt payment cannot exceed accrued balance");
+        if payable {
             if remaining_balance == Money::ZERO {
                 None
             } else {
@@ -3773,7 +3806,7 @@ fn settle_due_civic_debt(
         .get_mut(&due.id)
         .expect("civic debt must exist")
         .balance = accrued_balance;
-    if treasury_budget >= amount_due {
+    if payable {
         settle_successful_civic_debt_payment(state, treasury_id, due, amount_due, next_due_day)?;
     } else {
         settle_missed_civic_debt_payment(state, treasury_id, due, next_due_day)?;
@@ -4851,7 +4884,7 @@ fn settle_employment_agreement(
         wage_due,
     );
     emit_employment_outcome(state, business_id, recovered, became_disputed)?;
-    if paid == wage_due && prior_status == EmploymentStatus::Active {
+    if paid == wage_due && wage_due > Money::ZERO && prior_status == EmploymentStatus::Active {
         respond_to_market_wage_pressure(registry, state, employment_id, business_id)?;
     }
     Ok(())
@@ -4893,10 +4926,8 @@ fn respond_to_market_wage_pressure(
             i64::from(agreement.workers.max(1)),
         )
     };
-    if current_per_worker >= reference.copper()
-        || current_per_worker.saturating_mul(10_000)
-            >= i64::from(WAGE_ADEQUACY_STINGY_BASIS_POINTS)
-                .saturating_mul(reference.copper().max(1))
+    if current_per_worker.saturating_mul(10_000)
+        >= i64::from(WAGE_ADEQUACY_STINGY_BASIS_POINTS).saturating_mul(reference.copper().max(1))
     {
         return Ok(());
     }
@@ -5036,8 +5067,14 @@ fn update_employment_after_payment(
         .employment
         .get_mut(&employment_id)
         .expect("employment must exist");
-    if paid == wage_due {
+    if paid == wage_due && wage_due > Money::ZERO {
         return update_fully_paid_employment(agreement, prior_status, environment);
+    }
+    if wage_due <= Money::ZERO {
+        // A week with no work due pays nothing and drifts nothing: an idle
+        // firm owes no payroll, so payment accounting must not read a zero
+        // paycheck as either reconciliation or a missed one.
+        return (false, false);
     }
     let loyalty_loss = if prior_status == EmploymentStatus::Disputed {
         100
@@ -5994,6 +6031,14 @@ fn advance_ai_credit_participation(
     Ok(())
 }
 
+/// A business is worth external working capital only when its own operating
+/// history does not mark it as structurally unprofitable: the recovery
+/// machinery refuses lifetime-losing firms, so financing one through a loan
+/// would just convert a rescue doctrine into default churn.
+fn business_is_creditworthy(business: &crate::core::Business) -> bool {
+    business.finance.lifetime_costs <= business.finance.lifetime_revenue
+}
+
 /// The lending half of AI credit participation: a liquid house may fund a borrower's
 /// working-capital shortfall through the canonical loan machinery.
 fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
@@ -6020,9 +6065,7 @@ fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
             .copied()
             .filter(|id| *id != lender_id && *id != player_id)
             .filter_map(|candidate_id| {
-                if dynasty_has_active_ai_borrowing(state, candidate_id)
-                    || same_ai_pair_credit_blocks_new_loan(state, lender_id, candidate_id)
-                {
+                if dynasty_has_active_ai_borrowing(state, candidate_id) {
                     return None;
                 }
                 state
@@ -6037,6 +6080,7 @@ fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
                             BusinessStatus::Insolvent | BusinessStatus::Closed
                         )
                     })
+                    .filter(|business| business_is_creditworthy(business))
                     .filter_map(|business| {
                         let target = business_recapitalization_target(registry, state, business);
                         let shortfall = target.saturating_sub(business.cash());
@@ -6113,13 +6157,17 @@ fn advance_ai_credit_borrowing(
                     BusinessStatus::Insolvent | BusinessStatus::Closed
                 )
             })
+            .filter(|business| business_is_creditworthy(business))
             .filter_map(|business| {
                 let shortfall = business_recapitalization_target(registry, state, business)
                     .saturating_sub(business.cash());
                 (shortfall > Money::ZERO).then_some((business.id(), shortfall))
             })
             .max_by_key(|(_, shortfall)| *shortfall);
-        if neediest_business.is_none() || borrower.treasury() >= Money::from_copper(20_000) {
+        let Some((_, shortfall)) = neediest_business else {
+            continue;
+        };
+        if borrower.treasury() >= Money::from_copper(20_000) {
             continue;
         }
         if state.loans.values().any(|loan| {
@@ -6133,9 +6181,8 @@ fn advance_ai_credit_borrowing(
             .copied()
             .filter(|id| *id != borrower_id && *id != player_id)
             .filter_map(|candidate_id| {
-                if same_ai_pair_credit_blocks_new_loan(state, candidate_id, borrower_id) {
-                    return None;
-                }
+                // `validate_loan` itself rejects a second unsettled loan
+                // between the same pair, so no duplicate pre-filter here.
                 let available = state
                     .dynasties
                     .get(&candidate_id)
@@ -6151,7 +6198,10 @@ fn advance_ai_credit_borrowing(
         else {
             continue;
         };
-        let principal = available.min(Money::from_copper(10_000));
+        // Borrow only what the motivating shortfall needs: a house must not
+        // pay interest to hold idle treasury cash while the need that
+        // motivated the loan persists.
+        let principal = available.min(shortfall).min(Money::from_copper(10_000));
         if principal < Money::from_copper(1_000) {
             continue;
         }
@@ -6206,18 +6256,6 @@ fn dynasty_has_active_ai_borrowing(state: &AppState, dynasty_id: DynastyId) -> b
         .loans
         .values()
         .any(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status.is_repayment_active())
-}
-
-fn same_ai_pair_credit_blocks_new_loan(
-    state: &AppState,
-    lender_id: DynastyId,
-    borrower_id: DynastyId,
-) -> bool {
-    state.loans.values().any(|loan| {
-        loan.lender_dynasty_id == lender_id
-            && loan.borrower_dynasty_id == borrower_id
-            && loan.status.is_repayment_active()
-    })
 }
 
 fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
@@ -7347,7 +7385,8 @@ fn resolve_institution_selections(
     if due.is_empty() {
         return Ok(());
     }
-    let next_selection_day = checked_future_day(day, super::OFFICE_TERM_DAYS)?;
+    let next_term_day = checked_future_day(day, super::OFFICE_TERM_DAYS)?;
+    let next_retry_day = checked_future_day(day, super::OFFICE_VACANCY_RETRY_DAYS)?;
 
     // Decide the complete selection result before committing any term change.
     let mut planned_office_holders = BTreeSet::new();
@@ -7360,29 +7399,42 @@ fn resolve_institution_selections(
             day,
             &planned_office_holders,
         );
-        let institution = state
-            .institutions
-            .get(&institution_id)
-            .expect("institution runtime must exist");
-        let term_number = institution
-            .term_number
-            .checked_add(1)
-            .filter(|next| *next < u32::MAX)
-            .ok_or(SimulationError::InstitutionTermNumberExhausted { institution_id })?;
+        // A vacancy retries on the short forfeiture cadence instead of
+        // locking the office — its powers and stipend flow — away for a full
+        // term, and an unfilled term does not consume a term number.
+        let (term_number, next_selection_day) = {
+            let institution = state
+                .institutions
+                .get(&institution_id)
+                .expect("institution runtime must exist");
+            match winner {
+                Some(_) => (
+                    institution
+                        .term_number
+                        .checked_add(1)
+                        .filter(|next| *next < u32::MAX)
+                        .ok_or(SimulationError::InstitutionTermNumberExhausted {
+                            institution_id,
+                        })?,
+                    next_term_day,
+                ),
+                None => (institution.term_number, next_retry_day),
+            }
+        };
         if let Some(winner) = winner {
             planned_office_holders.insert(winner);
         }
-        selections.push((institution_id, winner, term_number));
+        selections.push((institution_id, winner, term_number, next_selection_day));
     }
 
-    for (institution_id, winner, term_number) in &selections {
+    for (institution_id, winner, term_number, next_selection_day) in &selections {
         let institution = state
             .institutions
             .get_mut(institution_id)
             .expect("institution runtime must exist");
         institution.office_holder_id = *winner;
         institution.term_started_day = day;
-        institution.next_selection_day = next_selection_day;
+        institution.next_selection_day = *next_selection_day;
         institution.term_number = *term_number;
     }
     announce_institution_selections(state, selections)?;
@@ -7455,9 +7507,9 @@ fn select_institution_officeholder(
 /// office selection.
 fn announce_institution_selections(
     state: &mut AppState,
-    selections: Vec<(InstitutionId, Option<CharacterId>, u32)>,
+    selections: Vec<(InstitutionId, Option<CharacterId>, u32, i64)>,
 ) -> Result<(), SimulationError> {
-    for (institution_id, winner, term_number) in selections {
+    for (institution_id, winner, term_number, _) in selections {
         if let Some(winner) = winner {
             apply_office_concentration_backlash(state, institution_id, winner);
             let winner_dynasty_id = state
@@ -7735,7 +7787,9 @@ fn advance_ai_objectives(registry: &Registry, state: &mut AppState) -> Result<()
                     id: new_id,
                     dynasty_id,
                     kind: next_objective_kind(kind),
-                    target_dynasty_id: Some(state.player_dynasty_id),
+                    // Replacement objectives are self-directed routes to
+                    // durable power, not campaigns against a named rival.
+                    target_dynasty_id: None,
                     priority: 50,
                     created_day: day,
                     status: ObjectiveStatus::Pursuing,
@@ -7798,10 +7852,14 @@ fn advance_ai_accumulation_objective(
         let Some(business) = state.businesses.get(business_id) else {
             continue;
         };
-        let excess = business
-            .cash()
-            .saturating_sub(business_owner_distribution_reserve(registry, business))
-            .max(Money::ZERO);
+        // The skim harvests genuinely idle cash only: the floor is the larger
+        // of the distribution reserve and the recapitalization target, so an
+        // accumulation drive cannot strip a firm below its own working-capital
+        // needs and manufacture the very shortfall that interest-bearing
+        // borrowing would later be recruited to refill.
+        let skim_floor = business_owner_distribution_reserve(registry, business)
+            .max(business_recapitalization_target(registry, state, business));
+        let excess = business.cash().saturating_sub(skim_floor).max(Money::ZERO);
         // `distribute_owned_business_cash` revalidates ownership, lifecycle,
         // reserve, and overflow before committing; a failed skim is skipped.
         if excess <= Money::ZERO {
@@ -8127,7 +8185,7 @@ fn update_information_reports(
     let day = state.clock.day();
     let most_changed = registry.goods().iter().filter_map(|good| {
         let quote = state.market.get_quote(good.id())?;
-        let prior = quote.previous_price().copper().max(1);
+        let prior = quote.previous_price().copper();
         let change = (quote.price().copper() - prior).unsigned_abs();
         // A month with no price movement anywhere is a non-event: publishing
         // "identified causes" for it would manufacture intelligence noise.
@@ -8179,7 +8237,8 @@ fn file_grounded_ai_legal_cases(
         let can_fund_filing = state
             .dynasties
             .get(&plaintiff_id)
-            .is_some_and(|dynasty| dynasty.treasury() >= super::LEGAL_CASE_FILING_COST);
+            .is_some_and(|dynasty| dynasty.treasury() >= super::LEGAL_CASE_FILING_COST)
+            && super::court_filing_fee_headroom(registry, state).is_ok();
         if !can_fund_filing || !legal_filing_interval_available(state, plaintiff_id, day) {
             continue;
         }
@@ -8506,6 +8565,28 @@ pub(crate) fn recoverable_legal_damages(
     }
 }
 
+/// Returns the full outstanding obligation behind a grounded claim source.
+///
+/// A negotiated settlement extinguishes the claim in whole only when its
+/// payment covers this amount; anything less discharges just what was paid,
+/// mirroring how a court judgment treats a judgment-proof defendant.
+pub(crate) fn outstanding_legal_claim_obligation(
+    state: &AppState,
+    claim_source: Option<LegalClaimSource>,
+) -> Money {
+    match claim_source {
+        Some(LegalClaimSource::Loan { loan_id }) => state
+            .loans
+            .get(&loan_id)
+            .map_or(Money::ZERO, |loan| loan.balance),
+        Some(LegalClaimSource::Contract { contract_id }) => state
+            .contracts
+            .get(&contract_id)
+            .map_or(Money::ZERO, |contract| contract.unpaid_breach_penalty),
+        None => Money::ZERO,
+    }
+}
+
 pub(crate) fn settle_legal_claim_source(
     state: &mut AppState,
     claim_source: Option<LegalClaimSource>,
@@ -8750,7 +8831,14 @@ fn detect_and_advance_crises(
         && !has_active_crisis(state, CrisisKind::NobleDemand)
         && state.rng.is_chance_success(2_500)
     {
-        let district_id = state.districts.keys().copied().next();
+        // The prince's extraordinary levy lands where the money is: the
+        // district with the highest current rent index, ties broken by the
+        // stable district order.
+        let district_id = state
+            .districts
+            .values()
+            .max_by_key(|district| (district.rent_index_basis_points, district.district_id))
+            .map(|district| district.district_id);
         insert_crisis(
             state,
             CrisisKind::NobleDemand,
@@ -8823,9 +8911,10 @@ fn advance_existing_crises(
             if worst_route_disruption >= TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD {
                 crisis.severity_basis_points.max(worst_route_disruption)
             } else {
-                crisis
-                    .severity_basis_points
-                    .saturating_sub(ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS)
+                // Every route has healed below the detection threshold: the
+                // tracked condition is gone, so the disruption ends with it
+                // instead of decaying for seasons as a phantom active threat.
+                0
             }
         } else if addressed_subjects.contains(&subject)
             || crisis

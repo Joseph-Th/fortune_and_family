@@ -141,6 +141,9 @@ pub struct CharacterRuntime {
     pub(crate) health_basis_points: u16,
     pub(crate) loyalty_basis_points: u16,
     pub(crate) role: CharacterRole,
+    /// The day a character's health collapsed into incapacitation. A
+    /// deterministic death window runs from here; `None` while active.
+    pub(crate) incapacitated_day: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

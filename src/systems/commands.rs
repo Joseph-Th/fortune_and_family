@@ -2529,7 +2529,9 @@ fn apply_legal_case(
             dynasty_id: defendant_dynasty_id,
         });
     }
-    if evidence_basis_points > 10_000 || damages.is_negative() {
+    if evidence_basis_points > 10_000 || damages <= Money::ZERO {
+        // Zero damages would file an unresolvable case: nothing to settle, no
+        // judgment award, and a claim source occupied for its whole life.
         return Err(CommandError::InvalidLegalTerms);
     }
     if state.legal_cases.values().any(|legal_case| {
@@ -2658,13 +2660,18 @@ fn apply_legal_settlement(
         .expect("legal plaintiff dynasty must exist")
         .resources
         .treasury = plaintiff_after;
+    // A negotiated settlement closes the grounded obligation in full only
+    // when the payment actually covers it; filing small damages and settling
+    // them cannot erase a larger underlying debt.
+    let settles_in_full =
+        quote.amount >= super::strategic::outstanding_legal_claim_obligation(state, claim_source);
     super::strategic::settle_legal_claim_source(
         state,
         claim_source,
         quote.plaintiff_dynasty_id,
         player_id,
         quote.amount,
-        true,
+        settles_in_full,
     );
     state
         .legal_cases
@@ -2690,10 +2697,17 @@ fn apply_legal_settlement(
         state,
         OutboxKind::Legal,
         format!("Legal case {case_id} settled"),
-        format!(
-            "The dynasty paid {} to settle the {:?} claim before judgment; the grounded obligation is closed.",
-            quote.amount, quote.kind
-        ),
+        if settles_in_full {
+            format!(
+                "The dynasty paid {} to settle the {:?} claim before judgment; the grounded obligation is closed.",
+                quote.amount, quote.kind
+            )
+        } else {
+            format!(
+                "The dynasty paid {} toward the {:?} claim before judgment; the remaining grounded obligation stands.",
+                quote.amount, quote.kind
+            )
+        },
     )?;
     Ok(CommandOutcome {
         summary: format!("Settled legal case {case_id} for {}.", quote.amount),
@@ -3162,6 +3176,7 @@ fn insert_ward_character(
             health_basis_points: 9_500,
             loyalty_basis_points: 8_500,
             role: CharacterRole::Clerk,
+            incapacitated_day: None,
         },
     });
 }
@@ -4733,7 +4748,11 @@ fn validate_negotiated_weekly_wage(
                     employment_id,
                     current: agreement.weekly_wage,
                 })?;
-            Ok(Some(raise.min(ceiling)))
+            // Negotiation is a concession, never a cut: a wage already above
+            // the per-worker ceiling (reachable through market wage pressure)
+            // stays where it is instead of being lowered onto disputing
+            // workers.
+            Ok(Some(raise.min(ceiling).max(agreement.weekly_wage)))
         }
         LaborResponse::ImproveConditions | LaborResponse::ReplaceWorkers => Ok(None),
     }

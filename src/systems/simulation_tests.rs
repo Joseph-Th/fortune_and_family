@@ -2863,6 +2863,7 @@ mod health_and_succession {
                 health_basis_points: 9_000,
                 loyalty_basis_points: 8_000,
                 role: CharacterRole::Clerk,
+                incapacitated_day: None,
             },
         });
         state
@@ -3217,6 +3218,7 @@ mod health_and_succession {
                 health_basis_points: 1,
                 loyalty_basis_points: 8_000,
                 role: CharacterRole::Clerk,
+                incapacitated_day: None,
             },
         });
         state
@@ -3407,6 +3409,7 @@ mod health_and_succession {
                 health_basis_points: 9_000,
                 loyalty_basis_points: 8_000,
                 role: CharacterRole::Clerk,
+                incapacitated_day: None,
             },
         });
         state

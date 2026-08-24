@@ -21,11 +21,6 @@ impl Angle {
     pub const ZERO: Self = Self(0);
 
     #[must_use]
-    pub const fn from_units(units: u16) -> Self {
-        Self(units)
-    }
-
-    #[must_use]
     pub const fn units(self) -> u16 {
         self.0
     }
@@ -137,19 +132,6 @@ pub fn ease_in_out(weight: i32) -> i32 {
     i32::try_from(value).expect("eased weight must fit i32")
 }
 
-/// Returns the length of `(x, y)` rounded down.
-///
-/// # Panics
-///
-/// Panics when the length does not fit `i32`.
-#[must_use]
-pub fn length(x: i32, y: i32) -> i32 {
-    let x = i128::from(x);
-    let y = i128::from(y);
-    let squared = x * x + y * y;
-    i32::try_from(squared.isqrt()).expect("length must fit i32")
-}
-
 /// Returns `sqrt(ONE^2 - squared)` scaled by [`ONE`], clamped at zero.
 ///
 /// # Panics
@@ -230,18 +212,6 @@ mod tests {
             assert!((0..=1_000).contains(&eased));
             previous = eased;
         }
-    }
-
-    #[test]
-    fn length_matches_a_known_triple() {
-        assert_eq!(length(3, 4), 5);
-        assert_eq!(length(-30, 40), 50);
-    }
-
-    #[test]
-    #[should_panic(expected = "length must fit i32")]
-    fn length_rejects_vectors_whose_magnitude_is_not_representable() {
-        let _ = length(i32::MIN, i32::MIN);
     }
 
     #[test]

@@ -1060,10 +1060,6 @@ fn validate_civic_numeric_ranges(state: &AppState) -> Result<(), String> {
             || district.sanitation_basis_points > 10_000
             || district.safety_basis_points > 10_000
             || district.unrest_basis_points > 10_000
-            || district
-                .dynasty_support
-                .iter()
-                .any(|(_, support)| *support > 10_000)
         {
             return Err(format!(
                 "district {} has an invalid basis-point value",
@@ -1189,23 +1185,6 @@ fn validate_definition_references(
         .any(|(district_id, district)| district.district_id != *district_id)
     {
         return Err("district runtime map key differs from its record ID".to_owned());
-    }
-    for district in state.districts.values() {
-        let mut supported_dynasties = BTreeSet::new();
-        for (dynasty_id, _) in &district.dynasty_support {
-            if !state.dynasties.contains_key(dynasty_id) {
-                return Err(format!(
-                    "district {} support references missing dynasty {dynasty_id}",
-                    district.district_id
-                ));
-            }
-            if !supported_dynasties.insert(*dynasty_id) {
-                return Err(format!(
-                    "district {} contains duplicate support for dynasty {dynasty_id}",
-                    district.district_id
-                ));
-            }
-        }
     }
     let expected_institutions: BTreeSet<_> = registry
         .institutions()
@@ -1539,17 +1518,14 @@ fn validate_contract_records(
             contract.breach_victim_dynasty_id,
         ) {
             (None, None) => true,
-            (Some(breacher), None) => {
-                contract.status == crate::core::ContractStatus::Breached
-                    && state.dynasties.contains_key(&breacher)
-            }
+            // Attribution records the defendant for recoverable breach debt
+            // from the first attributable miss, so it may outlive any status.
             (Some(breacher), Some(victim)) => {
-                contract.status == crate::core::ContractStatus::Breached
-                    && breacher != victim
+                breacher != victim
                     && state.dynasties.contains_key(&breacher)
                     && state.dynasties.contains_key(&victim)
             }
-            (None, Some(_)) => false,
+            (Some(_), None) | (None, Some(_)) => false,
         };
         let valid_delivery_attribution = contract_delivery_attribution_is_valid(state, contract);
         if seller_recipe.output_good_id() != contract.good_id
@@ -1562,8 +1538,7 @@ fn validate_contract_records(
             || (contract.status == crate::core::ContractStatus::Active
                 && contract.next_due_day > contract.end_day)
             || (contract.unpaid_breach_penalty > Money::ZERO
-                && (contract.status != crate::core::ContractStatus::Breached
-                    || contract.breaching_dynasty_id.is_none()
+                && (contract.breaching_dynasty_id.is_none()
                     || contract.breach_victim_dynasty_id.is_none()))
             || !valid_breach_attribution
             || !valid_delivery_attribution
