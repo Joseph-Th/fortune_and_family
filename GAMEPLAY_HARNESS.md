@@ -268,6 +268,9 @@ Reports contain:
 - Economic, civic, family, institutional, legal, crisis, and information snapshots
 - Per-campaign commercial ledger: player businesses' lifetime revenue, lifetime
   costs, and implied margin at each snapshot endpoint
+- Per-campaign `peak_player_treasury` and `minimum_unowned_property_value`
+  observations, so an unexercised acquisition route can be read as an
+  affordability ceiling rather than a declined choice
 - Representative decision traces
 - A chronological decision log for a configured number of campaigns, each retained step showing context, the selected command and outcome, and the reason no action was taken on quiet cycles
 - Findings and stated limitations
@@ -343,6 +346,9 @@ Findings use `Info`, `Warning`, or `Critical` severity. They identify conditions
 - Weak political progression or office utility
 - Succession without meaningful family, institutional, or strategic disruption
 - Excessive mature liquidity or starting-background imbalance
+- A property market that stayed priced out of reach: campaigns whose peak
+  treasury never reached the cheapest unowned property never had the option to
+  buy, which is an income-or-pricing signal rather than agent restraint
 
 Finding-rule unit tests should arrange the minimum report fields needed to test the rule. They should not run a long simulation merely to obtain a mutable report template.
 

@@ -2451,6 +2451,26 @@ fn initialize_properties(registry: &Registry, state: &mut AppState) {
                 collateral_loan_id: None,
             },
         );
+        // A modest workshop gives a rising house an attainable first step on
+        // the property ladder: rental income within reach of an established
+        // business, while the warehouses stay a mid-game aspiration.
+        let property_id = state.next_ids.property();
+        state.properties.insert(
+            property_id,
+            Property {
+                id: property_id,
+                name: format!("Vacant {} Workshop", district.name()),
+                kind: PropertyKind::Workshop,
+                district_id: district.id(),
+                owner_dynasty_id: None,
+                occupant_business_id: None,
+                tenant_dynasty_id: None,
+                value: Money::from_copper(24_000),
+                weekly_rent: Money::from_copper(60),
+                condition_basis_points: 7_000,
+                collateral_loan_id: None,
+            },
+        );
     }
 }
 

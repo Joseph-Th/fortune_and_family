@@ -37,6 +37,7 @@ pub(crate) fn derive_findings(
     add_choice_quality_finding(aggregate, &mut findings);
     add_institutional_reach_finding(campaigns, &mut findings);
     add_property_concentration_finding(aggregate, campaigns, &mut findings);
+    add_property_affordability_finding(campaigns, &mut findings);
     add_strategic_cadence_finding(aggregate, campaigns, &mut findings);
     add_phase_quality_findings(aggregate, campaigns, &mut findings);
     add_phase_action_mix_findings(aggregate, &mut findings);
@@ -271,6 +272,52 @@ pub(crate) fn add_property_concentration_finding(
         evidence: format!(
             "{repeated_acquirers} of {} campaigns acquired at least two additional properties. Repeated land acquisition across distinct personas is a concentration signal because property is intended to compete with business investment, credit, family capacity, and political commitments rather than become an automatic wealth step.",
             campaigns.len()
+        ),
+    });
+}
+
+pub(crate) fn add_property_affordability_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    // Distinguishes an affordability ceiling from a deliberate choice: a
+    // campaign whose peak treasury never reached the cheapest unowned
+    // property never had the option to decline. That is a game-economy
+    // signal (income too weak or asset prices too high), not agent restraint.
+    let unreachable: Vec<&GameplayCampaignReport> = campaigns
+        .iter()
+        .filter(|campaign| {
+            campaign
+                .commands
+                .get(&GameplayCommandKind::BuyProperty)
+                .is_none_or(|stats| stats.executed == 0)
+                && campaign
+                    .minimum_unowned_property_value
+                    .is_some_and(|cheapest| campaign.peak_player_treasury < cheapest)
+        })
+        .collect();
+    if unreachable.is_empty() || unreachable.len() * 2 < campaigns.len() {
+        return;
+    }
+    let worst = unreachable
+        .iter()
+        .min_by_key(|campaign| campaign.peak_player_treasury)
+        .copied()
+        .expect("unreachable campaigns are non-empty");
+    let worst_cheapest = worst
+        .minimum_unowned_property_value
+        .map_or_else(|| "n/a".to_owned(), |value| value.to_string());
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Info,
+        title: "Property market stayed priced out of reach".to_owned(),
+        evidence: format!(
+            "{} of {} campaigns never bought property and their peak treasury never reached the cheapest unowned property price, so the purchase route was unaffordable rather than declined; review dynasty income scaling or entry-level asset pricing. Worst: seed {} {} peaked at {} against a cheapest property of {}.",
+            unreachable.len(),
+            campaigns.len(),
+            worst.seed,
+            worst.persona.label(),
+            worst.peak_player_treasury,
+            worst_cheapest,
         ),
     });
 }

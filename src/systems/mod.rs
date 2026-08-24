@@ -153,13 +153,23 @@ pub(crate) fn business_policy_reserve(
 }
 
 /// Weekly quantity promised by a business's active supply contracts for one
-/// good. Every output-planning decision must hold this reserve back.
+/// good. Every output-planning decision must hold this reserve back — unless
+/// the firm is distressed. A distressed firm cannibalizes its commitments to
+/// survive: it liquidates everything it can into the market, so its scheduled
+/// deliveries can genuinely fail, penalties and breach attribution follow,
+/// and buyers who rely on a struggling supplier face real shortage risk.
 #[must_use]
 pub(crate) fn business_contract_reserve(
     state: &crate::core::AppState,
     business_id: crate::ids::BusinessId,
     good_id: crate::ids::GoodId,
 ) -> crate::money::Quantity {
+    let Some(business) = state.businesses.get(business_id) else {
+        return crate::money::Quantity::ZERO;
+    };
+    if business.status() == crate::core::BusinessStatus::Distressed {
+        return crate::money::Quantity::ZERO;
+    }
     state
         .contracts
         .values()

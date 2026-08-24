@@ -1517,7 +1517,7 @@ mod inventory_policy {
     }
 
     #[test]
-    fn distressed_business_liquidates_policy_reserve_but_preserves_contract_stock() {
+    fn distressed_business_liquidates_contract_stock_to_survive() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         let contract = state
@@ -1586,8 +1586,8 @@ mod inventory_policy {
             "a distressed firm must liquidate policy inventory to restore cash"
         );
         assert!(
-            seller.inventory_quantity(good_id) >= contract.quantity_per_week,
-            "distress liquidation must still preserve active contract obligations"
+            seller.inventory_quantity(good_id) < contract.quantity_per_week,
+            "a distressed firm cannibalizes its commitments: contract stock is no longer protected"
         );
         assert!(
             seller.cash() > Money::ZERO,

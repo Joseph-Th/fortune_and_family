@@ -5818,6 +5818,7 @@ mod metrics {
             .filter(|property| property.owner_dynasty_id.is_none())
             .take(2)
         {
+            property.value = Money::from_copper(55_000);
             property.weekly_rent = Money::from_copper(600);
         }
         let mut candidates = Vec::new();
@@ -5928,11 +5929,16 @@ mod metrics {
             .map(|property| property.id)
             .collect::<Vec<_>>()
         {
+            let value = state
+                .properties
+                .get(&property_id)
+                .expect("unowned property must exist")
+                .value;
             state
                 .properties
                 .get_mut(&property_id)
                 .expect("unowned property must exist")
-                .weekly_rent = Money::from_copper(100);
+                .weekly_rent = Money::from_copper(value.copper() / 1_040);
         }
 
         for persona in [GameplayPersona::Steward, GameplayPersona::Entrepreneur] {

@@ -255,6 +255,7 @@ pub struct GameplaySnapshot {
     pub player_pledged_properties: u16,
     pub player_collateral_balance: Money,
     pub occupied_properties: u16,
+    pub minimum_unowned_property_value: Option<Money>,
     pub property_state_checksum: u64,
     pub active_employment: u16,
     pub disputed_employment: u16,
@@ -466,6 +467,7 @@ pub(crate) struct StrategicSnapshotPart {
     pub player_pledged_properties: u16,
     pub player_collateral_balance: Money,
     pub occupied_properties: u16,
+    pub minimum_unowned_property_value: Option<Money>,
     pub active_employment: u16,
     pub disputed_employment: u16,
     pub player_active_employment: u16,
@@ -559,6 +561,7 @@ pub(crate) struct PropertySnapshotPart {
     pub player_pledged_properties: u16,
     pub player_collateral_balance: Money,
     pub occupied_properties: u16,
+    pub minimum_unowned_property_value: Option<Money>,
 }
 
 impl PropertySnapshotPart {
@@ -602,6 +605,12 @@ impl PropertySnapshotPart {
                     .filter(|property| property.occupant_business_id.is_some())
                     .count(),
             ),
+            minimum_unowned_property_value: state
+                .properties
+                .values()
+                .filter(|property| property.owner_dynasty_id.is_none())
+                .map(|property| property.value)
+                .min(),
         }
     }
 }
@@ -754,6 +763,7 @@ impl StrategicSnapshotPart {
             player_pledged_properties: properties.player_pledged_properties,
             player_collateral_balance: properties.player_collateral_balance,
             occupied_properties: properties.occupied_properties,
+            minimum_unowned_property_value: properties.minimum_unowned_property_value,
             active_employment: count_employment_status(state, EmploymentStatus::Active),
             disputed_employment: count_employment_status(state, EmploymentStatus::Disputed),
             player_active_employment: count_player_employment_status(
@@ -1227,6 +1237,7 @@ macro_rules! assemble_gameplay_snapshot {
             player_pledged_properties: $strategic.player_pledged_properties,
             player_collateral_balance: $strategic.player_collateral_balance,
             occupied_properties: $strategic.occupied_properties,
+            minimum_unowned_property_value: $strategic.minimum_unowned_property_value,
             property_state_checksum: stable_serialized_checksum(&$state.properties),
             active_employment: $strategic.active_employment,
             disputed_employment: $strategic.disputed_employment,
@@ -1899,6 +1910,8 @@ pub struct GameplayCampaignReport {
     pub minimum_food_satisfaction: u16,
     pub minimum_district_food_satisfaction: u16,
     pub minimum_operating_businesses: u16,
+    pub peak_player_treasury: Money,
+    pub minimum_unowned_property_value: Option<Money>,
     pub maximum_disputed_employment: u16,
     pub maximum_player_disputed_employment: u16,
     pub maximum_delinquent_loans: u16,

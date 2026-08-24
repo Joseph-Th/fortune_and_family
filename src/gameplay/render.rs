@@ -792,7 +792,7 @@ pub(crate) fn render_campaign_summaries(report: &GameplayHarnessReport, output: 
         let actions: u32 = campaign.commands.values().map(|stats| stats.executed).sum();
         let _ = writeln!(
             output,
-            "  seed {:>3} | {:<12} | {:<11?} | score {:>3} | actions {:>3} | choices {:>4} | treasury {} | businesses A:{} D:{} I:{}",
+            "  seed {:>3} | {:<12} | {:<11?} | score {:>3} | actions {:>3} | choices {:>4} | treasury {} (peak {}) | businesses A:{} D:{} I:{}",
             campaign.seed,
             campaign.persona.label(),
             campaign.background,
@@ -800,6 +800,7 @@ pub(crate) fn render_campaign_summaries(report: &GameplayHarnessReport, output: 
             actions,
             campaign.total_viable_choices,
             campaign.end.player_treasury,
+            campaign.peak_player_treasury,
             campaign.end.active_businesses,
             campaign.end.distressed_businesses,
             campaign.end.insolvent_businesses

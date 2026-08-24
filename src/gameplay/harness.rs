@@ -215,6 +215,8 @@ pub(crate) struct CampaignAccumulator {
     pub minimum_food_satisfaction: u16,
     pub minimum_district_food_satisfaction: u16,
     pub minimum_operating_businesses: u16,
+    pub peak_player_treasury: Money,
+    pub minimum_unowned_property_value: Option<Money>,
     pub maximum_disputed_employment: u16,
     pub maximum_player_disputed_employment: u16,
     pub maximum_delinquent_loans: u16,
@@ -285,6 +287,8 @@ impl CampaignAccumulator {
             minimum_food_satisfaction: u16::MAX,
             minimum_district_food_satisfaction: u16::MAX,
             minimum_operating_businesses: u16::MAX,
+            peak_player_treasury: Money::ZERO,
+            minimum_unowned_property_value: None,
             maximum_disputed_employment: 0,
             maximum_player_disputed_employment: 0,
             maximum_delinquent_loans: 0,
@@ -674,6 +678,14 @@ impl CampaignAccumulator {
     }
 
     pub fn observe_non_food_snapshot(&mut self, snapshot: &GameplaySnapshot) {
+        self.peak_player_treasury = self.peak_player_treasury.max(snapshot.player_treasury);
+        self.minimum_unowned_property_value = snapshot
+            .minimum_unowned_property_value
+            .map(|value| {
+                self.minimum_unowned_property_value
+                    .map_or(value, |current: Money| current.min(value))
+            })
+            .or(self.minimum_unowned_property_value);
         self.minimum_operating_businesses = self.minimum_operating_businesses.min(
             snapshot
                 .active_businesses
@@ -1074,6 +1086,8 @@ pub(crate) fn finish_campaign_report(
         minimum_food_satisfaction: accumulator.minimum_food_satisfaction,
         minimum_district_food_satisfaction: accumulator.minimum_district_food_satisfaction,
         minimum_operating_businesses: accumulator.minimum_operating_businesses,
+        peak_player_treasury: accumulator.peak_player_treasury,
+        minimum_unowned_property_value: accumulator.minimum_unowned_property_value,
         maximum_disputed_employment: accumulator.maximum_disputed_employment,
         maximum_player_disputed_employment: accumulator.maximum_player_disputed_employment,
         maximum_delinquent_loans: accumulator.maximum_delinquent_loans,

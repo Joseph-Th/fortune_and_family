@@ -2796,21 +2796,32 @@ pub(crate) fn generate_finance_candidates(
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist")
         .treasury();
+    // Property is one asset-building route among several: strong enough to be
+    // chosen when capital idles, never so dominant that every house becomes a
+    // landlord. Each investment property already held thins the appeal of the
+    // next purchase so portfolios grow deliberately, not automatically.
+    let owned_properties = state
+        .properties
+        .values()
+        .filter(|property| property.owner_dynasty_id == Some(state.player_dynasty_id))
+        .count();
+    let portfolio_steps = owned_properties.saturating_sub(2).min(4);
+    let portfolio_satiation =
+        Money::from_copper(i64::try_from(portfolio_steps).unwrap_or(0) * 45_000);
     let property_bonus: i64 = match persona {
-        GameplayPersona::Entrepreneur => 430,
-        GameplayPersona::Opportunist => 520,
-        GameplayPersona::PowerBroker => 230,
-        GameplayPersona::Steward => 160,
+        GameplayPersona::Entrepreneur => 1_200,
+        GameplayPersona::Opportunist => 1_050,
+        GameplayPersona::PowerBroker => 850,
+        GameplayPersona::Steward => 700,
     };
     let minimum_property_yield_basis_points = match persona {
         GameplayPersona::Entrepreneur => 1_000,
         GameplayPersona::Opportunist => 1_100,
         GameplayPersona::PowerBroker | GameplayPersona::Steward => 1_200,
     };
-    let affordability_cap = treasury.saturating_sub(property_purchase_liquidity_floor(
-        state,
-        state.player_dynasty_id,
-    ));
+    let affordability_cap = treasury.saturating_sub(portfolio_satiation).saturating_sub(
+        property_purchase_liquidity_floor(state, state.player_dynasty_id),
+    );
     let mut properties: Vec<_> = state
         .properties
         .values()
@@ -2862,7 +2873,13 @@ pub(crate) fn generate_finance_candidates(
                 district.name(),
                 property.value,
             ),
-            property_bonus.saturating_add(yield_bonus),
+            property_bonus
+                .saturating_sub(
+                    i64::try_from(portfolio_steps)
+                        .unwrap_or(0)
+                        .saturating_mul(350),
+                )
+                .saturating_add(yield_bonus),
         );
     }
 }
@@ -4119,11 +4136,14 @@ fn push_public_work_funding_candidate(
         return;
     }
     let base_bonus = if external {
+        // Patronage is civic generosity, not the house's main business: a
+        // rising dynasty keeps it well below commercial investment so early
+        // play is not consumed by bankrolling other houses' monuments.
         match persona {
-            GameplayPersona::Steward => 1_400,
-            GameplayPersona::PowerBroker => 1_100,
-            GameplayPersona::Entrepreneur => 600,
-            GameplayPersona::Opportunist => 400,
+            GameplayPersona::Steward => 800,
+            GameplayPersona::PowerBroker => 650,
+            GameplayPersona::Entrepreneur => 350,
+            GameplayPersona::Opportunist => 250,
         }
     } else {
         base_bonus
@@ -4174,8 +4194,16 @@ fn push_public_work_funding_candidate(
         base_bonus
             .saturating_add(if external { external_civic_bonus } else { 0 })
             .saturating_add(district_need / 10)
-            .saturating_add(i64::from(work.progress_basis_points) / 2)
-            .saturating_add(if stalled { 1_000 } else { 350 }),
+            // Progress already made makes completion tangible, but it must not
+            // dominate the score on its own: near-finished projects are common,
+            // and a large constant bonus once drowned out every foundation-phase
+            // alternative.
+            .saturating_add(i64::from(work.progress_basis_points).min(1_200) / 2)
+            .saturating_add(if stalled {
+                if external { 400 } else { 1_000 }
+            } else {
+                350
+            }),
     );
 }
 

@@ -29,7 +29,7 @@ pub(crate) const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_
 /// Monthly maintenance copper per resident family member the agent reserves
 /// before committing treasury to property acquisitions.
 pub(crate) const FAMILY_MAINTENANCE_MONTHLY_COPPER: i64 = 250;
-pub(crate) const AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER: Money = Money::from_copper(30_000);
+pub(crate) const AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER: Money = Money::from_copper(50_000);
 pub(crate) const AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION: Money = Money::from_copper(12_000);
 /// Minimum district need score (same scale as `public_work_need_score`)
 /// before the agent considers bankrolling a project it does not sponsor:
