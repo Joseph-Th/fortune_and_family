@@ -957,14 +957,31 @@ pub(crate) fn render_trace_alternatives(step: &GameplayTraceStep, output: &mut S
         output,
         "             alternatives (shared projected horizon):"
     );
-    // Distinct-option dedupe: several concrete targets often project the same
-    // measurable outcome (for example identical ward adoptions), so repeated
-    // rows would only re-render one tradeoff three times.
+    for option in distinct_projected_alternatives(&step.viable_options) {
+        let _ = writeln!(
+            output,
+            "               {:<18} score {:>5} | {}d later [{}] | changes [{}]",
+            option.command.label(),
+            option.score,
+            option.projected_horizon_days,
+            domain_labels(&option.projected_domains),
+            format_measure_changes(&option.projected_profile),
+        );
+    }
+}
+
+/// The first three options that project distinct measurable outcomes, in
+/// existing score order. Several concrete targets often project the same
+/// profile (for example identical ward adoptions), so deduplicating keeps each
+/// rendered row a distinct tradeoff instead of re-rendering one outcome.
+pub(crate) fn distinct_projected_alternatives(
+    options: &[GameplayViableOption],
+) -> Vec<&GameplayViableOption> {
     let mut rendered_profiles: std::collections::BTreeSet<(GameplayCommandKind, String)> =
         std::collections::BTreeSet::new();
-    let mut shown = 0;
-    for option in &step.viable_options {
-        if shown >= 3 {
+    let mut distinct = Vec::new();
+    for option in options {
+        if distinct.len() >= 3 {
             break;
         }
         let profile_key = (
@@ -975,27 +992,18 @@ pub(crate) fn render_trace_alternatives(step: &GameplayTraceStep, output: &mut S
                 format_measure_changes(&option.projected_profile)
             ),
         );
-        if !rendered_profiles.insert(profile_key) {
-            continue;
+        if rendered_profiles.insert(profile_key) {
+            distinct.push(option);
         }
-        let _ = writeln!(
-            output,
-            "               {:<18} score {:>5} | {}d later [{}] | changes [{}]",
-            option.command.label(),
-            option.score,
-            option.projected_horizon_days,
-            domain_labels(&option.projected_domains),
-            format_measure_changes(&option.projected_profile),
-        );
-        shown += 1;
     }
+    distinct
 }
 
 /// Caps the bracketed command-family list inside quiet-cycle reasons so a
 /// twelve-family restraint list cannot dominate every no-action line. The full
 /// list stays in the structured report; the human log keeps the leading
 /// families plus a count of the remainder.
-fn compact_no_action_reason(reason: Option<&str>) -> String {
+pub(crate) fn compact_no_action_reason(reason: Option<&str>) -> String {
     let Some(reason) = reason else {
         return "no reason recorded".to_owned();
     };
@@ -1017,7 +1025,7 @@ fn compact_no_action_reason(reason: Option<&str>) -> String {
 
 /// A short suffix surfacing player-facing legal exposure that the standard
 /// columns do not show, so a decision log explains lawsuit-driven context.
-fn legal_pressure_suffix(context: &GameplayDecisionContext) -> String {
+pub(crate) fn legal_pressure_suffix(context: &GameplayDecisionContext) -> String {
     let mut parts = Vec::new();
     if context.player_open_legal_cases_as_defendant > 0 {
         parts.push(format!(

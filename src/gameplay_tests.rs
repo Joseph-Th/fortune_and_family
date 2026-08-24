@@ -710,6 +710,106 @@ mod harness {
     }
 
     #[test]
+    fn distinct_alternatives_render_one_row_per_distinct_projected_outcome() {
+        let option = |command: GameplayCommandKind, treasury_after: i64| GameplayViableOption {
+            command,
+            score: 1_000,
+            description: "test option".to_owned(),
+            projected_horizon_days: 90,
+            immediate_domains: BTreeSet::new(),
+            projected_domains: BTreeSet::from([GameplayDomain::Economy]),
+            immediate_history_change: false,
+            projected_history_change: false,
+            immediate_profile: GameplayConsequenceProfile::default(),
+            projected_profile: GameplayConsequenceProfile {
+                changes: BTreeMap::from([(
+                    GameplayMeasure::PlayerTreasury,
+                    GameplayMeasureChange {
+                        before: 500,
+                        after: treasury_after,
+                    },
+                )]),
+                ..GameplayConsequenceProfile::default()
+            },
+        };
+        let duplicated = [
+            option(GameplayCommandKind::AdoptWard, 100),
+            option(GameplayCommandKind::AdoptWard, 100),
+            option(GameplayCommandKind::EducateFamilyMember, 200),
+            option(GameplayCommandKind::BuyProperty, 300),
+            option(GameplayCommandKind::SecureSupply, 400),
+        ];
+        let distinct = distinct_projected_alternatives(&duplicated);
+        assert_eq!(
+            distinct
+                .iter()
+                .map(|option| (
+                    option.command,
+                    option.projected_profile.changes[&GameplayMeasure::PlayerTreasury].after
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (GameplayCommandKind::AdoptWard, 100),
+                (GameplayCommandKind::EducateFamilyMember, 200),
+                (GameplayCommandKind::BuyProperty, 300),
+            ],
+            "identical projected outcomes must collapse to one row and the cap must hold at three distinct tradeoffs"
+        );
+    }
+
+    #[test]
+    fn compact_no_action_reasons_cap_family_lists_and_preserve_context() {
+        assert_eq!(
+            compact_no_action_reason(None),
+            "no reason recorded",
+            "a missing reason must keep its explicit placeholder"
+        );
+        let unbracketed = Some("all families exhausted");
+        assert_eq!(
+            compact_no_action_reason(unbracketed),
+            unbracketed.unwrap(),
+            "reasons without a family list must pass through unchanged"
+        );
+        let short = Some("reserved by agent policy [a, b, c]");
+        assert_eq!(
+            compact_no_action_reason(short),
+            short.unwrap(),
+            "short family lists must render in full"
+        );
+        let long = Some(
+            "reserved by agent policy [withdraw-cash, invest-business, set-wages, borrow-funds, buy-property, sell-property, family-council, acknowledge]; declined by agent policy [acquire-business]",
+        );
+        let compacted = compact_no_action_reason(long);
+        assert!(
+            compacted.starts_with("reserved by agent policy [withdraw-cash")
+                && compacted.ends_with("+2 more]; declined by agent policy [acquire-business]"),
+            "a long family list must keep its leading families plus an omitted count and preserve any trailing clause, got: {compacted}"
+        );
+    }
+
+    #[test]
+    fn legal_pressure_suffix_reports_defendant_cases_and_breach_victimizations() {
+        let registry = rivergate_registry_for_test();
+        let state = make_test_campaign();
+        let context = GameplayDecisionContext::from(&GameplaySnapshot::capture(&state));
+        assert_eq!(
+            legal_pressure_suffix(&context),
+            String::new(),
+            "an unexposed dynasty must carry no legal-pressure suffix"
+        );
+        let mut sued = context.clone();
+        sued.player_open_legal_cases_as_defendant = 2;
+        assert_eq!(legal_pressure_suffix(&sued), " (sued 2)");
+        let mut breached = context.clone();
+        breached.player_breach_victim_contracts = 1;
+        assert_eq!(legal_pressure_suffix(&breached), " (breached 1x)");
+        let mut both = context;
+        both.player_open_legal_cases_as_defendant = 1;
+        both.player_breach_victim_contracts = 3;
+        assert_eq!(legal_pressure_suffix(&both), " (sued 1, breached 3x)");
+    }
+
+    #[test]
     fn candidate_scenarios_cover_every_command_family() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_candidate_coverage_state(registry);
@@ -8103,6 +8203,72 @@ mod findings {
             finding
                 .evidence
                 .contains("Portfolio cash rebalancing accounted for 12 of")
+        );
+    }
+
+    #[test]
+    fn findings_surface_crisis_kinds_no_session_ever_reaches() {
+        let report = cached_focused_report(30);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        let campaigns: Vec<_> = (1_u64..=4)
+            .map(|seed| {
+                let mut campaign = template.clone();
+                campaign.seed = seed;
+                campaign.simulated_days = 1_080;
+                campaign.observed_crisis_kinds.clear();
+                campaign.observed_crisis_kinds.insert(CrisisKind::UrbanFire);
+                campaign.observed_crisis_kinds.insert(CrisisKind::Epidemic);
+                campaign
+            })
+            .collect();
+        let mut aggregate = report.aggregate.clone();
+        aggregate.simulated_days = u64::from(campaigns[0].simulated_days) * campaigns.len() as u64;
+        let mut findings = Vec::new();
+
+        add_crisis_coverage_finding(&aggregate, &campaigns, &mut findings);
+
+        let finding = finding_with_title(
+            &findings,
+            "5 crisis kind(s) were never detected in this horizon",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Info);
+        assert!(
+            finding.evidence.contains("Grain shortage")
+                && finding.evidence.contains("Banking panic")
+                && finding.evidence.contains("Trade disruption"),
+            "the evidence must name every unobserved crisis kind"
+        );
+        assert!(
+            finding.evidence.contains("Urban fire") && finding.evidence.contains("Epidemic"),
+            "observed kinds must be listed separately from unobserved ones"
+        );
+
+        // Every kind observed: no coverage gap to report.
+        let covered: Vec<_> = campaigns
+            .iter()
+            .map(|campaign| {
+                let mut campaign = campaign.clone();
+                for kind in [
+                    CrisisKind::GrainShortage,
+                    CrisisKind::BankingPanic,
+                    CrisisKind::GuildRevolt,
+                    CrisisKind::NobleDemand,
+                    CrisisKind::TradeDisruption,
+                ] {
+                    campaign.observed_crisis_kinds.insert(kind);
+                }
+                campaign
+            })
+            .collect();
+        let mut complete_findings = Vec::new();
+        add_crisis_coverage_finding(&aggregate, &covered, &mut complete_findings);
+        assert!(
+            complete_findings.is_empty(),
+            "a matrix that observed every crisis kind must not produce a coverage finding"
         );
     }
 

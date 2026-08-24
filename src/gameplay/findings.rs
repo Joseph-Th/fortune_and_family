@@ -19,6 +19,7 @@ pub(crate) fn derive_findings(
     add_information_routine_finding(campaigns, &mut findings);
     add_information_leverage_trajectory_finding(aggregate, &mut findings);
     add_crisis_trajectory_finding(aggregate, &mut findings);
+    add_crisis_coverage_finding(aggregate, campaigns, &mut findings);
     add_office_directive_trajectory_finding(aggregate, &mut findings);
     add_welfare_dynamism_finding(aggregate, campaigns, &mut findings);
     add_long_horizon_risk_findings(aggregate, campaigns, &mut findings);
@@ -1114,6 +1115,63 @@ pub(crate) fn add_office_directive_trajectory_finding(
             "Only {} of {} office directives produced a newly attributable consequence after time advanced ({delayed_share}%). Directives create immediate visible effects, but mature political power is not consistently changing later system behavior.",
             stats.actions_with_delayed_consequences,
             stats.executed,
+        ),
+    });
+}
+
+/// Surfaces crisis kinds that no campaign in the matrix ever detected. Every
+/// crisis kind owns detection, escalation, response options, and persistent
+/// consequences; a kind no session reaches is unreachable content whose
+/// design intent cannot be exercised or evaluated at all.
+pub(crate) fn add_crisis_coverage_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if campaigns.len() < 4 || average_campaign_days(aggregate) < 720 {
+        return;
+    }
+    let observed: BTreeSet<&'static str> = campaigns
+        .iter()
+        .flat_map(|campaign| {
+            campaign
+                .observed_crisis_kinds
+                .iter()
+                .map(|kind| kind.label())
+        })
+        .collect();
+    let all_kinds = [
+        CrisisKind::GrainShortage,
+        CrisisKind::BankingPanic,
+        CrisisKind::UrbanFire,
+        CrisisKind::GuildRevolt,
+        CrisisKind::NobleDemand,
+        CrisisKind::Epidemic,
+        CrisisKind::TradeDisruption,
+    ];
+    let unobserved: Vec<&'static str> = all_kinds
+        .iter()
+        .map(|kind| kind.label())
+        .filter(|label| !observed.contains(label))
+        .collect();
+    if unobserved.is_empty() {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Info,
+        title: format!(
+            "{} crisis kind(s) were never detected in this horizon",
+            unobserved.len()
+        ),
+        evidence: format!(
+            "Observed kinds across {} campaign(s): {}. Never detected: {}. A crisis kind no session reaches cannot expose structural weakness or exercise its response routes; treat it as dead detection content rather than rare drama.",
+            campaigns.len(),
+            if observed.is_empty() {
+                "none".to_owned()
+            } else {
+                observed.into_iter().collect::<Vec<_>>().join(", ")
+            },
+            unobserved.join(", "),
         ),
     });
 }

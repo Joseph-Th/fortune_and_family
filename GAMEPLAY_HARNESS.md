@@ -361,6 +361,10 @@ Findings use `Info`, `Warning`, or `Critical` severity. They identify conditions
 - A property market that stayed priced out of reach: campaigns whose peak
   treasury never reached the cheapest unowned property never had the option to
   buy, which is an income-or-pricing signal rather than agent restraint
+- Crisis kinds that no campaign ever detected: each crisis kind owns its own
+  detection, response options, and persistent consequences, so a kind absent
+  from every campaign in a matrix is dead detection content rather than rare
+  drama
 
 Finding-rule unit tests should arrange the minimum report fields needed to test the rule. They should not run a long simulation merely to obtain a mutable report template.
 
