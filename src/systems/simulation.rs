@@ -1997,7 +1997,7 @@ pub(crate) fn business_sustainable_unit_cost(
 }
 
 /// The share of nominal recipe output the firm's current quality and manager
-/// craft actually yield, expressed in basis points (at least 8_100).
+/// craft actually yield, expressed in basis points (at least `8_100`).
 fn expected_output_efficiency(state: &AppState, business: &crate::core::Business) -> u32 {
     let quality_efficiency = 9_000_u32
         .saturating_add(u32::from(business.operations.quality_basis_points) / 10)
@@ -2005,12 +2005,11 @@ fn expected_output_efficiency(state: &AppState, business: &crate::core::Business
     let craft_efficiency = state
         .characters
         .get(business.manager_id())
-        .map(|manager| {
+        .map_or(10_000, |manager| {
             9_000_u32
                 .saturating_add(u32::from(manager.capabilities.craft).saturating_mul(10))
                 .min(10_000)
-        })
-        .unwrap_or(10_000);
+        });
     quality_efficiency * craft_efficiency / 10_000
 }
 

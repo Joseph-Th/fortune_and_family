@@ -36,6 +36,13 @@ or `cargo build` the runner invokes. The default is Cargo's own parallelism,
 which already uses the machine's cores; lowering it can keep a heavily used
 development machine responsive.
 
+The `dev` and `test` profiles build this crate at `opt-level = 1` with
+dependencies fully optimized. Simulation-heavy tests then finish in seconds
+rather than tens of seconds, so the edit-test loop is dominated by incremental
+compile time instead of debug-mode execution. Keep new tests out of sleeps and
+wall-clock dependence so that speedup applies to them; use release lanes for
+throughput-critical evidence.
+
 - Plain `cargo test` is the default and fastest runner on this suite (tests
   share campaign-fixture setup inside one process). Set
   `CIVIC_DYNASTY_NEXTEST=1` to run library tests under `cargo-nextest` instead,

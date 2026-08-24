@@ -1004,10 +1004,10 @@ pub(crate) fn distinct_projected_alternatives(
 /// list stays in the structured report; the human log keeps the leading
 /// families plus a count of the remainder.
 pub(crate) fn compact_no_action_reason(reason: Option<&str>) -> String {
+    const MAX_FAMILIES: usize = 6;
     let Some(reason) = reason else {
         return "no reason recorded".to_owned();
     };
-    const MAX_FAMILIES: usize = 6;
     let Some((prefix, list)) = reason.split_once('[') else {
         return reason.to_owned();
     };

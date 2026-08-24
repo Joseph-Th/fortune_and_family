@@ -764,16 +764,16 @@ mod harness {
             "no reason recorded",
             "a missing reason must keep its explicit placeholder"
         );
-        let unbracketed = Some("all families exhausted");
+        let unbracketed = "all families exhausted";
         assert_eq!(
-            compact_no_action_reason(unbracketed),
-            unbracketed.unwrap(),
+            compact_no_action_reason(Some(unbracketed)),
+            unbracketed.to_owned(),
             "reasons without a family list must pass through unchanged"
         );
-        let short = Some("reserved by agent policy [a, b, c]");
+        let short = "reserved by agent policy [a, b, c]";
         assert_eq!(
-            compact_no_action_reason(short),
-            short.unwrap(),
+            compact_no_action_reason(Some(short)),
+            short.to_owned(),
             "short family lists must render in full"
         );
         let long = Some(
@@ -789,7 +789,6 @@ mod harness {
 
     #[test]
     fn legal_pressure_suffix_reports_defendant_cases_and_breach_victimizations() {
-        let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
         let context = GameplayDecisionContext::from(&GameplaySnapshot::capture(&state));
         assert_eq!(

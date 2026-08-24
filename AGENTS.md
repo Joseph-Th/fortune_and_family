@@ -35,6 +35,7 @@ This project applies the Universal, Stateful Application, Deterministic System, 
 - Persistent identity uses typed IDs; optional relationships are explicit; authoritative records and owned indexes/lifecycle memberships update coherently.
 - Core systems perform no implicit IO. Durable external work is represented before the adapter performs it.
 - Project-owned enums are exhaustive; consequential fields are private; domain failures use contextual typed errors; replaced internal paths are deleted.
+- Ad hoc saves, gameplay reports, CLI captures, benchmark evidence, and scratch copies belong under ignored `target/agent-output/<task>/` (or an operating-system temporary directory), never in `../` or the workspace root. Remove task-owned transient output before handoff.
 - Repository verification is local. Do not create or depend on GitHub Actions workflows.
 
 ## Completion

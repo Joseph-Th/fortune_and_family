@@ -106,10 +106,31 @@ function Format-ArgumentString([string[]]$ArgsList) {
 }
 
 function Run-ProcessWithCapture([string[]]$CommandArgs, [string]$StdOutPath = $null, [string]$StdErrPath = $null) {
+    # System.Diagnostics.Process spawns in tens of milliseconds; Start-Process
+    # costs roughly a second per invocation on this machine, which dominated
+    # every smoke lane. Argument escaping matches the previous Start-Process
+    # contract: Format-ArgumentString output is handed straight to
+    # CreateProcess, so quoting behavior is unchanged.
     if (-not $StdOutPath) { $StdOutPath = Join-Path $WorkDir ("stdout-" + [System.Guid]::NewGuid().ToString("N") + ".txt") }
     if (-not $StdErrPath) { $StdErrPath = Join-Path $WorkDir ("stderr-" + [System.Guid]::NewGuid().ToString("N") + ".txt") }
-    $argString = Format-ArgumentString $CommandArgs
-    $proc = Start-Process -FilePath $Binary -ArgumentList $argString -NoNewWindow -Wait -PassThru -RedirectStandardOutput $StdOutPath -RedirectStandardError $StdErrPath
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Binary
+    $psi.Arguments = Format-ArgumentString $CommandArgs
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    # Drain both pipes concurrently so a chatty child can never fill a pipe
+    # buffer and deadlock before WaitForExit returns.
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrText = $proc.StandardError.ReadToEnd()
+    $stdoutText = $stdoutTask.GetAwaiter().GetResult()
+    $proc.WaitForExit()
+    # BOM-less UTF-8: the static Encoding.UTF8 instance emits a BOM on .NET
+    # Framework, which breaks the JSON parsers downstream.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($StdOutPath, $stdoutText, $utf8NoBom)
+    [System.IO.File]::WriteAllText($StdErrPath, $stderrText, $utf8NoBom)
     return [PSCustomObject]@{
         ExitCode = $proc.ExitCode
         StdOutPath = $StdOutPath

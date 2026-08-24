@@ -4989,6 +4989,19 @@ pub(crate) fn preferred_house_governance(
     })
 }
 
+/// The most recent canonical heir-designation audit record, if any.
+fn last_heir_designation_day(state: &AppState) -> Option<i64> {
+    let designation_subject = format!("dynasty:{}", state.player_dynasty_id);
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind() == AuditKind::HeirDesignation && record.subject() == designation_subject
+        })
+        .map(AuditRecord::day)
+}
+
 pub(crate) fn generate_heir_designation_candidates(
     state: &AppState,
     persona: GameplayPersona,
@@ -5001,19 +5014,12 @@ pub(crate) fn generate_heir_designation_candidates(
     if dynasty.resources.legitimacy_basis_points < HEIR_DESIGNATION_LEGITIMACY_COST {
         return;
     }
-    let designation_subject = format!("dynasty:{}", state.player_dynasty_id);
-    let last_designation_day = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::HeirDesignation && record.subject() == designation_subject
-        })
-        .map(AuditRecord::day);
-    let designation_available = last_designation_day.is_none_or(|last_day| {
+    // A designation is available once the canonical cadence since the last
+    // recorded designation has elapsed.
+    let last_designation_day = last_heir_designation_day(state);
+    if !last_designation_day.is_none_or(|last_day| {
         state.clock.day() >= last_day.saturating_add(HEIR_DESIGNATION_INTERVAL_DAYS)
-    });
-    if !designation_available {
+    }) {
         return;
     }
     let current_heir_id = dynasty.heir_id();

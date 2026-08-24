@@ -3330,12 +3330,11 @@ fn terminate_inactive_contract(
     let remaining_collectible = state
         .contracts
         .get(&due.id)
-        .map(|contract| {
+        .map_or(Money::ZERO, |contract| {
             contract
                 .penalty
                 .saturating_sub(contract.collected_breach_penalty)
-        })
-        .unwrap_or(Money::ZERO);
+        });
     // The victim collects whatever the inactive party can still pay before the
     // termination is recorded; only the genuinely unpayable remainder
     // accumulates as recoverable breach debt.
@@ -3554,12 +3553,11 @@ fn settle_failed_contract(
     let remaining_collectible = state
         .contracts
         .get(&due.id)
-        .map(|contract| {
+        .map_or(Money::ZERO, |contract| {
             contract
                 .penalty
                 .saturating_sub(contract.collected_breach_penalty)
-        })
-        .unwrap_or(Money::ZERO);
+        });
     let collection_attempt = due.penalty.min(remaining_collectible);
     let unpaid_of_attempt = if let Some((payer_id, recipient_id)) = penalty_parties {
         collect_partial_contract_penalty(state, payer_id, recipient_id, collection_attempt)?
