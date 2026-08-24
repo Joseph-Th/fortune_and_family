@@ -84,6 +84,17 @@ const DISTRICT_FORMAL_EMPLOYMENT_BASIS_POINTS_PER_WORKER: u32 = 100;
 const DISTRICT_MAX_FORMAL_EMPLOYMENT_BONUS_BASIS_POINTS: u32 = 4_500;
 const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = 2_500;
 
+/// Speculative credit terms: risk capital carries roughly double the standard
+/// rate on a shorter book, is capped below the working-capital ceiling, and is
+/// secured by whatever unpledged property the borrower can offer, so a failed
+/// speculation costs the borrower real assets instead of only reputation.
+const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 1_500;
+const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 78;
+const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(6_000);
+/// Monthly risk-appetite draw per liquid house: speculative offers are rare
+/// enough that a campaign accumulates a handful, not a debt spiral.
+const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 3_000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StrategicError {
     #[error(transparent)]
@@ -6103,7 +6114,14 @@ fn business_is_creditworthy(business: &crate::core::Business) -> bool {
 }
 
 /// The lending half of AI credit participation: a liquid house may fund a borrower's
-/// working-capital shortfall through the canonical loan machinery.
+/// working-capital shortfall through the canonical loan machinery. Sound firms are
+/// financed first at standard terms; only when no sound firm needs capital does a
+/// monthly risk-appetite draw allow speculative credit to a losing firm at punitive
+/// terms. Speculative credit is the world's controlled source of repayment failure:
+/// some of those loans rescue the borrower, others miss installments, fall
+/// delinquent, default, and ground the enforcement claims that keep courts,
+/// collateral seizure, and banking panics reachable. Without it every obligation in
+/// the campaign is serviced on schedule and the enforcement systems stay idle.
 fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
     let player_id = state.player_dynasty_id;
     let dynasties: Vec<_> = state.dynasties.keys().copied().collect();
@@ -6122,54 +6140,20 @@ fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
         if lender_available < Money::from_copper(2_000) {
             continue;
         }
-        let Some((borrower_id, business_id, shortfall)) = state
-            .dynasties
-            .keys()
-            .copied()
-            .filter(|id| *id != lender_id && *id != player_id)
-            .filter_map(|candidate_id| {
-                if dynasty_has_active_ai_borrowing(state, candidate_id) {
-                    return None;
-                }
-                state
-                    .businesses
-                    .ids_for_owner(candidate_id)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|business_id| state.businesses.get(*business_id))
-                    .filter(|business| {
-                        !matches!(
-                            business.status(),
-                            BusinessStatus::Insolvent | BusinessStatus::Closed
-                        )
-                    })
-                    .filter(|business| business_is_creditworthy(business))
-                    .filter_map(|business| {
-                        let target = business_recapitalization_target(registry, state, business);
-                        let shortfall = target.saturating_sub(business.cash());
-                        (shortfall >= Money::from_copper(1_000))
-                            .then_some((business.id(), shortfall))
-                    })
-                    .max_by_key(|(_, shortfall)| *shortfall)
-                    .map(|(business_id, shortfall)| (candidate_id, business_id, shortfall))
-            })
-            .max_by_key(|(_, _, shortfall)| *shortfall)
-        else {
+        let Some(offer) = ai_credit_lending_offer(registry, state, player_id, lender_id) else {
             continue;
         };
-        let principal = lender_available
-            .min(shortfall)
-            .min(Money::from_copper(12_000));
+        let principal = offer.principal(lender_available);
         if principal < Money::from_copper(1_000) {
             continue;
         }
         let terms = LoanTerms {
             lender_dynasty_id: lender_id,
-            borrower_dynasty_id: borrower_id,
+            borrower_dynasty_id: offer.borrower_dynasty_id,
             principal,
-            weekly_payment: ai_loan_weekly_payment(principal, 104_i64),
-            interest_basis_points: 700_u16,
-            collateral_property_id: None,
+            weekly_payment: ai_loan_weekly_payment(principal, offer.term_weeks),
+            interest_basis_points: offer.interest_basis_points,
+            collateral_property_id: offer.collateral_property_id,
         };
         // `validate_loan(...).commit(...)` uses the canonical loan machinery and records
         // outbox feedback; a failed offer is simply skipped. The loan then capitalizes
@@ -6178,18 +6162,181 @@ fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
         else {
             continue;
         };
-        if let Some(business) = state.businesses.get_mut(business_id)
-            && business.owner_dynasty_id() == borrower_id
+        if let Some(business) = state.businesses.get_mut(offer.business_id)
+            && business.owner_dynasty_id() == offer.borrower_dynasty_id
             && business.status() != BusinessStatus::Closed
         {
             let _ = capitalize_owned_business(
                 state,
-                borrower_id,
-                business_id,
-                principal.min(shortfall),
+                offer.borrower_dynasty_id,
+                offer.business_id,
+                principal.min(offer.shortfall),
             );
         }
     }
+}
+
+/// One concrete loan offer a liquid house could make this month: the most
+/// undercapitalized operating business of an unleveraged rival house, priced by
+/// the borrower's track record.
+struct AiCreditLendingOffer {
+    borrower_dynasty_id: DynastyId,
+    business_id: BusinessId,
+    shortfall: Money,
+    principal_cap: Money,
+    interest_basis_points: u16,
+    term_weeks: i64,
+    collateral_property_id: Option<crate::ids::PropertyId>,
+}
+
+impl AiCreditLendingOffer {
+    fn principal(&self, lender_available: Money) -> Money {
+        lender_available.min(self.shortfall).min(self.principal_cap)
+    }
+}
+
+fn ai_credit_lending_offer(
+    registry: &Registry,
+    state: &mut AppState,
+    player_id: DynastyId,
+    lender_id: DynastyId,
+) -> Option<AiCreditLendingOffer> {
+    let sound = state
+        .dynasties
+        .keys()
+        .copied()
+        .filter(|id| *id != lender_id && *id != player_id)
+        .filter_map(|candidate_id| {
+            if dynasty_has_active_ai_borrowing(state, candidate_id) {
+                return None;
+            }
+            best_creditworthy_business(registry, state, candidate_id).map(
+                |(business_id, shortfall)| AiCreditLendingOffer {
+                    borrower_dynasty_id: candidate_id,
+                    business_id,
+                    shortfall,
+                    principal_cap: Money::from_copper(12_000),
+                    interest_basis_points: 700_u16,
+                    term_weeks: 104_i64,
+                    collateral_property_id: None,
+                },
+            )
+        })
+        .max_by_key(|offer| offer.shortfall);
+    if sound.is_some() {
+        return sound;
+    }
+    // Risk appetite: with the safe book saturated, a liquid house may back a
+    // losing firm's recovery at punitive terms secured by its property.
+    if !state
+        .rng
+        .is_chance_success(SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS)
+    {
+        return None;
+    }
+    state
+        .dynasties
+        .keys()
+        .copied()
+        .filter(|id| *id != lender_id && *id != player_id)
+        .filter_map(|candidate_id| {
+            if dynasty_has_active_ai_borrowing(state, candidate_id) {
+                return None;
+            }
+            best_speculative_business(registry, state, candidate_id).map(
+                |(business_id, shortfall)| AiCreditLendingOffer {
+                    borrower_dynasty_id: candidate_id,
+                    business_id,
+                    shortfall,
+                    principal_cap: SPECULATIVE_LOAN_MAX_PRINCIPAL,
+                    interest_basis_points: SPECULATIVE_LOAN_INTEREST_BASIS_POINTS,
+                    term_weeks: SPECULATIVE_LOAN_TERM_WEEKS,
+                    collateral_property_id: unpledged_borrower_property(state, candidate_id),
+                },
+            )
+        })
+        .max_by_key(|offer| offer.shortfall)
+}
+
+/// The most undercapitalized creditworthy business owned by a dynasty, when its
+/// recapitalization gap is large enough to be worth financing.
+fn best_creditworthy_business(
+    registry: &Registry,
+    state: &AppState,
+    owner_id: DynastyId,
+) -> Option<(BusinessId, Money)> {
+    undercapitalized_business(
+        registry,
+        state,
+        owner_id,
+        BusinessStatusFilter::Creditworthy,
+    )
+}
+
+/// The most undercapitalized structurally losing business owned by a dynasty:
+/// the speculative lending pool. Operating firms only — insolvent and closed
+/// businesses have nothing left to finance.
+fn best_speculative_business(
+    registry: &Registry,
+    state: &AppState,
+    owner_id: DynastyId,
+) -> Option<(BusinessId, Money)> {
+    undercapitalized_business(registry, state, owner_id, BusinessStatusFilter::Speculative)
+}
+
+/// Which side of the credit ledger a candidate business is drawn from.
+#[derive(Clone, Copy)]
+enum BusinessStatusFilter {
+    /// Lifetime-profitable firms: safe working-capital clients.
+    Creditworthy,
+    /// Lifetime-losing firms: speculative recovery bets.
+    Speculative,
+}
+
+fn undercapitalized_business(
+    registry: &Registry,
+    state: &AppState,
+    owner_id: DynastyId,
+    filter: BusinessStatusFilter,
+) -> Option<(BusinessId, Money)> {
+    state
+        .businesses
+        .ids_for_owner(owner_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|business_id| state.businesses.get(*business_id))
+        .filter(|business| {
+            !matches!(
+                business.status(),
+                BusinessStatus::Insolvent | BusinessStatus::Closed
+            )
+        })
+        .filter(|business| {
+            let creditworthy = business_is_creditworthy(business);
+            match filter {
+                BusinessStatusFilter::Creditworthy => creditworthy,
+                BusinessStatusFilter::Speculative => !creditworthy,
+            }
+        })
+        .filter_map(|business| {
+            let target = business_recapitalization_target(registry, state, business);
+            let shortfall = target.saturating_sub(business.cash());
+            (shortfall >= Money::from_copper(1_000)).then_some((business.id(), shortfall))
+        })
+        .max_by_key(|(_, shortfall)| *shortfall)
+}
+
+fn unpledged_borrower_property(
+    state: &AppState,
+    owner_id: DynastyId,
+) -> Option<crate::ids::PropertyId> {
+    state
+        .properties
+        .values()
+        .find(|property| {
+            property.owner_dynasty_id == Some(owner_id) && property.collateral_loan_id.is_none()
+        })
+        .map(|property| property.id)
 }
 
 /// The borrowing half of AI credit participation: a house whose businesses need capital

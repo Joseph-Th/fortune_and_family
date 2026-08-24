@@ -3311,8 +3311,10 @@ pub(crate) fn lending_limits(persona: GameplayPersona) -> (Money, usize) {
         GameplayPersona::PowerBroker => (Money::from_copper(50_000), 1),
         // Opportunist lending is the persona's signature route: a smaller
         // reserve keeps high-yield short-term credit reachable at ordinary
-        // dynasty treasuries instead of reserving it for rare surpluses.
-        GameplayPersona::Opportunist => (Money::from_copper(14_000), 2),
+        // dynasty treasuries instead of reserving it for rare surpluses, even
+        // in a world where crises and speculative defaults keep rival ledgers
+        // lean.
+        GameplayPersona::Opportunist => (Money::from_copper(10_000), 2),
     }
 }
 

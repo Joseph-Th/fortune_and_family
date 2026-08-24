@@ -34,11 +34,14 @@ pub(crate) const AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION: Money = Money::from_
 /// Minimum district need score (same scale as `public_work_need_score`)
 /// before the agent considers bankrolling a project it does not sponsor:
 /// external patronage answers visible deficits such as collapsing sanitation,
-/// dangerous streets, or food-driven unrest, not routine civic upkeep.
-pub(crate) const EXTERNAL_PATRONAGE_MIN_NEED_SCORE: i64 = 6_000;
+/// dangerous streets, or food-driven unrest, not routine civic upkeep. Typical
+/// mid-condition districts score roughly 3,000-4,700 on their weakest
+/// dimension, so a floor of 4,000 demands a genuinely deprived district while
+/// staying reachable.
+pub(crate) const EXTERNAL_PATRONAGE_MIN_NEED_SCORE: i64 = 4_000;
 /// A project the city could not finish is already a public failure, so
 /// rescuing one needs less provocation than accelerating a rival's work.
-pub(crate) const STALLED_PATRONAGE_MIN_NEED_SCORE: i64 = 4_000;
+pub(crate) const STALLED_PATRONAGE_MIN_NEED_SCORE: i64 = 2_500;
 pub(crate) const AGENT_ENDOWMENT_LIQUIDITY_FLOOR: Money = Money::from_copper(12_000);
 pub(crate) const AGENT_ENDOWMENT_OFFICE_BUFFER: Money = Money::from_copper(10_000);
 /// Minimum business-cash surplus above the operating target that justifies a

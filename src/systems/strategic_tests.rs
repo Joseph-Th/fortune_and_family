@@ -8710,6 +8710,155 @@ mod ai {
     }
 
     #[test]
+    fn ai_credit_lending_prefers_a_sound_borrower_over_a_losing_one() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let unleveraged: Vec<_> = state
+            .dynasties
+            .keys()
+            .copied()
+            .filter(|id| *id != state.player_dynasty_id)
+            .filter(|id| {
+                !state.loans.values().any(|loan| {
+                    loan.borrower_dynasty_id == *id && loan.status.is_repayment_active()
+                })
+            })
+            .collect();
+        assert!(
+            unleveraged.len() >= 2,
+            "campaign must contain at least two rivals without active debt"
+        );
+        let sound_id = unleveraged[0];
+        let losing_id = unleveraged[1];
+        // The sound house runs a lifetime-profitable business with a real
+        // capital gap; the losing house runs a structurally unprofitable one
+        // with an equally real gap.
+        let sound_business_id = *state
+            .businesses
+            .ids_for_owner(sound_id)
+            .expect("rival owner index must exist")
+            .iter()
+            .next()
+            .expect("rival must own a business");
+        {
+            let business = state
+                .businesses
+                .get_mut(sound_business_id)
+                .expect("sound business must exist");
+            business.finance.cash = Money::ZERO;
+            business.finance.lifetime_costs = Money::from_copper(500);
+            business.finance.lifetime_revenue = Money::from_copper(1_000);
+        }
+        let losing_business_id = *state
+            .businesses
+            .ids_for_owner(losing_id)
+            .expect("rival owner index must exist")
+            .iter()
+            .next()
+            .expect("rival must own a business");
+        {
+            let business = state
+                .businesses
+                .get_mut(losing_business_id)
+                .expect("losing business must exist");
+            business.finance.cash = Money::ZERO;
+            business.finance.lifetime_costs = Money::from_copper(1_000);
+            business.finance.lifetime_revenue = Money::from_copper(500);
+        }
+        let lender_id = *unleveraged.last().expect("lender must exist");
+        let player_id = state.player_dynasty_id;
+
+        let offer = super::ai_credit_lending_offer(registry, &mut state, player_id, lender_id)
+            .expect("a liquid house must find a lending offer");
+
+        assert_eq!(
+            offer.borrower_dynasty_id, sound_id,
+            "the safe working-capital book must be served before any speculation"
+        );
+        assert_eq!(offer.business_id, sound_business_id);
+        assert_eq!(
+            offer.interest_basis_points, 700,
+            "a sound borrower must be offered the standard working-capital rate"
+        );
+        assert_eq!(offer.term_weeks, 104);
+    }
+
+    #[test]
+    fn ai_credit_lending_speculates_only_when_the_sound_book_is_served() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        // Flush every rival business with capital so no creditworthy firm has a
+        // financeable shortfall, then leave exactly one structurally losing
+        // business undercapitalized as the only candidate in the pool.
+        let speculator_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|id| *id != state.player_dynasty_id)
+            .expect("campaign must contain a rival dynasty");
+        let speculative_business_id = *state
+            .businesses
+            .ids_for_owner(speculator_id)
+            .expect("rival owner index must exist")
+            .iter()
+            .next()
+            .expect("rival must own a business");
+        for business in state.businesses.iter_mut() {
+            if business.owner_dynasty_id() == state.player_dynasty_id {
+                continue;
+            }
+            business.finance.cash = Money::from_copper(1_000_000);
+            business.finance.lifetime_costs = Money::ZERO;
+            business.finance.lifetime_revenue = Money::from_copper(1);
+        }
+        {
+            let business = state
+                .businesses
+                .get_mut(speculative_business_id)
+                .expect("speculative business must exist");
+            business.finance.cash = Money::ZERO;
+            business.finance.lifetime_costs = Money::from_copper(1_000);
+            business.finance.lifetime_revenue = Money::from_copper(500);
+        }
+        let lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|id| *id != state.player_dynasty_id && *id != speculator_id)
+            .expect("campaign must contain a second rival dynasty");
+
+        // The monthly risk-appetite draw gates the speculative tier, so retry
+        // until the draw fires; each attempt consumes one deterministic draw.
+        let player_id = state.player_dynasty_id;
+        let mut offer = None;
+        for _ in 0..1_000 {
+            if let Some(found) =
+                super::ai_credit_lending_offer(registry, &mut state, player_id, lender_id)
+            {
+                offer = Some(found);
+                break;
+            }
+        }
+        let offer = offer.expect("the risk-appetite draw must fire within the retry bound");
+
+        assert_eq!(
+            offer.borrower_dynasty_id, speculator_id,
+            "with the safe book saturated, the losing firm is the only candidate"
+        );
+        assert_eq!(offer.business_id, speculative_business_id);
+        assert_eq!(
+            offer.interest_basis_points,
+            super::SPECULATIVE_LOAN_INTEREST_BASIS_POINTS,
+            "speculative credit must carry the punitive rate"
+        );
+        assert_eq!(offer.term_weeks, super::SPECULATIVE_LOAN_TERM_WEEKS);
+        assert!(
+            offer.principal(Money::from_copper(1_000_000)) <= super::SPECULATIVE_LOAN_MAX_PRINCIPAL,
+            "speculative principal must stay below the working-capital ceiling"
+        );
+    }
+
+    #[test]
     fn district_decay_revalues_property_values_downward() {
         let mut state = make_test_campaign();
         // Pick a non-residence property in a district.
