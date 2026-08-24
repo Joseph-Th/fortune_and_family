@@ -69,8 +69,14 @@ const CONTRACT_CAPACITY_COMMITMENT_DAYS: i64 = 5;
 
 const UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS: u16 = 240;
 const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
-/// Route disruption at or above this level spawns a trade-disruption crisis.
-const TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD: u16 = 7_000;
+/// Route disruption at or above this level spawns a trade-disruption crisis;
+/// a tracked disruption also holds at this condition until every route heals.
+pub(crate) const TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD: u16 = 7_000;
+/// A resolved banking panic raises the default bar for a follow-up panic for
+/// three years; older panics stop counting so confidence can rebuild.
+const BANKING_PANIC_MEMORY_DAYS: i64 = 3 * 360;
+/// Resolved crises stay visible in state for three years, then are pruned.
+const CRISIS_HISTORY_RETENTION_DAYS: i64 = 3 * 360;
 const EPIDEMIC_ONSET_WELFARE_DIVISOR: u16 = 7;
 const EPIDEMIC_DAILY_WELFARE_DIVISOR: u16 = 60;
 const DISTRICT_BACKGROUND_EMPLOYMENT_BASIS_POINTS: u16 = 4_500;
@@ -436,7 +442,6 @@ struct DueLoan {
     weekly_payment: Money,
     balance: Money,
     interest_basis_points: u16,
-    collateral_property_id: Option<PropertyId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -537,6 +542,7 @@ fn commit_supply_contract(
             breaching_dynasty_id: None,
             breach_victim_dynasty_id: None,
             unpaid_breach_penalty: Money::ZERO,
+            collected_breach_penalty: Money::ZERO,
             status: ContractStatus::Active,
         },
     );
@@ -3006,6 +3012,11 @@ fn apply_crisis_daily_effects(
                 if let Some(treasury_id) = registry.get_institution_id("treasury")
                     && let Some(treasury) = state.institutions.get_mut(&treasury_id)
                 {
+                    // The levy is the one deliberate external money leak in the
+                    // simulation: the payment leaves Rivergate for the prince's
+                    // court, so no internal record receives the counterparty
+                    // credit. Every other debit in the economy must have a
+                    // credited counterparty.
                     let levy = Money::from_copper(i64::from(severity) / 20).min(treasury.budget);
                     treasury.budget = treasury
                         .budget
@@ -3281,6 +3292,19 @@ fn terminate_inactive_contract(
 ) -> Result<(), SimulationError> {
     let (breaching_dynasty_id, breach_victim_dynasty_id) =
         attribute_contract_breach(buyer_owner_id, seller_owner_id, buyer_active, seller_active);
+    // Total breach exposure is capped at the contractual penalty across the
+    // contract's whole life: collected cash and recoverable breach debt
+    // partition that one penalty, so termination collects only what the
+    // contract still owes.
+    let remaining_collectible = state
+        .contracts
+        .get(&due.id)
+        .map(|contract| {
+            contract
+                .penalty
+                .saturating_sub(contract.collected_breach_penalty)
+        })
+        .unwrap_or(Money::ZERO);
     // The victim collects whatever the inactive party can still pay before the
     // termination is recorded; only the genuinely unpayable remainder
     // accumulates as recoverable breach debt.
@@ -3289,8 +3313,9 @@ fn terminate_inactive_contract(
         (false, true) => Some((due.seller_id, due.buyer_id)),
         _ => None,
     };
-    let unpaid_penalty = if let Some((payer_id, recipient_id)) = penalty_parties {
-        collect_partial_contract_penalty(state, payer_id, recipient_id, due.penalty)?
+    let collection_attempt = due.penalty.min(remaining_collectible);
+    let unpaid_of_attempt = if let Some((payer_id, recipient_id)) = penalty_parties {
+        collect_partial_contract_penalty(state, payer_id, recipient_id, collection_attempt)?
     } else {
         Money::ZERO
     };
@@ -3306,20 +3331,16 @@ fn terminate_inactive_contract(
         contract.breaching_dynasty_id = Some(breacher);
         contract.breach_victim_dynasty_id = Some(victim);
     }
-    if unpaid_penalty > Money::ZERO {
-        // Termination-time penalties accumulate on top of earlier recoverable
-        // breach debt, capped at the contractual penalty.
-        let accumulated = contract
-            .unpaid_breach_penalty
-            .checked_add(unpaid_penalty)
-            .ok_or(SimulationError::ContractPenaltyOverflow {
-                contract_id: due.id,
-                current: contract.unpaid_breach_penalty,
-                incoming: unpaid_penalty,
-            })?
-            .min(contract.penalty);
-        contract.unpaid_breach_penalty = accumulated;
-    }
+    // Collected cash and recoverable breach debt jointly partition the
+    // contractual penalty: the cash reaches the victim first and only the
+    // unpayable remainder accrues as recoverable debt.
+    contract.collected_breach_penalty = contract
+        .collected_breach_penalty
+        .checked_add(collection_attempt.saturating_sub(unpaid_of_attempt))
+        .expect("capped penalty collection cannot exceed the contractual penalty");
+    contract.unpaid_breach_penalty = contract
+        .penalty
+        .saturating_sub(contract.collected_breach_penalty);
     contract.status = ContractStatus::Breached;
     if buyer_owner_id != seller_owner_id {
         if !seller_active {
@@ -3495,11 +3516,26 @@ fn settle_failed_contract(
         (true, false) => Some((due.seller_id, due.buyer_id)),
         (false, false) | (true, true) => None,
     };
-    let unpaid_terminal_penalty = if let Some((payer_id, recipient_id)) = penalty_parties {
-        collect_partial_contract_penalty(state, payer_id, recipient_id, due.penalty)?
+    // Total breach exposure is capped at the contractual penalty across the
+    // contract's whole life: collected cash and recoverable breach debt
+    // partition that one penalty, so a repeat miss can only collect what the
+    // contract still owes, never a fresh penalty per missed delivery.
+    let remaining_collectible = state
+        .contracts
+        .get(&due.id)
+        .map(|contract| {
+            contract
+                .penalty
+                .saturating_sub(contract.collected_breach_penalty)
+        })
+        .unwrap_or(Money::ZERO);
+    let collection_attempt = due.penalty.min(remaining_collectible);
+    let unpaid_of_attempt = if let Some((payer_id, recipient_id)) = penalty_parties {
+        collect_partial_contract_penalty(state, payer_id, recipient_id, collection_attempt)?
     } else {
         Money::ZERO
     };
+    let collected_now = collection_attempt.saturating_sub(unpaid_of_attempt);
     let breached = {
         let contract = state
             .contracts
@@ -3522,21 +3558,17 @@ fn settle_failed_contract(
         if contract.missed_deliveries >= 3 {
             contract.status = ContractStatus::Breached;
         }
-        if settlement.has_attributable_nonperformance() && unpaid_terminal_penalty > Money::ZERO {
-            // A partially paid penalty accumulates as recoverable breach debt
-            // whether or not this delivery is the terminal one, capped at the
-            // contractual penalty so repeated misses cannot inflate the claim
-            // beyond what the contract owes.
-            let accumulated = contract
-                .unpaid_breach_penalty
-                .checked_add(unpaid_terminal_penalty)
-                .ok_or(SimulationError::ContractPenaltyOverflow {
-                    contract_id: due.id,
-                    current: contract.unpaid_breach_penalty,
-                    incoming: unpaid_terminal_penalty,
-                })?
-                .min(contract.penalty);
-            contract.unpaid_breach_penalty = accumulated;
+        if settlement.has_attributable_nonperformance() {
+            // Collected cash and recoverable breach debt jointly partition the
+            // contractual penalty: the cash reaches the victim first and only
+            // the unpayable remainder accrues as recoverable debt.
+            contract.collected_breach_penalty = contract
+                .collected_breach_penalty
+                .checked_add(collected_now)
+                .expect("capped penalty collection cannot exceed the contractual penalty");
+            contract.unpaid_breach_penalty = contract
+                .penalty
+                .saturating_sub(contract.collected_breach_penalty);
         }
         contract.status == ContractStatus::Breached
     };
@@ -3696,7 +3728,6 @@ fn settle_loans(state: &mut AppState) -> Result<(), SimulationError> {
             weekly_payment: loan.weekly_payment,
             balance: loan.balance,
             interest_basis_points: loan.interest_basis_points,
-            collateral_property_id: loan.collateral_property_id,
         })
         .collect();
     for due_loan in due {
@@ -3948,6 +3979,12 @@ fn settle_missed_civic_debt_payment(
         };
         debt.status == CivicDebtStatus::Defaulted
     };
+    // Unlike a defaulted private loan, a defaulted civic debt is terminal: the
+    // creditor's principal is extinguished with only these one-time legitimacy
+    // and unrest consequences. This asymmetry is deliberate — municipal
+    // default is a political event resolved at the ballot and in the street,
+    // not a restructuring case for the Civic Court, so no grounded claim
+    // source exists for civic debts.
     let treasury = state
         .institutions
         .get_mut(&treasury_id)
@@ -4228,84 +4265,94 @@ impl CollateralSeizure {
 }
 
 fn seize_defaulted_collateral(state: &mut AppState, due: DueLoan) -> CollateralSeizure {
-    if let Some(property_id) = due.collateral_property_id {
-        let (occupant_owner_id, existing_tenant_id) = {
-            let property = state
-                .properties
-                .get(&property_id)
-                .expect("loan collateral must exist");
-            let occupant_owner_id = property.occupant_business_id.map(|business_id| {
-                state
-                    .businesses
-                    .get(business_id)
-                    .expect("collateral occupant business must exist")
-                    .owner_dynasty_id()
-            });
-            (occupant_owner_id, property.tenant_dynasty_id)
-        };
-        let property = state
-            .properties
-            .get_mut(&property_id)
-            .expect("loan collateral must exist");
-        property.owner_dynasty_id = Some(due.lender_id);
-        property.tenant_dynasty_id = occupant_owner_id
-            .or(existing_tenant_id)
-            .filter(|tenant_id| *tenant_id != due.lender_id);
-        property.collateral_loan_id = None;
-        apply_defaulted_collateral_recovery(state, due.id)
+    let defaulted = state
+        .loans
+        .get(&due.id)
+        .is_some_and(|loan| loan.status == LoanStatus::Defaulted);
+    if defaulted {
+        seize_pledged_collateral(state, due.id)
     } else {
         CollateralSeizure::none()
     }
 }
 
-fn apply_defaulted_collateral_recovery(
+/// Executes recovery against a loan's still-pledged collateral: ownership of
+/// the premises passes to the lender, its liquidation value credits the
+/// balance, and any surplus equity flows back to the borrower. Shared by the
+/// extrajudicial default-seizure path and the court-judgment execution path so
+/// both keep identical accounting and equity handling.
+fn seize_pledged_collateral(
     state: &mut AppState,
     loan_id: crate::ids::LoanId,
 ) -> CollateralSeizure {
-    let (recovery, equity_surplus) = {
-        let loan = state
-            .loans
-            .get(&loan_id)
-            .expect("defaulted loan must exist");
-        if loan.status != LoanStatus::Defaulted {
-            return CollateralSeizure::none();
-        }
-        let Some(property_id) = loan.collateral_property_id else {
+    let (lender_id, property_id, balance) = {
+        let Some(loan) = state.loans.get(&loan_id) else {
             return CollateralSeizure::none();
         };
-        let liquidation_value = state
-            .properties
-            .get(&property_id)
-            .expect("defaulted loan collateral must exist")
-            .value
-            .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000);
-        (
-            liquidation_value.min(loan.balance),
-            liquidation_value.saturating_sub(loan.balance),
-        )
+        match loan.collateral_property_id {
+            Some(property_id) => (loan.lender_dynasty_id, property_id, loan.balance),
+            None => return CollateralSeizure::none(),
+        }
     };
-    if recovery <= Money::ZERO {
+    if balance <= Money::ZERO {
         return CollateralSeizure::none();
     }
+    let pledged = state
+        .properties
+        .get(&property_id)
+        .is_some_and(|property| property.collateral_loan_id == Some(loan_id));
+    if !pledged {
+        return CollateralSeizure::none();
+    }
+    let (occupant_owner_id, existing_tenant_id) = {
+        let property = state
+            .properties
+            .get(&property_id)
+            .expect("loan collateral must exist");
+        let occupant_owner_id = property.occupant_business_id.map(|business_id| {
+            state
+                .businesses
+                .get(business_id)
+                .expect("collateral occupant business must exist")
+                .owner_dynasty_id()
+        });
+        (occupant_owner_id, property.tenant_dynasty_id)
+    };
+    let (liquidation_value, equity_surplus) = {
+        let property = state
+            .properties
+            .get_mut(&property_id)
+            .expect("loan collateral must exist");
+        property.owner_dynasty_id = Some(lender_id);
+        property.tenant_dynasty_id = occupant_owner_id
+            .or(existing_tenant_id)
+            .filter(|tenant_id| *tenant_id != lender_id);
+        property.collateral_loan_id = None;
+        let liquidation_value = property
+            .value
+            .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000);
+        (liquidation_value, liquidation_value.saturating_sub(balance))
+    };
     let (equity_returned, equity_withheld) = if equity_surplus > Money::ZERO {
         return_collateral_equity_surplus(state, loan_id, equity_surplus)
     } else {
         (Money::ZERO, Money::ZERO)
     };
+    let credited = liquidation_value.min(balance);
     let loan = state
         .loans
         .get_mut(&loan_id)
-        .expect("defaulted loan must exist");
+        .expect("judgment loan must exist");
     loan.balance = loan
         .balance
-        .checked_sub(recovery)
-        .expect("collateral recovery must not exceed the defaulted balance");
+        .checked_sub(credited)
+        .expect("collateral recovery must not exceed the judgment balance");
     if loan.balance == Money::ZERO {
         loan.status = LoanStatus::Repaid;
         loan.missed_payments = 0;
     }
     CollateralSeizure {
-        recovery,
+        recovery: credited,
         equity_returned,
         equity_withheld,
     }
@@ -5958,13 +6005,12 @@ fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> 
             .dynasties
             .get_mut(&dynasty_id)
             .expect("upkeep dynasty must exist");
-        dynasty.resources.treasury = dynasty.resources.treasury.checked_sub(paid).ok_or(
-            SimulationError::DynastyTreasuryOverflow {
-                dynasty_id,
-                current: dynasty.resources.treasury,
-                incoming: paid,
-            },
-        )?;
+        // `paid` is bounded by the treasury, so the subtraction cannot fail.
+        dynasty.resources.treasury = dynasty
+            .resources
+            .treasury
+            .checked_sub(paid)
+            .expect("bounded upkeep payment must not exceed the treasury");
         total_upkeep =
             total_upkeep
                 .checked_add(paid)
@@ -7291,7 +7337,9 @@ fn revalue_district_properties(state: &mut AppState, district_id: DistrictId, re
             .saturating_mul_ratio(500, 10_000)
             .copper()
             .unsigned_abs();
-        let step = Money::from_copper(i64::try_from(raw_step.min(cap)).unwrap_or(i64::MAX));
+        let step = Money::from_copper(
+            i64::try_from(raw_step.min(cap)).expect("capped revaluation step must fit i64"),
+        );
         if step == Money::ZERO {
             continue;
         }
@@ -8183,12 +8231,21 @@ fn update_information_reports(
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
     let day = state.clock.day();
+    // Movement is measured against each good's price at the last monthly
+    // boundary, so the report describes the whole month; the references then
+    // roll forward to today's prices for next month's report.
     let most_changed = registry.goods().iter().filter_map(|good| {
         let quote = state.market.get_quote(good.id())?;
-        let prior = quote.previous_price().copper();
-        let change = (quote.price().copper() - prior).unsigned_abs();
-        // A month with no price movement anywhere is a non-event: publishing
-        // "identified causes" for it would manufacture intelligence noise.
+        let month_start = state
+            .market
+            .month_start_prices
+            .get(&good.id())
+            .copied()
+            .unwrap_or_else(|| quote.price());
+        let change = (quote.price().copper() - month_start.copper()).unsigned_abs();
+        // A month with no net price movement anywhere is a non-event:
+        // publishing "identified causes" for it would manufacture
+        // intelligence noise.
         (change > 0).then_some((
             change,
             good.id(),
@@ -8198,6 +8255,12 @@ fn update_information_reports(
         ))
     });
     let Some((_, good_id, name, price, causes)) = most_changed.max_by_key(|item| item.0) else {
+        state.market.month_start_prices = state
+            .market
+            .quotes
+            .iter()
+            .map(|(good_id, quote)| (*good_id, quote.price()))
+            .collect();
         return Ok(());
     };
     let expires_day = checked_future_day(day, 120)?;
@@ -8218,6 +8281,12 @@ fn update_information_reports(
             summary: format!("{name} is priced at {price}; identified causes: {causes:?}."),
         },
     );
+    state.market.month_start_prices = state
+        .market
+        .quotes
+        .iter()
+        .map(|(good_id, quote)| (*good_id, quote.price()))
+        .collect();
     Ok(())
 }
 
@@ -8660,71 +8729,26 @@ pub(crate) fn settle_legal_claim_source(
 }
 
 /// Executes a won debt judgment against the loan's pledged collateral when
-/// immediate payment could not cover it: ownership of the premises passes to
-/// the creditor and its liquidation value credits the outstanding balance,
-/// mirroring the extrajudicial default-seizure path.
+/// immediate payment could not cover it, through the same seizure accounting
+/// as the default-seizure path. Equity the lender cannot fund is recorded as a
+/// borrower grievance rather than silently enriching the lender.
 fn execute_judgment_against_collateral(state: &mut AppState, loan_id: crate::ids::LoanId) {
-    let (lender_id, property_id, balance) = {
-        let loan = state.loans.get(&loan_id).expect("judgment loan must exist");
-        match loan.collateral_property_id {
-            Some(property_id) => (loan.lender_dynasty_id, property_id, loan.balance),
-            None => return,
-        }
-    };
-    if balance <= Money::ZERO {
-        return;
-    }
-    let pledged = state
-        .properties
-        .get(&property_id)
-        .is_some_and(|property| property.collateral_loan_id == Some(loan_id));
-    if !pledged {
-        return;
-    }
-    let (occupant_owner_id, existing_tenant_id) = {
-        let property = state
-            .properties
-            .get(&property_id)
-            .expect("loan collateral must exist");
-        let occupant_owner_id = property.occupant_business_id.map(|business_id| {
-            state
-                .businesses
-                .get(business_id)
-                .expect("collateral occupant business must exist")
-                .owner_dynasty_id()
-        });
-        (occupant_owner_id, property.tenant_dynasty_id)
-    };
-    let (liquidation_value, equity_surplus) = {
-        let property = state
-            .properties
-            .get_mut(&property_id)
-            .expect("loan collateral must exist");
-        property.owner_dynasty_id = Some(lender_id);
-        property.tenant_dynasty_id = occupant_owner_id
-            .or(existing_tenant_id)
-            .filter(|tenant_id| *tenant_id != lender_id);
-        property.collateral_loan_id = None;
-        let liquidation_value = property
-            .value
-            .saturating_mul_ratio(PROPERTY_LIQUIDATION_BASIS_POINTS, 10_000);
-        (liquidation_value, liquidation_value.saturating_sub(balance))
-    };
-    if equity_surplus > Money::ZERO {
-        let _ = return_collateral_equity_surplus(state, loan_id, equity_surplus);
-    }
-    let credited = liquidation_value.min(balance);
-    let loan = state
+    let parties = state
         .loans
-        .get_mut(&loan_id)
-        .expect("judgment loan must exist");
-    loan.balance = loan
-        .balance
-        .checked_sub(credited)
-        .expect("collateral recovery must not exceed the judgment balance");
-    if loan.balance == Money::ZERO {
-        loan.status = LoanStatus::Repaid;
-        loan.missed_payments = 0;
+        .get(&loan_id)
+        .map(|loan| (loan.lender_dynasty_id, loan.borrower_dynasty_id));
+    let seizure = seize_pledged_collateral(state, loan_id);
+    if seizure.equity_withheld > Money::ZERO
+        && let Some((lender_id, borrower_id)) = parties
+    {
+        // The executing lender could not fund the full surplus, so it kept a
+        // windfall above its claim; the borrower remembers the grievance.
+        adjust_dynasty_relationship(
+            state,
+            borrower_id,
+            lender_id,
+            RelationshipDelta::new(-150, -100, 0, 250, 0),
+        );
     }
 }
 
@@ -8813,7 +8837,14 @@ fn detect_and_advance_crises(
     let prior_panics = state
         .crises
         .values()
-        .filter(|crisis| crisis.kind == CrisisKind::BankingPanic)
+        .filter(|crisis| {
+            crisis.kind == CrisisKind::BankingPanic
+                // Only recent panics raise the bar for the next one: without a
+                // lookback window the threshold ratchets forever because
+                // resolved crises stay in state, and after a few events no
+                // reachable default count could ever trigger detection again.
+                && day - crisis.started_day <= BANKING_PANIC_MEMORY_DAYS
+        })
         .count();
     let next_panic_threshold = prior_panics.saturating_add(1).saturating_mul(2);
     if defaulted_loans >= next_panic_threshold && !active_panic {
@@ -8958,7 +8989,19 @@ fn advance_existing_crises(
             format!("The {kind:?} crisis has subsided below an active threat level."),
         )?;
     }
+    prune_expired_crisis_history(state);
     Ok(())
+}
+
+/// Resolved crises leave `state.crises` only long enough to remain visible
+/// history; beyond the retention horizon they are dropped so the record map
+/// (and every monthly scan over it) stays bounded on long campaigns. No other
+/// record references crises, so pruning cannot desynchronize derived state.
+fn prune_expired_crisis_history(state: &mut AppState) {
+    let day = state.clock.day();
+    state.crises.retain(|_, crisis| {
+        crisis.status.is_active() || day - crisis.started_day <= CRISIS_HISTORY_RETENTION_DAYS
+    });
 }
 
 /// The single canonical audit-detail encoding for a crisis response. Readers

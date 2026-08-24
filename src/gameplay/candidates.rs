@@ -7159,6 +7159,7 @@ pub(crate) const fn command_error_category(error: &CommandError) -> &'static str
         CommandError::InformationReportExpired { .. } => "intelligence report expired",
         CommandError::InformationReportHasNoLeverage { .. } => REPORT_NO_LEVERAGE,
         CommandError::MissingNotification { .. } => "missing notification",
+        CommandError::NotificationAlreadyAcknowledged { .. } => "notification already acknowledged",
         CommandError::MarketExtractionUnavailable { .. } => "market extraction unavailable",
     }
 }
@@ -7301,7 +7302,6 @@ pub(crate) const fn simulation_error_category(error: &SimulationError) -> &'stat
         SimulationError::CivicDebtBalanceOverflow { .. } => {
             "simulation: civic debt balance overflow"
         }
-        SimulationError::ContractPenaltyOverflow { .. } => "simulation: contract penalty overflow",
         SimulationError::MarketClearingAccountOverflow { .. } => {
             "simulation: market clearing account overflow"
         }

@@ -34,6 +34,11 @@ pub struct SupplyContract {
     pub(crate) breaching_dynasty_id: Option<DynastyId>,
     pub(crate) breach_victim_dynasty_id: Option<DynastyId>,
     pub(crate) unpaid_breach_penalty: Money,
+    /// Penalty cash already collected from attributed misses. Together with
+    /// `unpaid_breach_penalty` this bounds total breach exposure to exactly
+    /// `penalty`: repeated misses collect only what the contract still owes,
+    /// never a fresh penalty per missed delivery.
+    pub(crate) collected_breach_penalty: Money,
     pub(crate) status: ContractStatus,
 }
 
@@ -487,6 +492,9 @@ pub enum ObjectiveKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObjectiveStatus {
+    /// Never constructed at runtime: systems create objectives directly in
+    /// `Pursuing`. The variant exists only so saves and hostile input carrying
+    /// it are rejected cleanly by validation instead of failing a deserialize.
     Planned,
     Pursuing,
     Achieved,
@@ -706,16 +714,6 @@ pub struct OutboxMessage {
 }
 
 impl OutboxMessage {
-    #[must_use]
-    pub const fn id(&self) -> OutboxMessageId {
-        self.id
-    }
-
-    #[must_use]
-    pub const fn day(&self) -> i64 {
-        self.day
-    }
-
     #[must_use]
     pub const fn kind(&self) -> OutboxKind {
         self.kind

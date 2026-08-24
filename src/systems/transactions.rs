@@ -2,7 +2,7 @@
 
 use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};
 use crate::ids::{
-    BusinessId, CivicDebtId, ContractId, DynastyId, GoodId, HouseholdId, IdentifierAllocationError,
+    BusinessId, CivicDebtId, DynastyId, GoodId, HouseholdId, IdentifierAllocationError,
     InstitutionId, LoanId,
 };
 use crate::money::{Money, Quantity};
@@ -205,14 +205,6 @@ pub enum SimulationError {
     )]
     CivicDebtBalanceOverflow {
         civic_debt_id: CivicDebtId,
-        current: Money,
-        incoming: Money,
-    },
-    #[error(
-        "contract {contract_id} cannot accumulate unpaid penalty {incoming}; current balance {current} would exceed the supported money range"
-    )]
-    ContractPenaltyOverflow {
-        contract_id: ContractId,
         current: Money,
         incoming: Money,
     },

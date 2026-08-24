@@ -152,6 +152,11 @@ fn empty_state(registry: &Registry, seed: u64) -> AppState {
             })
             .collect(),
         clearing_account: Money::from_copper(INITIAL_MARKET_CLEARING_COPPER),
+        month_start_prices: registry
+            .goods()
+            .iter()
+            .map(|good| (good.id(), good.base_price()))
+            .collect(),
     };
     AppState {
         schema_version: CURRENT_SCHEMA_VERSION,

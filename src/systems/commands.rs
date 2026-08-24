@@ -19,9 +19,9 @@ use crate::core::{
     CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry,
     ChronicleKind, CivicDebt, CivicDebtStatus, ContractStatus, CrisisKind, CrisisStatus,
     DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw, FamilyLink, FamilyLinkKind,
-    HouseGovernance, InformationConfidence, InformationReport, InformationTarget, LawKind,
-    LegalCase, LegalCaseKind, LegalCaseStatus, LoanStatus, OfficeDirectiveState, OfficePower,
-    OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
+    HouseGovernance, InformationConfidence, InformationReport, InformationTarget,
+    InstitutionRuntime, LawKind, LegalCase, LegalCaseKind, LegalCaseStatus, LoanStatus,
+    OfficeDirectiveState, OfficePower, OutboxKind, PublicWork, PublicWorkKind, PublicWorkStatus,
 };
 use crate::ids::{
     BusinessId, CharacterId, ContractId, CrisisId, DistrictId, DynastyId, EmploymentId,
@@ -740,6 +740,8 @@ pub enum CommandError {
     InformationReportHasNoLeverage { report_id: InformationReportId },
     #[error("notification {message_id} does not exist")]
     MissingNotification { message_id: OutboxMessageId },
+    #[error("notifications through {message_id} are already acknowledged")]
+    NotificationAlreadyAcknowledged { message_id: OutboxMessageId },
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -1133,9 +1135,11 @@ fn apply_cash_transfer(
     amount: Money,
 ) -> Result<CommandOutcome, CommandError> {
     ensure_operable_owned_business(state, from_business_id)?;
-    // Receiving a cash infusion is allowed for any owned business, including
-    // one under distress the transfer is meant to relieve; only the source
-    // must remain operable.
+    // Receiving a cash infusion is allowed for any owned business still
+    // operating, including one under distress the transfer is meant to
+    // relieve; rescuing an insolvent or closed firm is InvestInBusiness's
+    // role, so `transfer_business_cash` rejects a terminated destination and
+    // only the source must be operable here.
     ensure_owned_business(state, to_business_id)?;
     // Portfolio transfers honor the same operating-reserve floor as every
     // other player-driven route out of the business, so a firm cannot be
@@ -2024,7 +2028,9 @@ fn apply_law(
     value: i64,
 ) -> Result<CommandOutcome, CommandError> {
     let validation = validate_law_sponsorship(registry, state, kind, value)?;
-    spend_player_treasury(state, LAW_SPONSORSHIP_COST)?;
+    // Resolve every fallible step before the first mutation.
+    let id = state.next_ids.try_law()?;
+    spend_player_treasury_to_market(state, LAW_SPONSORSHIP_COST)?;
     state
         .dynasties
         .get_mut(&state.player_dynasty_id)
@@ -2038,7 +2044,6 @@ fn apply_law(
     {
         law.active = false;
     }
-    let id = state.next_ids.try_law()?;
     state.laws.insert(
         id,
         EnactedLaw {
@@ -2366,27 +2371,40 @@ fn validate_public_work_cooldown(state: &AppState, subject: &str) -> Result<(), 
     Ok(())
 }
 
+/// Whether the named office power is currently held by an active player-dynasty
+/// character. This is the single canonical gate for exercising office powers:
+/// incapacitation vacates offices, but this predicate does not depend on that
+/// cross-system invariant holding.
+fn office_power_is_player_held(
+    state: &AppState,
+    institution: &InstitutionRuntime,
+    power: OfficePower,
+) -> bool {
+    institution.powers.contains(&power)
+        && institution.office_holder_id.is_some_and(|character_id| {
+            state.characters.get(character_id).is_some_and(|character| {
+                character.status() == CharacterStatus::Active
+                    && character.dynasty_id() == state.player_dynasty_id
+            })
+        })
+}
+
 pub(crate) fn has_player_office(state: &AppState) -> bool {
     state.institutions.values().any(|institution| {
         institution.office_holder_id.is_some_and(|character_id| {
-            state
-                .characters
-                .get(character_id)
-                .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
+            state.characters.get(character_id).is_some_and(|character| {
+                character.status() == CharacterStatus::Active
+                    && character.dynasty_id() == state.player_dynasty_id
+            })
         })
     })
 }
 
 pub(crate) fn has_player_office_power(state: &AppState, power: OfficePower) -> bool {
-    state.institutions.values().any(|institution| {
-        institution.powers.contains(&power)
-            && institution.office_holder_id.is_some_and(|character_id| {
-                state
-                    .characters
-                    .get(character_id)
-                    .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
-            })
-    })
+    state
+        .institutions
+        .values()
+        .any(|institution| office_power_is_player_held(state, institution, power))
 }
 
 pub(crate) fn player_office_power_available_day(
@@ -2405,15 +2423,7 @@ fn checked_player_office_power_available_day(
     for institution in state
         .institutions
         .values()
-        .filter(|institution| institution.powers.contains(&power))
-        .filter(|institution| {
-            institution.office_holder_id.is_some_and(|character_id| {
-                state
-                    .characters
-                    .get(character_id)
-                    .is_some_and(|character| character.dynasty_id() == state.player_dynasty_id)
-            })
-        })
+        .filter(|institution| office_power_is_player_held(state, institution, power))
     {
         match checked_future_day(
             institution.term_started_day,
@@ -2521,19 +2531,13 @@ fn apply_legal_case(
     evidence_basis_points: u16,
     damages: Money,
 ) -> Result<CommandOutcome, CommandError> {
-    if defendant_dynasty_id == state.player_dynasty_id {
-        return Err(CommandError::SameLegalParty);
-    }
-    if !state.dynasties.contains_key(&defendant_dynasty_id) {
-        return Err(CommandError::MissingDynasty {
-            dynasty_id: defendant_dynasty_id,
-        });
-    }
     if evidence_basis_points > 10_000 || damages <= Money::ZERO {
         // Zero damages would file an unresolvable case: nothing to settle, no
         // judgment award, and a claim source occupied for its whole life.
         return Err(CommandError::InvalidLegalTerms);
     }
+    // Party validity and existence are the quote's own preconditions, so they
+    // are checked once inside `quote_player_legal_claim`.
     if state.legal_cases.values().any(|legal_case| {
         legal_case.plaintiff_dynasty_id == state.player_dynasty_id
             && legal_case.defendant_dynasty_id == defendant_dynasty_id
@@ -2792,7 +2796,7 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
     }
     let member_ids: Vec<_> = council.members.iter().copied().collect();
     let unity_before = council.unity_basis_points;
-    spend_player_treasury(state, FAMILY_COUNCIL_MEETING_COST)?;
+    spend_player_treasury_to_market(state, FAMILY_COUNCIL_MEETING_COST)?;
     for character_id in member_ids {
         if let Some(character) = state.characters.get_mut(character_id)
             && character.status() == CharacterStatus::Active
@@ -3054,7 +3058,7 @@ fn apply_adopt_ward(
     let ward_id = state.next_ids.try_character()?;
     let family_link_id: crate::ids::FamilyLinkId = state.next_ids.try_family_link()?;
     let chronicle_id: crate::ids::ChronicleEntryId = state.next_ids.try_chronicle()?;
-    spend_player_treasury(state, WARD_ADOPTION_COST)?;
+    spend_player_treasury_to_market(state, WARD_ADOPTION_COST)?;
     let ward_name = format!("{dynasty_name} Ward {ward_id}");
     insert_ward_character(state, dynasty_id, ward_id, ward_name.clone(), focus);
     insert_ward_family_link(state, family_link_id, head_id, ward_id);
@@ -3308,7 +3312,7 @@ fn apply_family_education(
     {
         return Err(CommandError::FamilyEducationCooldown { next_education_day });
     }
-    spend_player_treasury(state, FAMILY_EDUCATION_COST)?;
+    spend_player_treasury_to_market(state, FAMILY_EDUCATION_COST)?;
     let character = state
         .characters
         .get_mut(character_id)
@@ -3942,7 +3946,7 @@ fn apply_office_nomination(
         });
     }
     let selection_day = checked_future_day(state.clock.day(), OFFICE_NOMINATION_RESOLUTION_DAYS)?;
-    spend_player_treasury(state, OFFICE_NOMINATION_CAMPAIGN_COST)?;
+    spend_player_treasury_to_market(state, OFFICE_NOMINATION_CAMPAIGN_COST)?;
     let institution = state
         .institutions
         .get_mut(&institution_id)
@@ -3987,13 +3991,7 @@ fn validate_office_power_directive(
         .institutions
         .get(&institution_id)
         .ok_or(CommandError::MissingInstitution { institution_id })?;
-    let holder_is_player = institution.office_holder_id.is_some_and(|character_id| {
-        state.characters.get(character_id).is_some_and(|character| {
-            character.status() == CharacterStatus::Active
-                && character.dynasty_id() == state.player_dynasty_id
-        })
-    });
-    if !holder_is_player || !institution.powers.contains(&power) {
+    if !office_power_is_player_held(state, institution, power) {
         return Err(CommandError::OfficePowerUnavailable {
             institution_id,
             power,
@@ -4198,6 +4196,8 @@ fn apply_office_power_directive(
     } = validate_office_power_directive(registry, state, institution_id, power)?;
     let directive_expires_day =
         checked_future_day(state.clock.day(), OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS)?;
+    // Resolve every fallible step before the first mutation.
+    let chronicle_id = state.next_ids.try_chronicle()?;
     state
         .dynasties
         .get_mut(&state.player_dynasty_id)
@@ -4223,7 +4223,6 @@ fn apply_office_power_directive(
             "district={district_id};power={power:?};legitimacy_cost={OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST}"
         ),
     });
-    let chronicle_id = state.next_ids.try_chronicle()?;
     state.chronicle.push(ChronicleEntry {
         id: chronicle_id,
         day: state.clock.day(),
@@ -4489,21 +4488,27 @@ fn apply_crisis_response(
             });
         }
     }
+    // Organized responses to a trade disruption heal the tracked routes first,
+    // so the severity reduction is clamped against the post-healing route
+    // condition and cannot declare victory over disruption that remains.
+    if organized_response_severity_reduction > 0 && crisis_kind == CrisisKind::TradeDisruption {
+        heal_disrupted_routes(state, organized_response_severity_reduction);
+    }
     match response {
         CrisisResponse::Relief => {
-            spend_player_treasury(state, crisis_relief_cost(severity))?;
+            spend_player_treasury_to_market(state, crisis_relief_cost(severity))?;
             reduce_crisis(state, crisis_id, organized_response_severity_reduction);
             adjust_player_legitimacy(state, CRISIS_RELIEF_LEGITIMACY_GAIN, true);
             adjust_district_unrest(state, district_id, CRISIS_RELIEF_UNREST_REDUCTION, false);
         }
         CrisisResponse::Reform => {
-            spend_player_treasury(state, CRISIS_REFORM_COST)?;
+            spend_player_treasury_to_market(state, CRISIS_REFORM_COST)?;
             reduce_crisis(state, crisis_id, organized_response_severity_reduction);
             adjust_player_legitimacy(state, CRISIS_REFORM_LEGITIMACY_GAIN, true);
             adjust_district_unrest(state, district_id, CRISIS_REFORM_UNREST_REDUCTION, false);
         }
         CrisisResponse::Suppress => {
-            spend_player_treasury(state, CRISIS_SUPPRESS_COST)?;
+            spend_player_treasury_to_market(state, CRISIS_SUPPRESS_COST)?;
             reduce_crisis(state, crisis_id, organized_response_severity_reduction);
             adjust_player_legitimacy(state, CRISIS_SUPPRESS_LEGITIMACY_COST, false);
             adjust_district_unrest(state, district_id, CRISIS_SUPPRESS_UNREST_INCREASE, true);
@@ -4511,9 +4516,6 @@ fn apply_crisis_response(
         CrisisResponse::Exploit => {
             apply_crisis_exploitation(state, crisis_id, severity, district_id)?;
         }
-    }
-    if organized_response_severity_reduction > 0 && crisis_kind == CrisisKind::TradeDisruption {
-        heal_disrupted_routes(state, organized_response_severity_reduction);
     }
     // A guild revolt is a crisis of guild standing: the answer changes how
     // every chartered guild is seen, and that standing feeds back into future
@@ -4681,6 +4683,21 @@ fn reduce_crisis(state: &mut AppState, crisis_id: CrisisId, amount: u16) {
         .get_mut(&crisis_id)
         .expect("validated crisis must exist");
     crisis.severity_basis_points = crisis.severity_basis_points.saturating_sub(amount);
+    // A tracked trade disruption holds at the condition that spawned it: a
+    // response cannot mark it resolved while any route remains disrupted at or
+    // above the detection threshold, or the next monthly pass would immediately
+    // re-detect an identical replacement crisis and orphan this audit trail.
+    if crisis.kind == CrisisKind::TradeDisruption {
+        let worst_route_disruption = state
+            .external_routes
+            .values()
+            .map(|route| route.disruption_basis_points)
+            .max()
+            .unwrap_or(0);
+        if worst_route_disruption >= super::strategic::TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD {
+            crisis.severity_basis_points = crisis.severity_basis_points.max(worst_route_disruption);
+        }
+    }
     crisis.status = CrisisStatus::from_severity(crisis.severity_basis_points);
 }
 
@@ -4949,6 +4966,22 @@ fn spend_player_treasury(state: &mut AppState, amount: Money) -> Result<(), Comm
     Ok(())
 }
 
+/// Debits the player treasury for an unmodeled service cost — legal,
+/// educational, informational, or crisis-mobilization work outside the modeled
+/// business economy — and credits the same amount to the market clearing
+/// account, so the payment keeps a credited counterparty instead of vanishing
+/// from the economy. Flows whose counterparty is a named record (court filing
+/// fees, institutional endowments, public-work construction) debit through
+/// [`spend_player_treasury`] and credit that record directly.
+fn spend_player_treasury_to_market(
+    state: &mut AppState,
+    amount: Money,
+) -> Result<(), CommandError> {
+    spend_player_treasury(state, amount)?;
+    credit_market_clearing_account(state, amount)?;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct InformationCommissionPlan {
     target: InformationTarget,
@@ -4964,11 +4997,12 @@ fn commission_information(
     let plan = resolve_information_commission(registry, state, focus)?;
     let day = state.clock.day();
     let expires_day = checked_future_day(day, INFORMATION_REPORT_LIFETIME_DAYS)?;
-    spend_player_treasury(state, INFORMATION_COMMISSION_COST)?;
+    // Resolve every fallible step before the first mutation.
+    let id = state.next_ids.try_information_report()?;
+    spend_player_treasury_to_market(state, INFORMATION_COMMISSION_COST)?;
     state.information_reports.retain(|_, report| {
         report.owner_dynasty_id != state.player_dynasty_id || report.target != Some(plan.target)
     });
-    let id = state.next_ids.try_information_report()?;
     state.information_reports.insert(
         id,
         InformationReport {
@@ -5455,7 +5489,7 @@ fn leverage_information(
     report_id: InformationReportId,
 ) -> Result<CommandOutcome, CommandError> {
     let plan = resolve_information_leverage(registry, state, report_id)?;
-    spend_player_treasury(state, INFORMATION_LEVERAGE_COST)?;
+    spend_player_treasury_to_market(state, INFORMATION_LEVERAGE_COST)?;
     apply_information_leverage_effect(state, &plan.effect);
     state
         .information_reports
@@ -5612,6 +5646,12 @@ fn acknowledge(
     {
         message.acknowledged = true;
         acknowledged = acknowledged.saturating_add(1);
+    }
+    if acknowledged == 0 {
+        // Every notification through `message_id` was already acknowledged:
+        // like other unchanged-state requests this is a typed no-op failure,
+        // not a successful command that mutated nothing.
+        return Err(CommandError::NotificationAlreadyAcknowledged { message_id });
     }
     Ok(CommandOutcome {
         summary: format!(

@@ -17,7 +17,7 @@ use crate::rng::DeterministicRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 27;
+pub const CURRENT_SCHEMA_VERSION: u32 = 28;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGameConfig {
@@ -679,18 +679,8 @@ impl AppState {
     }
 
     #[must_use]
-    pub const fn households(&self) -> &HouseholdStore {
-        &self.households
-    }
-
-    #[must_use]
     pub const fn businesses(&self) -> &BusinessStore {
         &self.businesses
-    }
-
-    #[must_use]
-    pub const fn market(&self) -> &MarketState {
-        &self.market
     }
 
     #[must_use]

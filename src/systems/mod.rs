@@ -35,11 +35,13 @@ pub(crate) const fn is_schedulable_day(day: i64) -> bool {
 /// at `current_day`.
 ///
 /// Weekly obligations settle at global week boundaries. A schedule signed
-/// mid-week stores its nominal `signed + 7` date and stays on that private
-/// cadence until its first boundary settlement snaps it to the global one, so
-/// a valid due day may sit up to two weeks ahead of the current week's start.
-/// Anything overdue (at or before the current week's start) or beyond the
-/// coming fortnight indicates corrupted scheduling.
+/// mid-week stores its nominal `signed + 7` date and keeps that private
+/// cadence: once it is overdue it settles at every weekly boundary and each
+/// settlement advances the due day by seven from the settled date, so the
+/// schedule's phase stays anchored to its signing instead of snapping to the
+/// global boundary. A valid due day may therefore sit up to two weeks ahead of
+/// the current week's start. Anything overdue (at or before the current week's
+/// start) or beyond the coming fortnight indicates corrupted scheduling.
 pub(crate) fn is_settleable_weekly_due_day(current_day: i64, due_day: i64) -> bool {
     let Some(latest_weekly_boundary) = current_day.checked_sub(current_day.rem_euclid(7)) else {
         return false;
@@ -357,8 +359,7 @@ pub(crate) use legal::{
     is_valid_legal_hearing_day, quote_grounded_legal_claim,
 };
 pub(crate) use progression::{
-    campaign_phase_is_consistent, campaign_phase_is_persistently_consistent,
-    contract_deliveries_for_dynasty, refresh_campaign_phases,
+    campaign_phase_is_consistent, contract_deliveries_for_dynasty, refresh_campaign_phases,
 };
 pub use simulation::advance_days;
 pub(crate) use simulation::business_sustainable_unit_cost;

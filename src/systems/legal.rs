@@ -8,6 +8,12 @@ use crate::registry::Registry;
 pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 90;
 pub(crate) const LEGAL_CASE_FILING_COST: Money = Money::from_copper(300);
 pub(crate) const LEGAL_CASE_HEARING_DELAY_DAYS: i64 = 60;
+// The evidence floors below sit above the worst-case decision threshold of the
+// court's scoring model (a fully legitimate defendant versus a legitimacy-less
+// plaintiff needs evidence >= 7_375), so grounded claims are near-certain
+// convictions by design: they are filed only against documented delinquent or
+// breached obligations, and the adversarial legitimacy/attention terms exist
+// for player-filed cases below these floors.
 pub(crate) const LEGAL_DELINQUENT_DEBT_EVIDENCE_BASIS_POINTS: u16 = 7_500;
 pub(crate) const LEGAL_DEFAULTED_DEBT_EVIDENCE_BASIS_POINTS: u16 = 9_000;
 pub(crate) const LEGAL_CONTRACT_BREACH_EVIDENCE_BASIS_POINTS: u16 = 8_500;

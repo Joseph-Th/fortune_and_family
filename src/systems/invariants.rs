@@ -822,6 +822,11 @@ fn contract_breach_attribution_is_valid(
 fn contract_breach_penalty_is_valid(contract: &crate::core::SupplyContract) -> bool {
     !contract.unpaid_breach_penalty.is_negative()
         && contract.unpaid_breach_penalty <= contract.penalty
+        && !contract.collected_breach_penalty.is_negative()
+        && contract
+            .collected_breach_penalty
+            .saturating_add(contract.unpaid_breach_penalty)
+            <= contract.penalty
         && (contract.unpaid_breach_penalty == crate::money::Money::ZERO
             || (contract.breaching_dynasty_id.is_some()
                 && contract.breach_victim_dynasty_id.is_some()))
@@ -1516,8 +1521,10 @@ fn validate_legal_cases(state: &AppState) {
                     let contract = state.contracts.get(&contract_id);
                     debug_assert!(
                         contract.is_some_and(|contract| {
+                            // Recoverable breach debt grounds on the attributed
+                            // debt from the first attributable miss, which can
+                            // exist while the contract itself is still Active.
                             case.kind == LegalCaseKind::ContractBreach
-                                && contract.status == ContractStatus::Breached
                                 && contract.breaching_dynasty_id == Some(case.defendant_dynasty_id)
                                 && contract.breach_victim_dynasty_id
                                     == Some(case.plaintiff_dynasty_id)

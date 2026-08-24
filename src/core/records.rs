@@ -364,6 +364,10 @@ pub struct BusinessOperations {
 pub struct BusinessFinance {
     pub(crate) cash: Money,
     pub(crate) version: u64,
+    /// Cumulative value of goods placed on the market for sale. Sales settle
+    /// against the market's clearing pool when goods are listed rather than
+    /// when consumers buy them, so this measures placement volume, not
+    /// consumer purchases (unsold stock spoils later without reversing it).
     pub(crate) lifetime_revenue: Money,
     pub(crate) lifetime_costs: Money,
 }
@@ -538,13 +542,13 @@ impl MarketQuote {
 pub struct MarketState {
     pub(crate) quotes: BTreeMap<GoodId, MarketQuote>,
     pub(crate) clearing_account: Money,
+    /// Price of each good at the last monthly boundary. The monthly market
+    /// report measures movement against this reference, so it describes the
+    /// whole month instead of the most recent day-over-day tick.
+    pub(crate) month_start_prices: BTreeMap<GoodId, Money>,
 }
 
 impl MarketState {
-    pub fn quotes(&self) -> impl Iterator<Item = &MarketQuote> {
-        self.quotes.values()
-    }
-
     #[must_use]
     pub fn get_quote(&self, good_id: GoodId) -> Option<&MarketQuote> {
         self.quotes.get(&good_id)

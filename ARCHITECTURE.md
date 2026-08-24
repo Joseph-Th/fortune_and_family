@@ -145,9 +145,16 @@ The market clearing account is the market's internal cash pool. Credits into it:
 
 - Business purchases and unmodeled operating and maintenance costs.
 - Player public-work sponsorships and direct funding contributions.
+- Player unmodeled service spends: law sponsorship, family council meetings,
+  ward adoption, family education, office nomination campaigns, crisis
+  relief/reform/suppression mobilizations, and commissioned or leveraged
+  information.
 - Public-work tool purchases and their construction labor/materials residual.
 - Unowned-property sale proceeds, banking-panic deposit flight.
 - AI dynasty upkeep, AI campaigning spend, and AI legitimacy patronage.
+
+The one deliberate exception is the NobleDemand levy, which leaves Rivergate
+for the prince's court and therefore has no internal counterparty.
 
 Debits against it:
 

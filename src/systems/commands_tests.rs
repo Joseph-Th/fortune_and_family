@@ -5946,7 +5946,16 @@ mod crises {
             .crises
             .get(&crisis_id)
             .expect("crisis must remain recorded");
-        assert!(crisis.severity_basis_points < severity);
+        let worst_remaining = state
+            .external_routes
+            .values()
+            .map(|route| route.disruption_basis_points)
+            .max()
+            .expect("campaign must contain regional routes");
+        assert_eq!(
+            crisis.severity_basis_points, worst_remaining,
+            "a tracked trade disruption holds at its worst remaining route instead of declaring victory over unresolved disruption"
+        );
         validate_invariants(registry, &state);
     }
 

@@ -226,6 +226,8 @@ pub struct DynastyProjection {
     pub generation: u16,
     pub properties: usize,
     pub businesses: usize,
+    /// Combined cash across all businesses owned by this dynasty.
+    pub business_cash: Money,
     pub current_loans_as_borrower: usize,
     pub offices: Vec<String>,
     pub active_objective: Option<ObjectiveProjection>,
@@ -711,6 +713,15 @@ fn build_dynasty_projection(
             .businesses
             .ids_for_owner(dynasty_id)
             .map_or(0, std::collections::BTreeSet::len),
+        business_cash: state
+            .businesses
+            .ids_for_owner(dynasty_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| state.businesses.get(*id))
+            .fold(Money::ZERO, |total, business| {
+                total.saturating_add(business.cash())
+            }),
         current_loans_as_borrower: state
             .loans
             .values()
@@ -1359,12 +1370,11 @@ pub fn render_campaign_html(
     state: &AppState,
 ) -> Result<String, serde_json::Error> {
     let projection = build_campaign_projection(registry, state);
-    // The script payload travels compact; only the human-readable mirror is
-    // pretty-printed, so the dashboard does not carry two pretty copies.
-    let serialized = serde_json::to_string_pretty(&projection)?;
+    // The projection travels once, compact: the human-readable mirror in the
+    // collapsed data section is rendered client-side from the same payload,
+    // so the dashboard never carries two copies of its own JSON.
     let compact = serde_json::to_string(&projection)?;
     let data = escape_json_for_html_script(&compact);
-    let data_display = escape_html(&serialized);
     let DashboardFragments {
         attention,
         district_rows,
@@ -1424,8 +1434,8 @@ pub fn render_campaign_html(
 <details open><summary>Market and district conditions</summary><div><h3>Market</h3><section class="scroll"><table><caption class="sr-only">Market prices, movement, stocks, and flows</caption><thead><tr><th scope="col">Good</th><th scope="col">Price</th><th scope="col">Movement</th><th scope="col">Stock / target</th><th scope="col">Demand / supply</th><th scope="col">Drivers</th></tr></thead><tbody>{market_rows}</tbody></table></section><h3>Districts</h3><section class="scroll"><table><caption class="sr-only">District conditions</caption><thead><tr><th scope="col">District</th><th scope="col">Food</th><th scope="col">Employment</th><th scope="col">Sanitation</th><th scope="col">Safety</th><th scope="col">Unrest</th><th scope="col">Drivers</th></tr></thead><tbody>{district_rows}</tbody></table></section></div></details>
 <details><summary>Institutions, active laws, municipal debt & relationships</summary><div><h3>Institutions</h3><section class="scroll"><table><caption class="sr-only">City institutions</caption><thead><tr><th scope="col">Institution</th><th scope="col">Officeholder</th><th scope="col">Next selection</th><th scope="col">Institution standing</th><th scope="col">Powers</th></tr></thead><tbody>{institution_rows}</tbody></table></section><h3>Active laws</h3><section class="scroll"><table><caption class="sr-only">Active laws</caption><thead><tr><th scope="col">Law</th><th scope="col">Value</th><th scope="col">Sponsor</th><th scope="col">Enacted</th></tr></thead><tbody>{law_rows}</tbody></table></section><h3>Municipal debt</h3><section class="scroll"><table><caption class="sr-only">Municipal debt obligations</caption><thead><tr><th scope="col">Creditor</th><th scope="col">Principal</th><th scope="col">Balance</th><th scope="col">Weekly payment</th><th scope="col">Interest</th><th scope="col">Status</th><th scope="col">Next due</th></tr></thead><tbody>{civic_debt_rows}</tbody></table></section><h3>Dynasty relationships</h3><section class="scroll"><table><caption class="sr-only">Dynasty relationship measures</caption><thead><tr><th scope="col">House</th><th scope="col">Trust</th><th scope="col">Respect</th><th scope="col">Fear</th><th scope="col">Resentment</th><th scope="col">Obligation</th><th scope="col">Last interaction</th></tr></thead><tbody>{relationship_rows}</tbody></table></section></div></details>
 <details><summary>Acquisition opportunities</summary><section class="scroll"><table><caption class="sr-only">Businesses currently available for acquisition</caption><thead><tr><th scope="col">Business</th><th scope="col">Owner</th><th scope="col">Status</th><th scope="col">Condition</th><th scope="col">Purchase</th><th scope="col">Required working capital</th></tr></thead><tbody>{acquisition_rows}</tbody></table></section></details>
-<details><summary>Complete projection data</summary><pre>{data_display}</pre></details>
-</main><script type="application/json" id="campaign-data">{data}</script></body></html>"##,
+<details><summary>Complete projection data</summary><pre id="projection-json">JavaScript-disabled viewers can read the raw JSON in the campaign-data script block.</pre></details>
+</main><script type="application/json" id="campaign-data">{data}</script><script>(function(){{var el=document.getElementById('campaign-data');if(el)document.getElementById('projection-json').textContent=JSON.stringify(JSON.parse(el.textContent),null,2);}})();</script></body></html>"##,
         scenario = escape_html(&projection.scenario.name),
         year = projection.scenario.year,
         day = projection.scenario.day_of_year,

@@ -3008,9 +3008,10 @@ mod contracts {
         assert_eq!(contract.breach_victim_dynasty_id, Some(seller_owner_id));
         assert_eq!(
             contract.unpaid_breach_penalty,
-            Money::from_copper(500),
-            "recoverable breach debt must stay capped at the contractual penalty"
+            Money::from_copper(400),
+            "the collected cash pays down the recoverable claim, keeping total exposure at the contractual penalty"
         );
+        assert_eq!(contract.collected_breach_penalty, Money::from_copper(100));
         assert_eq!(
             state
                 .businesses
@@ -4820,7 +4821,6 @@ mod loans {
                 weekly_payment: loan.weekly_payment,
                 balance: loan.balance,
                 interest_basis_points: loan.interest_basis_points,
-                collateral_property_id: loan.collateral_property_id,
             }
         };
 

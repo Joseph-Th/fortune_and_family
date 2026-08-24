@@ -452,6 +452,13 @@ const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = 8_000;
 /// horizon most campaigns reach.
 const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 50;
 
+/// Health an heir resumes natural aging from when they accede to the headship.
+/// The annual health pass pins a designated heir's collapsed health at a
+/// survivable floor so a sick heir can neither collapse into incapacity nor
+/// die before inheriting; accession lifts that artificial floor so the new
+/// head does not carry a guaranteed next-year collapse into office.
+const SUCCESSION_ACCESSION_HEALTH_FLOOR: u16 = 1_000;
+
 /// Falling into distress needs two days of operating cover.
 const ACTIVE_CASH_DAYS_OF_OPERATING_COST: i64 = 2;
 /// Climbing out needs six, so a business near the threshold cannot flap
@@ -669,7 +676,10 @@ pub(crate) fn worker_limited_batches(state: &AppState, business_id: BusinessId) 
             .filter(|agreement| agreement.business_id == business_id)
             .map(|agreement| match agreement.status {
                 EmploymentStatus::Active => u32::from(agreement.workers),
-                EmploymentStatus::Disputed => u32::from(agreement.workers).div_ceil(2),
+                // A disputed crew works at half strength; an odd worker sits
+                // out with the even half rather than rounding up to full
+                // capacity, which would make disputes free for small crews.
+                EmploymentStatus::Disputed => u32::from(agreement.workers) / 2,
                 EmploymentStatus::Suspended | EmploymentStatus::Ended => 0,
             }),
     );
@@ -1505,7 +1515,16 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
                 business_id: business.id(),
                 recipe_id: business.recipe_id(),
                 cash: business.cash(),
-                minimum_cash_reserve: business.policy.minimum_cash_reserve,
+                // A distressed firm may spend through its minimum cash reserve
+                // to keep operating, matching the daily cost limiter; purchase
+                // and maintenance planning must fence off no more, or a
+                // distressed firm would keep buying inputs while systematically
+                // failing every maintenance check.
+                minimum_cash_reserve: if business.status() == BusinessStatus::Distressed {
+                    Money::ZERO
+                } else {
+                    business.policy.minimum_cash_reserve
+                },
                 maintenance_basis_points: business.policy.maintenance_basis_points,
                 quality_target_basis_points: business
                     .policy
@@ -1904,9 +1923,10 @@ fn recently_shocked_goods(state: &AppState) -> BTreeSet<String> {
 
 /// The sustainable unit cost of one business's output at current market input
 /// prices: input costs plus labor and maintenance overhead spread across the
-/// batches the firm can actually run, with a tenth again for margin. Both the
-/// market's production price floors and acquisition-turnaround analysis read
-/// this one canonical formula.
+/// batches the firm can actually run, charged against the efficiency-adjusted
+/// output the firm really expects to yield, with a tenth again for margin.
+/// Both the market's production price floors and acquisition-turnaround
+/// analysis read this one canonical formula.
 pub(crate) fn business_sustainable_unit_cost(
     registry: &Registry,
     state: &AppState,
@@ -1960,9 +1980,38 @@ pub(crate) fn business_sustainable_unit_cost(
             total.saturating_add(cost_for(input.quantity(), price))
         },
     );
-    let break_even = batch_cost
-        .saturating_mul_ratio_ceil_nonnegative(1_000, recipe.output_quantity().milliunits());
+    // Break-even divides cost by the output the firm actually expects to
+    // yield, not the recipe's nominal quantity: quality and craft efficiency
+    // shave up to ~19% off real output, so a floor computed from nominal
+    // output would still let weak producers lose money per unit at the floor.
+    let expected_output = recipe
+        .output_quantity()
+        .saturating_mul_ratio(
+            i64::from(expected_output_efficiency(state, business)),
+            10_000,
+        )
+        .max(Quantity::from_milliunits(1));
+    let break_even =
+        batch_cost.saturating_mul_ratio_ceil_nonnegative(1_000, expected_output.milliunits());
     break_even.saturating_mul_ratio_ceil_nonnegative(11, 10)
+}
+
+/// The share of nominal recipe output the firm's current quality and manager
+/// craft actually yield, expressed in basis points (at least 8_100).
+fn expected_output_efficiency(state: &AppState, business: &crate::core::Business) -> u32 {
+    let quality_efficiency = 9_000_u32
+        .saturating_add(u32::from(business.operations.quality_basis_points) / 10)
+        .min(10_000);
+    let craft_efficiency = state
+        .characters
+        .get(business.manager_id())
+        .map(|manager| {
+            9_000_u32
+                .saturating_add(u32::from(manager.capabilities.craft).saturating_mul(10))
+                .min(10_000)
+        })
+        .unwrap_or(10_000);
+    quality_efficiency * craft_efficiency / 10_000
 }
 
 fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<GoodId, Money> {
@@ -2257,12 +2306,12 @@ fn regional_demand_availability_basis_points(state: &AppState) -> u16 {
             sum.saturating_add(u32::from(availability))
         });
     let count = u32::try_from(routes.len()).unwrap_or(u32::MAX);
-    let average = total / count;
-    average
-        .max(u32::from(REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS))
-        .min(10_000)
-        .try_into()
-        .unwrap_or(10_000)
+    u16::try_from(
+        (total / count)
+            .max(u32::from(REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS))
+            .min(10_000),
+    )
+    .expect("availability clamped into basis-point range must fit u16")
 }
 
 fn process_year_boundary(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
@@ -2316,6 +2365,10 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
             age_years,
             epidemic_severity,
         );
+        // A designated heir whose resolved health collapses is pinned at a
+        // survivable floor for this year instead of becoming incapacitated:
+        // succession needs a live designated heir, and the floor is lifted on
+        // accession (SUCCESSION_ACCESSION_HEALTH_FLOOR).
         character.runtime.health_basis_points =
             if resolved_health == 0 && heir_ids.contains(&character.id()) {
                 1
@@ -2368,9 +2421,14 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
         }
     }
     reconcile_inactive_business_managers(state);
-    // A head whose health has collapsed with no designated heir must not keep
-    // running the house indefinitely: designate the most capable adult member
-    // as emergency heir so this year's succession pass can execute normally.
+    designate_emergency_heirs(state);
+    Ok(())
+}
+
+/// A head whose health has collapsed with no designated heir must not keep
+/// running the house indefinitely: designate the most capable adult member
+/// as emergency heir so this year's succession pass can execute normally.
+fn designate_emergency_heirs(state: &mut AppState) {
     let emergency_candidates: Vec<(DynastyId, CharacterId)> = state
         .dynasties
         .values()
@@ -2392,7 +2450,6 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
             .expect("emergency succession dynasty must exist");
         dynasty.relationships.heir_id = Some(successor_id);
     }
-    Ok(())
 }
 
 /// Selects the most capable adult active dynasty member other than the head,
@@ -3080,6 +3137,11 @@ fn apply_successions_in_place(
                 .expect("succession incoming head must exist");
             incoming.runtime.role = CharacterRole::HeadOfHouse;
             incoming.runtime.loyalty_basis_points = 10_000;
+            // Lift the heir health pin: see SUCCESSION_ACCESSION_HEALTH_FLOOR.
+            incoming.runtime.health_basis_points = incoming
+                .runtime
+                .health_basis_points
+                .max(SUCCESSION_ACCESSION_HEALTH_FLOOR);
         }
 
         update_institutions_for_succession(

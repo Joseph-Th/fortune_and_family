@@ -432,6 +432,10 @@ pub fn load_state(path: impl AsRef<Path>) -> Result<AppState, PersistenceError> 
 }
 
 fn read_bounded_save(path: &Path) -> Result<Vec<u8>, PersistenceError> {
+    // The pre-open stat rejects regular-file violations and gross oversizing
+    // before allocation; the post-open re-stat closes the TOCTOU window
+    // between stat and open. The post-read length check is the authoritative
+    // bound: `take(MAX + 1)` guarantees the buffer can never exceed the limit.
     let metadata = fs::metadata(path).map_err(|source| PersistenceError::Read {
         path: path.to_path_buf(),
         source,
@@ -807,7 +811,7 @@ fn validate_no_duplicate_json_members(bytes: &[u8], path: &Path) -> Result<(), P
 
 fn validate_campaign_phase_consistency(state: &AppState) -> Result<(), String> {
     for dynasty_id in state.dynasties.keys().copied() {
-        if !crate::systems::campaign_phase_is_persistently_consistent(state, dynasty_id) {
+        if !crate::systems::campaign_phase_is_consistent(state, dynasty_id) {
             return Err(format!(
                 "dynasty {dynasty_id} has a stale or incompatible campaign phase"
             ));
@@ -921,6 +925,11 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
             ));
         }
     }
+    for (good_id, price) in &state.market.month_start_prices {
+        if *price <= Money::ZERO || !state.market.quotes.contains_key(good_id) {
+            return Err(format!("market month-start price for {good_id} is invalid"));
+        }
+    }
     Ok(())
 }
 
@@ -995,6 +1004,11 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
             || contract.penalty < Money::ZERO
             || contract.unpaid_breach_penalty < Money::ZERO
             || contract.unpaid_breach_penalty > contract.penalty
+            || contract.collected_breach_penalty < Money::ZERO
+            || contract
+                .collected_breach_penalty
+                .saturating_add(contract.unpaid_breach_penalty)
+                > contract.penalty
             || checked_cost_for(contract.quantity_per_week, contract.unit_price).is_none()
         {
             return Err(format!(
@@ -1710,9 +1724,10 @@ fn validate_employment_records(state: &AppState) -> Result<(), String> {
     let mut workers_by_household = BTreeMap::<HouseholdId, u64>::new();
     for (employment_id, agreement) in &state.employment {
         let business = state.businesses.get(agreement.business_id);
+        // Numeric bounds (positive wage, nonzero workers) are owned by
+        // `validate_financial_numeric_ranges`; this pass owns references and
+        // lifecycle agreement.
         if agreement.id != *employment_id
-            || agreement.workers == 0
-            || agreement.weekly_wage <= Money::ZERO
             || business.is_none()
             || state.households.get(agreement.household_id).is_none()
         {

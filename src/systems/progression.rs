@@ -26,6 +26,11 @@ pub(crate) fn contract_deliveries_for_dynasty(state: &AppState, dynasty_id: Dyna
     })
 }
 
+/// Reputation standing keys the `Establishment` phase on the dynasty's
+/// *current* commercial reputation rather than an append-only record. This is
+/// the one deliberate live-value trigger: the monotonic phase clamp turns any
+/// crossing into a permanent milestone, so the phase can be gained here but
+/// never lost when standing later softens.
 fn dynasty_reputation_standing(state: &AppState, dynasty_id: DynastyId) -> bool {
     state.dynasties.get(&dynasty_id).is_some_and(|dynasty| {
         dynasty
@@ -127,23 +132,11 @@ fn campaign_phase_has_required_durable_evidence(state: &AppState, dynasty_id: Dy
     }
 }
 
+/// Whether the persisted phase agrees with a fresh derivation from durable
+/// evidence: the phase must carry its required milestone evidence and never
+/// sit below the reconstructed rank (promotion is monotonic, so evidence that
+/// later softens does not invalidate an already-earned phase).
 pub(crate) fn campaign_phase_is_consistent(state: &AppState, dynasty_id: DynastyId) -> bool {
-    let Some(dynasty) = state.dynasties.get(&dynasty_id) else {
-        return false;
-    };
-    if !campaign_phase_has_required_durable_evidence(state, dynasty_id) {
-        return false;
-    }
-    if dynasty.runtime.generation > 1 {
-        return true;
-    }
-    dynasty.runtime.phase == runtime_campaign_phase(state, dynasty_id)
-}
-
-pub(crate) fn campaign_phase_is_persistently_consistent(
-    state: &AppState,
-    dynasty_id: DynastyId,
-) -> bool {
     let Some(dynasty) = state.dynasties.get(&dynasty_id) else {
         return false;
     };
@@ -338,9 +331,6 @@ mod tests {
             .phase = CampaignPhase::Ascendancy;
 
         assert!(!campaign_phase_is_consistent(&state, player_id));
-        assert!(!campaign_phase_is_persistently_consistent(
-            &state, player_id
-        ));
 
         state
             .dynasties
@@ -350,9 +340,6 @@ mod tests {
             .phase = CampaignPhase::Dominion;
 
         assert!(!campaign_phase_is_consistent(&state, player_id));
-        assert!(!campaign_phase_is_persistently_consistent(
-            &state, player_id
-        ));
 
         state.audit_log.push(crate::core::AuditRecord {
             day: state.clock.day(),
@@ -362,9 +349,6 @@ mod tests {
         });
 
         assert!(!campaign_phase_is_consistent(&state, player_id));
-        assert!(!campaign_phase_is_persistently_consistent(
-            &state, player_id
-        ));
     }
 
     #[test]
@@ -395,7 +379,6 @@ mod tests {
             .reputation_reliability_basis_points = 0;
 
         assert!(campaign_phase_is_consistent(&state, player_id));
-        assert!(campaign_phase_is_persistently_consistent(&state, player_id));
     }
 
     #[test]

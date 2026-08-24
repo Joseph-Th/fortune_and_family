@@ -654,18 +654,20 @@ fn ensure_output_parent(path: &Path) -> Result<(), CliError> {
 }
 
 fn print_human_summary(registry: &Registry, state: &civic_dynasty::AppState) {
-    let summary = build_state_summary(registry, state);
     let projection = build_campaign_projection(registry, state);
     println!(
         "{} | year {}, day {} | elapsed {} days",
-        summary.scenario_name, summary.year, summary.day_of_year, summary.elapsed_days
+        projection.scenario.name,
+        projection.scenario.year,
+        projection.scenario.day_of_year,
+        projection.scenario.elapsed_days
     );
     println!(
         "House {} | {} | treasury {} | business cash {}",
-        summary.dynasty_name,
-        summary.phase.label(),
-        summary.dynasty_treasury,
-        summary.business_cash
+        projection.player.name,
+        projection.scenario.phase.label(),
+        projection.player.treasury,
+        projection.player.business_cash
     );
     println!(
         "Capacity {} / {} | {} businesses | {} properties | {:.1}% family unity",
