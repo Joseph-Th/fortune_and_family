@@ -12,7 +12,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Save schema | 28 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 67 |
+| Gameplay report schema | 68 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -50,7 +50,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 | Civic systems | Laws, differentiated public works, district conditions, grounded legal cases and settlements with filing fees funding the Civic Court, crisis response, municipal debt, and private funding of any unfinished public work — a dynasty's own project or another house's stalled one, with external contributions earning visible legitimacy and sponsor gratitude. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, subject, summary, creation, expiry, passive reports, and paid market/district/counterparty intelligence. |
-| AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; monthly household upkeep with penalties for shortfalls; private-credit participation funding sound firms first, with punitive speculative loans to losing firms so delinquency, default, seizure, and grounded legal claims arise organically; accumulation skims never strip a firm below its recapitalization target; property purchases preserve the recovery reserve. |
+| AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; monthly household upkeep with penalties for shortfalls; private-credit participation funding sound firms first, with punitive speculative credit for distressed or losing firms once a house carries a live loan, so repayment failure, seizure, and grounded legal claims arise organically; accumulation skims never strip a firm below its recapitalization target. |
 | Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, response, resolution, and recovery. Trade disruptions track their route condition: organized responses heal routes, a watch directive counts as a response, and the disruption resolves once every route heals below the detection threshold. A resolved banking panic raises the follow-up default bar for three years; resolved crises then leave state. Phantom demand moves prices only. |
 | Observability | State summary, campaign projection, HTML dashboard, outbox, chronicle, audit history, validation, campaign progression, gameplay reports with causal feedback traces, and art review reports. |
 

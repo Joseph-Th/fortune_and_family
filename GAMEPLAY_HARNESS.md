@@ -271,8 +271,20 @@ Reports contain:
 - Per-campaign `peak_player_treasury` and `minimum_unowned_property_value`
   observations, so an unexercised acquisition route can be read as an
   affordability ceiling rather than a declined choice
+- Per-campaign `player_breach_victim_contracts`, counting contracts that
+  record the player dynasty as their attributed breach victim, so
+  counterparty wrongdoing that could ground a court claim is visible even
+  when the agent declines to litigate
 - Representative decision traces
-- A chronological decision log for a configured number of campaigns, each retained step showing context, the selected command and outcome, and the reason no action was taken on quiet cycles
+- A chronological decision log for a configured number of campaigns, each
+  retained step showing context, the selected command and outcome, and the
+  reason no action was taken on quiet cycles. Each context line carries the
+  dynasty's power position — treasury, business cash, offices, legitimacy,
+  generation, and any player-facing legal exposure (open cases as defendant,
+  attributed breach victimizations) — so an ascent can be read alongside its
+  setbacks. Rendered alternatives are deduplicated by identical projected
+  outcome, and quiet-cycle reason family lists are capped with a remainder
+  count in the human log; the structured report keeps full lists.
 - Findings and stated limitations
 
 Each retained trace step includes its phase, three measured consequence profiles: immediate

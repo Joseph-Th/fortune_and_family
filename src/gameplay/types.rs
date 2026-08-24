@@ -225,6 +225,7 @@ pub struct GameplaySnapshot {
     pub player_active_contracts: u16,
     pub player_fulfilled_contracts: u16,
     pub player_breached_contracts: u16,
+    pub player_breach_victim_contracts: u16,
     pub player_contract_failures: u32,
     pub player_contract_deliveries: u32,
     pub contract_state_checksum: u64,
@@ -444,6 +445,7 @@ pub(crate) struct StrategicSnapshotPart {
     pub player_active_contracts: u16,
     pub player_fulfilled_contracts: u16,
     pub player_breached_contracts: u16,
+    pub player_breach_victim_contracts: u16,
     pub player_contract_failures: u32,
     pub player_contract_deliveries: u32,
     pub current_loans: u16,
@@ -736,6 +738,13 @@ impl StrategicSnapshotPart {
             player_breached_contracts: usize_to_u16(
                 player_contracts()
                     .filter(|contract| contract.status == ContractStatus::Breached)
+                    .count(),
+            ),
+            player_breach_victim_contracts: usize_to_u16(
+                state
+                    .contracts
+                    .values()
+                    .filter(|contract| contract.breach_victim_dynasty_id == Some(player_id))
                     .count(),
             ),
             player_contract_failures: player_contracts()
@@ -1207,6 +1216,7 @@ macro_rules! assemble_gameplay_snapshot {
             player_active_contracts: $strategic.player_active_contracts,
             player_fulfilled_contracts: $strategic.player_fulfilled_contracts,
             player_breached_contracts: $strategic.player_breached_contracts,
+            player_breach_victim_contracts: $strategic.player_breach_victim_contracts,
             player_contract_failures: $strategic.player_contract_failures,
             player_contract_deliveries: $strategic.player_contract_deliveries,
             contract_state_checksum: stable_serialized_checksum(&$state.contracts),
@@ -1380,6 +1390,7 @@ pub struct GameplayDecisionContext {
     pub player_disputed_employment: u16,
     pub maximum_contract_relationship_pressure_basis_points: u16,
     pub player_open_legal_cases_as_defendant: u16,
+    pub player_breach_victim_contracts: u16,
     pub active_crises: u16,
     pub unread_notifications: u16,
 }
@@ -1424,6 +1435,7 @@ impl From<&GameplaySnapshot> for GameplayDecisionContext {
             maximum_contract_relationship_pressure_basis_points: snapshot
                 .maximum_contract_relationship_pressure_basis_points,
             player_open_legal_cases_as_defendant: snapshot.player_open_legal_cases_as_defendant,
+            player_breach_victim_contracts: snapshot.player_breach_victim_contracts,
             active_crises: snapshot.active_crises,
             unread_notifications: snapshot.unread_notifications,
         }

@@ -911,14 +911,12 @@ pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut S
                 }
                 None => format!(
                     "NO ACTION ({options}) => {}",
-                    step.no_action_reason
-                        .as_deref()
-                        .unwrap_or("no reason recorded")
+                    compact_no_action_reason(step.no_action_reason.as_deref())
                 ),
             };
             let _ = writeln!(
                 output,
-                "  day {:>4} {:<19} | treasury {:>9} | biz {:>9} | businesses {}{} | offices {} | crises {} | {}",
+                "  day {:>4} {:<19} | treasury {:>9} | biz {:>9} | businesses {}{} | offices {} | legit {:.0}% | gen {}{} | crises {} | {}",
                 step.day,
                 phase_label_at_day(&campaign.fantasy_arc, step.day),
                 context.player_treasury,
@@ -930,6 +928,9 @@ pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut S
                     String::new()
                 },
                 context.offices_held,
+                f64::from(context.legitimacy) / 100.0,
+                context.generation,
+                legal_pressure_suffix(context),
                 context.active_crises,
                 action_text,
             );
@@ -956,7 +957,27 @@ pub(crate) fn render_trace_alternatives(step: &GameplayTraceStep, output: &mut S
         output,
         "             alternatives (shared projected horizon):"
     );
-    for option in step.viable_options.iter().take(3) {
+    // Distinct-option dedupe: several concrete targets often project the same
+    // measurable outcome (for example identical ward adoptions), so repeated
+    // rows would only re-render one tradeoff three times.
+    let mut rendered_profiles: std::collections::BTreeSet<(GameplayCommandKind, String)> =
+        std::collections::BTreeSet::new();
+    let mut shown = 0;
+    for option in &step.viable_options {
+        if shown >= 3 {
+            break;
+        }
+        let profile_key = (
+            option.command,
+            format!(
+                "{}|{}",
+                domain_labels(&option.projected_domains),
+                format_measure_changes(&option.projected_profile)
+            ),
+        );
+        if !rendered_profiles.insert(profile_key) {
+            continue;
+        }
         let _ = writeln!(
             output,
             "               {:<18} score {:>5} | {}d later [{}] | changes [{}]",
@@ -966,6 +987,54 @@ pub(crate) fn render_trace_alternatives(step: &GameplayTraceStep, output: &mut S
             domain_labels(&option.projected_domains),
             format_measure_changes(&option.projected_profile),
         );
+        shown += 1;
+    }
+}
+
+/// Caps the bracketed command-family list inside quiet-cycle reasons so a
+/// twelve-family restraint list cannot dominate every no-action line. The full
+/// list stays in the structured report; the human log keeps the leading
+/// families plus a count of the remainder.
+fn compact_no_action_reason(reason: Option<&str>) -> String {
+    let Some(reason) = reason else {
+        return "no reason recorded".to_owned();
+    };
+    const MAX_FAMILIES: usize = 6;
+    let Some((prefix, list)) = reason.split_once('[') else {
+        return reason.to_owned();
+    };
+    let Some((families, suffix)) = list.split_once(']') else {
+        return reason.to_owned();
+    };
+    let mut parts: Vec<&str> = families.split(',').map(str::trim).collect();
+    if parts.len() <= MAX_FAMILIES {
+        return reason.to_owned();
+    }
+    let omitted = parts.len() - MAX_FAMILIES;
+    parts.truncate(MAX_FAMILIES);
+    format!("{prefix}[{}, +{omitted} more]{suffix}", parts.join(", "))
+}
+
+/// A short suffix surfacing player-facing legal exposure that the standard
+/// columns do not show, so a decision log explains lawsuit-driven context.
+fn legal_pressure_suffix(context: &GameplayDecisionContext) -> String {
+    let mut parts = Vec::new();
+    if context.player_open_legal_cases_as_defendant > 0 {
+        parts.push(format!(
+            "sued {}",
+            context.player_open_legal_cases_as_defendant
+        ));
+    }
+    if context.player_breach_victim_contracts > 0 {
+        parts.push(format!(
+            "breached {}x",
+            context.player_breach_victim_contracts
+        ));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
     }
 }
 

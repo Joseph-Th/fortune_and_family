@@ -8859,6 +8859,170 @@ mod ai {
     }
 
     #[test]
+    fn a_distressed_but_history_profitable_firm_is_not_a_safe_credit_client() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let (owner_id, business_id) = state
+            .dynasties
+            .keys()
+            .copied()
+            .filter(|id| *id != state.player_dynasty_id)
+            .find_map(|owner| {
+                state
+                    .businesses
+                    .ids_for_owner(owner)
+                    .expect("rival owner index must exist")
+                    .iter()
+                    .next()
+                    .map(|business_id| (owner, *business_id))
+            })
+            .expect("campaign must contain a rival with a business");
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            // Lifetime-profitable operating history, but currently distressed:
+            // the firm cannot cover its own next operating window.
+            business.finance.lifetime_costs = Money::from_copper(500);
+            business.finance.lifetime_revenue = Money::from_copper(1_000);
+            business.finance.cash = Money::ZERO;
+            business.operations.status = BusinessStatus::Distressed;
+        }
+        let sound = super::undercapitalized_business(
+            registry,
+            &state,
+            owner_id,
+            super::BusinessStatusFilter::Creditworthy,
+        );
+        assert!(
+            sound.is_none(),
+            "the safe working-capital book must not serve a distressed firm"
+        );
+        let speculative = super::undercapitalized_business(
+            registry,
+            &state,
+            owner_id,
+            super::BusinessStatusFilter::Speculative,
+        );
+        assert_eq!(
+            speculative.map(|(found, _)| found),
+            Some(business_id),
+            "a distressed firm must be a speculative-pool candidate so punitive secured credit has eligible borrowers within a session"
+        );
+    }
+
+    #[test]
+    fn a_lender_with_an_active_book_may_diversify_into_speculation() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        // Give one rival a structurally losing business so the speculative
+        // pool has a candidate, and leave another rival's firm creditworthy
+        // with a real shortfall so the sound offer exists the whole time.
+        let rivals: Vec<_> = state
+            .dynasties
+            .keys()
+            .copied()
+            .filter(|id| *id != state.player_dynasty_id)
+            .collect();
+        assert!(
+            rivals.len() >= 3,
+            "campaign must contain at least three rival dynasties"
+        );
+        let (speculator_id, losing_business_id) = {
+            let owner = rivals[0];
+            let business_id = *state
+                .businesses
+                .ids_for_owner(owner)
+                .expect("rival owner index must exist")
+                .iter()
+                .next()
+                .expect("speculator must own a business");
+            (owner, business_id)
+        };
+        {
+            let business = state
+                .businesses
+                .get_mut(losing_business_id)
+                .expect("losing business must exist");
+            business.finance.cash = Money::ZERO;
+            business.finance.lifetime_costs = Money::from_copper(1_000);
+            business.finance.lifetime_revenue = Money::from_copper(500);
+        }
+        let (sound_id, sound_business_id) = {
+            let owner = rivals[1];
+            let business_id = *state
+                .businesses
+                .ids_for_owner(owner)
+                .expect("rival owner index must exist")
+                .iter()
+                .next()
+                .expect("sound borrower must own a business");
+            (owner, business_id)
+        };
+        {
+            let business = state
+                .businesses
+                .get_mut(sound_business_id)
+                .expect("sound business must exist");
+            business.finance.cash = Money::ZERO;
+            business.finance.lifetime_costs = Money::from_copper(500);
+            business.finance.lifetime_revenue = Money::from_copper(1_000);
+        }
+        // The lender already carries a live loan on its book: rebrand an
+        // active bootstrap loan so the diversification draw is armed. The
+        // borrower keeps its debt, so it stays blocked from new borrowing.
+        let borrowers_of_active_loans: std::collections::BTreeSet<_> = state
+            .loans
+            .values()
+            .filter(|loan| loan.status.is_repayment_active())
+            .map(|loan| loan.borrower_dynasty_id)
+            .collect();
+        let lender_id = *rivals
+            .iter()
+            .find(|id| {
+                **id != speculator_id && **id != sound_id && !borrowers_of_active_loans.contains(id)
+            })
+            .expect("campaign must contain a rival with no active borrowing");
+        let rebranded = state
+            .loans
+            .values_mut()
+            .find(|loan| loan.status.is_repayment_active() && loan.borrower_dynasty_id != lender_id)
+            .expect("bootstrap must create a rival active loan to rebrand");
+        rebranded.lender_dynasty_id = lender_id;
+        let player_id = state.player_dynasty_id;
+
+        // The monthly risk-appetite draw gates the speculative tier, so retry
+        // until it fires; every intermediate answer must still be the sound
+        // offer because unserved safe demand remains the fallback.
+        let mut saw_speculative = false;
+        for _ in 0..1_000 {
+            let Some(offer) =
+                super::ai_credit_lending_offer(registry, &mut state, player_id, lender_id)
+            else {
+                continue;
+            };
+            if offer.interest_basis_points == super::SPECULATIVE_LOAN_INTEREST_BASIS_POINTS {
+                saw_speculative = true;
+                assert_eq!(
+                    offer.borrower_dynasty_id, speculator_id,
+                    "the punitive offer must target the losing firm"
+                );
+                assert_eq!(offer.term_weeks, super::SPECULATIVE_LOAN_TERM_WEEKS);
+                break;
+            }
+            assert_eq!(
+                offer.borrower_dynasty_id, sound_id,
+                "a failed risk draw must fall back to the sound working-capital offer"
+            );
+        }
+        assert!(
+            saw_speculative,
+            "a house with an active lending book must eventually diversify into speculative credit"
+        );
+    }
+
+    #[test]
     fn district_decay_revalues_property_values_downward() {
         let mut state = make_test_campaign();
         // Pick a non-residence property in a district.

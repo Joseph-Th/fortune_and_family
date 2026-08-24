@@ -89,7 +89,7 @@ const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = 2_500;
 /// secured by whatever unpledged property the borrower can offer, so a failed
 /// speculation costs the borrower real assets instead of only reputation.
 const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 1_500;
-const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 78;
+const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 52;
 const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(6_000);
 /// Monthly risk-appetite draw per liquid house: speculative offers are rare
 /// enough that a campaign accumulates a handful, not a debt spiral.
@@ -6135,9 +6135,11 @@ fn business_is_creditworthy(business: &crate::core::Business) -> bool {
 
 /// The lending half of AI credit participation: a liquid house may fund a borrower's
 /// working-capital shortfall through the canonical loan machinery. Sound firms are
-/// financed first at standard terms; only when no sound firm needs capital does a
-/// monthly risk-appetite draw allow speculative credit to a losing firm at punitive
-/// terms. Speculative credit is the world's controlled source of repayment failure:
+/// financed first at standard terms; a house already carrying a live loan may
+/// additionally diversify into speculative credit on the monthly risk-appetite draw,
+/// and a house with no book at all may speculate once no sound firm needs capital.
+/// Speculative credit — to distressed or lifetime-losing firms, at punitive secured
+/// terms — is the world's controlled source of repayment failure:
 /// some of those loans rescue the borrower, others miss installments, fall
 /// delinquent, default, and ground the enforcement claims that keep courts,
 /// collateral seizure, and banking panics reachable. Without it every obligation in
@@ -6243,17 +6245,49 @@ fn ai_credit_lending_offer(
             )
         })
         .max_by_key(|offer| offer.shortfall);
-    if sound.is_some() {
+    // Risk appetite: a liquid house whose safe working-capital book already
+    // carries a live loan may diversify into a losing firm's recovery at
+    // punitive, property-secured terms. Without this second route the
+    // speculative tier only opens once *every* firm in the city is fully
+    // capitalized, which on fresh campaigns takes years of accumulation —
+    // so delinquency, default, seizure, and the grounded legal claims they
+    // ground stay unreachable across a whole standard session. The draw stays
+    // monthly and per-house, and unserved sound demand remains the fallback
+    // answer when the draw fails.
+    let sound_book_active = dynasty_holds_active_ai_loan(state, lender_id);
+    if sound_book_active {
+        if state
+            .rng
+            .is_chance_success(SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS)
+            && let Some(speculative) =
+                speculative_lending_offer(registry, state, player_id, lender_id)
+        {
+            return Some(speculative);
+        }
         return sound;
     }
-    // Risk appetite: with the safe book saturated, a liquid house may back a
-    // losing firm's recovery at punitive terms secured by its property.
+    // With nothing on the book yet, the safe offer still comes first and the
+    // original saturated-book speculation path applies behind it.
+    if let Some(sound) = sound {
+        return Some(sound);
+    }
     if !state
         .rng
         .is_chance_success(SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS)
     {
         return None;
     }
+    speculative_lending_offer(registry, state, player_id, lender_id)
+}
+
+/// The punitive recovery-loan pool: the most undercapitalized losing firm of an
+/// otherwise unleveraged rival house.
+fn speculative_lending_offer(
+    registry: &Registry,
+    state: &mut AppState,
+    player_id: DynastyId,
+    lender_id: DynastyId,
+) -> Option<AiCreditLendingOffer> {
     state
         .dynasties
         .keys()
@@ -6307,9 +6341,13 @@ fn best_speculative_business(
 /// Which side of the credit ledger a candidate business is drawn from.
 #[derive(Clone, Copy)]
 enum BusinessStatusFilter {
-    /// Lifetime-profitable firms: safe working-capital clients.
+    /// Operating, lifetime-profitable firms: safe working-capital clients.
     Creditworthy,
-    /// Lifetime-losing firms: speculative recovery bets.
+    /// Speculative recovery bets: everything else — lifetime-losing firms and
+    /// distressed firms generally. A firm that cannot keep itself operating
+    /// this season is a risky borrower even with a profitable history, so the
+    /// punitive secured pool has eligible candidates within a session instead
+    /// of only after years of accumulated losses.
     Speculative,
 }
 
@@ -6332,10 +6370,15 @@ fn undercapitalized_business(
             )
         })
         .filter(|business| {
-            let creditworthy = business_is_creditworthy(business);
+            // A distressed firm is never a safe client even when its lifetime
+            // history nets positive: the safe book must not rescue for cheap
+            // the very firms whose operating trouble makes punitive, secured
+            // recovery credit (and its eventual repayment failures) possible.
+            let sound =
+                business_is_creditworthy(business) && business.status() == BusinessStatus::Active;
             match filter {
-                BusinessStatusFilter::Creditworthy => creditworthy,
-                BusinessStatusFilter::Speculative => !creditworthy,
+                BusinessStatusFilter::Creditworthy => sound,
+                BusinessStatusFilter::Speculative => !sound,
             }
         })
         .filter_map(|business| {
@@ -6486,6 +6529,15 @@ fn dynasty_has_active_ai_borrowing(state: &AppState, dynasty_id: DynastyId) -> b
         .loans
         .values()
         .any(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status.is_repayment_active())
+}
+
+/// Whether the house already carries a live loan on its own lending book, so
+/// its monthly risk-appetite draw may diversify into speculative credit.
+fn dynasty_holds_active_ai_loan(state: &AppState, dynasty_id: DynastyId) -> bool {
+    state
+        .loans
+        .values()
+        .any(|loan| loan.lender_dynasty_id == dynasty_id && loan.status.is_repayment_active())
 }
 
 fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
