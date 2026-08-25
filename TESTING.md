@@ -120,7 +120,7 @@ Large suites live beside their production owner:
 |---|---|
 | Core state and stores | `src/core/state_tests.rs` |
 | Campaign bootstrap | `src/systems/bootstrap_tests.rs` |
-| Player commands | `src/systems/commands_tests.rs` |
+| Player commands | `src/systems/commands/commands_tests.rs` |
 | Daily simulation | `src/systems/simulation_tests.rs` |
 | Strategic systems | `src/systems/strategic/strategic_tests.rs` |
 | Persistence | `src/persistence_tests.rs` |

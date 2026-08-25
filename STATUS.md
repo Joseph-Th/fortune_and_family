@@ -56,7 +56,7 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 
 ## Player command surface
 
-`PlayerCommand` in `src/systems/commands.rs` is authoritative. Command families include:
+`PlayerCommand` in `src/systems/commands/` is authoritative. Command families include:
 
 - Business capital, acquisition, investment, wage posture, and operating policy
 - Supply contracts and private loans

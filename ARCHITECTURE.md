@@ -41,7 +41,7 @@ Dependency direction is one way:
 | `src/registry/mod.rs` | Immutable Rivergate definitions and lookup validation. |
 | `src/rng.rs` | Serializable deterministic RNG. |
 | `src/systems/bootstrap.rs` | New campaign construction. |
-| `src/systems/commands.rs` | `PlayerCommand`, validation, dispatch, and command-owned mutation. |
+| `src/systems/commands/` | `PlayerCommand` schema, dispatch, and command-owned mutation (see below). |
 | `src/systems/mod.rs` | Systems facade: entry-point re-exports and shared scheduling and worker helpers. |
 | `src/systems/legal.rs` | Grounded debt and contract claims. |
 | `src/systems/progression.rs` | Monotonic campaign progression. |
@@ -65,6 +65,25 @@ The strategic directory keeps one submodule per domain behind a single facade:
 | `strategic/legal_cases.rs` | Legal-case hearings, judgments, settlements, claim discharge. |
 | `strategic/crises.rs` | Crisis detection, escalation, response effects, route risk. |
 | `strategic/initialization.rs` | Deterministic bootstrap initialization of strategic state. |
+
+The commands directory keeps one submodule per command family behind the
+canonical dispatch:
+
+| Submodule | Responsibility |
+|---|---|
+| `commands/mod.rs` | Command schema, dispatch, shared spending plumbing, cooldown lookups. |
+| `commands/consts.rs` | Tuning constants for every command family. |
+| `commands/error.rs` | Typed player-command failures and conversions. |
+| `commands/holdings.rs` | Owned-business transfers, capital, policy, and wages. |
+| `commands/trade.rs` | Supply-contract and private-credit negotiation. |
+| `commands/law.rs` | Law sponsorship and municipal debt issuance. |
+| `commands/property_cmd.rs` | Property purchase and liquidation. |
+| `commands/civic.rs` | Public-work sponsorship and funding. |
+| `commands/legal_cmd.rs` | Legal-case filing and settlement. |
+| `commands/family.rs` | Governance, councils, heirs, wards, education. |
+| `commands/politics.rs` | Institutions, patronage, offices, nominations, directives. |
+| `commands/response.rs` | Crisis-response and labor-dispute commands. |
+| `commands/information.rs` | Intelligence commissioning, leverage, notifications. |
 | `src/persistence.rs` | Current-schema save/load, release validation, atomic writes. |
 | `src/projection.rs` | Immutable read models and self-contained HTML rendering. |
 | `src/gameplay/` | Deterministic player agents, counterfactual attribution, scores, findings, traces. |
@@ -133,7 +152,7 @@ PlayerCommand
   -> validate invariants
 ```
 
-Owner: `src/systems/commands.rs` and the subsystem functions it invokes.
+Owner: `src/systems/commands/` and the subsystem functions it invokes.
 
 Multi-record operations may use consumed validated tokens. A deferred commit must revalidate the state it depends on; stale tokens must fail without mutation.
 
@@ -291,7 +310,7 @@ Important invariant groups include registry references, derived indexes, ownersh
 |---|---|---|
 | Immutable Rivergate content | `src/registry/mod.rs` | Registry tests, bootstrap, projection when visible. |
 | Persistent state | `src/core/*`, `src/core/state.rs` | Bootstrap, validation, invariants, projection, tests. |
-| Player command | `src/systems/commands.rs` | Command tests, feedback, projection, gameplay integration, CLI smoke when needed. |
+| Player command | `src/systems/commands/` | Command tests, feedback, projection, gameplay integration, CLI smoke when needed. |
 | Daily economic rule | `src/systems/simulation.rs` | Simulation tests, causal ordering, invariants. |
 | Scheduled strategic rule | `src/systems/strategic/` domain submodule | Strategic tests, feedback, gameplay snapshots. |
 | Cross-record transaction | Owning system or `src/systems/transactions.rs` | Typed errors, atomicity, stale-token tests. |
@@ -303,4 +322,4 @@ Important invariant groups include registry references, derived indexes, ownersh
 
 ## Public API
 
-`src/lib.rs` defines the supported integration surface. Prefer stable operations there over exposing record internals. `PlayerCommand` in `src/systems/commands.rs` is the authoritative player mutation schema.
+`src/lib.rs` defines the supported integration surface. Prefer stable operations there over exposing record internals. `PlayerCommand` in `src/systems/commands/` is the authoritative player mutation schema.

@@ -131,7 +131,7 @@ src/
   systems/
     mod.rs            Systems facade: entry-point re-exports and shared scheduling helpers
     bootstrap.rs      New campaign construction
-    commands.rs       PlayerCommand schema and dispatch
+    commands/         PlayerCommand schema and dispatch by family
     legal.rs          Grounded legal claims
     progression.rs    Campaign progression milestones
     simulation.rs     Daily simulation pipeline
@@ -175,7 +175,7 @@ scripts/
 | Render and review sprites | `build_art_review`, `build_art_review_report`, `render_art_review_html` |
 | Check runtime invariants | `validate_invariants` |
 
-`PlayerCommand` in `src/systems/commands.rs` is the authoritative player mutation schema.
+`PlayerCommand` in `src/systems/commands/` is the authoritative player mutation schema.
 
 ## Working rule
 

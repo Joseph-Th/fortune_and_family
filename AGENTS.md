@@ -18,7 +18,7 @@ This project applies the Universal, Stateful Application, Deterministic System, 
 | Concern | Owner |
 |---|---|
 | Campaign construction | `src/systems/bootstrap.rs` |
-| Player commands | `src/systems/commands.rs` |
+| Player commands | `src/systems/commands/` |
 | Daily/scheduled simulation | `src/systems/simulation.rs`, `src/systems/strategic/` |
 | Legal/progression | `src/systems/legal.rs`, `src/systems/progression.rs` |
 | Persistence | `src/persistence.rs` |
