@@ -763,6 +763,10 @@ fn reserve_loan_commit(
 /// Infallible by construction: reservation has already consumed the loan,
 /// outbox, and counterparty-report identifiers and resolved the schedule, so
 /// no step below can fail.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the commit keeps every ledger, index, and feedback write in one auditable sequence"
+)]
 fn commit_loan_reserved(
     state: &mut AppState,
     terms: &LoanTerms,

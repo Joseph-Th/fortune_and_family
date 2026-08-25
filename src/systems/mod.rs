@@ -8,7 +8,7 @@ mod commands;
 mod invariants;
 mod legal;
 mod progression;
-mod simulation;
+pub(crate) mod simulation;
 mod strategic;
 mod transactions;
 
@@ -322,6 +322,7 @@ pub(crate) fn heir_audit_detail_matches(
 /// office. The writer and reader share this one constant.
 pub(crate) const OFFICE_RESIGNATION_AUDIT_DETAIL: &str = "resigned_office=true";
 
+pub(crate) use commands::apply_player_command_scratch;
 pub(crate) use commands::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS,
     CIVIC_DEBT_CREDITOR_RESERVE, COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST,

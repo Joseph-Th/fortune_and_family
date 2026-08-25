@@ -192,7 +192,9 @@ pub(crate) fn probe_candidate(
     projection_days: u32,
 ) -> Result<CandidateProbeOutcome, GameplayHarnessError> {
     let mut probe = state.clone();
-    match apply_player_command(registry, &mut probe, candidate.command.clone()) {
+    // The clone above is disposable, so the probe applies through the
+    // scratch entry and pays one campaign copy instead of two.
+    match apply_player_command_scratch(registry, &mut probe, candidate.command.clone()) {
         Ok(_) => Ok(CandidateProbeOutcome::Viable {
             evaluated: Box::new(evaluate_viable_option(
                 registry,
@@ -988,16 +990,18 @@ pub(crate) fn pending_player_nomination_power_counts(
     state: &AppState,
 ) -> BTreeMap<InstitutionId, usize> {
     let day = state.clock.day();
+    // Nominations stop counting once `day >= record.day() + resolution`, and
+    // audit days never decrease, so everything before that boundary can be
+    // skipped instead of filtered.
+    let window_start = day.saturating_sub(OFFICE_NOMINATION_RESOLUTION_DAYS - 1);
+    let window_start_index = state
+        .audit_log
+        .partition_point(|record| record.day() < window_start);
     state
         .audit_log
         .iter()
-        .filter(|record| {
-            record.kind() == AuditKind::OfficeNomination
-                && day
-                    < record
-                        .day()
-                        .saturating_add(OFFICE_NOMINATION_RESOLUTION_DAYS)
-        })
+        .skip(window_start_index)
+        .filter(|record| record.kind() == AuditKind::OfficeNomination)
         .filter_map(|record| {
             let (institution_id, character_id) =
                 record.audit_subject().institution_character_ids()?;
@@ -1238,16 +1242,23 @@ pub(crate) fn crisis_has_containment_response(
     crisis_id: crate::ids::CrisisId,
 ) -> bool {
     let subject = format!("crisis:{crisis_id}");
-    state
-        .audit_log
-        .iter()
-        .rev()
+    // Responses cannot predate the crisis, so the scan starts there.
+    let earliest_day = state
+        .crises
+        .get(&crisis_id)
+        .map_or(0, crate::core::Crisis::started_day);
+    audit_records_from(state, earliest_day)
         .any(|record| record.subject() == subject && crisis_response_contains_crisis(record))
 }
 
 pub(crate) fn crisis_was_exploited(state: &AppState, crisis_id: crate::ids::CrisisId) -> bool {
     let subject = format!("crisis:{crisis_id}");
-    state.audit_log.iter().rev().any(|record| {
+    // Responses cannot predate the crisis, so the scan starts there.
+    let earliest_day = state
+        .crises
+        .get(&crisis_id)
+        .map_or(0, crate::core::Crisis::started_day);
+    audit_records_from(state, earliest_day).any(|record| {
         record.kind() == AuditKind::CrisisResponse
             && record.subject() == subject
             && record.detail() == "response=Exploit"
@@ -1377,20 +1388,12 @@ pub(crate) fn generate_business_wage_candidates(
         .filter(|business| is_open_business(business))
     {
         let subject = format!("business:{}", business.id());
-        if state
-            .audit_log
-            .iter()
-            .rev()
+        if audit_records_within_cooldown(state, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS)
             .find(|record| {
                 record.kind() == crate::core::AuditKind::BusinessWageChange
                     && record.subject() == subject
             })
-            .is_some_and(|record| {
-                state.clock.day()
-                    < record
-                        .day()
-                        .saturating_add(BUSINESS_WAGE_CHANGE_INTERVAL_DAYS)
-            })
+            .is_some()
         {
             continue;
         }
@@ -1567,19 +1570,13 @@ pub(crate) fn generate_business_policy_candidates(
     candidates: &mut Vec<Candidate>,
 ) {
     let policy_subject = format!("business:{}", business.id());
-    let policy_change_available = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::BusinessPolicyChange && record.subject() == policy_subject
-        })
-        .is_none_or(|record| {
-            state.clock.day()
-                >= record
-                    .day()
-                    .saturating_add(BUSINESS_POLICY_CHANGE_INTERVAL_DAYS)
-        });
+    let policy_change_available =
+        audit_records_within_cooldown(state, BUSINESS_POLICY_CHANGE_INTERVAL_DAYS)
+            .find(|record| {
+                record.kind() == AuditKind::BusinessPolicyChange
+                    && record.subject() == policy_subject
+            })
+            .is_none();
     if !policy_change_available {
         return;
     }
@@ -1660,17 +1657,8 @@ pub(crate) fn generate_cash_rebalance_candidate(
     if player_businesses.len() < 2 {
         return;
     }
-    if state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::CashTransfer)
-        .is_some_and(|record| {
-            state.clock.day()
-                < record
-                    .day()
-                    .saturating_add(AGENT_CASH_REBALANCE_INTERVAL_DAYS)
-        })
+    if audit_records_within_cooldown(state, AGENT_CASH_REBALANCE_INTERVAL_DAYS)
+        .any(|record| record.kind() == AuditKind::CashTransfer)
     {
         return;
     }
@@ -1856,25 +1844,15 @@ pub(crate) fn generate_ordinary_distribution_candidate(
     if player.treasury() >= liquidity_target {
         return;
     }
-    if state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::BusinessDividend
-                && record.subject().starts_with("business:")
-                && record.detail().starts_with("owner_distribution=")
-        })
-        .is_some_and(|record| {
-            if legal_requirement.is_some() {
-                return false;
-            }
-            state.clock.day()
-                < record
-                    .day()
-                    .saturating_add(AGENT_OWNER_DISTRIBUTION_INTERVAL_DAYS)
-        })
-    {
+    let recent_owner_distribution =
+        audit_records_within_cooldown(state, AGENT_OWNER_DISTRIBUTION_INTERVAL_DAYS).any(
+            |record| {
+                record.kind() == AuditKind::BusinessDividend
+                    && record.subject().starts_with("business:")
+                    && record.detail().starts_with("owner_distribution=")
+            },
+        );
+    if recent_owner_distribution && legal_requirement.is_none() {
         return;
     }
     let source = player_businesses
@@ -2072,12 +2050,9 @@ pub(crate) fn generate_planned_business_investment(
         return;
     }
     let subject = format!("business:{}", business.id());
-    if state.audit_log.iter().rev().any(|record| {
-        record.kind() == AuditKind::BusinessCapitalization
-            && record.subject() == subject
-            && state.clock.day().saturating_sub(record.day())
-                < AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS
-    }) {
+    if audit_records_within_cooldown(state, AGENT_PLANNED_CAPITALIZATION_INTERVAL_DAYS).any(
+        |record| record.kind() == AuditKind::BusinessCapitalization && record.subject() == subject,
+    ) {
         return;
     }
     let target_condition = 9_000_u16;
@@ -5758,10 +5733,12 @@ pub(crate) fn player_has_severe_business_distress(state: &AppState) -> bool {
 }
 
 pub(crate) fn has_recent_player_office_duty_shortfall(state: &AppState) -> bool {
-    state.audit_log.iter().rev().any(|record| {
+    // The 180-day lookback window bounds the scan: audit days never decrease,
+    // so records older than the cutoff cannot be followed by relevant ones.
+    let earliest_day = state.clock.day().saturating_sub(180);
+    audit_records_from(state, earliest_day).any(|record| {
         record.kind() == AuditKind::OfficeDutyShortfall
             && audit_subject_has_dynasty(record.audit_subject(), state.player_dynasty_id)
-            && state.clock.day().saturating_sub(record.day()) <= 180
     })
 }
 

@@ -534,8 +534,9 @@ mod soak {
 
 mod history_log {
     use super::*;
+    use crate::core::checksum::ChecksumFolder;
     use std::sync::Arc;
-
+    use std::sync::atomic::AtomicU64;
     fn log_with(values: &[u32]) -> HistoryLog<u32> {
         let mut log = HistoryLog::new();
         for value in values {
@@ -720,21 +721,120 @@ mod history_log {
         let left = HistoryLog {
             base: Arc::clone(&shared_bulk),
             tail: Vec::new(),
+            checksum_len: AtomicU64::new(HISTORY_CHECKSUM_UNSYNCED),
+            checksum_state: AtomicU64::new(ChecksumFolder::new().raw()),
         };
         let right = HistoryLog {
             base: Arc::clone(&shared_bulk),
             tail: vec![],
+            checksum_len: AtomicU64::new(HISTORY_CHECKSUM_UNSYNCED),
+            checksum_state: AtomicU64::new(ChecksumFolder::new().raw()),
         };
         assert_eq!(left, right);
 
         let with_tail = HistoryLog {
             base: Arc::clone(&shared_bulk),
             tail: vec![4],
+            checksum_len: AtomicU64::new(HISTORY_CHECKSUM_UNSYNCED),
+            checksum_state: AtomicU64::new(ChecksumFolder::new().raw()),
         };
         let rebuilt = log_with(&[1, 2, 3, 4]);
         assert_eq!(
             with_tail, rebuilt,
             "identical sequences are equal regardless of internal split"
         );
+    }
+}
+
+mod history_checksum {
+    use super::*;
+
+    fn log_with(entries: &[u32]) -> HistoryLog<u32> {
+        let mut log = HistoryLog::new();
+        for entry in entries {
+            log.push(*entry);
+        }
+        log
+    }
+
+    #[test]
+    fn checksum_is_stable_across_reads_and_clones() {
+        let log = log_with(&[1, 2, 3]);
+        let first = log.structural_checksum();
+        assert_eq!(log.structural_checksum(), first);
+
+        let clone = log.clone();
+        assert_eq!(
+            clone.structural_checksum(),
+            first,
+            "a cloned log shares the same entry stream and memo"
+        );
+
+        let rebuilt = log_with(&[1, 2, 3]);
+        // The rebuild path starts from an unsynced memo (fresh pushes kept
+        // this one synced), so force staleness to exercise the rebuild.
+        let mut stale = log.clone();
+        stale.retain(|entry| *entry % 2 == 0);
+        let _ = stale.structural_checksum();
+        assert_eq!(rebuilt.structural_checksum(), first);
+    }
+
+    #[test]
+    fn appended_entries_change_the_checksum_incrementally() {
+        let mut log = log_with(&[1, 2, 3]);
+        let before = log.structural_checksum();
+
+        log.push(4);
+        let after_append = log.structural_checksum();
+        assert_ne!(after_append, before);
+
+        // A fresh log built with the same contents must agree exactly:
+        // incremental extension and full rebuild are interchangeable.
+        let rebuilt = log_with(&[1, 2, 3, 4]);
+        assert_eq!(rebuilt.structural_checksum(), after_append);
+
+        log.push(5);
+        let extended = log.structural_checksum();
+        assert_eq!(log_with(&[1, 2, 3, 4, 5]).structural_checksum(), extended);
+    }
+
+    #[test]
+    fn mutated_entries_invalidate_the_memo_without_corrupting_it() {
+        let mut log = log_with(&[10, 20, 30]);
+        let baseline = log.structural_checksum();
+
+        log.retain(|entry| *entry != 20);
+        let after_retain = log.structural_checksum();
+        assert_ne!(after_retain, baseline);
+
+        // Appends after a non-append mutation must still produce a value
+        // identical to a from-scratch build of the same sequence.
+        log.push(40);
+        let extended = log.structural_checksum();
+        assert_eq!(log_with(&[10, 30, 40]).structural_checksum(), extended);
+    }
+
+    #[test]
+    fn mutable_iteration_rebuilds_the_checksum_after_entry_edits() {
+        let mut log = log_with(&[7, 8, 9]);
+        let before = log.structural_checksum();
+
+        for entry in &mut log {
+            if *entry == 8 {
+                *entry = 800;
+            }
+        }
+        let after_edit = log.structural_checksum();
+        assert_ne!(after_edit, before);
+        assert_eq!(log_with(&[7, 800, 9]).structural_checksum(), after_edit);
+    }
+
+    #[test]
+    fn cleared_logs_restart_from_the_empty_checksum() {
+        let mut log = log_with(&[1, 2, 3]);
+        let _ = log.structural_checksum();
+        log.clear();
+        let empty = HistoryLog::<u32>::new().structural_checksum();
+        assert_eq!(log.structural_checksum(), empty);
     }
 }

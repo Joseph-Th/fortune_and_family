@@ -130,10 +130,10 @@ Each decision cycle:
 2. Generate concrete `PlayerCommand` candidates from state.
 3. Rank candidates by urgency, persona priorities, resources, coverage, and repetition.
 4. Preserve probe capacity across command families.
-5. Probe candidates through `apply_player_command` on cloned state.
+5. Probe candidates through the in-place scratch command entry (`apply_player_command_scratch`) on cloned state, so each probe pays one campaign copy instead of two.
 6. Select a viable substantive command; notification acknowledgement is fallback housekeeping.
 7. Commit through `apply_player_command`.
-8. Advance the action branch through `advance_days` (counterfactual branches use the same day loop on their own disposable clone via the in-place scratch entry point).
+8. Advance the action branch through the in-place scratch entry point (counterfactual branches use the same day loop on their own disposable clone).
 9. Advance a no-action baseline from the same decision point.
 10. Record outcomes, attribution, scores, findings, and bounded trace data.
 

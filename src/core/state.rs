@@ -19,6 +19,7 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 28;
 
@@ -623,10 +624,40 @@ impl NextIds {
 /// short copy and dropping a superseded working copy releases its share of
 /// the bulk untouched. Iteration order, serialized shape, and observable
 /// values are identical to the plain vector it replaces.
-#[derive(Clone, Debug)]
+///
+/// The log also maintains an incremental structural checksum over its entry
+/// stream (see [`HistoryLog::structural_checksum`]). Appends extend the fold
+/// in constant time, so observation paths that re-read the checksum after
+/// every simulated day stay flat-cost across campaign length instead of
+/// reserializing the whole history. The memo never affects stored content,
+/// equality (which compares element-wise), or serialization.
+#[derive(Debug)]
 pub struct HistoryLog<T> {
     base: Arc<Vec<T>>,
     tail: Vec<T>,
+    /// Number of entries folded into `checksum_state`, or
+    /// [`HISTORY_CHECKSUM_UNSYNCED`](self::HISTORY_CHECKSUM_UNSYNCED) when
+    /// non-append mutations made the memo stale and the next read must
+    /// rebuild it.
+    checksum_len: AtomicU64,
+    /// Running FNV-1a mid-state covering entries `0..checksum_len`.
+    checksum_state: AtomicU64,
+}
+
+/// Memo sentinel meaning "the running checksum no longer matches the log".
+const HISTORY_CHECKSUM_UNSYNCED: u64 = u64::MAX;
+
+impl<T: Clone> Clone for HistoryLog<T> {
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            tail: self.tail.clone(),
+            // A cloned log shares the same entry stream, so the memo state
+            // transfers verbatim and stays valid on both copies.
+            checksum_len: AtomicU64::new(self.checksum_len.load(Ordering::Relaxed)),
+            checksum_state: AtomicU64::new(self.checksum_state.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 /// Entries appended since the last fold; past this many, an exclusively
@@ -704,10 +735,15 @@ impl<T> HistoryLog<T> {
         Self {
             base: Arc::new(Vec::new()),
             tail: Vec::new(),
+            checksum_len: AtomicU64::new(0),
+            checksum_state: AtomicU64::new(super::checksum::ChecksumFolder::new().raw()),
         }
     }
 
-    pub fn push(&mut self, entry: T) {
+    pub fn push(&mut self, entry: T)
+    where
+        T: Serialize,
+    {
         // Folding requires exclusive access: under a shared base (a live
         // transactional clone elsewhere) folding would deep-copy the entire
         // bulk, so the tail simply keeps growing until ownership is sole.
@@ -716,7 +752,69 @@ impl<T> HistoryLog<T> {
         {
             base.append(&mut self.tail);
         }
+        let total_before = self.len();
         self.tail.push(entry);
+        // Extending the running checksum is only valid when it currently
+        // covers exactly the pre-push entries; after an invalidating
+        // mutation the next read rebuilds from scratch instead.
+        if self.checksum_len.load(Ordering::Relaxed) == total_before as u64
+            && let Some(entry) = self.tail.last()
+        {
+            let mut folder = super::checksum::ChecksumFolder::from_raw(
+                self.checksum_state.load(Ordering::Relaxed),
+            );
+            let _ = entry.serialize(&mut folder);
+            self.checksum_state.store(folder.raw(), Ordering::Relaxed);
+            self.checksum_len
+                .store(total_before as u64 + 1, Ordering::Relaxed);
+        }
+    }
+
+    /// Marks the incremental checksum stale so the next read rebuilds it.
+    ///
+    /// Call this from every operation that can alter already-folded entries.
+    /// Appends via [`Self::push`] extend the memo instead of invalidating it.
+    fn invalidate_checksum(&self) {
+        self.checksum_len
+            .store(HISTORY_CHECKSUM_UNSYNCED, Ordering::Relaxed);
+    }
+
+    /// The structural checksum over the log's entry stream in insertion
+    /// order: an FNV-1a fold of each entry's serialized shape, terminated by
+    /// the entry count. Equal contents always produce equal values, any
+    /// appended or mutated entry changes the value, and repeated reads are
+    /// stable.
+    ///
+    /// Appends are folded incrementally, so reading stays flat-cost across
+    /// campaign length. A rebuild after non-append mutations is proportional
+    /// to the history once, then incremental again.
+    #[must_use]
+    pub fn structural_checksum(&self) -> u64
+    where
+        T: Serialize,
+    {
+        let total = self.len();
+        let len = total as u64;
+        let hashed_len = self.checksum_len.load(Ordering::Relaxed);
+        if hashed_len != len {
+            let mut folder = super::checksum::ChecksumFolder::new();
+            for entry in self {
+                let _ = entry.serialize(&mut folder);
+            }
+            self.checksum_state.store(folder.raw(), Ordering::Relaxed);
+            // Another reader may have rebuilt concurrently with the same
+            // deterministic result; only refuse to store a *stale* length
+            // (impossible without a concurrent writer, but cheap to guard).
+            let _ = self.checksum_len.compare_exchange(
+                hashed_len,
+                len,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+        let finisher =
+            super::checksum::ChecksumFolder::from_raw(self.checksum_state.load(Ordering::Relaxed));
+        finisher.finish_with_entry_count(total)
     }
 
     /// Folds the tail into the bulk, taking exclusive ownership of it. A
@@ -770,6 +868,9 @@ impl<T> HistoryLog<T> {
         T: Clone,
     {
         self.fold_tail();
+        // Entries can change through this iterator, so the incremental
+        // checksum must be rebuilt on its next read.
+        self.invalidate_checksum();
         HistoryLogIterMut {
             entries: Arc::make_mut(&mut self.base).iter_mut(),
         }
@@ -797,6 +898,7 @@ impl<T> HistoryLog<T> {
         T: Clone,
     {
         self.fold_tail();
+        self.invalidate_checksum();
         Arc::make_mut(&mut self.base).retain(|entry| keep(entry));
     }
 
@@ -817,6 +919,7 @@ impl<T> HistoryLog<T> {
         T: Clone,
     {
         self.fold_tail();
+        self.invalidate_checksum();
         Arc::make_mut(&mut self.base).sort_by_key(|entry| compare(entry));
     }
 }
@@ -908,6 +1011,9 @@ where
         Ok(Self {
             base: Arc::new(Vec::<T>::deserialize(deserializer)?),
             tail: Vec::new(),
+            // A fresh memo: the first checksum read rebuilds it once.
+            checksum_len: AtomicU64::new(HISTORY_CHECKSUM_UNSYNCED),
+            checksum_state: AtomicU64::new(super::checksum::ChecksumFolder::new().raw()),
         })
     }
 }

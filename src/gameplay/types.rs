@@ -1323,9 +1323,9 @@ macro_rules! assemble_gameplay_snapshot {
             unread_notifications: $world.unread_notifications,
             outbox_messages: $world.outbox_messages,
             chronicle_entries: $world.chronicle_entries,
-            outbox_state_checksum: stable_serialized_checksum(&$state.outbox),
-            chronicle_state_checksum: stable_serialized_checksum(&$state.chronicle),
-            audit_state_checksum: stable_serialized_checksum(&$state.audit_log),
+            outbox_state_checksum: $state.outbox.structural_checksum(),
+            chronicle_state_checksum: $state.chronicle.structural_checksum(),
+            audit_state_checksum: $state.audit_log.structural_checksum(),
         }
     };
 }

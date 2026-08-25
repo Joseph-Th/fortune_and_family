@@ -694,6 +694,17 @@ pub struct Crisis {
     pub(crate) cause: String,
 }
 
+impl Crisis {
+    /// The simulation day this crisis was first detected.
+    ///
+    /// Audit records naming this crisis cannot predate this day, so history
+    /// scans for crisis responses can skip everything earlier.
+    #[must_use]
+    pub const fn started_day(&self) -> i64 {
+        self.started_day
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutboxKind {
     Contract,

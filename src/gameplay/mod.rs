@@ -9,6 +9,10 @@ use crate::core::{
 use crate::ids::{BusinessId, CharacterId, DistrictId, DynastyId, GoodId, InstitutionId};
 use crate::money::{Money, Quantity, checked_cost_for};
 use crate::registry::{GoodCategory, InstitutionKind, Registry};
+// Test modules under `src/gameplay_tests.rs` reach `advance_days` through
+// this module's namespace; production gameplay code uses the scratch entry.
+#[cfg(test)]
+use crate::systems::advance_days;
 use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS,
     CIVIC_DEBT_CREDITOR_RESERVE, COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST,
@@ -33,8 +37,8 @@ use crate::systems::{
     SimulationError, StrategicError, SupplyContractTerms, WARD_ADOPTION_COST,
     WARD_ADOPTION_DELIVERY_REQUIREMENT, WARD_ADOPTION_INTERVAL_DAYS,
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT,
-    WARD_ADOPTION_UNITY_COST, active_player_ward_count, advance_days, advance_days_scratch,
-    apply_player_command, available_household_workers, available_supply_contract_capacity,
+    WARD_ADOPTION_UNITY_COST, active_player_ward_count, advance_days_scratch, apply_player_command,
+    apply_player_command_scratch, available_household_workers, available_supply_contract_capacity,
     build_new_game, business_operating_spendable_cash, business_owner_distribution_reserve,
     business_recapitalization_target, business_sustainable_unit_cost,
     contract_counterparty_price_bounds, contract_relationship_pressure_basis_points,

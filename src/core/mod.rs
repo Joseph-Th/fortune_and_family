@@ -1,8 +1,11 @@
 //! Persistent runtime records and application-state ownership.
 
+mod checksum;
 mod extended;
 mod records;
 mod state;
+
+pub(crate) use checksum::ChecksumFolder;
 
 pub use extended::{
     AiObjective, CivicDebt, CivicDebtStatus, ContractStatus, Crisis, CrisisKind, CrisisStatus,

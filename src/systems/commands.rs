@@ -794,16 +794,38 @@ pub fn apply_player_command(
         .into());
     }
     let mut candidate = state.clone();
-    match dispatch_player_command(registry, &mut candidate, command) {
-        Ok(outcome) => {
-            super::expire_time_limited_state(&mut candidate);
-            super::refresh_campaign_phases(&mut candidate);
-            super::validate_invariants(registry, &candidate);
-            *state = candidate;
-            Ok(outcome)
+    let outcome = super::apply_player_command_scratch(registry, &mut candidate, command)?;
+    *state = candidate;
+    Ok(outcome)
+}
+
+/// Applies a player command to an exclusively owned scratch campaign.
+///
+/// Identical to [`apply_player_command`] on success, including post-command
+/// expiry, phase refresh, and invariant validation. It skips only the
+/// defensive whole-campaign copy: the caller must hold `state` as a
+/// disposable working branch whose rejection would simply be discarded.
+///
+/// The gameplay harness probes candidates on private clones of the live
+/// campaign; cloning once per probe instead of twice halves the probing
+/// cost without weakening any externally observable guarantee.
+pub(crate) fn apply_player_command_scratch(
+    registry: &Registry,
+    state: &mut AppState,
+    command: PlayerCommand,
+) -> Result<CommandOutcome, CommandError> {
+    if state.scenario_key() != registry.scenario().key() {
+        return Err(super::SimulationError::RegistryMismatch {
+            state_scenario: state.scenario_key().to_owned(),
+            registry_scenario: registry.scenario().key().to_owned(),
         }
-        Err(error) => Err(error),
+        .into());
     }
+    dispatch_player_command(registry, state, command).inspect(|_| {
+        super::expire_time_limited_state(state);
+        super::refresh_campaign_phases(state);
+        super::validate_invariants(registry, state);
+    })
 }
 
 #[expect(
@@ -1290,9 +1312,12 @@ fn apply_business_policy(
         return Err(CommandError::UnchangedBusinessPolicy { business_id });
     }
     let subject = format!("business:{business_id}");
-    if let Some(last_change_day) =
-        latest_audit_day_for_subject(state, AuditKind::BusinessPolicyChange, &subject)
-    {
+    if let Some(last_change_day) = latest_cooldown_audit_day(
+        state,
+        AuditKind::BusinessPolicyChange,
+        BUSINESS_POLICY_CHANGE_INTERVAL_DAYS,
+        |record_subject| record_subject == subject,
+    ) {
         let next_change_day =
             checked_future_day(last_change_day, BUSINESS_POLICY_CHANGE_INTERVAL_DAYS)?;
         if state.clock.day() < next_change_day {
@@ -1352,9 +1377,12 @@ fn apply_business_wages(
         });
     }
     let subject = format!("business:{business_id}");
-    if let Some(last_change_day) =
-        latest_audit_day_for_subject(state, AuditKind::BusinessWageChange, &subject)
-    {
+    if let Some(last_change_day) = latest_cooldown_audit_day(
+        state,
+        AuditKind::BusinessWageChange,
+        BUSINESS_WAGE_CHANGE_INTERVAL_DAYS,
+        |record_subject| record_subject == subject,
+    ) {
         let next_change_day =
             checked_future_day(last_change_day, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS)?;
         if state.clock.day() < next_change_day {
@@ -2361,9 +2389,12 @@ fn quote_public_work_funding(
 }
 
 fn validate_public_work_cooldown(state: &AppState, subject: &str) -> Result<(), CommandError> {
-    if let Some(last_start_day) =
-        latest_audit_day_for_subject(state, AuditKind::PublicWorkStarted, subject)
-    {
+    if let Some(last_start_day) = latest_cooldown_audit_day(
+        state,
+        AuditKind::PublicWorkStarted,
+        PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS,
+        |record_subject| record_subject == subject,
+    ) {
         let next_start_day =
             checked_future_day(last_start_day, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS)?;
         if state.clock.day() < next_start_day {
@@ -2733,9 +2764,12 @@ fn apply_governance(
         return Err(CommandError::UnchangedHouseGovernance { governance });
     }
     let subject = format!("dynasty:{dynasty_id}");
-    if let Some(last_change_day) =
-        latest_audit_day_for_subject(state, AuditKind::HouseGovernanceChange, &subject)
-    {
+    if let Some(last_change_day) = latest_cooldown_audit_day(
+        state,
+        AuditKind::HouseGovernanceChange,
+        HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
+        |record_subject| record_subject == subject,
+    ) {
         let next_change_day =
             checked_future_day(last_change_day, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS)?;
         if state.clock.day() < next_change_day {
@@ -2787,9 +2821,12 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
         .family_councils
         .get(&dynasty_id)
         .ok_or(CommandError::MissingFamilyCouncil { dynasty_id })?;
-    if let Some(last_meeting_day) =
-        latest_audit_day_for_subject(state, AuditKind::FamilyCouncilMeeting, &subject)
-    {
+    if let Some(last_meeting_day) = latest_cooldown_audit_day(
+        state,
+        AuditKind::FamilyCouncilMeeting,
+        FAMILY_COUNCIL_MEETING_INTERVAL_DAYS,
+        |record_subject| record_subject == subject,
+    ) {
         let next_meeting_day =
             checked_future_day(last_meeting_day, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS)?;
         if state.clock.day() < next_meeting_day {
@@ -3145,11 +3182,13 @@ fn validate_ward_adoption(state: &AppState) -> Result<WardAdoptionContext, Comma
             required: WARD_ADOPTION_UNITY_COST,
         });
     }
-    if let Some(last_adoption_day) =
-        latest_audit_day(state, AuditKind::WardAdoption, |record_subject| {
-            record_subject.starts_with(&format!("dynasty:{dynasty_id}:"))
-        })
-    {
+    let adoption_subject_prefix = format!("dynasty:{dynasty_id}:");
+    if let Some(last_adoption_day) = latest_cooldown_audit_day(
+        state,
+        AuditKind::WardAdoption,
+        WARD_ADOPTION_INTERVAL_DAYS,
+        |record_subject| record_subject.starts_with(&adoption_subject_prefix),
+    ) {
         let next_adoption_day = checked_future_day(last_adoption_day, WARD_ADOPTION_INTERVAL_DAYS)?;
         if state.clock.day() < next_adoption_day {
             return Err(CommandError::WardAdoptionCooldown { next_adoption_day });
@@ -4312,8 +4351,13 @@ pub(crate) fn office_nomination_next_day(
     // ordinary interval, any retry at that interval would already land after
     // resolution, so a single stable schedule keeps the quoted retry day
     // honest and the accept/reject decisions unchanged.
-    let campaign = latest_character_campaign_day(state, AuditKind::OfficeNomination, character_id)
-        .map(|day| future_day_or_terminal(day, OFFICE_NOMINATION_RECOVERY_DAYS));
+    let campaign = latest_character_campaign_day_in_cooldown(
+        state,
+        AuditKind::OfficeNomination,
+        OFFICE_NOMINATION_RECOVERY_DAYS,
+        character_id,
+    )
+    .map(|day| future_day_or_terminal(day, OFFICE_NOMINATION_RECOVERY_DAYS));
     let dynasty_office_resignation = latest_player_office_resignation_day(state)
         .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
     campaign.into_iter().chain(dynasty_office_resignation).max()
@@ -4331,16 +4375,24 @@ pub(crate) fn institution_support_next_day(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> Option<i64> {
-    let patronage =
-        latest_character_campaign_day(state, AuditKind::InstitutionPatronage, character_id)
-            .map(|day| future_day_or_terminal(day, INSTITUTION_SUPPORT_INTERVAL_DAYS));
+    let patronage = latest_character_campaign_day_in_cooldown(
+        state,
+        AuditKind::InstitutionPatronage,
+        INSTITUTION_SUPPORT_INTERVAL_DAYS,
+        character_id,
+    )
+    .map(|day| future_day_or_terminal(day, INSTITUTION_SUPPORT_INTERVAL_DAYS));
     // Withdrawing from one institution costs standing with that house, not
     // with the whole city: the recovery cooldown is scoped to the institution
     // the character walked out of.
-    let withdrawal =
-        latest_character_campaign_day(state, AuditKind::InstitutionWithdrawal, character_id)
-            .filter(|_| latest_withdrawal_institution(state, character_id) == Some(institution_id))
-            .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
+    let withdrawal = latest_character_campaign_day_in_cooldown(
+        state,
+        AuditKind::InstitutionWithdrawal,
+        INSTITUTION_WITHDRAWAL_RECOVERY_DAYS,
+        character_id,
+    )
+    .filter(|_| latest_withdrawal_institution(state, character_id) == Some(institution_id))
+    .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
     // Resigning a held office, by contrast, is a city-visible act: it pauses
     // support cultivation everywhere until the same recovery period passes.
     let dynasty_office_resignation = latest_player_office_resignation_day(state)
@@ -4352,14 +4404,25 @@ pub(crate) fn institution_support_next_day(
         .max()
 }
 
+/// The institution of the character's most recent withdrawal still inside the
+/// withdrawal recovery window.
+///
+/// Older withdrawals cannot restrict anything (their recovery has elapsed),
+/// so the scan stops at the cooldown boundary; see
+/// [`latest_cooldown_audit_day`] for the exactness argument.
 fn latest_withdrawal_institution(
     state: &AppState,
     character_id: CharacterId,
 ) -> Option<InstitutionId> {
+    let earliest_day = state
+        .clock
+        .day()
+        .saturating_sub(INSTITUTION_WITHDRAWAL_RECOVERY_DAYS - 1);
     state
         .audit_log
         .iter()
         .rev()
+        .take_while(|record| record.day() >= earliest_day)
         .find(|record| {
             record.kind() == AuditKind::InstitutionWithdrawal
                 && record
@@ -4372,10 +4435,17 @@ fn latest_withdrawal_institution(
 }
 
 fn latest_player_office_resignation_day(state: &AppState) -> Option<i64> {
+    // Resignations only matter through their recovery cooldown, so the scan
+    // is bounded by that window (audit days never decrease).
+    let earliest_day = state
+        .clock
+        .day()
+        .saturating_sub(INSTITUTION_WITHDRAWAL_RECOVERY_DAYS - 1);
     state
         .audit_log
         .iter()
         .rev()
+        .take_while(|record| record.day() >= earliest_day)
         .find(|record| {
             record.kind() == AuditKind::InstitutionWithdrawal
                 && record.detail() == super::OFFICE_RESIGNATION_AUDIT_DETAIL
@@ -4411,19 +4481,49 @@ fn latest_audit_day(
         .map(AuditRecord::day)
 }
 
-fn latest_audit_day_for_subject(state: &AppState, kind: AuditKind, subject: &str) -> Option<i64> {
-    latest_audit_day(state, kind, |record_subject| record_subject == subject)
-}
-
-fn latest_character_campaign_day(
+/// Most recent day of `kind` matching `subject_matches` inside an
+/// `interval_days` cooldown, scanning from newest to oldest.
+///
+/// A record older than the cooldown can never reject an action (`day +
+/// interval <= today`), and audit days never decrease (an enforced
+/// invariant), so the scan stops exactly at the window boundary instead of
+/// walking the whole campaign history. Only the presence of an in-window
+/// record decides the cooldown, so callers must use this for rejection tests
+/// rather than for reporting the underlying record's day.
+fn latest_cooldown_audit_day(
     state: &AppState,
     kind: AuditKind,
-    character_id: CharacterId,
+    interval_days: i64,
+    subject_matches: impl Fn(&str) -> bool,
 ) -> Option<i64> {
+    let earliest_day = state.clock.day().saturating_sub(interval_days - 1);
     state
         .audit_log
         .iter()
         .rev()
+        .take_while(|record| record.day() >= earliest_day)
+        .find(|record| record.kind() == kind && subject_matches(record.subject()))
+        .map(AuditRecord::day)
+}
+
+fn latest_audit_day_for_subject(state: &AppState, kind: AuditKind, subject: &str) -> Option<i64> {
+    latest_audit_day(state, kind, |record_subject| record_subject == subject)
+}
+
+/// Cooldown-window counterpart to the plain latest-record lookup; see
+/// [`latest_cooldown_audit_day`] for the scan-boundary argument.
+fn latest_character_campaign_day_in_cooldown(
+    state: &AppState,
+    kind: AuditKind,
+    interval_days: i64,
+    character_id: CharacterId,
+) -> Option<i64> {
+    let earliest_day = state.clock.day().saturating_sub(interval_days - 1);
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .take_while(|record| record.day() >= earliest_day)
         .find(|record| {
             record.kind() == kind
                 && record

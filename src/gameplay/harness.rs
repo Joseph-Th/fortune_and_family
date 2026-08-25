@@ -1449,7 +1449,10 @@ pub(crate) fn advance_decision_time(
     Ok(match mode {
         DecisionCycleMode::AdvanceCampaign { step_days } => {
             let mut consequence_state = (consequence_horizon > step_days).then(|| state.clone());
-            advance_days(registry, state, step_days)?;
+            // The harness owns this campaign branch outright and discards it
+            // wholesale when a day fails, so the defensive copy the public
+            // entry makes is redundant here.
+            advance_days_scratch(registry, state, step_days)?;
             let campaign_after_time = GameplaySnapshot::capture(state);
             accumulator.observe_snapshot(&campaign_after_time);
             accumulator.record_recovery_pressure(step_days, &campaign_after_time);
@@ -2010,6 +2013,36 @@ pub(crate) fn is_open_business(business: &crate::core::Business) -> bool {
     )
 }
 
+/// Iterates audit records from newest to oldest, stopping before the first
+/// record older than `earliest_day`.
+///
+/// Audit entries are append-only with chronologically nondecreasing days (an
+/// enforced invariant), so a record older than the cutoff cannot be followed
+/// by a newer one. Cooldown questions of the form "does a matching record
+/// exist with `day + interval > today`?" are therefore decided entirely
+/// inside the window, and scans stay proportional to the window instead of
+/// the campaign's full history. The window must include the boundary: a
+/// cooldown of `interval` days covers `day >= today - (interval - 1)`.
+pub(crate) fn audit_records_from(
+    state: &AppState,
+    earliest_day: i64,
+) -> impl Iterator<Item = &AuditRecord> {
+    state
+        .audit_log
+        .iter()
+        .rev()
+        .take_while(move |record| record.day() >= earliest_day)
+}
+
+/// Newest-to-oldest audit records still inside an `interval`-day cooldown,
+/// i.e. exactly those records for which `today < day + interval` holds.
+pub(crate) fn audit_records_within_cooldown(
+    state: &AppState,
+    interval_days: i64,
+) -> impl Iterator<Item = &AuditRecord> {
+    audit_records_from(state, state.clock.day().saturating_sub(interval_days - 1))
+}
+
 /// Mirrors the canonical route (`apply_business_wages`): an owned, open
 /// business with a workforce is off cooldown and accepts a wage change.
 /// The agent's wage posture and material-change threshold live in the
@@ -2025,20 +2058,12 @@ pub(crate) fn has_business_wage_opportunity(state: &AppState) -> bool {
         .filter(|business| is_open_business(business))
         .any(|business| {
             let subject = format!("business:{}", business.id());
-            state
-                .audit_log
-                .iter()
-                .rev()
+            audit_records_within_cooldown(state, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS)
                 .find(|record| {
                     record.kind() == crate::core::AuditKind::BusinessWageChange
                         && record.subject() == subject
                 })
-                .is_none_or(|record| {
-                    state.clock.day()
-                        >= record
-                            .day()
-                            .saturating_add(BUSINESS_WAGE_CHANGE_INTERVAL_DAYS)
-                })
+                .is_none()
                 && state
                     .employment
                     .values()
@@ -2216,17 +2241,12 @@ pub(crate) fn has_start_public_work_opportunity(registry: &Registry, state: &App
         return false;
     }
     let subject = format!("dynasty:{player_id}");
-    let sponsorship_available = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::PublicWorkStarted && record.subject() == subject)
-        .is_none_or(|record| {
-            state.clock.day()
-                >= record
-                    .day()
-                    .saturating_add(PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS)
-        });
+    let sponsorship_available =
+        audit_records_within_cooldown(state, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS)
+            .find(|record| {
+                record.kind() == AuditKind::PublicWorkStarted && record.subject() == subject
+            })
+            .is_none();
     sponsorship_available
         && state.dynasties.get(&player_id).is_some_and(|dynasty| {
             dynasty.treasury() >= public_work_initial_contribution(CANDIDATE_PUBLIC_WORK_BUDGET)
@@ -2257,20 +2277,13 @@ pub(crate) fn has_governance_opportunity(state: &AppState) -> bool {
         return false;
     };
     let governance_subject = format!("dynasty:{}", state.player_dynasty_id);
-    let governance_available = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::HouseGovernanceChange
-                && record.subject() == governance_subject
-        })
-        .is_none_or(|record| {
-            record
-                .day()
-                .saturating_add(HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS)
-                <= state.clock.day()
-        });
+    let governance_available =
+        audit_records_within_cooldown(state, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS)
+            .find(|record| {
+                record.kind() == AuditKind::HouseGovernanceChange
+                    && record.subject() == governance_subject
+            })
+            .is_none();
     // The canonical route (`apply_governance`) accepts any change to a
     // different governance model while the house can pay its unity price and
     // is off cooldown; which model the agent *prefers* is generator policy,
@@ -2296,19 +2309,11 @@ pub(crate) fn has_family_council_opportunity(state: &AppState) -> bool {
         return false;
     }
     let subject = format!("dynasty:{player_id};council-meeting");
-    state
-        .audit_log
-        .iter()
-        .rev()
+    audit_records_within_cooldown(state, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS)
         .find(|record| {
             record.kind() == AuditKind::FamilyCouncilMeeting && record.subject() == subject
         })
-        .is_none_or(|record| {
-            record
-                .day()
-                .saturating_add(FAMILY_COUNCIL_MEETING_INTERVAL_DAYS)
-                <= state.clock.day()
-        })
+        .is_none()
 }
 
 pub(crate) fn has_heir_designation_opportunity(state: &AppState) -> bool {
@@ -2320,17 +2325,13 @@ pub(crate) fn has_heir_designation_opportunity(state: &AppState) -> bool {
         return false;
     }
     let designation_subject = format!("dynasty:{player_id}");
-    let designation_available = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::HeirDesignation && record.subject() == designation_subject
-        })
-        .map(AuditRecord::day)
-        .is_none_or(|last_day| {
-            state.clock.day() >= last_day.saturating_add(HEIR_DESIGNATION_INTERVAL_DAYS)
-        });
+    let designation_available =
+        audit_records_within_cooldown(state, HEIR_DESIGNATION_INTERVAL_DAYS)
+            .find(|record| {
+                record.kind() == AuditKind::HeirDesignation
+                    && record.subject() == designation_subject
+            })
+            .is_none();
     if !designation_available {
         return false;
     }
@@ -2378,19 +2379,16 @@ pub(crate) fn has_ward_adoption_opportunity(state: &AppState) -> bool {
             >= WARD_ADOPTION_REPUTATION_REQUIREMENT
         && player_contract_deliveries(state) >= WARD_ADOPTION_DELIVERY_REQUIREMENT
         && active_player_ward_count(state) < MAX_ACTIVE_WARDS
-        && state
-            .audit_log
-            .iter()
-            .rev()
-            .find(|record| {
-                record.kind() == AuditKind::WardAdoption
-                    && record
-                        .subject()
-                        .starts_with(&format!("dynasty:{player_id}:"))
-            })
-            .is_none_or(|record| {
-                state.clock.day() >= record.day().saturating_add(WARD_ADOPTION_INTERVAL_DAYS)
-            })
+        && {
+            // Hoisted so the windowed scan never allocates per visited record.
+            let subject_prefix = format!("dynasty:{player_id}:");
+            audit_records_within_cooldown(state, WARD_ADOPTION_INTERVAL_DAYS)
+                .find(|record| {
+                    record.kind() == AuditKind::WardAdoption
+                        && record.subject().starts_with(&subject_prefix)
+                })
+                .is_none()
+        }
 }
 
 pub(crate) fn has_family_education_opportunity(state: &AppState) -> bool {
