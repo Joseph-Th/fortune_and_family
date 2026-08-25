@@ -1631,8 +1631,7 @@ mod household_demand {
             .expect("grain quote must exist")
             .stock = Quantity::from_units(10_000);
 
-        let plan =
-            decide_household_consumption(registry, &state).expect("household demand must resolve");
+        let plan = decide_household_consumption(registry, &state);
 
         assert!(plan.lines.iter().all(|line| line.good_id != bread_id));
         assert!(
@@ -1668,8 +1667,7 @@ mod household_demand {
             quote.stock = Quantity::from_units(10_000);
         }
 
-        let plan =
-            decide_household_consumption(registry, &state).expect("household demand must resolve");
+        let plan = decide_household_consumption(registry, &state);
 
         assert!(
             plan.lines
@@ -1699,8 +1697,7 @@ mod household_demand {
             quote.stock = Quantity::from_units(10_000);
         }
 
-        let plan =
-            decide_household_consumption(registry, &state).expect("household demand must resolve");
+        let plan = decide_household_consumption(registry, &state);
 
         for good_id in [charcoal_id, cloth_id, tools_id] {
             assert!(
@@ -1751,8 +1748,7 @@ mod household_demand {
             quote.stock = Quantity::from_units(10_000);
         }
 
-        let plan =
-            decide_household_consumption(registry, &state).expect("household demand must resolve");
+        let plan = decide_household_consumption(registry, &state);
         let cloth_demand = plan
             .lines
             .iter()
@@ -1788,8 +1784,7 @@ mod household_demand {
         for quote in state.market.quotes.values_mut() {
             quote.stock = Quantity::from_units(10_000);
         }
-        let reference_plan =
-            decide_household_consumption(registry, &state).expect("demand must resolve");
+        let reference_plan = decide_household_consumption(registry, &state);
         let demand_at_reference = cloth_demand_of(&reference_plan, cloth_id);
         assert!(demand_at_reference > Quantity::ZERO);
 
@@ -1801,8 +1796,7 @@ mod household_demand {
             .get_mut(&cloth_id)
             .expect("cloth quote must exist")
             .price = reference_price.saturating_mul(4);
-        let dear_plan =
-            decide_household_consumption(registry, &state).expect("demand must resolve");
+        let dear_plan = decide_household_consumption(registry, &state);
         let demand_when_dear = cloth_demand_of(&dear_plan, cloth_id);
 
         assert!(
@@ -2764,7 +2758,7 @@ mod health_and_succession {
             day: state.clock.day(),
             kind: AuditKind::InstitutionPatronage,
             subject: format!("institution:{institution_id}:character:{outgoing_head_id}").into(),
-            detail: "test cultivated support".to_owned(),
+            detail: "test cultivated support".into(),
         });
         state
             .characters
@@ -3019,7 +3013,7 @@ mod health_and_succession {
             subject: format!("dynasty:{dynasty_id}").into(),
             detail: format!(
                 "prior_heir={heir_id};heir={heir_id};confirmation=true;legitimacy_cost=0;unity_cost=0"
-            ),
+            ).into(),
         });
 
         let unprepared_lines =

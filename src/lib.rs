@@ -27,7 +27,7 @@ pub use art::{
     ArtSeverity, CharacterSpec, SpriteRole, build_art_review, build_art_review_report,
     render_art_review_html,
 };
-pub use core::{AppState, NewGameConfig};
+pub use core::{AppState, HistoryLog, NewGameConfig};
 pub use gameplay::{
     GAMEPLAY_REPORT_SCHEMA_VERSION, GameplayAggregate, GameplayCampaignReport,
     GameplayCandidateRanking, GameplayCommandKind, GameplayCommandStats,

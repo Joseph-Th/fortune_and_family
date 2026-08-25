@@ -14,8 +14,11 @@ use crate::ids::{
     PublicWorkId,
 };
 use crate::rng::DeterministicRng;
+use serde::de::Deserializer;
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 28;
 
@@ -609,7 +612,377 @@ impl NextIds {
     );
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Append-only history container whose clones stay cheap as campaigns age.
+///
+/// The audit log, chronicle, and outbox grow without bound, and every
+/// transactional commit clones the whole working state and then drops the
+/// replaced original. A plain `Vec` makes both sides of that idiom
+/// proportional to total campaign history even though histories only ever
+/// gain entries. [`HistoryLog`] appends into a small exclusive tail while the
+/// immutable bulk is shared through an arc, so a clone is one refcount plus a
+/// short copy and dropping a superseded working copy releases its share of
+/// the bulk untouched. Iteration order, serialized shape, and observable
+/// values are identical to the plain vector it replaces.
+#[derive(Clone, Debug)]
+pub struct HistoryLog<T> {
+    base: Arc<Vec<T>>,
+    tail: Vec<T>,
+}
+
+/// Entries appended since the last fold; past this many, an exclusively
+/// owned log folds them into the shared bulk so the tail stays a short copy.
+const HISTORY_TAIL_FOLD_THRESHOLD: usize = 1024;
+
+impl<T> Default for HistoryLog<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Double-ended, exact-size iterator over a [`HistoryLog`]'s entries in
+/// insertion order.
+#[derive(Clone, Debug)]
+pub struct HistoryLogIter<'a, T> {
+    base: std::slice::Iter<'a, T>,
+    tail: std::slice::Iter<'a, T>,
+}
+
+impl<'a, T> Iterator for HistoryLogIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.base.next().or_else(|| self.tail.next())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.base.len() + self.tail.len();
+        (remaining, Some(remaining))
+    }
+
+    fn count(self) -> usize {
+        self.base.count() + self.tail.count()
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        // Specialized so adapters like `Skip` position in constant time
+        // instead of walking the folded bulk one entry at a time.
+        let base_len = self.base.len();
+        if n < base_len {
+            return self.base.nth(n);
+        }
+        // Skipping past every remaining base entry exhausts it outright.
+        let _ = self.base.nth(base_len);
+        self.tail.nth(n - base_len)
+    }
+
+    fn last(mut self) -> Option<Self::Item> {
+        self.next_back()
+    }
+}
+
+impl<T> DoubleEndedIterator for HistoryLogIter<'_, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.tail.next_back().or_else(|| self.base.next_back())
+    }
+
+    fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
+        // Mirror of `nth` from the back: constant-time positioning.
+        let tail_len = self.tail.len();
+        if n < tail_len {
+            return self.tail.nth_back(n);
+        }
+        let _ = self.tail.nth_back(tail_len);
+        self.base.nth_back(n - tail_len)
+    }
+}
+
+impl<T> ExactSizeIterator for HistoryLogIter<'_, T> {}
+
+impl<T> HistoryLog<T> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            base: Arc::new(Vec::new()),
+            tail: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, entry: T) {
+        // Folding requires exclusive access: under a shared base (a live
+        // transactional clone elsewhere) folding would deep-copy the entire
+        // bulk, so the tail simply keeps growing until ownership is sole.
+        if self.tail.len() >= HISTORY_TAIL_FOLD_THRESHOLD
+            && let Some(base) = Arc::get_mut(&mut self.base)
+        {
+            base.append(&mut self.tail);
+        }
+        self.tail.push(entry);
+    }
+
+    /// Folds the tail into the bulk, taking exclusive ownership of it. A
+    /// shared bulk is first cloned, mirroring `Arc::make_mut` semantics.
+    fn fold_tail(&mut self)
+    where
+        T: Clone,
+    {
+        if !self.tail.is_empty() {
+            Arc::make_mut(&mut self.base).append(&mut self.tail);
+        }
+    }
+
+    /// The number of entries in the log.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the total entry count exceeds `usize::MAX`, which is
+    /// unreachable for any representable campaign history.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.base
+            .len()
+            .checked_add(self.tail.len())
+            .expect("history length must fit usize")
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.base.is_empty() && self.tail.is_empty()
+    }
+
+    #[must_use]
+    pub fn last(&self) -> Option<&T> {
+        self.tail.last().or_else(|| self.base.last())
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> HistoryLogIter<'_, T> {
+        HistoryLogIter {
+            base: self.base.iter(),
+            tail: self.tail.iter(),
+        }
+    }
+
+    /// Mutable iteration over every entry in one folded buffer. A shared
+    /// bulk is first cloned, mirroring `Arc::make_mut` copy-on-write
+    /// semantics.
+    pub fn iter_mut(&mut self) -> HistoryLogIterMut<'_, T>
+    where
+        T: Clone,
+    {
+        self.fold_tail();
+        HistoryLogIterMut {
+            entries: Arc::make_mut(&mut self.base).iter_mut(),
+        }
+    }
+
+    /// Partitions the day-ordered history at the first entry satisfying
+    /// `predicate`, mirroring `<[T]>::partition_point` on the combined log.
+    #[must_use]
+    pub fn partition_point<F>(&self, mut predicate: F) -> usize
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let base_position = self.base.partition_point(|entry| predicate(entry));
+        if base_position < self.base.len() {
+            base_position
+        } else {
+            base_position + self.tail.partition_point(predicate)
+        }
+    }
+
+    /// Retains only the entries the predicate accepts, preserving order.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&T) -> bool,
+        T: Clone,
+    {
+        self.fold_tail();
+        Arc::make_mut(&mut self.base).retain(|entry| keep(entry));
+    }
+
+    /// Removes every entry.
+    pub fn clear(&mut self) {
+        // A fresh empty log simply releases this handle's share of the bulk.
+        *self = Self::new();
+    }
+
+    /// Stable-sorts entries by `compare`; production histories are appended
+    /// in day order and are never reordered, so this exists for test
+    /// fixtures that assemble records out of order.
+    #[cfg(test)]
+    pub fn sort_by_key<K, F>(&mut self, mut compare: F)
+    where
+        F: FnMut(&T) -> K,
+        K: Ord,
+        T: Clone,
+    {
+        self.fold_tail();
+        Arc::make_mut(&mut self.base).sort_by_key(|entry| compare(entry));
+    }
+}
+
+/// Mutable counterpart to [`HistoryLogIter`]; iteration always operates on
+/// one folded buffer.
+#[derive(Debug)]
+pub struct HistoryLogIterMut<'a, T> {
+    entries: std::slice::IterMut<'a, T>,
+}
+
+impl<'a, T> Iterator for HistoryLogIterMut<'a, T> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.entries.size_hint()
+    }
+}
+
+impl<T> DoubleEndedIterator for HistoryLogIterMut<'_, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.entries.next_back()
+    }
+}
+
+impl<T> ExactSizeIterator for HistoryLogIterMut<'_, T> {}
+
+impl<T> PartialEq for HistoryLog<T>
+where
+    T: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl<T> Eq for HistoryLog<T> where T: Eq {}
+
+impl<'a, T> IntoIterator for &'a HistoryLog<T> {
+    type Item = &'a T;
+    type IntoIter = HistoryLogIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut HistoryLog<T>
+where
+    T: Clone,
+{
+    type Item = &'a mut T;
+    type IntoIter = HistoryLogIterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<T> Serialize for HistoryLog<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.len()))?;
+        for entry in self {
+            sequence.serialize_element(entry)?;
+        }
+        sequence.end()
+    }
+}
+
+impl<'de, T> Deserialize<'de> for HistoryLog<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self {
+            base: Arc::new(Vec::<T>::deserialize(deserializer)?),
+            tail: Vec::new(),
+        })
+    }
+}
+
+/// Incremental fold of campaign-phase evidence over the append-only audit
+/// log.
+///
+/// Phase derivation reads three audit record kinds (`OfficeDirective`,
+/// `OfficeNomination`, `InstitutionPatronage`) whose records accumulate for
+/// the lifetime of the campaign. Rescanning the whole log every simulated day
+/// made each day's cost grow with campaign length; this memo folds only the
+/// entries appended since the last synchronization and keeps the folded
+/// answers in small ID sets.
+///
+/// The memo is a pure derivation of persisted state and never affects
+/// behavior, so it is excluded from serialization (the save schema is
+/// unchanged) and from [`AppState`] equality. It is rebuilt lazily after a
+/// load from its guards:
+///
+/// - Audit entries are append-only with chronologically nondecreasing days
+///   (an enforced invariant), so a shrinking history or a last-day regression
+///   invalidates the fold and forces a full rebuild.
+/// - Typed IDs are never reused, so a character resolved into a nomination or
+///   patronage bucket can be dropped once its record is gone without that ID
+///   ever contributing again through a re-created record holder.
+///
+/// Records whose referenced character does not resolve yet are retried on
+/// every synchronization, mirroring a full rescan's behavior when such a
+/// character appears later.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CampaignEvidenceMemo {
+    /// Number of leading audit entries already folded into the sets below.
+    pub(crate) folded_len: usize,
+    /// Day of the last folded entry; unused while `folded_len` is zero.
+    pub(crate) folded_last_day: i64,
+    /// Dynasty/institution pairs named by folded `OfficeDirective` records.
+    /// Institution existence is deliberately checked at materialization time
+    /// so the memo never encodes an institution-lifecycle answer.
+    pub(crate) office_directive_houses: BTreeSet<(DynastyId, crate::ids::InstitutionId)>,
+    /// Characters named by folded `OfficeNomination` records, mapped to their
+    /// dynasty at first resolution.
+    pub(crate) nomination_characters: BTreeMap<CharacterId, DynastyId>,
+    /// Characters named by folded `InstitutionPatronage` records.
+    pub(crate) patronage_characters: BTreeMap<CharacterId, DynastyId>,
+    /// Nomination characters not yet resolvable against current state.
+    pub(crate) unresolved_nomination_characters: BTreeSet<CharacterId>,
+    /// Patronage characters not yet resolvable against current state.
+    pub(crate) unresolved_patronage_characters: BTreeSet<CharacterId>,
+}
+
+impl CampaignEvidenceMemo {
+    /// Whether the memo can be extended by folding entries past
+    /// `folded_len`: the history must still contain every folded entry and
+    /// must not regress below the last folded day. Anything else replaces the
+    /// memo with a fresh full-history rebuild.
+    pub(crate) fn is_consistent_with(&self, audit_log: &HistoryLog<AuditRecord>) -> bool {
+        if self.folded_len > audit_log.len() {
+            return false;
+        }
+        if self.folded_len == 0 {
+            return true;
+        }
+        audit_log
+            .last()
+            .is_some_and(|record| record.day() >= self.folded_last_day)
+    }
+}
+
+/// The serializable campaign state.
+///
+/// Equality deliberately excludes `campaign_evidence_memo`: it is a pure
+/// derivation of the other fields. When adding a field, extend the hand-written
+/// `PartialEq` implementation below — the derive was removed so a new field
+/// cannot silently bypass the comparison contract.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppState {
     pub(crate) schema_version: u32,
     pub(crate) scenario_key: String,
@@ -640,10 +1013,53 @@ pub struct AppState {
     pub(crate) legal_cases: BTreeMap<LegalCaseId, LegalCase>,
     pub(crate) external_routes: BTreeMap<ExternalRouteId, ExternalRoute>,
     pub(crate) crises: BTreeMap<CrisisId, Crisis>,
-    pub(crate) outbox: Vec<OutboxMessage>,
-    pub(crate) chronicle: Vec<ChronicleEntry>,
-    pub(crate) audit_log: Vec<AuditRecord>,
+    pub(crate) outbox: HistoryLog<OutboxMessage>,
+    pub(crate) chronicle: HistoryLog<ChronicleEntry>,
+    pub(crate) audit_log: HistoryLog<AuditRecord>,
+    #[serde(skip)]
+    pub(crate) campaign_evidence_memo: CampaignEvidenceMemo,
 }
+
+impl PartialEq for AppState {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.scenario_key == other.scenario_key
+            && self.registry_fingerprint == other.registry_fingerprint
+            && self.clock == other.clock
+            && self.rng == other.rng
+            && self.next_ids == other.next_ids
+            && self.player_dynasty_id == other.player_dynasty_id
+            && self.dynasties == other.dynasties
+            && self.characters == other.characters
+            && self.households == other.households
+            && self.businesses == other.businesses
+            && self.institutions == other.institutions
+            && self.market == other.market
+            && self.contracts == other.contracts
+            && self.loans == other.loans
+            && self.civic_debts == other.civic_debts
+            && self.properties == other.properties
+            && self.employment == other.employment
+            && self.family_links == other.family_links
+            && self.family_councils == other.family_councils
+            && self.laws == other.laws
+            && self.relationships == other.relationships
+            && self.information_reports == other.information_reports
+            && self.ai_objectives == other.ai_objectives
+            && self.districts == other.districts
+            && self.public_works == other.public_works
+            && self.legal_cases == other.legal_cases
+            && self.external_routes == other.external_routes
+            && self.crises == other.crises
+            && self.outbox == other.outbox
+            && self.chronicle == other.chronicle
+            && self.audit_log == other.audit_log
+        // `campaign_evidence_memo` is intentionally absent: it is a pure
+        // function of the fields above and never affects behavior.
+    }
+}
+
+impl Eq for AppState {}
 
 impl AppState {
     #[must_use]
@@ -687,7 +1103,7 @@ impl AppState {
     }
 
     #[must_use]
-    pub fn chronicle(&self) -> &[ChronicleEntry] {
+    pub fn chronicle(&self) -> &HistoryLog<ChronicleEntry> {
         &self.chronicle
     }
 

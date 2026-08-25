@@ -98,7 +98,17 @@ impl Money {
     #[must_use]
     pub const fn checked_mul_ratio(self, numerator: i64, denominator: i64) -> Option<Self> {
         assert!(denominator != 0, "ratio denominator must not be zero");
-        let result = (self.0 as i128) * (numerator as i128) / (denominator as i128);
+        let product = (self.0 as i128) * (numerator as i128);
+        // Narrow products divide on native 64-bit hardware division; see
+        // `saturating_mul_ratio_i64` for the equivalence argument. Excluding
+        // exactly `i64::MIN` keeps `i64::MIN / -1` out of the narrow path.
+        let result = if product > i64::MIN as i128 && product <= i64::MAX as i128 {
+            #[allow(clippy::cast_possible_truncation)]
+            let narrow = product as i64;
+            (narrow / denominator) as i128
+        } else {
+            product / (denominator as i128)
+        };
         match checked_i128_to_i64(result) {
             Some(value) => Some(Self(value)),
             None => None,
@@ -127,9 +137,20 @@ impl Money {
             "rounded money ratio denominator must be positive"
         );
         let product = (self.0 as i128).saturating_mul(numerator as i128);
-        let denominator = denominator as i128;
-        let quotient = product / denominator;
-        let rounded = quotient.saturating_add((product % denominator != 0) as i128);
+        // Narrow products divide on native 64-bit hardware division; see
+        // `saturating_mul_ratio_i64` for the equivalence argument. The
+        // nonnegative assertions keep `i64::MIN / -1` unreachable here.
+        let rounded = if product > i64::MIN as i128 && product <= i64::MAX as i128 {
+            #[allow(clippy::cast_possible_truncation)]
+            let narrow = product as i64;
+            #[allow(clippy::cast_sign_loss)] // the assertions guarantee nonnegativity
+            let ceil_adjustment = (narrow % denominator != 0) as i64;
+            ((narrow / denominator) + ceil_adjustment) as i128
+        } else {
+            let denominator = denominator as i128;
+            let quotient = product / denominator;
+            quotient.saturating_add((product % denominator != 0) as i128)
+        };
         Self(saturating_i128_to_i64(rounded))
     }
 }
@@ -270,7 +291,20 @@ pub fn affordable_quantity(cash: Money, unit_price: Money) -> Quantity {
 
 const fn saturating_mul_ratio_i64(value: i64, numerator: i64, denominator: i64) -> i64 {
     assert!(denominator != 0, "ratio denominator must not be zero");
-    let result = (value as i128).saturating_mul(numerator as i128) / denominator as i128;
+    let product = (value as i128).saturating_mul(numerator as i128);
+    // When the wide product still fits an `i64` strictly above `i64::MIN`,
+    // the division can run on native 64-bit hardware division instead of the
+    // much slower 128-bit software divide; truncation toward zero is
+    // identical in both widths, so results are unchanged on this path and
+    // every other path. Excluding exactly `i64::MIN` also keeps the classic
+    // `i64::MIN / -1` overflow out of the narrow division.
+    let result = if product > i64::MIN as i128 && product <= i64::MAX as i128 {
+        #[allow(clippy::cast_possible_truncation)]
+        let narrow = product as i64;
+        (narrow / denominator) as i128
+    } else {
+        product / denominator as i128
+    };
     saturating_i128_to_i64(result)
 }
 
@@ -374,6 +408,31 @@ mod tests {
         assert_eq!(
             Quantity::from_milliunits(i64::MIN).saturating_mul_ratio(1, -1),
             Quantity::from_milliunits(i64::MAX)
+        );
+    }
+
+    #[test]
+    fn ratio_boundaries_stay_exact_across_the_narrow_and_wide_division_paths() {
+        // The wide product equals exactly `i64::MIN`: this must take the
+        // 128-bit division path because `i64::MIN / -1` cannot be represented
+        // in `i64`, and the final result saturates upward.
+        assert_eq!(Money::from_copper(i64::MIN).checked_mul_ratio(1, -1), None);
+        assert_eq!(
+            Money::from_copper(i64::MIN).saturating_mul_ratio(1, -1),
+            Money::from_copper(i64::MAX)
+        );
+        // Narrow products truncate toward zero identically on both paths.
+        assert_eq!(
+            Money::from_copper(-7).saturating_mul_ratio(3, 2),
+            Money::from_copper(-10)
+        );
+        assert_eq!(
+            Money::from_copper(-7).checked_mul_ratio(3, 2),
+            Some(Money::from_copper(-10))
+        );
+        assert_eq!(
+            Money::from_copper(7).saturating_mul_ratio_ceil_nonnegative(3, 2),
+            Money::from_copper(11)
         );
     }
 

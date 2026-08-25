@@ -73,6 +73,16 @@ Records contain identity, references, local values, and lifecycle state. Consequ
 
 Character, household, and business stores own records plus derived indexes. Use store methods for insertion, removal, and ownership changes; do not update backing records and indexes independently.
 
+Append-only history text (audit subjects and details) is immutable after construction and shared through reference counting, so working-copy clones of long campaigns do not re-allocate the entire history. The serialized save shape is plain strings either way.
+
+The audit log, chronicle, and outbox are `HistoryLog` sequences: entries append into a short exclusive tail while the immutable bulk is shared through an arc, so transactional working-copy clones stay cheap as histories grow across generations. Iteration order and the serialized save shape are identical to a plain vector; use push, iteration, retain, and partition_point rather than assuming one contiguous buffer.
+
+`HistoryLog`'s iterator specializes `nth`/`nth_back`, so adapters such as `Skip` position in constant time instead of walking the folded bulk.
+
+Non-persisted derivation memos are allowed only as pure functions of persisted state. They are excluded from serialization and from `AppState` equality (the hand-written `PartialEq` must be extended when fields are added), rebuilt lazily behind guards that detect history replacement, and never influence observable results.
+
+`CampaignEvidenceMemo` in `src/core/state.rs` is the one current instance: it folds campaign-phase audit evidence incrementally for `refresh_campaign_phases`.
+
 ## Canonical flows
 
 ### New campaign
@@ -131,6 +141,8 @@ Each simulated day runs in this order:
 18. Validate runtime invariants.
 
 Owners: `src/systems/simulation.rs`, `src/systems/strategic.rs`, and `src/systems/progression.rs`.
+
+`advance_days` clones once up front and replaces the caller's state only after every day succeeds. A separate in-place loop (`advance_days_scratch`) serves exclusively owned disposable branches such as gameplay-harness counterfactuals: identical day loop, no defensive copy, and a caller obligation to discard the state when a day fails.
 
 Execution order is causal behavior. Change it only with tests that establish the intended effect.
 
@@ -233,6 +245,7 @@ Given the same registry, state, seed, command sequence, and day count, execution
 - Validate references, ownership, permissions, lifecycle, capacities, ranges, and arithmetic before mutation.
 - Failed operations leave state unchanged.
 - Calculate complete balance and ownership results before multi-record commits.
+- Hot transactional commits reserve every durable identifier before mutating, so the mutation phase is infallible and needs no defensive whole-campaign copy; a failed reservation restores the allocator snapshot while state is still untouched.
 - Use fixed-point helpers from `src/money.rs`.
 - Use wide intermediates for multiply-then-divide arithmetic.
 - Use shared checked scheduling helpers for future dates.

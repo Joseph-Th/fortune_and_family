@@ -483,18 +483,90 @@ impl ValidatedSupplyContract {
         state: &mut AppState,
     ) -> Result<crate::ids::ContractId, StrategicError> {
         validate_supply_contract_terms(registry, state, &self.terms)?;
-        let mut next_state = state.clone();
-        let id = commit_supply_contract(registry, &mut next_state, &self.terms)?;
-        *state = next_state;
-        Ok(id)
+        let reserved = reserve_supply_contract_commit(state, &self.terms)?;
+        Ok(commit_supply_contract_reserved(
+            registry,
+            state,
+            &self.terms,
+            reserved,
+        ))
     }
 }
 
-fn commit_supply_contract(
+/// Durable identifiers and schedule results a supply-contract commit consumes.
+#[derive(Clone, Copy)]
+struct ReservedSupplyContractCommit {
+    contract_id: crate::ids::ContractId,
+    next_due_day: i64,
+    end_day: i64,
+    outbox_id: crate::ids::OutboxMessageId,
+    counterparty_report: Option<ReservedCounterpartyReport>,
+}
+
+fn reserve_supply_contract_commit(
+    state: &mut AppState,
+    terms: &SupplyContractTerms,
+) -> Result<ReservedSupplyContractCommit, StrategicError> {
+    let day = state.clock.day();
+    let next_due_day = checked_future_day(day, 7)?;
+    let end_day = checked_future_day(day, i64::from(terms.duration_weeks) * 7)?;
+    let report_is_due = {
+        let buyer_owner = state
+            .businesses
+            .get(terms.buyer_business_id)
+            .expect("validated contract buyer must exist")
+            .owner_dynasty_id();
+        let seller_owner = state
+            .businesses
+            .get(terms.seller_business_id)
+            .expect("validated contract seller must exist")
+            .owner_dynasty_id();
+        (buyer_owner == state.player_dynasty_id) != (seller_owner == state.player_dynasty_id)
+    };
+    let ids_before = state.next_ids.clone();
+    let reservation = (|| -> Result<ReservedSupplyContractCommit, StrategicError> {
+        let contract_id = state.next_ids.try_contract()?;
+        let outbox_id = state.next_ids.try_outbox()?;
+        let counterparty_report = if report_is_due {
+            Some(ReservedCounterpartyReport {
+                id: state.next_ids.try_information_report()?,
+                expires_day: checked_future_day(day, COUNTERPARTY_REPORT_EXPIRY_DAYS)?,
+            })
+        } else {
+            None
+        };
+        Ok(ReservedSupplyContractCommit {
+            contract_id,
+            next_due_day,
+            end_day,
+            outbox_id,
+            counterparty_report,
+        })
+    })();
+    match reservation {
+        Ok(reserved) => Ok(reserved),
+        Err(error) => {
+            state.next_ids = ids_before;
+            Err(error)
+        }
+    }
+}
+
+/// Applies a validated supply contract with every durable identifier
+/// pre-reserved; infallible by construction.
+fn commit_supply_contract_reserved(
     registry: &Registry,
     state: &mut AppState,
     terms: &SupplyContractTerms,
-) -> Result<crate::ids::ContractId, StrategicError> {
+    reserved: ReservedSupplyContractCommit,
+) -> crate::ids::ContractId {
+    let ReservedSupplyContractCommit {
+        contract_id: id,
+        next_due_day,
+        end_day,
+        outbox_id,
+        counterparty_report,
+    } = reserved;
     let &SupplyContractTerms {
         buyer_business_id,
         seller_business_id,
@@ -502,7 +574,7 @@ fn commit_supply_contract(
         quantity_per_week,
         unit_price,
         penalty,
-        duration_weeks,
+        ..
     } = terms;
     let buyer_owner_id = state
         .businesses
@@ -531,10 +603,6 @@ fn commit_supply_contract(
         .expect("validated contract good must exist")
         .name()
         .to_owned();
-    let id = state.next_ids.try_contract()?;
-    let day = state.clock.day();
-    let next_due_day = checked_future_day(day, 7)?;
-    let end_day = checked_future_day(day, i64::from(duration_weeks) * 7)?;
     state.contracts.insert(
         id,
         SupplyContract {
@@ -557,14 +625,16 @@ fn commit_supply_contract(
             status: ContractStatus::Active,
         },
     );
-    try_push_outbox(
-        state,
-        OutboxKind::Contract,
-        format!("Supply contract {id} signed"),
-        format!(
+    state.outbox.push(OutboxMessage {
+        id: outbox_id,
+        day: state.clock.day(),
+        kind: OutboxKind::Contract,
+        subject: format!("Supply contract {id} signed"),
+        body: format!(
             "{seller_name} (business {seller_business_id}) will deliver {quantity_per_week} of {good_name} to {buyer_name} (business {buyer_business_id}) each week."
         ),
-    )?;
+        acknowledged: false,
+    });
     adjust_dynasty_relationship(
         state,
         buyer_owner_id,
@@ -577,13 +647,16 @@ fn commit_supply_contract(
         seller_owner_id,
         &format!("Supply contract {id} was signed."),
     );
-    try_record_counterparty_information(
-        state,
-        buyer_owner_id,
-        seller_owner_id,
-        "Contract negotiation and delivery records",
-    )?;
-    Ok(id)
+    if let Some(report) = counterparty_report {
+        emit_counterparty_report(
+            state,
+            report,
+            buyer_owner_id,
+            seller_owner_id,
+            "Contract negotiation and delivery records",
+        );
+    }
+    id
 }
 
 #[derive(Debug)]
@@ -607,18 +680,101 @@ impl ValidatedLoan {
     /// allocation or timeline error if durable loan feedback can no longer be recorded.
     pub fn commit(self, state: &mut AppState) -> Result<crate::ids::LoanId, StrategicError> {
         let defaulted_loan_id = validate_loan_terms(state, &self.terms)?;
-        let mut next_state = state.clone();
-        let id = commit_loan(&mut next_state, &self.terms, defaulted_loan_id)?;
-        *state = next_state;
-        Ok(id)
+        // Every durable identifier and schedule this commit consumes is
+        // reserved up front (the allocator snapshot is restored on failure),
+        // so the mutation phase below is infallible. That removes the
+        // defensive whole-campaign copy a mid-mutation failure would
+        // otherwise need for rollback.
+        let reserved = reserve_loan_commit(state, &self.terms, defaulted_loan_id)?;
+        Ok(commit_loan_reserved(state, &self.terms, reserved))
     }
 }
 
-fn commit_loan(
+/// Durable identifiers and schedule results a loan commit will consume.
+#[derive(Clone, Copy)]
+struct ReservedLoanCommit {
+    /// New loan identifier, or the restructured defaulted loan's identifier.
+    loan_id: crate::ids::LoanId,
+    /// Whether `loan_id` targets an existing defaulted loan being
+    /// restructured rather than a freshly issued record.
+    restructured: bool,
+    next_due_day: i64,
+    outbox_id: crate::ids::OutboxMessageId,
+    counterparty_report: Option<ReservedCounterpartyReport>,
+}
+
+/// A player-facing counterparty report a commit will emit.
+#[derive(Clone, Copy)]
+struct ReservedCounterpartyReport {
+    id: crate::ids::InformationReportId,
+    expires_day: i64,
+}
+
+const COUNTERPARTY_REPORT_EXPIRY_DAYS: i64 = 180;
+
+/// Reserves, in the exact order [`commit_loan_reserved`] consumes them, every
+/// durable identifier the loan commit needs. Nothing has mutated when a
+/// reservation fails, so the allocator snapshot alone restores state.
+fn reserve_loan_commit(
     state: &mut AppState,
     terms: &LoanTerms,
     defaulted_loan_id: Option<crate::ids::LoanId>,
-) -> Result<crate::ids::LoanId, StrategicError> {
+) -> Result<ReservedLoanCommit, StrategicError> {
+    let day = state.clock.day();
+    let next_due_day = checked_future_day(day, 7)?;
+    // Mirrors `reserve_counterparty_report`'s targeting: loans between two AI
+    // houses never touch the player's intelligence ledger.
+    let report_is_due = (terms.lender_dynasty_id == state.player_dynasty_id)
+        != (terms.borrower_dynasty_id == state.player_dynasty_id);
+    let ids_before = state.next_ids.clone();
+    let reservation = (|| -> Result<ReservedLoanCommit, StrategicError> {
+        let (loan_id, restructured) = match defaulted_loan_id {
+            Some(id) => (id, true),
+            None => (state.next_ids.try_loan()?, false),
+        };
+        let outbox_id = state.next_ids.try_outbox()?;
+        let counterparty_report = if report_is_due {
+            Some(ReservedCounterpartyReport {
+                id: state.next_ids.try_information_report()?,
+                expires_day: checked_future_day(day, COUNTERPARTY_REPORT_EXPIRY_DAYS)?,
+            })
+        } else {
+            None
+        };
+        Ok(ReservedLoanCommit {
+            loan_id,
+            restructured,
+            next_due_day,
+            outbox_id,
+            counterparty_report,
+        })
+    })();
+    match reservation {
+        Ok(reserved) => Ok(reserved),
+        Err(error) => {
+            state.next_ids = ids_before;
+            Err(error)
+        }
+    }
+}
+
+/// Applies a validated loan with every durable identifier pre-reserved.
+///
+/// Infallible by construction: reservation has already consumed the loan,
+/// outbox, and counterparty-report identifiers and resolved the schedule, so
+/// no step below can fail.
+fn commit_loan_reserved(
+    state: &mut AppState,
+    terms: &LoanTerms,
+    reserved: ReservedLoanCommit,
+) -> crate::ids::LoanId {
+    let ReservedLoanCommit {
+        loan_id: id,
+        restructured,
+        next_due_day,
+        outbox_id,
+        counterparty_report,
+    } = reserved;
     let &LoanTerms {
         lender_dynasty_id,
         borrower_dynasty_id,
@@ -626,11 +782,6 @@ fn commit_loan(
         collateral_property_id,
         ..
     } = terms;
-    let id = match defaulted_loan_id {
-        Some(id) => id,
-        None => state.next_ids.try_loan()?,
-    };
-    let next_due_day = checked_future_day(state.clock.day(), 7)?;
     let lender = state
         .dynasties
         .get_mut(&lender_dynasty_id)
@@ -656,8 +807,13 @@ fn commit_loan(
             .expect("validated collateral must exist")
             .collateral_loan_id = Some(id);
     }
-    commit_loan_record(state, terms, id, defaulted_loan_id, next_due_day);
-    let restructured = defaulted_loan_id.is_some();
+    commit_loan_record(
+        state,
+        terms,
+        id,
+        if restructured { Some(id) } else { None },
+        next_due_day,
+    );
     let lender_name = state
         .dynasties
         .get(&lender_dynasty_id)
@@ -670,22 +826,24 @@ fn commit_loan(
         .expect("validated borrower must exist")
         .name()
         .to_owned();
-    try_push_outbox(
-        state,
-        OutboxKind::Finance,
-        if restructured {
+    state.outbox.push(OutboxMessage {
+        id: outbox_id,
+        day: state.clock.day(),
+        kind: OutboxKind::Finance,
+        subject: if restructured {
             format!("Loan {id} restructured")
         } else {
             format!("Loan {id} issued")
         },
-        if restructured {
+        body: if restructured {
             format!(
                 "House {lender_name} restructured loan {id} and advanced {principal} to House {borrower_name}."
             )
         } else {
             format!("House {lender_name} lent {principal} to House {borrower_name}.")
         },
-    )?;
+        acknowledged: false,
+    });
     adjust_dynasty_relationship(
         state,
         lender_dynasty_id,
@@ -702,13 +860,16 @@ fn commit_loan(
             format!("Loan {id} was issued for {principal}.")
         },
     );
-    try_record_counterparty_information(
-        state,
-        lender_dynasty_id,
-        borrower_dynasty_id,
-        "Credit underwriting and repayment records",
-    )?;
-    Ok(id)
+    if let Some(report) = counterparty_report {
+        emit_counterparty_report(
+            state,
+            report,
+            lender_dynasty_id,
+            borrower_dynasty_id,
+            "Credit underwriting and repayment records",
+        );
+    }
+    id
 }
 
 fn commit_loan_record(
@@ -1102,17 +1263,21 @@ pub fn buy_unowned_property(
     buyer_dynasty_id: DynastyId,
     property_id: PropertyId,
 ) -> Result<(), StrategicError> {
-    let mut next_state = state.clone();
-    commit_unowned_property_purchase(&mut next_state, buyer_dynasty_id, property_id)?;
-    *state = next_state;
+    // Validation — including durable-feedback headroom — completes before any
+    // mutation runs, so no defensive whole-campaign copy is needed for
+    // rollback.
+    let price = validate_unowned_property_purchase(state, buyer_dynasty_id, property_id)?;
+    let outbox_id = state.next_ids.try_outbox()?;
+    commit_unowned_property_purchase(state, buyer_dynasty_id, property_id, price, outbox_id);
     Ok(())
 }
 
-fn commit_unowned_property_purchase(
-    state: &mut AppState,
+/// Validates an unowned-property purchase and returns its price.
+fn validate_unowned_property_purchase(
+    state: &AppState,
     buyer_dynasty_id: DynastyId,
     property_id: PropertyId,
-) -> Result<(), StrategicError> {
+) -> Result<Money, StrategicError> {
     let property = state
         .properties
         .get(&property_id)
@@ -1134,31 +1299,51 @@ fn commit_unowned_property_purchase(
             required: price,
         });
     }
-    state
-        .dynasties
-        .get_mut(&buyer_dynasty_id)
-        .expect("validated buyer must exist")
-        .resources
-        .treasury = buyer
-        .treasury()
-        .checked_sub(price)
-        .expect("validated property buyer must cover the purchase price");
     // Unowned stock is effectively city real estate, so the purchase price
     // flows into the market clearing pool like every other payment into the
     // city's commercial sector instead of vanishing from the economy.
-    credit_market_clearing_account(state, price).map_err(StrategicError::Simulation)?;
+    if state.market.clearing_account.checked_add(price).is_none() {
+        return Err(StrategicError::Simulation(
+            SimulationError::MarketClearingAccountOverflow {
+                current: state.market.clearing_account,
+                change: price,
+            },
+        ));
+    }
+    Ok(price)
+}
+
+/// Applies a fully validated unowned-property purchase; infallible.
+fn commit_unowned_property_purchase(
+    state: &mut AppState,
+    buyer_dynasty_id: DynastyId,
+    property_id: PropertyId,
+    price: Money,
+    outbox_id: crate::ids::OutboxMessageId,
+) {
+    let buyer = state
+        .dynasties
+        .get_mut(&buyer_dynasty_id)
+        .expect("validated buyer must exist");
+    buyer.resources.treasury = buyer
+        .treasury()
+        .checked_sub(price)
+        .expect("validated property buyer must cover the purchase price");
+    credit_market_clearing_account(state, price)
+        .expect("pre-validated clearing-account credit must succeed");
     state
         .properties
         .get_mut(&property_id)
         .expect("validated property must exist")
         .owner_dynasty_id = Some(buyer_dynasty_id);
-    try_push_outbox(
-        state,
-        OutboxKind::Property,
-        format!("Property {property_id} acquired"),
-        format!("Dynasty {buyer_dynasty_id} acquired the property for {price}."),
-    )?;
-    Ok(())
+    state.outbox.push(OutboxMessage {
+        id: outbox_id,
+        day: state.clock.day(),
+        kind: OutboxKind::Property,
+        subject: format!("Property {property_id} acquired"),
+        body: format!("Dynasty {buyer_dynasty_id} acquired the property for {price}."),
+        acknowledged: false,
+    });
 }
 
 fn property_liquidation_lien(
@@ -1519,7 +1704,8 @@ pub(crate) fn capitalize_owned_business(
         detail: format!(
             "dynasty={dynasty_id};amount={};rehabilitation_basis_points={rehabilitation}",
             amount.copper()
-        ),
+        )
+        .into(),
     });
     Ok(rehabilitation)
 }
@@ -1613,7 +1799,8 @@ pub(crate) fn distribute_owned_business_cash(
             "owner_distribution={};reserve={}",
             amount.copper(),
             reserve.copper()
-        ),
+        )
+        .into(),
     });
     Ok(())
 }
@@ -2260,7 +2447,7 @@ fn record_business_acquisition(
             quote.seller_dynasty_id,
             quote.purchase_price.copper(),
             recapitalization.copper()
-        ),
+        ).into(),
     });
     try_push_outbox(
         state,
@@ -2831,13 +3018,13 @@ fn grant_maturing_institution_support(state: &mut AppState) -> Result<(), Simula
         return Ok(());
     };
     // Patronage records mature exactly 90 days after they are appended, and
-    // the audit log is day-ordered: slice to the single establishment day
+    // the audit log is day-ordered: skip to the single establishment day
     // instead of scanning the whole history every day.
     let start = state
         .audit_log
         .partition_point(|record| record.day() < establishment_day);
     let mut matured: Vec<(InstitutionId, CharacterId)> = Vec::new();
-    for record in &state.audit_log[start..] {
+    for record in state.audit_log.iter().skip(start) {
         if record.day() > establishment_day {
             break;
         }
@@ -4826,7 +5013,7 @@ fn distribute_business_dividends(
             day: state.clock.day(),
             kind: AuditKind::BusinessDividend,
             subject: "business-portfolio".into(),
-            detail: format!("dividends={total_copper}"),
+            detail: format!("dividends={total_copper}").into(),
         });
     }
     Ok(())
@@ -5048,7 +5235,8 @@ fn respond_to_market_wage_pressure(
         detail: format!(
             "market_wage_adjustment={}; per_worker={old_total}/{new_total}",
             weekly_increase.copper()
-        ),
+        )
+        .into(),
     });
     Ok(())
 }
@@ -5871,14 +6059,57 @@ pub(crate) fn try_record_counterparty_information(
     second_dynasty_id: DynastyId,
     source: &str,
 ) -> Result<(), DurableFeedbackError> {
+    let Some(reservation) =
+        reserve_counterparty_report(state, first_dynasty_id, second_dynasty_id)?
+    else {
+        return Ok(());
+    };
+    emit_counterparty_report(
+        state,
+        reservation,
+        first_dynasty_id,
+        second_dynasty_id,
+        source,
+    );
+    Ok(())
+}
+
+/// Reserves the player-facing counterparty report for a pair when exactly one
+/// party is the player; AI-to-AI pairs consume no identifier and reserve
+/// nothing.
+fn reserve_counterparty_report(
+    state: &mut AppState,
+    first_dynasty_id: DynastyId,
+    second_dynasty_id: DynastyId,
+) -> Result<Option<ReservedCounterpartyReport>, DurableFeedbackError> {
+    let player_dynasty_id = state.player_dynasty_id;
+    let counterparty_is_player_adjacent =
+        (first_dynasty_id == player_dynasty_id) != (second_dynasty_id == player_dynasty_id);
+    if !counterparty_is_player_adjacent {
+        return Ok(None);
+    }
+    let expires_day = checked_future_day(state.clock.day(), COUNTERPARTY_REPORT_EXPIRY_DAYS)?;
+    let id = state.next_ids.try_information_report()?;
+    Ok(Some(ReservedCounterpartyReport { id, expires_day }))
+}
+
+/// Emits a previously reserved counterparty report. Infallible: every
+/// fallible step ran during reservation, and the report text is derived from
+/// current state at emit time exactly as before.
+fn emit_counterparty_report(
+    state: &mut AppState,
+    reservation: ReservedCounterpartyReport,
+    first_dynasty_id: DynastyId,
+    second_dynasty_id: DynastyId,
+    source: &str,
+) {
+    let ReservedCounterpartyReport { id, expires_day } = reservation;
     let player_dynasty_id = state.player_dynasty_id;
     let counterparty_id =
         if first_dynasty_id == player_dynasty_id && second_dynasty_id != player_dynasty_id {
             second_dynasty_id
-        } else if second_dynasty_id == player_dynasty_id && first_dynasty_id != player_dynasty_id {
-            first_dynasty_id
         } else {
-            return Ok(());
+            first_dynasty_id
         };
     let counterparty = state
         .dynasties
@@ -5906,9 +6137,6 @@ pub(crate) fn try_record_counterparty_information(
         (relationship.resentment_basis_points % 100) / 10,
         relationship.obligation
     );
-    let day = state.clock.day();
-    let expires_day = checked_future_day(day, 180)?;
-    let id = state.next_ids.try_information_report()?;
     state.information_reports.retain(|_, report| {
         report.owner_dynasty_id != player_dynasty_id || report.target != Some(target)
     });
@@ -5920,13 +6148,12 @@ pub(crate) fn try_record_counterparty_information(
             target: Some(target),
             subject,
             confidence: InformationConfidence::Probable,
-            created_day: day,
+            created_day: state.clock.day(),
             expires_day,
             source: source.to_owned(),
             summary,
         },
     );
-    Ok(())
 }
 
 fn adjust_basis_points(current: u16, delta: i16) -> u16 {
@@ -6099,7 +6326,8 @@ fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> 
                 "monthly_upkeep={};shortfall={}",
                 total_upkeep.copper(),
                 total_shortfall.copper()
-            ),
+            )
+            .into(),
         });
     }
     Ok(())
@@ -6118,9 +6346,47 @@ fn advance_ai_credit_participation(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
-    advance_ai_credit_lending(registry, state);
-    advance_ai_credit_borrowing(registry, state)?;
+    // Live-book membership is read for every candidate house below; one fold
+    // over the loan ledger per month replaces a full scan per candidate. The
+    // book is updated at every commit inside this pass, so subsequent
+    // candidates observe exactly what a fresh rescan would.
+    let mut active_book = ActiveAiLoanBook::collect(state);
+    advance_ai_credit_lending(registry, state, &mut active_book);
+    advance_ai_credit_borrowing(registry, state, &mut active_book)?;
     Ok(())
+}
+
+/// Which houses sit on either side of a repayment-active loan, folded once
+/// from the loan ledger and kept current as this pass commits new loans.
+#[derive(Default)]
+pub(crate) struct ActiveAiLoanBook {
+    borrowers: BTreeSet<DynastyId>,
+    lenders: BTreeSet<DynastyId>,
+}
+
+impl ActiveAiLoanBook {
+    pub(crate) fn collect(state: &AppState) -> Self {
+        let mut book = Self::default();
+        for loan in state.loans.values() {
+            if loan.status.is_repayment_active() {
+                book.record(loan.borrower_dynasty_id, loan.lender_dynasty_id);
+            }
+        }
+        book
+    }
+
+    fn record(&mut self, borrower_id: DynastyId, lender_id: DynastyId) {
+        self.borrowers.insert(borrower_id);
+        self.lenders.insert(lender_id);
+    }
+
+    fn has_active_borrowing(&self, dynasty_id: DynastyId) -> bool {
+        self.borrowers.contains(&dynasty_id)
+    }
+
+    fn holds_active_loan(&self, dynasty_id: DynastyId) -> bool {
+        self.lenders.contains(&dynasty_id)
+    }
 }
 
 /// A business is worth external working capital only when its own operating
@@ -6142,7 +6408,11 @@ fn business_is_creditworthy(business: &crate::core::Business) -> bool {
 /// delinquent, default, and ground the enforcement claims that keep courts,
 /// collateral seizure, and banking panics reachable. Without it every obligation in
 /// the campaign is serviced on schedule and the enforcement systems stay idle.
-fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
+fn advance_ai_credit_lending(
+    registry: &Registry,
+    state: &mut AppState,
+    active_book: &mut ActiveAiLoanBook,
+) {
     let player_id = state.player_dynasty_id;
     let dynasties: Vec<_> = state.dynasties.keys().copied().collect();
 
@@ -6160,7 +6430,9 @@ fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
         if lender_available < Money::from_copper(2_000) {
             continue;
         }
-        let Some(offer) = ai_credit_lending_offer(registry, state, player_id, lender_id) else {
+        let Some(offer) =
+            ai_credit_lending_offer(registry, state, player_id, lender_id, active_book)
+        else {
             continue;
         };
         let principal = offer.principal(lender_available);
@@ -6178,10 +6450,10 @@ fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
         // `validate_loan(...).commit(...)` uses the canonical loan machinery and records
         // outbox feedback; a failed offer is simply skipped. The loan then capitalizes
         // the borrower's short business so the financing need actually resolves.
-        let Ok(_) = validate_loan(state, terms.clone()).and_then(|token| token.commit(state))
-        else {
-            continue;
-        };
+        match validate_loan(state, terms.clone()).and_then(|token| token.commit(state)) {
+            Ok(_) => active_book.record(terms.lender_dynasty_id, terms.borrower_dynasty_id),
+            Err(_) => continue,
+        }
         if let Some(business) = state.businesses.get_mut(offer.business_id)
             && business.owner_dynasty_id() == offer.borrower_dynasty_id
             && business.status() != BusinessStatus::Closed
@@ -6199,7 +6471,7 @@ fn advance_ai_credit_lending(registry: &Registry, state: &mut AppState) {
 /// One concrete loan offer a liquid house could make this month: the most
 /// undercapitalized operating business of an unleveraged rival house, priced by
 /// the borrower's track record.
-struct AiCreditLendingOffer {
+pub(crate) struct AiCreditLendingOffer {
     borrower_dynasty_id: DynastyId,
     business_id: BusinessId,
     shortfall: Money,
@@ -6215,11 +6487,23 @@ impl AiCreditLendingOffer {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn lending_offer_for_test(
+    registry: &Registry,
+    state: &mut AppState,
+    player_id: DynastyId,
+    lender_id: DynastyId,
+) -> Option<AiCreditLendingOffer> {
+    let active_book = ActiveAiLoanBook::collect(state);
+    ai_credit_lending_offer(registry, state, player_id, lender_id, &active_book)
+}
+
 fn ai_credit_lending_offer(
     registry: &Registry,
     state: &mut AppState,
     player_id: DynastyId,
     lender_id: DynastyId,
+    active_book: &ActiveAiLoanBook,
 ) -> Option<AiCreditLendingOffer> {
     let sound = state
         .dynasties
@@ -6227,7 +6511,7 @@ fn ai_credit_lending_offer(
         .copied()
         .filter(|id| *id != lender_id && *id != player_id)
         .filter_map(|candidate_id| {
-            if dynasty_has_active_ai_borrowing(state, candidate_id) {
+            if active_book.has_active_borrowing(candidate_id) {
                 return None;
             }
             best_creditworthy_business(registry, state, candidate_id).map(
@@ -6252,13 +6536,13 @@ fn ai_credit_lending_offer(
     // ground stay unreachable across a whole standard session. The draw stays
     // monthly and per-house, and unserved sound demand remains the fallback
     // answer when the draw fails.
-    let sound_book_active = dynasty_holds_active_ai_loan(state, lender_id);
+    let sound_book_active = active_book.holds_active_loan(lender_id);
     if sound_book_active {
         if state
             .rng
             .is_chance_success(SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS)
             && let Some(speculative) =
-                speculative_lending_offer(registry, state, player_id, lender_id)
+                speculative_lending_offer(registry, state, player_id, lender_id, active_book)
         {
             return Some(speculative);
         }
@@ -6275,7 +6559,7 @@ fn ai_credit_lending_offer(
     {
         return None;
     }
-    speculative_lending_offer(registry, state, player_id, lender_id)
+    speculative_lending_offer(registry, state, player_id, lender_id, active_book)
 }
 
 /// The punitive recovery-loan pool: the most undercapitalized losing firm of an
@@ -6285,6 +6569,7 @@ fn speculative_lending_offer(
     state: &mut AppState,
     player_id: DynastyId,
     lender_id: DynastyId,
+    active_book: &ActiveAiLoanBook,
 ) -> Option<AiCreditLendingOffer> {
     state
         .dynasties
@@ -6292,7 +6577,7 @@ fn speculative_lending_offer(
         .copied()
         .filter(|id| *id != lender_id && *id != player_id)
         .filter_map(|candidate_id| {
-            if dynasty_has_active_ai_borrowing(state, candidate_id) {
+            if active_book.has_active_borrowing(candidate_id) {
                 return None;
             }
             best_speculative_business(registry, state, candidate_id).map(
@@ -6409,6 +6694,7 @@ fn unpledged_borrower_property(
 fn advance_ai_credit_borrowing(
     registry: &Registry,
     state: &mut AppState,
+    active_book: &mut ActiveAiLoanBook,
 ) -> Result<(), SimulationError> {
     let player_id = state.player_dynasty_id;
     let dynasties: Vec<_> = state.dynasties.keys().copied().collect();
@@ -6441,9 +6727,7 @@ fn advance_ai_credit_borrowing(
         if borrower.treasury() >= Money::from_copper(20_000) {
             continue;
         }
-        if state.loans.values().any(|loan| {
-            loan.borrower_dynasty_id == borrower_id && loan.status.is_repayment_active()
-        }) {
+        if active_book.has_active_borrowing(borrower_id) {
             continue;
         }
         let Some((lender_id, available)) = state
@@ -6492,11 +6776,12 @@ fn advance_ai_credit_borrowing(
                 .map(|property| property.id),
         };
         let committed = ai_strategic_attempt(
-            &validate_loan(state, terms).and_then(|token| token.commit(state)),
+            &validate_loan(state, terms.clone()).and_then(|token| token.commit(state)),
         )?;
         if !committed {
             continue;
         }
+        active_book.record(terms.lender_dynasty_id, terms.borrower_dynasty_id);
         // Deploy the borrowed working capital exactly where the shortfall that
         // motivated the loan lives.
         if let Some((business_id, shortfall)) = neediest_business
@@ -6520,22 +6805,6 @@ fn ai_loan_weekly_payment(principal: Money, weeks: i64) -> Money {
     debug_assert!(principal > Money::ZERO);
     debug_assert!(weeks > 0);
     principal.ceil_div_positive(weeks)
-}
-
-fn dynasty_has_active_ai_borrowing(state: &AppState, dynasty_id: DynastyId) -> bool {
-    state
-        .loans
-        .values()
-        .any(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status.is_repayment_active())
-}
-
-/// Whether the house already carries a live loan on its own lending book, so
-/// its monthly risk-appetite draw may diversify into speculative credit.
-fn dynasty_holds_active_ai_loan(state: &AppState, dynasty_id: DynastyId) -> bool {
-    state
-        .loans
-        .values()
-        .any(|loan| loan.lender_dynasty_id == dynasty_id && loan.status.is_repayment_active())
 }
 
 fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
@@ -7105,7 +7374,7 @@ fn record_office_duty_shortfall(
         day: state.clock.day(),
         kind: AuditKind::OfficeDutyShortfall,
         subject: subject.clone().into(),
-        detail: format!("required={required};paid={paid};shortfall={shortfall}"),
+        detail: format!("required={required};paid={paid};shortfall={shortfall}").into(),
     });
     let forfeited = recent_shortfalls.saturating_add(1) >= OFFICE_DUTY_FORFEITURE_THRESHOLD;
     if forfeited {
@@ -7131,16 +7400,23 @@ fn record_office_duty_shortfall(
     Ok(())
 }
 fn recent_office_duty_shortfalls(state: &AppState, subject: &str) -> usize {
-    state
-        .audit_log
-        .iter()
-        .filter(|record| {
-            record.kind() == AuditKind::OfficeDutyShortfall
-                && record.subject() == subject
-                && state.clock.day().saturating_sub(record.day())
-                    <= OFFICE_DUTY_FORFEITURE_WINDOW_DAYS
-        })
-        .count()
+    // Audit-record days are chronologically nondecreasing (an enforced
+    // invariant), so reverse iteration can stop as soon as records fall
+    // outside the forfeiture window instead of sweeping the entire history.
+    let cutoff = state
+        .clock
+        .day()
+        .saturating_sub(OFFICE_DUTY_FORFEITURE_WINDOW_DAYS);
+    let mut count = 0_usize;
+    for record in state.audit_log.iter().rev() {
+        if record.day() < cutoff {
+            break;
+        }
+        if record.kind() == AuditKind::OfficeDutyShortfall && record.subject() == subject {
+            count += 1;
+        }
+    }
+    count
 }
 
 fn should_notify_office_duty_shortfall(state: &AppState, subject: &str) -> bool {
@@ -7203,7 +7479,7 @@ fn forfeit_office_for_unmet_duties(
         day,
         kind: AuditKind::OfficeDutyForfeiture,
         subject: subject.into(),
-        detail: format!("office forfeited after {recent_shortfalls} recent duty shortfalls"),
+        detail: format!("office forfeited after {recent_shortfalls} recent duty shortfalls").into(),
     });
     Ok(())
 }
@@ -7943,11 +8219,17 @@ fn has_recent_office_nomination(
 ) -> bool {
     let nomination_subject =
         super::commands::office_nomination_subject(institution_id, character_id);
-    state.audit_log.iter().rev().any(|record| {
-        record.kind() == AuditKind::OfficeNomination
-            && record.subject() == nomination_subject
-            && day.saturating_sub(record.day()) <= 180
-    })
+    // Chronologically ordered history: stop once records predate the
+    // nomination-recency window.
+    for record in state.audit_log.iter().rev() {
+        if day.saturating_sub(record.day()) > 180 {
+            break;
+        }
+        if record.kind() == AuditKind::OfficeNomination && record.subject() == nomination_subject {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_recent_office_duty_forfeiture(
@@ -7957,11 +8239,17 @@ fn has_recent_office_duty_forfeiture(
     day: i64,
 ) -> bool {
     let subject = office_duty_subject(institution_id, dynasty_id);
-    state.audit_log.iter().rev().any(|record| {
-        record.kind() == AuditKind::OfficeDutyForfeiture
-            && record.subject() == subject
-            && day.saturating_sub(record.day()) <= OFFICE_DUTY_REELECTION_BAN_DAYS
-    })
+    // Chronologically ordered history: stop once records predate the
+    // reelection-ban window.
+    for record in state.audit_log.iter().rev() {
+        if day.saturating_sub(record.day()) > OFFICE_DUTY_REELECTION_BAN_DAYS {
+            break;
+        }
+        if record.kind() == AuditKind::OfficeDutyForfeiture && record.subject() == subject {
+            return true;
+        }
+    }
+    false
 }
 
 fn institution_relationship_support(
@@ -9127,13 +9415,15 @@ fn advance_existing_crises(
     let mut resolved = Vec::new();
     let mut escalated = Vec::new();
     let day = state.clock.day();
+    // Chronologically ordered history: reverse iteration stops at the window
+    // boundary instead of sweeping the whole audit log for every crisis.
+    let cutoff = day.saturating_sub(CRISIS_RESPONSE_WINDOW_DAYS);
     let addressed_subjects: BTreeSet<_> = state
         .audit_log
         .iter()
-        .filter(|record| {
-            crisis_response_contains_crisis(record)
-                && day - record.day <= CRISIS_RESPONSE_WINDOW_DAYS
-        })
+        .rev()
+        .take_while(|record| record.day() >= cutoff)
+        .filter(|record| crisis_response_contains_crisis(record))
         .map(|record| record.subject().to_owned())
         .collect();
     // A standing watch directive is an ongoing institutional response in its
@@ -9753,7 +10043,8 @@ fn update_family_councils(state: &mut AppState) -> Result<(), SimulationError> {
             subject: format!("dynasty:{dynasty_id}").into(),
             detail: format!(
                 "automatic=true;from={prior:?};governance={governance:?};reason=low_unity"
-            ),
+            )
+            .into(),
         });
         try_push_outbox(
             state,

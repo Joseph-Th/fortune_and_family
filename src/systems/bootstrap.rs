@@ -3,11 +3,11 @@
 use crate::core::{
     AppState, AuditKind, AuditRecord, Business, BusinessFinance, BusinessIdentity,
     BusinessOperations, BusinessPolicy, BusinessStatus, BusinessStore, CURRENT_SCHEMA_VERSION,
-    CampaignPhase, Character, CharacterCapabilities, CharacterIdentity, CharacterRole,
-    CharacterRuntime, CharacterStatus, CharacterStore, ChronicleEntry, ChronicleKind, Dynasty,
-    DynastyIdentity, DynastyRelationships, DynastyResources, DynastyRuntime, Household,
-    HouseholdStore, MarketCause, MarketQuote, MarketState, NewGameConfig, NextIds, SimulationClock,
-    SocialClass, StartingBackground,
+    CampaignEvidenceMemo, CampaignPhase, Character, CharacterCapabilities, CharacterIdentity,
+    CharacterRole, CharacterRuntime, CharacterStatus, CharacterStore, ChronicleEntry,
+    ChronicleKind, Dynasty, DynastyIdentity, DynastyRelationships, DynastyResources,
+    DynastyRuntime, HistoryLog, Household, HouseholdStore, MarketCause, MarketQuote, MarketState,
+    NewGameConfig, NextIds, SimulationClock, SocialClass, StartingBackground,
 };
 use crate::ids::{CharacterId, DistrictId, DynastyId, RecipeId};
 use crate::money::{Money, Quantity};
@@ -188,9 +188,10 @@ fn empty_state(registry: &Registry, seed: u64) -> AppState {
         legal_cases: BTreeMap::new(),
         external_routes: BTreeMap::new(),
         crises: BTreeMap::new(),
-        outbox: Vec::new(),
-        chronicle: Vec::new(),
-        audit_log: Vec::new(),
+        outbox: HistoryLog::new(),
+        chronicle: HistoryLog::new(),
+        audit_log: HistoryLog::new(),
+        campaign_evidence_memo: CampaignEvidenceMemo::default(),
     }
 }
 
@@ -302,7 +303,7 @@ fn record_campaign_foundation(
         day: 0,
         kind: AuditKind::CampaignCreated,
         subject: format!("dynasty:{player_id}").into(),
-        detail: format!("seed={seed}; background={background:?}"),
+        detail: format!("seed={seed}; background={background:?}").into(),
     });
 }
 

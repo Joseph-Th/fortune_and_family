@@ -133,7 +133,7 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
                 day: support_day,
                 kind: AuditKind::InstitutionPatronage,
                 subject: institution_support_subject(institution_id, *character_id).into(),
-                detail: "test support".to_owned(),
+                detail: "test support".into(),
             });
         }
     }
@@ -3492,13 +3492,13 @@ mod politics {
             day: state.clock.day(),
             kind: AuditKind::InstitutionPatronage,
             subject: format!("invalid:character:{character_id}").into(),
-            detail: "invalid persisted history fixture".to_owned(),
+            detail: "invalid persisted history fixture".into(),
         });
         state.audit_log.push(AuditRecord {
             day: state.clock.day(),
             kind: AuditKind::OfficeNomination,
             subject: format!("invalid:character:{character_id}").into(),
-            detail: "invalid persisted history fixture".to_owned(),
+            detail: "invalid persisted history fixture".into(),
         });
 
         assert_eq!(

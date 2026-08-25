@@ -27,7 +27,9 @@ pub(crate) use records::{
     DynastyRuntime,
 };
 pub use state::{
-    AppState, BusinessStore, CURRENT_SCHEMA_VERSION, CharacterStore, HouseholdStore, NewGameConfig,
-    SimulationClock,
+    AppState, BusinessStore, CURRENT_SCHEMA_VERSION, CharacterStore, HistoryLog, HouseholdStore,
+    NewGameConfig, SimulationClock,
 };
-pub(crate) use state::{NextIds, population_weighted_food_satisfaction_basis_points};
+pub(crate) use state::{
+    CampaignEvidenceMemo, NextIds, population_weighted_food_satisfaction_basis_points,
+};

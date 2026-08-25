@@ -133,7 +133,7 @@ Each decision cycle:
 5. Probe candidates through `apply_player_command` on cloned state.
 6. Select a viable substantive command; notification acknowledgement is fallback housekeeping.
 7. Commit through `apply_player_command`.
-8. Advance the action branch through `advance_days`.
+8. Advance the action branch through `advance_days` (counterfactual branches use the same day loop on their own disposable clone via the in-place scratch entry point).
 9. Advance a no-action baseline from the same decision point.
 10. Record outcomes, attribution, scores, findings, and bounded trace data.
 

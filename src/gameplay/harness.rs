@@ -1213,7 +1213,6 @@ pub(crate) fn run_decision_cycle_internal(
     accumulator.decision_cycles = accumulator.decision_cycles.saturating_add(1);
     apply_notification_housekeeping(registry, state, accumulator)?;
     let phase = gameplay_phase(&accumulator.fantasy_arc);
-    let baseline_state = state.clone();
     let before = GameplaySnapshot::capture(state);
     let feedback_before = feedback_cursor(state);
     let (candidates, raw_generated_kinds) =
@@ -1265,6 +1264,12 @@ pub(crate) fn run_decision_cycle_internal(
     );
     let choice_metrics =
         record_choice_cycle_metrics(accumulator, substantive_candidate_count, &probe);
+    // The ambient baseline branch advances a frozen pre-cycle clone, but only
+    // cycles that actually commit an action have a separate no-action branch
+    // to observe. A quiet cycle never branches (the main advance IS the
+    // no-action path), so the expensive campaign clone is deferred until the
+    // probe result shows an action will be committed.
+    let baseline_state = probe.selected.is_some().then(|| state.clone());
     let action = apply_selected_candidate(registry, state, probe.selected.clone(), accumulator)?;
     let action_kind = action.as_ref().map(|action| action.kind);
     let command_feedback =
@@ -1449,7 +1454,7 @@ pub(crate) fn advance_decision_time(
             accumulator.observe_snapshot(&campaign_after_time);
             accumulator.record_recovery_pressure(step_days, &campaign_after_time);
             if let Some(consequence_state) = consequence_state.as_mut() {
-                advance_days(registry, consequence_state, consequence_horizon)?;
+                advance_days_scratch(registry, consequence_state, consequence_horizon)?;
                 GameplaySnapshot::capture(consequence_state)
             } else {
                 campaign_after_time
@@ -1458,7 +1463,7 @@ pub(crate) fn advance_decision_time(
         DecisionCycleMode::Terminal => {
             accumulator.observe_snapshot(after_command);
             let mut consequence_state = state.clone();
-            advance_days(registry, &mut consequence_state, consequence_horizon)?;
+            advance_days_scratch(registry, &mut consequence_state, consequence_horizon)?;
             GameplaySnapshot::capture(&consequence_state)
         }
     })
@@ -1470,19 +1475,31 @@ pub(crate) fn advance_decision_time(
 )]
 pub(crate) fn baseline_observation(
     registry: &Registry,
-    action: Option<&ExecutedAction>,
+    // Kept in the signature so the branch contract stays explicit at call
+    // sites: an executed action always pairs with `Some(baseline_state)`,
+    // because both derive from the probe selecting a candidate.
+    _action: Option<&ExecutedAction>,
     consequence_horizon: u32,
     after_time: &GameplaySnapshot,
-    mut baseline_state: AppState,
+    baseline_state: Option<AppState>,
     before: &GameplaySnapshot,
     advanced_state: &AppState,
     advanced_feedback_cursor: FeedbackCursor,
 ) -> Result<(GameplaySnapshot, bool, Vec<GameplayFeedbackEvent>), GameplayHarnessError> {
-    let feedback_before = feedback_cursor(&baseline_state);
-    let (baseline_after_time, ambient_feedback) = if action.is_none() {
+    let (baseline_after_time, ambient_feedback) = if let Some(mut baseline_state) = baseline_state {
+        let feedback_before = feedback_cursor(&baseline_state);
+        advance_days_scratch(registry, &mut baseline_state, consequence_horizon)?;
+        let snapshot = GameplaySnapshot::capture(&baseline_state);
+        let feedback = collect_feedback(
+            &baseline_state,
+            feedback_before,
+            GameplayFeedbackSource::Ambient,
+        );
+        (snapshot, feedback)
+    } else {
         // A quiet cycle never branches: the main advance already is the
         // no-action path, so its own post-advance events are the ambient
-        // feedback. Collecting from the untouched clone here would always be
+        // feedback. Collecting from an untouched clone here would always be
         // empty and hide exactly the world change quiet diagnostics measure.
         (
             after_time.clone(),
@@ -1492,15 +1509,6 @@ pub(crate) fn baseline_observation(
                 GameplayFeedbackSource::Ambient,
             ),
         )
-    } else {
-        advance_days(registry, &mut baseline_state, consequence_horizon)?;
-        let snapshot = GameplaySnapshot::capture(&baseline_state);
-        let feedback = collect_feedback(
-            &baseline_state,
-            feedback_before,
-            GameplayFeedbackSource::Ambient,
-        );
-        (snapshot, feedback)
     };
     let ambient_change = !before.changed_domains(&baseline_after_time).is_empty()
         || baseline_after_time.outbox_messages > before.outbox_messages

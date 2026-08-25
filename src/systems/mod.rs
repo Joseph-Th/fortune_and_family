@@ -372,7 +372,7 @@ pub(crate) use progression::{
     campaign_phase_is_consistent, contract_deliveries_for_dynasty, refresh_campaign_phases,
 };
 pub use simulation::advance_days;
-pub(crate) use simulation::business_sustainable_unit_cost;
+pub(crate) use simulation::{advance_days_scratch, business_sustainable_unit_cost};
 pub(crate) use strategic::MAX_RELATIONSHIP_MEMORIES;
 #[cfg(test)]
 pub(crate) use strategic::issue_loan;

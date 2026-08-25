@@ -399,7 +399,7 @@ impl ValidatedCashTransfer {
             day: state.clock.day(),
             kind: AuditKind::CashTransfer,
             subject: format!("business:{from_business_id}->business:{to_business_id}").into(),
-            detail: format!("amount={}", amount.copper()),
+            detail: format!("amount={}", amount.copper()).into(),
         });
         Ok(())
     }

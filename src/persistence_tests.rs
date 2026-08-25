@@ -567,7 +567,7 @@ mod validation {
             day: state.clock.day(),
             kind: AuditKind::OfficeDirective,
             subject: format!("institution:{institution_id}").into(),
-            detail: "untagged current directive".to_owned(),
+            detail: "untagged current directive".into(),
         });
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) =
@@ -1137,7 +1137,7 @@ mod validation {
             day: state.clock.day(),
             kind: AuditKind::InstitutionPatronage,
             subject: format!("invalid:character:{character_id}").into(),
-            detail: "malformed institutional history".to_owned(),
+            detail: "malformed institutional history".into(),
         });
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) =
@@ -2195,7 +2195,7 @@ mod validation {
                 day: state.clock.day(),
                 kind: AuditKind::InstitutionPatronage,
                 subject: format!("institution:{institution_id}:character:{character_id}").into(),
-                detail: "test patronage record".to_owned(),
+                detail: "test patronage record".into(),
             });
         }
         let value = serde_json::to_value(state).expect("state must serialize");
@@ -2747,7 +2747,7 @@ mod validation {
             day: state.clock.day(),
             kind: AuditKind::OfficeDirective,
             subject: "invalid-office-directive".into(),
-            detail: "fabricated directive history".to_owned(),
+            detail: "fabricated directive history".into(),
         });
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) =
@@ -2772,7 +2772,7 @@ mod validation {
             day: state.clock.day(),
             kind: AuditKind::OfficeDirective,
             subject: format!("institution:{institution_id};dynasty:{}", u32::MAX).into(),
-            detail: "fabricated directive actor".to_owned(),
+            detail: "fabricated directive actor".into(),
         });
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) =
@@ -2797,7 +2797,7 @@ mod validation {
             day: state.clock.day(),
             kind: AuditKind::OfficeDutyShortfall,
             subject: format!("institution:{institution_id};dynasty:{}", u32::MAX).into(),
-            detail: "fabricated office duty".to_owned(),
+            detail: "fabricated office duty".into(),
         });
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) = write_test_json_fixture("invalid-office-duty-actor.json", &value);
@@ -2816,7 +2816,7 @@ mod validation {
             day: state.clock.day(),
             kind: AuditKind::InstitutionEndowment,
             subject: "invalid-institution-endowment".into(),
-            detail: "fabricated endowment history".to_owned(),
+            detail: "fabricated endowment history".into(),
         });
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) = write_test_json_fixture("invalid-endowment-audit.json", &value);
@@ -2841,7 +2841,7 @@ mod validation {
             day: state.clock.day(),
             kind: AuditKind::InstitutionEndowment,
             subject: format!("institution:{institution_id}").into(),
-            detail: "fabricated endowment history".to_owned(),
+            detail: "fabricated endowment history".into(),
         });
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) =
@@ -2876,7 +2876,7 @@ mod validation {
             day: state.clock.day(),
             kind: AuditKind::InstitutionEndowment,
             subject: format!("institution:{institution_id};dynasty:{missing_dynasty_id}").into(),
-            detail: "fabricated endowment history".to_owned(),
+            detail: "fabricated endowment history".into(),
         });
         let value = serde_json::to_value(state).expect("state must serialize");
         let (_directory, path) =

@@ -48,7 +48,7 @@ pub(crate) fn probe_candidates_with_parallelism(
         .min(u32::from(max_consequence_horizon_days))
         .max(projection_days);
     let mut projected_baseline_state = state.clone();
-    advance_days(
+    advance_days_scratch(
         registry,
         &mut projected_baseline_state,
         shared_projection_days,
@@ -236,11 +236,13 @@ pub(crate) fn probe_candidate_outcomes(
             .collect();
     }
 
-    // A campaign clone is intentionally self-contained but comparatively large. Cap nested
-    // workers so a high-core developer machine does not trade throughput for clone-memory churn.
+    // A campaign clone is self-contained but comparatively large. Cap nested
+    // workers so a high-core developer machine does not trade throughput for
+    // clone-memory churn; shared history text keeps each working copy modest,
+    // but eight concurrent branches still bound peak residency sensibly.
     let worker_count = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
-        .min(4)
+        .min(8)
         .min(candidates.len());
     let chunk_size = candidates.len().div_ceil(worker_count);
     let chunks: Vec<&[Candidate]> = candidates.chunks(chunk_size).collect();
@@ -307,7 +309,7 @@ pub(crate) fn evaluate_viable_option(
         baseline.audit_state_checksum != immediate_snapshot.audit_state_checksum;
     let immediate_profile = GameplayConsequenceProfile::between(baseline, &immediate_snapshot);
     let mut projected_state = immediate_state.clone();
-    advance_days(registry, &mut projected_state, projection_days)?;
+    advance_days_scratch(registry, &mut projected_state, projection_days)?;
     let projected_snapshot = GameplaySnapshot::capture(&projected_state);
     let projected_domains = projected_baseline.changed_domains(&projected_snapshot);
     let projected_history_change =

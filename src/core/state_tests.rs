@@ -531,3 +531,210 @@ mod soak {
         );
     }
 }
+
+mod history_log {
+    use super::*;
+    use std::sync::Arc;
+
+    fn log_with(values: &[u32]) -> HistoryLog<u32> {
+        let mut log = HistoryLog::new();
+        for value in values {
+            log.push(*value);
+        }
+        log
+    }
+
+    #[test]
+    fn iteration_order_survives_the_tail_fold() {
+        // Push well past the fold threshold so entries live in both the
+        // folded bulk and the tail, then verify one ordered sequence.
+        let count = u32::try_from(HISTORY_TAIL_FOLD_THRESHOLD * 3 + 17)
+            .expect("fold threshold arithmetic must fit u32");
+        let mut log = HistoryLog::new();
+        for value in 0..u64::from(count) {
+            log.push(value);
+        }
+
+        assert_eq!(log.len() as u64, u64::from(count));
+        let seen: Vec<u64> = log.iter().copied().collect();
+        let expected: Vec<u64> = (0..u64::from(count)).collect();
+        assert_eq!(seen, expected, "iteration must follow insertion order");
+        assert_eq!(
+            log.last(),
+            Some(&(u64::from(count) - 1)),
+            "last must observe the most recent append"
+        );
+
+        // Reverse iteration must mirror it exactly.
+        let reversed: Vec<u64> = log.iter().rev().copied().collect();
+        let mut expected_reversed = expected;
+        expected_reversed.reverse();
+        assert_eq!(reversed, expected_reversed);
+    }
+
+    #[test]
+    fn clones_append_independently_of_the_shared_bulk() {
+        let original = log_with(&[1, 2, 3]);
+        let mut branch = original.clone();
+
+        branch.push(4);
+        assert_eq!(original.len(), 3, "clone appends must not leak back");
+        assert_eq!(branch.last(), Some(&4));
+        assert_eq!(
+            original.iter().copied().collect::<Vec<u32>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn partition_point_spans_bulk_and_tail() {
+        let count = u32::try_from(HISTORY_TAIL_FOLD_THRESHOLD + 32)
+            .expect("fold threshold arithmetic must fit u32");
+        let mut log = HistoryLog::new();
+        for value in 0..count {
+            log.push(value);
+        }
+
+        assert_eq!(log.partition_point(|value| *value < 10), 10);
+        assert_eq!(
+            log.partition_point(|value| *value < count),
+            count as usize,
+            "a predicate every entry satisfies must land past the tail"
+        );
+        assert_eq!(
+            log.partition_point(|_| false),
+            0,
+            "a predicate no entry satisfies must land at the front"
+        );
+    }
+
+    #[test]
+    fn retain_preserves_order_across_the_fold_boundary() {
+        let count = u32::try_from(HISTORY_TAIL_FOLD_THRESHOLD + 32)
+            .expect("fold threshold arithmetic must fit u32");
+        let mut log = HistoryLog::new();
+        for value in 0..count {
+            log.push(value);
+        }
+
+        log.retain(|value| value % 2 == 0);
+        let kept: Vec<u32> = log.iter().copied().collect();
+        let expected: Vec<u32> = (0..count).filter(|value| value % 2 == 0).collect();
+        assert_eq!(kept, expected, "retain must keep relative order");
+    }
+
+    #[test]
+    fn iter_mut_reaches_every_entry_after_a_fold() {
+        let count = u64::from(
+            u32::try_from(HISTORY_TAIL_FOLD_THRESHOLD + 8)
+                .expect("fold threshold arithmetic must fit u32"),
+        );
+        let mut log = HistoryLog::new();
+        for value in 0..count {
+            log.push(value);
+        }
+
+        for entry in &mut log {
+            *entry += 1;
+        }
+        let seen: Vec<u64> = log.iter().copied().collect();
+        let expected: Vec<u64> = (1..=count).collect();
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn serialization_matches_the_plain_sequence_shape() {
+        let log = log_with(&[7, 8, 9]);
+        let serialized = serde_json::to_string(&log).expect("history must serialize");
+        assert_eq!(serialized, "[7,8,9]", "the save shape stays a plain array");
+
+        let round_tripped: HistoryLog<u32> =
+            serde_json::from_str(&serialized).expect("history must deserialize");
+        assert_eq!(round_tripped, log);
+
+        // A freshly deserialized log keeps accepting appends in order.
+        let mut reopened = round_tripped;
+        reopened.push(10);
+        assert_eq!(
+            reopened.iter().copied().collect::<Vec<u32>>(),
+            vec![7, 8, 9, 10]
+        );
+    }
+
+    #[test]
+    fn clear_releases_every_entry() {
+        let mut log = log_with(&[1, 2, 3]);
+        log.clear();
+        assert!(log.is_empty());
+        assert_eq!(log.len(), 0);
+        assert_eq!(log.last(), None);
+
+        log.push(5);
+        assert_eq!(log.iter().copied().collect::<Vec<u32>>(), vec![5]);
+    }
+
+    #[test]
+    fn skip_and_nth_position_in_order_across_the_fold_boundary() {
+        // Push past the fold threshold so entries live in both segments;
+        // `Skip` relies on `nth` positioning, which must stay exact.
+        let count = u32::try_from(HISTORY_TAIL_FOLD_THRESHOLD + 40)
+            .expect("fold threshold arithmetic must fit u32");
+        let mut log = HistoryLog::new();
+        for value in 0..count {
+            log.push(value);
+        }
+
+        let skipped: Vec<u32> = log.iter().copied().skip(10).collect();
+        let expected: Vec<u32> = (10..count).collect();
+        assert_eq!(skipped, expected);
+
+        let skipped_tail_only: Vec<u32> = log
+            .iter()
+            .copied()
+            .skip(usize::try_from(count).expect("fits usize") - 3)
+            .collect();
+        assert_eq!(
+            skipped_tail_only,
+            vec![count - 3, count - 2, count - 1],
+            "a skip landing inside the tail must not disturb order"
+        );
+
+        let reverse_skipped: Vec<u32> = log.iter().rev().copied().skip(5).collect();
+        let mut expected_reverse: Vec<u32> = (0..count - 5).collect();
+        expected_reverse.reverse();
+        assert_eq!(reverse_skipped, expected_reverse);
+
+        let mut iter = log.iter();
+        assert_eq!(iter.nth(2), Some(&2));
+        assert_eq!(iter.next(), Some(&3));
+        // Backward positioning: next_back yields the newest entry, then
+        // nth_back(1) skips `count - 2` and yields `count - 3`.
+        let mut rev_iter = log.iter();
+        assert_eq!(rev_iter.next_back(), Some(&(count - 1)));
+        assert_eq!(rev_iter.nth_back(1), Some(&(count - 3)));
+    }
+
+    #[test]
+    fn equality_compares_entries_not_sharing() {
+        let shared_bulk = Arc::new(vec![1_u32, 2, 3]);
+        let left = HistoryLog {
+            base: Arc::clone(&shared_bulk),
+            tail: Vec::new(),
+        };
+        let right = HistoryLog {
+            base: Arc::clone(&shared_bulk),
+            tail: vec![],
+        };
+        assert_eq!(left, right);
+
+        let with_tail = HistoryLog {
+            base: Arc::clone(&shared_bulk),
+            tail: vec![4],
+        };
+        let rebuilt = log_with(&[1, 2, 3, 4]);
+        assert_eq!(
+            with_tail, rebuilt,
+            "identical sequences are equal regardless of internal split"
+        );
+    }
+}

@@ -1381,7 +1381,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::OfficeNomination,
             subject: format!("institution:{institution_id}:character:{character_id}").into(),
-            detail: "campaign_cost=300".to_owned(),
+            detail: "campaign_cost=300".into(),
         });
         let protected_floor = AGENT_ENDOWMENT_LIQUIDITY_FLOOR.max(
             player_office_duty_reserve(&state, 0).saturating_add(AGENT_ENDOWMENT_OFFICE_BUFFER),
@@ -1445,7 +1445,7 @@ mod candidates {
                     .saturating_sub(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS),
                 kind: AuditKind::InstitutionPatronage,
                 subject: format!("institution:{institution_id}:character:{character_id}").into(),
-                detail: "test support".to_owned(),
+                detail: "test support".into(),
             });
         }
         {
@@ -1481,7 +1481,7 @@ mod candidates {
                 institutions[0], characters[0]
             )
             .into(),
-            detail: "campaign_cost=300".to_owned(),
+            detail: "campaign_cost=300".into(),
         });
         let mut candidates = Vec::new();
 
@@ -1553,7 +1553,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::InstitutionPatronage,
             subject: format!("institution:{institution_id}:character:{head_id}").into(),
-            detail: "test support".to_owned(),
+            detail: "test support".into(),
         });
         let mut candidates = Vec::new();
 
@@ -1629,7 +1629,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::InstitutionPatronage,
             subject: format!("institution:{institution_id}:character:{head_id}").into(),
-            detail: "test support".to_owned(),
+            detail: "test support".into(),
         });
         let mut candidates = Vec::new();
 
@@ -1957,7 +1957,7 @@ mod candidates {
                 institution_ids[0], character_id
             )
             .into(),
-            detail: "campaign_cost=300".to_owned(),
+            detail: "campaign_cost=300".into(),
         });
         let one_campaign_reserve = player_office_duty_reserve(&state, 0);
 
@@ -1969,7 +1969,7 @@ mod candidates {
                 institution_ids[1], character_id
             )
             .into(),
-            detail: "campaign_cost=300".to_owned(),
+            detail: "campaign_cost=300".into(),
         });
         let two_campaign_reserve = player_office_duty_reserve(&state, 0);
 
@@ -2756,7 +2756,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::BusinessCapitalization,
             subject: format!("business:{business_id}").into(),
-            detail: "amount=6000;rehabilitation_basis_points=3000".to_owned(),
+            detail: "amount=6000;rehabilitation_basis_points=3000".into(),
         });
         candidates.clear();
         generate_planned_business_investment(
@@ -2902,7 +2902,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::CashTransfer,
             subject: format!("business:{source_id}->business:{target_id}").into(),
-            detail: "amount=1000".to_owned(),
+            detail: "amount=1000".into(),
         });
         let businesses: Vec<_> = business_ids
             .iter()
@@ -3043,7 +3043,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::BusinessDividend,
             subject: format!("business:{business_id}").into(),
-            detail: "owner_distribution=500".to_owned(),
+            detail: "owner_distribution=500".into(),
         });
         let businesses = vec![
             state
@@ -3328,7 +3328,7 @@ mod candidates {
                 .saturating_sub(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS),
             kind: AuditKind::InstitutionPatronage,
             subject: supply_subject.into(),
-            detail: "support_established".to_owned(),
+            detail: "support_established".into(),
         });
         {
             let institution = state
@@ -3590,7 +3590,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
             subject: format!("crisis:{crisis_id}").into(),
-            detail: "response=Exploit".to_owned(),
+            detail: "response=Exploit".into(),
         });
         let mut candidates = Vec::new();
 
@@ -3635,7 +3635,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
             subject: format!("crisis:{crisis_id}").into(),
-            detail: "response=Reform".to_owned(),
+            detail: "response=Reform".into(),
         });
         candidates.clear();
         generate_reactive_candidates(&state, GameplayPersona::Opportunist, &mut candidates);
@@ -4159,7 +4159,7 @@ mod candidates {
                 day: state.clock.day(),
                 kind,
                 subject: "institution:3;dynasty:10".into(),
-                detail: "different dynasty".to_owned(),
+                detail: "different dynasty".into(),
             });
         }
 
@@ -4174,7 +4174,7 @@ mod candidates {
                 day: state.clock.day(),
                 kind,
                 subject: "institution:3;dynasty:1".into(),
-                detail: "player dynasty".to_owned(),
+                detail: "player dynasty".into(),
             });
         }
 
@@ -4839,7 +4839,7 @@ mod candidates {
             day: 0,
             kind: AuditKind::InformationCommission,
             subject: format!("dynasty:{player_id}").into(),
-            detail: "prior commissioned intelligence".to_owned(),
+            detail: "prior commissioned intelligence".into(),
         });
         for _ in 0..INFORMATION_COMMISSION_INTERVAL_DAYS {
             state.clock.advance_one_day();
@@ -4879,7 +4879,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::InformationCommission,
             subject: format!("dynasty:{player_id}").into(),
-            detail: "fresh commission".to_owned(),
+            detail: "fresh commission".into(),
         });
         generate_information_candidates(
             registry,
@@ -5399,7 +5399,7 @@ mod candidates {
             day: state.clock.day(),
             kind: AuditKind::BusinessWageChange,
             subject: format!("business:{business_id}").into(),
-            detail: "wage_per_worker=42; agreements=1".to_owned(),
+            detail: "wage_per_worker=42; agreements=1".into(),
         });
         assert!(
             !has_business_wage_opportunity(&state),
@@ -6734,7 +6734,7 @@ mod metrics {
             day: state.clock.day(),
             kind: AuditKind::BusinessPolicyChange,
             subject: format!("business:{business_id}").into(),
-            detail: "synthetic cooldown marker".to_owned(),
+            detail: "synthetic cooldown marker".into(),
         });
         let later = GameplaySnapshot::capture(&state);
 
@@ -10479,7 +10479,7 @@ fn grant_office_nomination_record_for_test(registry: &Registry, state: &mut AppS
                 day: support_day,
                 kind: AuditKind::InstitutionPatronage,
                 subject: format!("institution:{institution_id}:character:{character_id}").into(),
-                detail: "test support".to_owned(),
+                detail: "test support".into(),
             });
         }
     }

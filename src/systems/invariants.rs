@@ -13,7 +13,7 @@ use crate::registry::{DistrictDef, GoodDef, InstitutionDef, RecipeDef, Registry}
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
-struct RegistryIds {
+pub(crate) struct RegistryIds {
     districts: BTreeSet<DistrictId>,
     goods: BTreeSet<GoodId>,
     recipes: BTreeSet<RecipeId>,
@@ -35,6 +35,17 @@ impl RegistryIds {
     }
 }
 
+/// Prepares the per-registry lookup sets the invariant battery needs, but only
+/// when debug assertions are active (the battery's documented build profile).
+/// Returns `None` in release builds so hot loops skip preparation entirely.
+pub(crate) fn prepare_invariant_ids(registry: &Registry) -> Option<RegistryIds> {
+    if cfg!(debug_assertions) {
+        Some(RegistryIds::new(registry))
+    } else {
+        None
+    }
+}
+
 /// Asserts all cheap runtime invariants in debug builds.
 ///
 /// # Panics
@@ -42,7 +53,25 @@ impl RegistryIds {
 /// Panics in debug builds when state contains invalid references, stale indexes, invalid lifecycle
 /// combinations, negative constrained values, or inconsistent derived data.
 pub fn validate_invariants(registry: &Registry, state: &AppState) {
-    let ids = RegistryIds::new(registry);
+    // The battery is documented as debug-only: every check is a
+    // `debug_assert!`, so release builds previously kept only the cost —
+    // per-call registry-ID sets and full-state index rebuilds that exist to
+    // feed assertions the compiler had already removed. The compile-time gate
+    // makes the release no-op explicit and free without touching debug
+    // behavior.
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    validate_invariants_with_ids(registry, state, &RegistryIds::new(registry));
+}
+
+/// Shared body of [`validate_invariants`] for callers that run it across many
+/// consecutive states with one registry, such as the daily simulation loop.
+pub(crate) fn validate_invariants_with_ids(
+    registry: &Registry,
+    state: &AppState,
+    ids: &RegistryIds,
+) {
     debug_assert!(
         state.clock.day() >= 0 && state.clock.day() < i64::MAX,
         "Lifecycle Validity: simulation clock must be nonnegative and retain advancement headroom"
@@ -66,13 +95,13 @@ pub fn validate_invariants(registry: &Registry, state: &AppState) {
         "Identifier Allocation: next-ID state is stale or exhausted"
     );
 
-    validate_market(registry, state, &ids);
+    validate_market(registry, state, ids);
     validate_characters(state);
     validate_dynasties(state);
-    validate_businesses(registry, state, &ids);
-    validate_households(state, &ids);
-    validate_institutions(registry, state, &ids);
-    validate_strategic_state(registry, state, &ids);
+    validate_businesses(registry, state, ids);
+    validate_households(state, ids);
+    validate_institutions(registry, state, ids);
+    validate_strategic_state(registry, state, ids);
     validate_history(state);
 }
 

@@ -147,13 +147,75 @@ pub fn advance_days(
     }
     validate_market_quotes(registry, state)?;
 
+    // Debug builds re-check the full invariant battery after every simulated
+    // day; release builds compile those assertions out entirely. The
+    // registry-ID lookup sets are per-registry constants, so preparing them
+    // once per call keeps the debug sweep proportional to state size instead
+    // of multiplying it by the requested day count.
+    let invariant_ids = super::invariants::prepare_invariant_ids(registry);
     let mut next_state = state.clone();
-    for _ in 0..days {
-        run_one_day(registry, &mut next_state)?;
-        super::validate_invariants(registry, &next_state);
-    }
+    run_day_loop(registry, &mut next_state, days, invariant_ids.as_ref())?;
     *state = next_state;
 
+    Ok(())
+}
+
+/// Advances an exclusively owned scratch state in place.
+///
+/// Identical to [`advance_days`] on success, including per-day validation and
+/// deterministic ordering. It skips only the defensive whole-campaign copy:
+/// the caller must hold `state` as a disposable working branch, because when
+/// a day fails, `state` may be partially advanced and has to be discarded.
+///
+/// The gameplay harness counterfactual branches (candidate probes, ambient
+/// baselines, consequence horizons) clone a campaign and then immediately
+/// advance the clone; going through [`advance_days`] there would deep-copy
+/// every history record twice per branch. This entry point keeps one copy --
+/// the caller's own -- while preserving observable results on every success
+/// path and on every error path that discards the scratch state.
+pub(crate) fn advance_days_scratch(
+    registry: &Registry,
+    state: &mut AppState,
+    days: u32,
+) -> Result<(), SimulationError> {
+    if days == 0 {
+        return Err(SimulationError::InvalidDayCount { days });
+    }
+    if state
+        .clock
+        .day()
+        .checked_add(i64::from(days))
+        .is_none_or(|final_day| final_day == i64::MAX)
+    {
+        return Err(SimulationError::DayRangeExhausted {
+            current_day: state.clock.day(),
+            requested_days: days,
+        });
+    }
+    if state.scenario_key != registry.scenario().key() {
+        return Err(SimulationError::RegistryMismatch {
+            state_scenario: state.scenario_key.clone(),
+            registry_scenario: registry.scenario().key().to_owned(),
+        });
+    }
+    validate_market_quotes(registry, state)?;
+    let invariant_ids = super::invariants::prepare_invariant_ids(registry);
+    run_day_loop(registry, state, days, invariant_ids.as_ref())
+}
+
+/// Shared day loop of both advance entries; `state` is mutated in place.
+fn run_day_loop(
+    registry: &Registry,
+    state: &mut AppState,
+    days: u32,
+    invariant_ids: Option<&super::invariants::RegistryIds>,
+) -> Result<(), SimulationError> {
+    for _ in 0..days {
+        run_one_day(registry, state)?;
+        if let Some(ids) = invariant_ids {
+            super::invariants::validate_invariants_with_ids(registry, state, ids);
+        }
+    }
     Ok(())
 }
 
@@ -179,7 +241,7 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
     let sale_plan = decide_business_sales(registry, state)?;
     apply_business_sales(state, sale_plan)?;
 
-    let household_plan = decide_household_consumption(registry, state)?;
+    let household_plan = decide_household_consumption(registry, state);
     apply_household_consumption(state, household_plan)?;
 
     let maintenance_plan = decide_maintenance(registry, state);
@@ -209,7 +271,7 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
         day: state.clock.day(),
         kind: AuditKind::DayAdvanced,
         subject: "simulation".into(),
-        detail: format!("day={}", state.clock.day()),
+        detail: format!("day={}", state.clock.day()).into(),
     });
     Ok(())
 }
@@ -225,17 +287,26 @@ fn decide_business_purchases(
     registry: &Registry,
     state: &AppState,
 ) -> Result<BusinessPurchasePlan, SimulationError> {
-    let mut remaining_stock: BTreeMap<GoodId, Quantity> = state
-        .market
-        .quotes
-        .iter()
-        .map(|(good_id, quote)| (*good_id, quote.stock))
-        .collect();
-    let mut available_cash: BTreeMap<BusinessId, Money> = state
+    // Registry good identifiers are dense (`GoodId::new(goods.len())` at
+    // registration), so the shared-stock scratch pad is a flat vector indexed
+    // by identifier instead of a map rebuilt and probed for every planned
+    // line. Identical contents, identical ordering effects, no tree walks.
+    let mut remaining_stock = vec![Quantity::ZERO; registry.goods().len()];
+    for (good_id, quote) in &state.market.quotes {
+        remaining_stock[good_id.value() as usize] = quote.stock;
+    }
+    // Business identifiers come from the monotonic campaign allocator, so
+    // every live business fits below one past the largest existing identifier.
+    let cash_slots = state
         .businesses
-        .iter()
-        .map(|business| (business.id(), business.cash()))
-        .collect();
+        .records()
+        .keys()
+        .next_back()
+        .map_or(0, |id| id.value() as usize + 1);
+    let mut available_cash = vec![Money::ZERO; cash_slots];
+    for business in state.businesses.iter() {
+        available_cash[business.id().value() as usize] = business.cash();
+    }
     let mut lines = Vec::new();
 
     for business in state.businesses.iter() {
@@ -248,15 +319,17 @@ fn decide_business_purchases(
         let recipe = registry
             .get_recipe(business.recipe_id())
             .expect("business recipe reference must be valid");
+        // Reorder against the capacity the business can actually use â€”
+        // administrative/status capacity further limited by its workforce
+        // and sellable output headroom â€” so struggling or blocked firms do
+        // not spend their remaining liquidity stockpiling inputs they
+        // cannot process. The three batch limits depend on the business and
+        // its recipe, not on the individual input good, so they are resolved
+        // once per business instead of once per input.
+        let effective_batches = effective_capacity_batches(state, business)
+            .min(output_limited_batches(state, business, recipe))
+            .min(worker_limited_batches(state, business.id()));
         for input in recipe.inputs() {
-            // Reorder against the capacity the business can actually use —
-            // administrative/status capacity further limited by its workforce
-            // and sellable output headroom — so struggling or blocked firms do
-            // not spend their remaining liquidity stockpiling inputs they
-            // cannot process.
-            let effective_batches = effective_capacity_batches(state, business)
-                .min(output_limited_batches(state, business, recipe))
-                .min(worker_limited_batches(state, business.id()));
             let target_batches = i64::from(effective_batches)
                 .saturating_mul(i64::from(business.policy.target_input_days));
             let desired = input.quantity().saturating_mul_ratio(target_batches, 1);
@@ -270,14 +343,9 @@ fn decide_business_purchases(
                     good_id: input.good_id(),
                 },
             )?;
-            let stock = remaining_stock
-                .get(&input.good_id())
-                .copied()
-                .unwrap_or(Quantity::ZERO);
-            let cash = available_cash
-                .get(&business.id())
-                .copied()
-                .unwrap_or(Money::ZERO);
+            let good_slot = input.good_id().value() as usize;
+            let stock = remaining_stock[good_slot];
+            let cash = available_cash[business.id().value() as usize];
             let cash_reserve = if business.status() == BusinessStatus::Distressed {
                 // A distressed firm may spend through its minimum cash
                 // reserve to keep operating, matching the daily cost limiter;
@@ -295,17 +363,12 @@ fn decide_business_purchases(
                 continue;
             }
             let cost = cost_for(quantity, quote.price);
-            remaining_stock.insert(
-                input.good_id(),
-                stock
-                    .checked_sub(quantity)
-                    .expect("planned business purchase must not exceed market stock"),
-            );
-            available_cash.insert(
-                business.id(),
-                cash.checked_sub(cost)
-                    .expect("affordable business purchase must not exceed available cash"),
-            );
+            remaining_stock[good_slot] = stock
+                .checked_sub(quantity)
+                .expect("planned business purchase must not exceed market stock");
+            available_cash[business.id().value() as usize] = cash
+                .checked_sub(cost)
+                .expect("affordable business purchase must not exceed available cash");
             lines.push(BusinessPurchaseLine {
                 business_id: business.id(),
                 good_id: input.good_id(),
@@ -409,7 +472,8 @@ fn apply_business_purchases(
             day: state.clock.day(),
             kind: AuditKind::MarketPurchase,
             subject: "businesses".into(),
-            detail: format!("quantity={total_quantity_milliunits}; cost={total_cost_copper}"),
+            detail: format!("quantity={total_quantity_milliunits}; cost={total_cost_copper}")
+                .into(),
         });
     }
     Ok(())
@@ -827,7 +891,7 @@ fn apply_production(state: &mut AppState, plan: ProductionPlan) -> Result<(), Si
             subject: "businesses".into(),
             detail: format!(
                 "output={total_output_milliunits}; operating_cost={total_operating_cost_copper}; tools={total_tool_quantity_milliunits}; tool_spending={total_tool_spending_copper}"
-            ),
+            ).into(),
         });
     }
     Ok(())
@@ -893,20 +957,15 @@ fn decide_business_sales(
     registry: &Registry,
     state: &AppState,
 ) -> Result<BusinessSalePlan, SimulationError> {
-    let mut market_capacity: BTreeMap<GoodId, Quantity> = state
-        .market
-        .quotes
-        .iter()
-        .map(|(good_id, quote)| {
-            let maximum_stock = quote.target_stock.saturating_mul_ratio(3, 2);
-            (
-                *good_id,
-                maximum_stock
-                    .saturating_sub(quote.stock)
-                    .max(Quantity::ZERO),
-            )
-        })
-        .collect();
+    // Shared per-good absorption headroom in a flat vector indexed by the
+    // registry's dense good identifiers (see `decide_business_purchases`).
+    let mut market_capacity = vec![Quantity::ZERO; registry.goods().len()];
+    for (good_id, quote) in &state.market.quotes {
+        let maximum_stock = quote.target_stock.saturating_mul_ratio(3, 2);
+        market_capacity[good_id.value() as usize] = maximum_stock
+            .saturating_sub(quote.stock)
+            .max(Quantity::ZERO);
+    }
     let mut lines = Vec::new();
 
     for business in state.businesses.iter() {
@@ -922,10 +981,8 @@ fn decide_business_sales(
         // Sellers share one absorption ceiling per good: each placement
         // consumes the headroom later sellers plan against, mirroring the
         // shared stock accounting in `decide_business_purchases`.
-        let shared_capacity = market_capacity
-            .get(&candidate.good_id)
-            .copied()
-            .unwrap_or(Quantity::ZERO);
+        let good_slot = candidate.good_id.value() as usize;
+        let shared_capacity = market_capacity[good_slot];
         candidate.capacity = candidate.capacity.min(shared_capacity);
         let quantity = sale_quantity(&candidate);
         if quantity.is_zero() {
@@ -940,13 +997,10 @@ fn decide_business_sales(
         )?;
         // Remaining shared capacity must stay nonnegative; the quantity is
         // already clamped to the shared remainder in `sale_quantity`.
-        market_capacity.insert(
-            candidate.good_id,
-            candidate
-                .capacity
-                .saturating_sub(quantity)
-                .max(Quantity::ZERO),
-        );
+        market_capacity[good_slot] = candidate
+            .capacity
+            .saturating_sub(quantity)
+            .max(Quantity::ZERO);
         lines.push(BusinessSaleLine {
             business_id: business.id(),
             good_id: candidate.good_id,
@@ -1176,16 +1230,14 @@ fn apply_business_sales(
             day: state.clock.day(),
             kind: AuditKind::MarketSale,
             subject: "businesses".into(),
-            detail: format!("quantity={total_quantity_milliunits}; revenue={total_revenue_copper}"),
+            detail: format!("quantity={total_quantity_milliunits}; revenue={total_revenue_copper}")
+                .into(),
         });
     }
     Ok(())
 }
 
-fn decide_household_consumption(
-    registry: &Registry,
-    state: &AppState,
-) -> Result<HouseholdConsumptionPlan, SimulationError> {
+fn decide_household_consumption(registry: &Registry, state: &AppState) -> HouseholdConsumptionPlan {
     let bread_id = registry
         .get_good_id("bread")
         .expect("Rivergate registry must define bread");
@@ -1207,12 +1259,25 @@ fn decide_household_consumption(
     let tools_id = registry
         .get_good_id("tools")
         .expect("Rivergate registry must define tools");
-    let mut stock: BTreeMap<GoodId, Quantity> = state
-        .market
-        .quotes
-        .iter()
-        .map(|(good_id, quote)| (*good_id, quote.stock))
-        .collect();
+    // Shared market stock in a flat vector indexed by the registry's dense
+    // good identifiers (see `decide_business_purchases`).
+    let mut stock = vec![Quantity::ZERO; registry.goods().len()];
+    // Quote prices are constant across the whole planning pass (the apply
+    // phase performs every write), so they are prefetched next to the stock
+    // scratch pad and the per-household loop reads them without repeated
+    // map probes.
+    let mut prices = vec![Money::ZERO; registry.goods().len()];
+    for (good_id, quote) in &state.market.quotes {
+        let slot = good_id.value() as usize;
+        stock[slot] = quote.stock;
+        prices[slot] = quote.price;
+    }
+    // Cloth demand discipline scales with the market's current reference-price
+    // ratio, which is identical for every household in the same planning pass.
+    // Resolving the good and its ratio once per day keeps the per-household
+    // loop free of repeated registry string lookups without changing any
+    // computed value.
+    let cloth_ratio_basis_points = cloth_price_ratio_basis_points(registry, state);
     let mut lines = Vec::new();
     let mut food_satisfaction = BTreeMap::new();
 
@@ -1228,14 +1293,14 @@ fn decide_household_consumption(
                 break;
             }
             let quantity = plan_household_purchase(
-                state,
                 household.id(),
                 good_id,
                 remaining_need,
+                prices[good_id.value() as usize],
                 &mut cash,
                 &mut stock,
                 &mut lines,
-            )?;
+            );
             food_acquired = food_acquired.saturating_add(quantity);
         }
         let (charcoal_need, cloth_need, tools_need) =
@@ -1245,7 +1310,10 @@ fn decide_household_consumption(
         // price for it: dear cloth means mending and waiting, so demand
         // scales down with the going price instead of ratcheting a shortage
         // ever upward.
-        let cloth_need = affordable_cloth_demand(registry, state, cloth_need);
+        let cloth_need = match cloth_ratio_basis_points {
+            Some(ratio_basis_points) => cloth_need.saturating_mul_ratio(ratio_basis_points, 10_000),
+            None => cloth_need,
+        };
         for (good_id, need) in [
             (ale_id, household.ale_need_daily),
             (charcoal_id, charcoal_need),
@@ -1253,14 +1321,14 @@ fn decide_household_consumption(
             (tools_id, tools_need),
         ] {
             plan_household_purchase(
-                state,
                 household.id(),
                 good_id,
                 need,
+                prices[good_id.value() as usize],
                 &mut cash,
                 &mut stock,
                 &mut lines,
-            )?;
+            );
         }
 
         let daily_satisfaction = if household.bread_need_daily.is_zero() {
@@ -1283,40 +1351,31 @@ fn decide_household_consumption(
         food_satisfaction.insert(household.id(), smoothed);
     }
 
-    Ok(HouseholdConsumptionPlan {
+    HouseholdConsumptionPlan {
         lines,
         food_satisfaction,
-    })
+    }
 }
-
 fn plan_household_purchase(
-    state: &AppState,
     household_id: crate::ids::HouseholdId,
     good_id: GoodId,
     need: Quantity,
+    price: Money,
     cash: &mut Money,
-    stock: &mut BTreeMap<GoodId, Quantity>,
+    stock: &mut [Quantity],
     lines: &mut Vec<HouseholdPurchaseLine>,
-) -> Result<Quantity, SimulationError> {
-    let quote = state
-        .market
-        .quotes
-        .get(&good_id)
-        .ok_or(SimulationError::MarketQuoteMissing { good_id })?;
-    let available = stock.get(&good_id).copied().unwrap_or(Quantity::ZERO);
-    let quantity = need
-        .min(available)
-        .min(affordable_quantity(*cash, quote.price));
+) -> Quantity {
+    let good_slot = good_id.value() as usize;
+    debug_assert!(good_slot < stock.len());
+    let available = stock.get(good_slot).copied().unwrap_or(Quantity::ZERO);
+    let quantity = need.min(available).min(affordable_quantity(*cash, price));
     if quantity.is_zero() {
-        return Ok(Quantity::ZERO);
+        return Quantity::ZERO;
     }
-    let cost = cost_for(quantity, quote.price);
-    stock.insert(
-        good_id,
-        available
-            .checked_sub(quantity)
-            .expect("planned purchase quantity must not exceed available stock"),
-    );
+    let cost = cost_for(quantity, price);
+    stock[good_slot] = available
+        .checked_sub(quantity)
+        .expect("planned purchase quantity must not exceed available stock");
     *cash = cash
         .checked_sub(cost)
         .expect("affordable planned purchase must not exceed household cash");
@@ -1326,7 +1385,7 @@ fn plan_household_purchase(
         quantity,
         cost,
     });
-    Ok(quantity)
+    quantity
 }
 
 fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, Quantity) {
@@ -1334,8 +1393,8 @@ fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, 
     // nominal cloth needs sit just under the city's weaving capacity (the
     // player's loomhouse plus the Veyra workshop), so both weavers sell at
     // viable margins instead of glutting the market into structural losses,
-    // while [`affordable_cloth_demand`] scales need back when prices climb
-    // so a shortage cannot ratchet. The household income in bootstrap is
+    // while [`cloth_price_ratio_basis_points`] scales need back when prices
+    // climb so a shortage cannot ratchet. The household income in bootstrap is
     // calibrated to carry this budget alongside food.
     let (charcoal, cloth, tools) = match social_class {
         SocialClass::Laboring => (180, 400, 30),
@@ -1349,29 +1408,22 @@ fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, 
     )
 }
 
-/// Household cloth demand after price discipline: at or below the good's
-/// registry reference price households buy their full clothing need; above
-/// it they economize proportionally, never falling below a quarter of the
-/// need. Without this response, a crisis- or shortage-driven cloth price
-/// spike ratchets unchecked because fixed demand cannot answer a rising
-/// price, and households burn their food buffer on expensive cloth.
-fn affordable_cloth_demand(registry: &Registry, state: &AppState, need: Quantity) -> Quantity {
-    let Some(cloth_id) = registry.get_good_id("cloth") else {
-        return need;
-    };
-    let Some(reference) = registry
+/// Cloth demand's price-discipline ratio in basis points, resolved once per
+/// planning pass: at or below the good's registry reference price households
+/// buy their full clothing need; above it they economize proportionally,
+/// never falling below a quarter of the need. Without this response, a
+/// crisis- or shortage-driven cloth price spike ratchets unchecked because
+/// fixed demand cannot answer a rising price, and households burn their food
+/// buffer on expensive cloth.
+fn cloth_price_ratio_basis_points(registry: &Registry, state: &AppState) -> Option<i64> {
+    let cloth_id = registry.get_good_id("cloth")?;
+    let reference = registry
         .get_good(cloth_id)
-        .map(crate::registry::GoodDef::base_price)
-    else {
-        return need;
-    };
-    let Some(quote) = state.market.quotes.get(&cloth_id) else {
-        return need;
-    };
+        .map(crate::registry::GoodDef::base_price)?;
+    let quote = state.market.quotes.get(&cloth_id)?;
     let reference_copper = reference.copper().max(1);
     let current_copper = quote.price.copper().max(1);
-    let ratio_basis_points = (reference_copper * 10_000 / current_copper).clamp(2_500, 10_000);
-    need.saturating_mul_ratio(ratio_basis_points, 10_000)
+    Some((reference_copper * 10_000 / current_copper).clamp(2_500, 10_000))
 }
 
 fn apply_household_consumption(
@@ -1391,6 +1443,9 @@ fn apply_household_consumption(
             quantity,
             cost,
         } = line;
+        // The quote stays a pure read here: its write-back below must wait
+        // until the clearing-account and household checks have also passed,
+        // so a rejected line leaves market stock untouched.
         let (resulting_market_stock, resulting_market_demand) = {
             let quote = state
                 .market
@@ -1418,18 +1473,18 @@ fn apply_household_consumption(
                 change: cost,
             },
         )?;
-        let resulting_household_cash = state
-            .households
-            .get(household_id)
-            .expect("planned household purchase target must exist")
-            .cash
-            .checked_sub(cost)
-            .expect("planned household purchase must not exceed household cash");
         {
+            // One traversal computes and commits the household deduction;
+            // both preceding checks have already passed, so this write is
+            // reached exactly when the previous form wrote it.
             let household = state
                 .households
                 .get_mut(household_id)
                 .expect("planned household purchase target must exist");
+            let resulting_household_cash = household
+                .cash
+                .checked_sub(cost)
+                .expect("planned household purchase must not exceed household cash");
             household.cash = resulting_household_cash;
         }
         {
@@ -1459,7 +1514,8 @@ fn apply_household_consumption(
             day: state.clock.day(),
             kind: AuditKind::HouseholdConsumption,
             subject: "households".into(),
-            detail: format!("quantity={total_quantity_milliunits}; spending={total_cost_copper}"),
+            detail: format!("quantity={total_quantity_milliunits}; spending={total_cost_copper}")
+                .into(),
         });
     }
     Ok(())
@@ -1735,7 +1791,7 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
             subject: "businesses".into(),
             detail: format!(
                 "cost={total_cost_copper}; tools={total_tool_quantity_milliunits}; tool_spending={total_tool_cost_copper}"
-            ),
+            ).into(),
         });
     }
     Ok(())
@@ -2274,7 +2330,8 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
         detail: format!(
             "weekly_income={}; regional_availability={availability}",
             total.copper()
-        ),
+        )
+        .into(),
     });
     Ok(())
 }

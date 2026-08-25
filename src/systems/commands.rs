@@ -1079,9 +1079,9 @@ fn apply_institution_withdrawal(
         kind: AuditKind::InstitutionWithdrawal,
         subject: institution_support_subject(institution_id, character_id).into(),
         detail: if resigned_office {
-            super::OFFICE_RESIGNATION_AUDIT_DETAIL.to_owned()
+            super::OFFICE_RESIGNATION_AUDIT_DETAIL.to_owned().into()
         } else {
-            "resigned_office=false".to_owned()
+            "resigned_office=false".to_owned().into()
         },
     });
     super::strategic::try_push_outbox(
@@ -1320,7 +1320,7 @@ fn apply_business_policy(
         detail: format!(
             "input_days={target_input_days}; output_days={target_output_days}; reserve={}; maintenance={maintenance_basis_points}; quality={quality_target_basis_points}",
             minimum_cash_reserve.copper()
-        ),
+        ).into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -1412,7 +1412,8 @@ fn apply_business_wages(
             "wage_per_worker={}; agreements={}",
             weekly_wage_per_worker.copper(),
             agreements.len()
-        ),
+        )
+        .into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -2158,7 +2159,8 @@ fn apply_public_work(
             district_id.value(),
             budget.copper(),
             contribution.copper()
-        ),
+        )
+        .into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -2763,7 +2765,7 @@ fn apply_governance(
         day: state.clock.day(),
         kind: AuditKind::HouseGovernanceChange,
         subject: subject.into(),
-        detail: format!("governance={governance:?}"),
+        detail: format!("governance={governance:?}").into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -2827,7 +2829,7 @@ fn apply_family_council_meeting(state: &mut AppState) -> Result<CommandOutcome, 
         detail: format!(
             "cost={};unity_before={unity_before};unity_after={unity_after};loyalty_gain={FAMILY_COUNCIL_MEETING_LOYALTY_GAIN}",
             FAMILY_COUNCIL_MEETING_COST.copper()
-        ),
+        ).into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -2998,7 +3000,7 @@ fn apply_heir(
             "prior_heir={};{};confirmation={confirmation};legitimacy_cost={HEIR_DESIGNATION_LEGITIMACY_COST};unity_cost={HEIR_DESIGNATION_UNITY_COST}",
             prior_heir_id.map_or_else(|| "none".to_owned(), |id| id.to_string()),
             super::heir_designation_detail_component(character_id)
-        ),
+        ).into(),
     });
     let chronicle_id = state.next_ids.try_chronicle()?;
     let chronicle_summary = if confirmation {
@@ -3215,7 +3217,7 @@ fn record_ward_adoption(
         day: state.clock.day(),
         kind: AuditKind::WardAdoption,
         subject: format!("dynasty:{dynasty_id}:character:{ward_id}").into(),
-        detail: format!("focus={focus:?};cost={}", WARD_ADOPTION_COST.copper()),
+        detail: format!("focus={focus:?};cost={}", WARD_ADOPTION_COST.copper()).into(),
     });
     state.chronicle.push(ChronicleEntry {
         id: chronicle_id,
@@ -3330,7 +3332,7 @@ fn apply_family_education(
         day: state.clock.day(),
         kind: AuditKind::FamilyEducation,
         subject: family_education_subject(state.player_dynasty_id, character_id).into(),
-        detail: format!("focus={focus:?};cost={}", FAMILY_EDUCATION_COST.copper()),
+        detail: format!("focus={focus:?};cost={}", FAMILY_EDUCATION_COST.copper()).into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -3528,7 +3530,7 @@ fn finish_institution_patronage(
         day,
         kind: AuditKind::InstitutionPatronage,
         subject: subject.into(),
-        detail: format!("contribution={}", contribution.copper()),
+        detail: format!("contribution={}", contribution.copper()).into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -3708,7 +3710,8 @@ fn commit_institution_endowment(
             "amount={};institution_legitimacy_gain={}",
             endowment.amount.copper(),
             applied_legitimacy_gain
-        ),
+        )
+        .into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -3957,7 +3960,7 @@ fn apply_office_nomination(
         day: state.clock.day(),
         kind: AuditKind::OfficeNomination,
         subject: subject.into(),
-        detail: format!("campaign_cost={}", OFFICE_NOMINATION_CAMPAIGN_COST.copper()),
+        detail: format!("campaign_cost={}", OFFICE_NOMINATION_CAMPAIGN_COST.copper()).into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -4221,7 +4224,7 @@ fn apply_office_power_directive(
         subject: subject.into(),
         detail: format!(
             "district={district_id};power={power:?};legitimacy_cost={OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST}"
-        ),
+        ).into(),
     });
     state.chronicle.push(ChronicleEntry {
         id: chronicle_id,
@@ -4545,7 +4548,7 @@ fn apply_crisis_response(
         day: state.clock.day(),
         kind: AuditKind::CrisisResponse,
         subject: subject.into(),
-        detail: super::strategic::crisis_response_audit_detail(response),
+        detail: super::strategic::crisis_response_audit_detail(response).into(),
     });
     Ok(CommandOutcome {
         summary: format!("Applied {response:?} response to crisis {crisis_id}."),
@@ -5021,7 +5024,7 @@ fn commission_information(
         day,
         kind: AuditKind::InformationCommission,
         subject: format!("dynasty:{}", state.player_dynasty_id).into(),
-        detail: format!("report={id};subject={}", plan.subject),
+        detail: format!("report={id};subject={}", plan.subject).into(),
     });
     super::strategic::try_push_outbox(
         state,
@@ -5499,7 +5502,7 @@ fn leverage_information(
         day: state.clock.day(),
         kind: AuditKind::InformationLeverage,
         subject: format!("information-report:{report_id}").into(),
-        detail: plan.quote.description.clone(),
+        detail: plan.quote.description.clone().into(),
     });
     super::strategic::try_push_outbox(
         state,

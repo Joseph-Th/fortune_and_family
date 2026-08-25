@@ -8,6 +8,7 @@ use crate::money::{Money, Quantity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -639,7 +640,7 @@ pub enum AuditKind {
 /// compact while preserving a typed runtime boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct AuditSubject(String);
+pub struct AuditSubject(Arc<str>);
 
 impl AuditSubject {
     #[must_use]
@@ -720,13 +721,13 @@ impl AuditSubject {
 
 impl From<String> for AuditSubject {
     fn from(value: String) -> Self {
-        Self(value)
+        Self(Arc::from(value))
     }
 }
 
 impl From<&str> for AuditSubject {
     fn from(value: &str) -> Self {
-        Self(value.to_owned())
+        Self(Arc::from(value))
     }
 }
 
@@ -735,7 +736,11 @@ pub struct AuditRecord {
     pub(crate) day: i64,
     pub(crate) kind: AuditKind,
     pub(crate) subject: AuditSubject,
-    pub(crate) detail: String,
+    /// Shared, immutable after construction: the audit log is append-only and
+    /// every simulation working copy clones it, so cheap reference-counted
+    /// text keeps campaign-length history from dominating clone cost. The
+    /// serialized shape is a plain string either way.
+    pub(crate) detail: Arc<str>,
 }
 
 impl AuditRecord {

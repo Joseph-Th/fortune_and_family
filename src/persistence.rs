@@ -7,6 +7,8 @@ use crate::core::{
 use crate::ids::{BusinessId, HouseholdId};
 use crate::money::{Money, Quantity, checked_cost_for};
 use crate::systems::is_schedulable_day;
+use serde::Deserialize;
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -401,14 +403,9 @@ pub fn load_state_with_revision(
     let bytes = read_bounded_save(path)?;
     let revision = SaveRevision::of_bytes(&bytes);
     validate_no_duplicate_json_members(&bytes, path)?;
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|source| PersistenceError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    require_current_schema(&value, path)?;
+    require_current_schema(&bytes, path)?;
     let state: AppState =
-        serde_json::from_value(value).map_err(|source| PersistenceError::Parse {
+        serde_json::from_slice(&bytes).map_err(|source| PersistenceError::Parse {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2522,21 +2519,41 @@ fn validate_office_duty_audit_reference(
     Ok(())
 }
 
-fn require_current_schema(value: &Value, path: &Path) -> Result<(), PersistenceError> {
-    let found = value
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| PersistenceError::MissingSchemaVersion {
+/// The only member the loader must inspect before a full deserialize.
+///
+/// Deserializing this probe skips every other member without building the
+/// intermediate value tree, so loading does not parse the whole document
+/// twice just to learn its schema version. Unknown members are deliberately
+/// allowed; duplicates were already rejected before this runs.
+#[derive(Deserialize)]
+struct SchemaVersionProbe {
+    schema_version: u64,
+}
+
+fn require_current_schema(bytes: &[u8], path: &Path) -> Result<(), PersistenceError> {
+    match serde_json::from_slice::<SchemaVersionProbe>(bytes) {
+        Ok(probe) => {
+            if probe.schema_version != u64::from(CURRENT_SCHEMA_VERSION) {
+                return Err(PersistenceError::UnsupportedSchemaVersion {
+                    path: path.to_path_buf(),
+                    found: probe.schema_version,
+                    supported: CURRENT_SCHEMA_VERSION,
+                });
+            }
+            Ok(())
+        }
+        // A well-formed document without a usable `schema_version` member
+        // (missing, wrong type, non-object root) is reported exactly as the
+        // previous value-tree lookup reported it; only genuine syntax
+        // failures surface as parse errors.
+        Err(error) if error.is_data() => Err(PersistenceError::MissingSchemaVersion {
             path: path.to_path_buf(),
-        })?;
-    if found != u64::from(CURRENT_SCHEMA_VERSION) {
-        return Err(PersistenceError::UnsupportedSchemaVersion {
+        }),
+        Err(source) => Err(PersistenceError::Parse {
             path: path.to_path_buf(),
-            found,
-            supported: CURRENT_SCHEMA_VERSION,
-        });
+            source,
+        }),
     }
-    Ok(())
 }
 
 #[cfg(test)]

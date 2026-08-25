@@ -6921,7 +6921,7 @@ mod crises {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
             subject: format!("crisis:{crisis_id}").into(),
-            detail: "response=Exploit".to_owned(),
+            detail: "response=Exploit".into(),
         });
 
         detect_and_advance_crises(registry, &mut state).expect("crisis advancement must succeed");
@@ -6950,7 +6950,7 @@ mod crises {
             day: state.clock.day(),
             kind: AuditKind::CrisisResponse,
             subject: format!("crisis:{crisis_id}").into(),
-            detail: "response=Reform".to_owned(),
+            detail: "response=Reform".into(),
         });
         let outbox_before = state.outbox.len();
 
@@ -8768,7 +8768,7 @@ mod ai {
         let lender_id = *unleveraged.last().expect("lender must exist");
         let player_id = state.player_dynasty_id;
 
-        let offer = super::ai_credit_lending_offer(registry, &mut state, player_id, lender_id)
+        let offer = super::lending_offer_for_test(registry, &mut state, player_id, lender_id)
             .expect("a liquid house must find a lending offer");
 
         assert_eq!(
@@ -8833,7 +8833,7 @@ mod ai {
         let mut offer = None;
         for _ in 0..1_000 {
             if let Some(found) =
-                super::ai_credit_lending_offer(registry, &mut state, player_id, lender_id)
+                super::lending_offer_for_test(registry, &mut state, player_id, lender_id)
             {
                 offer = Some(found);
                 break;
@@ -8998,7 +8998,7 @@ mod ai {
         let mut saw_speculative = false;
         for _ in 0..1_000 {
             let Some(offer) =
-                super::ai_credit_lending_offer(registry, &mut state, player_id, lender_id)
+                super::lending_offer_for_test(registry, &mut state, player_id, lender_id)
             else {
                 continue;
             };
