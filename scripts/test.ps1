@@ -3,11 +3,15 @@ param(
     [Parameter(Position=0)]
     [string]$Mode = "fast",
 
-    [Parameter(Position=1)]
-    [string]$Filter = ""
+    [Parameter(Position=1, ValueFromRemainingArguments = $true)]
+    [string[]]$Rest
 )
 
 $ErrorActionPreference = "Stop"
+
+# The common modes take at most one filter argument; `playtest` forwards every
+# remaining argument to the gameplay-harness CLI verbatim.
+$Filter = if ($Rest -and $Rest.Count -gt 0) { $Rest[0] } else { "" }
 
 $ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $ProjectRoot
@@ -39,6 +43,7 @@ usage:
   .\scripts\test.ps1 adapters            run all CLI smoke groups
   .\scripts\test.ps1 gameplay            run release gameplay and generation-length quality gates
   .\scripts\test.ps1 gameplay-audit      run mature multi-seed, generation, and credit-stress audits
+  .\scripts\test.ps1 playtest [args...]  run one focused release harness campaign; args pass through
   .\scripts\test.ps1 ci-verify           fast CI lane: format, clippy, library, docs
   .\scripts\test.ps1 ci-gates            deep CI lane: release tests, soaks, adapters, gameplay, audit
   .\scripts\test.ps1 all                 everything: standard + soak + adapters + gameplay
@@ -437,6 +442,14 @@ switch ($Mode) {
     }
     "gameplay"       { Run-GameplayGates }
     "gameplay-audit" { Run-GameplayAudit }
+    "playtest"       {
+        if (-not $Rest -or $Rest.Count -eq 0) { Show-Usage }
+        Ensure-CliBinary "release"
+        Run-Step "Gameplay harness run" {
+            & $env:CIVIC_DYNASTY_BINARY playtest @Rest
+            if ($LASTEXITCODE -ne 0) { throw "Gameplay harness run failed" }
+        }
+    }
     "ci-verify"      { Run-CiVerify }
     "ci-gates"       { Run-CiGates }
     "slow"           { Run-SlowGates }

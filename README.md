@@ -109,6 +109,7 @@ Run gameplay analysis or sprite review:
 
 ```bash
 cargo run --release --locked -- playtest
+bash scripts/test.sh playtest --days 360 --persona entrepreneur
 cargo run --locked -- art --output target/sprite-review.html --seeds 2 --scale 6
 ```
 

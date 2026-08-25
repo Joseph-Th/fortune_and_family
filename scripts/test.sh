@@ -33,6 +33,7 @@ usage:
   $0 adapters            run all CLI smoke groups
   $0 gameplay            run release gameplay and generation-length quality gates
   $0 gameplay-audit      run mature multi-seed, generation, and credit-stress audits
+  $0 playtest [args...]  run one focused release harness campaign; args pass through
   $0 ci-verify           fast CI lane: format, clippy, library, docs
   $0 ci-gates            deep CI lane: release tests, soaks, adapters, gameplay, audit
   $0 all                 everything: standard + soak + adapters + gameplay
@@ -525,6 +526,12 @@ case "$mode" in
     [[ $# -eq 1 ]] || usage
     run_gameplay
     run_generation_gameplay
+    ;;
+  playtest)
+    [[ $# -ge 1 ]] || usage
+    shift
+    ensure_cli_binary release
+    run_step 'Gameplay harness run' "$CIVIC_DYNASTY_BINARY" playtest "$@"
     ;;
   gameplay-audit)
     [[ $# -eq 1 ]] || usage

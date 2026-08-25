@@ -41,9 +41,24 @@ debug = 1
 incremental = true
 codegen-units = 16
 
+# Release is the everyday optimized profile for gates and harnesses: full
+# optimization with parallel codegen units, incremental reuse, and no
+# cross-crate LTO, so an edited source file rebuilds in seconds instead of
+# minutes. Simulation throughput stays within roughly ten percent of the
+# release-max profile, and all gameplay output is identical.
 [profile.release]
+codegen-units = 16
+incremental = true
+
+# Deliberate throughput-evidence profile: serialized single-unit codegen plus
+# thin-LTO for the smallest, fastest binaries. Build it explicitly
+# (`cargo build --profile release-max`) when peak performance itself is the
+# thing being measured; routine verification does not need it.
+[profile.release-max]
+inherits = "release"
 lto = "thin"
 codegen-units = 1
+incremental = false
 
 [lints.rust]
 unsafe_code = "forbid"

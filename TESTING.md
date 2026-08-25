@@ -19,6 +19,7 @@ This document defines test tiers, suite organization, assertion standards, and c
 | Art CLI smoke | `bash scripts/test.sh art-cli` |
 | Gameplay CLI smoke | `bash scripts/test.sh gameplay-cli` |
 | All adapter smoke groups | `bash scripts/test.sh adapters` |
+| Focused harness run | `bash scripts/test.sh playtest [args...]` |
 | Release gameplay gates | `bash scripts/test.sh gameplay` |
 | Deep gameplay design audit | `bash scripts/test.sh gameplay-audit` |
 | Fast CI verification lane | `bash scripts/test.sh ci-verify` |
@@ -42,6 +43,14 @@ rather than tens of seconds, so the edit-test loop is dominated by incremental
 compile time instead of debug-mode execution. Keep new tests out of sleeps and
 wall-clock dependence so that speedup applies to them; use release lanes for
 throughput-critical evidence.
+
+The `release` profile is the everyday optimized profile for soaks, adapter
+smokes, and gameplay gates: parallel codegen units with incremental reuse and
+no cross-crate LTO keep an edited source file's optimized rebuild in seconds,
+while simulation throughput stays within roughly ten percent of peak and all
+gameplay output stays identical. Build `--profile release-max` only when peak
+performance itself is under measurement; routine verification does not need
+it.
 
 - Plain `cargo test` is the default and fastest runner on this suite (tests
   share campaign-fixture setup inside one process). Set

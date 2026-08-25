@@ -39,6 +39,15 @@ cargo run --release --locked -- playtest \
   --trace-limit 20
 ```
 
+The repository runner exposes the same run with one shared optimized CLI
+build, so an edited source file reaches a focused report in seconds:
+
+```bash
+bash scripts/test.sh playtest --days 360 --persona entrepreneur
+```
+
+Extra arguments pass through to the `playtest` CLI unchanged.
+
 Default matrix:
 
 ```bash
