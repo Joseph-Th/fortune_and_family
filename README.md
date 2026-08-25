@@ -135,7 +135,7 @@ src/
     legal.rs          Grounded legal claims
     progression.rs    Campaign progression milestones
     simulation.rs     Daily simulation pipeline
-    strategic.rs      Scheduled and cross-domain systems
+    strategic/        Scheduled and cross-domain systems by domain
     transactions.rs   Reusable validated transactions
     invariants.rs     Runtime invariant checks
   persistence.rs      Current-schema save/load and release validation

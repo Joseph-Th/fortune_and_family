@@ -1096,7 +1096,7 @@ impl WorldSnapshotPart {
                 crate::core::population_weighted_food_satisfaction_basis_points(
                     state.households.iter(),
                 )
-                .unwrap_or(0),
+                .unwrap_or(crate::core::NEUTRAL_FOOD_SATISFACTION_BASIS_POINTS),
             minimum_district_food_satisfaction: minimum_district_food_satisfaction(state),
             average_district_unrest: district.unrest,
             average_district_employment: district.employment,

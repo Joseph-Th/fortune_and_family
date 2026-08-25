@@ -122,7 +122,7 @@ Large suites live beside their production owner:
 | Campaign bootstrap | `src/systems/bootstrap_tests.rs` |
 | Player commands | `src/systems/commands_tests.rs` |
 | Daily simulation | `src/systems/simulation_tests.rs` |
-| Strategic systems | `src/systems/strategic_tests.rs` |
+| Strategic systems | `src/systems/strategic/strategic_tests.rs` |
 | Persistence | `src/persistence_tests.rs` |
 | Projections and HTML | `src/projection_tests.rs` |
 | Gameplay harness | `src/gameplay_tests.rs` |

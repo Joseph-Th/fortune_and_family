@@ -31,7 +31,7 @@ pub(crate) use records::{
 };
 pub use state::{
     AppState, BusinessStore, CURRENT_SCHEMA_VERSION, CharacterStore, HistoryLog, HouseholdStore,
-    NewGameConfig, SimulationClock,
+    NEUTRAL_FOOD_SATISFACTION_BASIS_POINTS, NewGameConfig, SimulationClock,
 };
 pub(crate) use state::{
     CampaignEvidenceMemo, NextIds, population_weighted_food_satisfaction_basis_points,

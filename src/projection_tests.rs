@@ -928,8 +928,8 @@ mod html {
             "an entry restriction row must state its market-access and patronage effects"
         );
         assert!(
-            html.contains("units of grain to the market each day"),
-            "an emergency imports row must state its daily grain supply"
+            html.contains("units of grain to the market each week"),
+            "an emergency imports row must state its weekly grain supply"
         );
     }
 }

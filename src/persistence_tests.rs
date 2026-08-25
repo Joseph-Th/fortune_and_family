@@ -277,6 +277,78 @@ mod round_trip {
     }
 
     #[test]
+    fn preserves_contract_breach_claim_on_a_still_active_contract() {
+        // Attributable breach debt exists from the first missed delivery while
+        // the contract itself stays Active (breach status needs three misses),
+        // and a grounded claim may already be litigating that debt. A save
+        // taken in exactly that window must reload.
+        let mut state = make_test_campaign();
+        let contract_id = *state
+            .contracts
+            .keys()
+            .next()
+            .expect("campaign must contain a supply contract");
+        let (plaintiff_dynasty_id, defendant_dynasty_id) = {
+            let contract = state
+                .contracts
+                .get(&contract_id)
+                .expect("selected contract must exist");
+            let plaintiff_dynasty_id = state
+                .businesses
+                .get(contract.seller_business_id)
+                .expect("contract seller must exist")
+                .owner_dynasty_id();
+            let defendant_dynasty_id = state
+                .businesses
+                .get(contract.buyer_business_id)
+                .expect("contract buyer must exist")
+                .owner_dynasty_id();
+            (plaintiff_dynasty_id, defendant_dynasty_id)
+        };
+        {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("selected contract must exist");
+            contract.status = crate::core::ContractStatus::Active;
+            contract.missed_deliveries = 1;
+            contract.breaching_dynasty_id = Some(defendant_dynasty_id);
+            contract.breach_victim_dynasty_id = Some(plaintiff_dynasty_id);
+            contract.unpaid_breach_penalty = Money::from_copper(100);
+        }
+        let case_id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            case_id,
+            LegalCase {
+                id: case_id,
+                plaintiff_dynasty_id,
+                defendant_dynasty_id,
+                kind: LegalCaseKind::ContractBreach,
+                claim_source: Some(LegalClaimSource::Contract { contract_id }),
+                evidence_basis_points: 8_500,
+                public_attention_basis_points: 1_500,
+                filed_day: state.clock.day(),
+                hearing_day: state.clock.day().saturating_add(60),
+                damages: Money::from_copper(100),
+                status: LegalCaseStatus::Filed,
+            },
+        );
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("active-contract-breach-claim.json");
+
+        save_state(&path, &state).expect("active-contract breach claim must save");
+        let loaded = load_state(&path).expect(
+            "a breach claim on a still-active contract must load; the simulation emits this state",
+        );
+
+        assert_state_eq(
+            &state,
+            &loaded,
+            "save/load must preserve attributed breach debt on an active contract",
+        );
+    }
+
+    #[test]
     fn preserves_adopted_wards_and_family_education() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

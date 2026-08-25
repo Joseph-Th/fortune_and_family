@@ -154,6 +154,12 @@ pub struct Property {
     pub(crate) owner_dynasty_id: Option<DynastyId>,
     pub(crate) occupant_business_id: Option<BusinessId>,
     pub(crate) tenant_dynasty_id: Option<DynastyId>,
+    /// The price a neutral district (rent index 10,000) would command for this
+    /// property. Monthly revaluation targets `anchor_value * rent_index /
+    /// 10_000`, so a one-time change in district desirability reprices the
+    /// property once toward a stable level instead of compounding against its
+    /// own drifting value every month.
+    pub(crate) anchor_value: Money,
     pub(crate) value: Money,
     pub(crate) weekly_rent: Money,
     pub(crate) condition_basis_points: u16,

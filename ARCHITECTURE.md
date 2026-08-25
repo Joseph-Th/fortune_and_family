@@ -46,9 +46,25 @@ Dependency direction is one way:
 | `src/systems/legal.rs` | Grounded debt and contract claims. |
 | `src/systems/progression.rs` | Monotonic campaign progression. |
 | `src/systems/simulation.rs` | Daily economic pipeline and time advancement. |
-| `src/systems/strategic.rs` | Daily, weekly, monthly, annual, and cross-domain systems. |
+| `src/systems/strategic/` | Scheduled strategic systems, split by domain (see below). |
 | `src/systems/transactions.rs` | Reusable validated transaction primitives. |
 | `src/systems/invariants.rs` | Runtime cross-record invariants. |
+
+The strategic directory keeps one submodule per domain behind a single facade:
+
+| Submodule | Responsibility |
+|---|---|
+| `strategic/mod.rs` | Scheduling entries, shared relationship plumbing, law appliers, information reports, annual family systems. |
+| `strategic/contracts.rs` | Supply contracts: terms, validated commits, capacity, weekly settlement. |
+| `strategic/credit.rs` | Private and municipal credit: loans, civic debts, interest, collateral seizure. |
+| `strategic/property.rs` | Real estate, tenancy, rents, district conditions, public works. |
+| `strategic/businesses.rs` | Business ownership: capitalization, distributions, acquisitions, dividends. |
+| `strategic/labor.rs` | Weekly employment settlement, market wage fairness, workforce disputes. |
+| `strategic/offices.rs` | Political-office lifecycle: duties, stipends, powers, directives, elections. |
+| `strategic/ai.rs` | Autonomous houses: objectives, upkeep, credit participation, recovery. |
+| `strategic/legal_cases.rs` | Legal-case hearings, judgments, settlements, claim discharge. |
+| `strategic/crises.rs` | Crisis detection, escalation, response effects, route risk. |
+| `strategic/initialization.rs` | Deterministic bootstrap initialization of strategic state. |
 | `src/persistence.rs` | Current-schema save/load, release validation, atomic writes. |
 | `src/projection.rs` | Immutable read models and self-contained HTML rendering. |
 | `src/gameplay/` | Deterministic player agents, counterfactual attribution, scores, findings, traces. |
@@ -146,13 +162,13 @@ Each simulated day runs in this order:
 17. Append the day audit record.
 18. Validate runtime invariants.
 
-Owners: `src/systems/simulation.rs`, `src/systems/strategic.rs`, and `src/systems/progression.rs`.
+Owners: `src/systems/simulation.rs`, `src/systems/strategic/`, and `src/systems/progression.rs`.
 
 `advance_days` clones once up front and replaces the caller's state only after every day succeeds. A separate in-place loop (`advance_days_scratch`) serves exclusively owned disposable branches such as gameplay-harness counterfactuals: identical day loop, no defensive copy, and a caller obligation to discard the state when a day fails.
 
 Execution order is causal behavior. Change it only with tests that establish the intended effect.
 
-Strategic scheduling lives in `src/systems/strategic.rs`:
+Strategic scheduling lives in `src/systems/strategic/` (domain submodules under one facade):
 
 - **Daily**: routes, crisis effects, AI business recovery, external route supply.
 - **Weekly**: household wage settlement, contracts, loans, civic debts, property rents, employment, dividends, public works, relationship and reputation updates.
@@ -277,7 +293,7 @@ Important invariant groups include registry references, derived indexes, ownersh
 | Persistent state | `src/core/*`, `src/core/state.rs` | Bootstrap, validation, invariants, projection, tests. |
 | Player command | `src/systems/commands.rs` | Command tests, feedback, projection, gameplay integration, CLI smoke when needed. |
 | Daily economic rule | `src/systems/simulation.rs` | Simulation tests, causal ordering, invariants. |
-| Scheduled strategic rule | `src/systems/strategic.rs` | Strategic tests, feedback, gameplay snapshots. |
+| Scheduled strategic rule | `src/systems/strategic/` domain submodule | Strategic tests, feedback, gameplay snapshots. |
 | Cross-record transaction | Owning system or `src/systems/transactions.rs` | Typed errors, atomicity, stale-token tests. |
 | Read-only output | `src/projection.rs` | Projection/rendering tests. |
 | Save format | `src/persistence.rs` | Current schema, release validation, round trip, status. |

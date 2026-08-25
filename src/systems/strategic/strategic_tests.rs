@@ -9068,4 +9068,137 @@ mod ai {
             property.value
         );
     }
+
+    #[test]
+    fn vacant_workshop_value_converges_to_its_anchor_instead_of_collapsing() {
+        // Regression: revaluation used to anchor workshops on
+        // `weekly_rent * 82`, a ratio calibrated for business premises rents.
+        // A vacant workshop's modest rent implied an anchor far below its real
+        // value, so every month silently wrote its value down toward that
+        // broken target. The persisted neutral-district anchor must keep the
+        // value orbiting its authored level instead.
+        let mut state = make_test_campaign();
+        let (district_id, workshop_id) = state
+            .properties
+            .values()
+            .find(|property| {
+                property.kind == PropertyKind::Workshop && property.occupant_business_id.is_none()
+            })
+            .map(|property| (property.district_id, property.id()))
+            .expect("campaign must contain a vacant workshop");
+        let anchor = state
+            .properties
+            .get(&workshop_id)
+            .expect("vacant workshop must exist")
+            .anchor_value;
+        assert!(
+            anchor >= Money::from_copper(20_000),
+            "precondition: the vacant workshop's anchor must reflect its real value"
+        );
+
+        update_district_conditions(&mut state);
+        let after_first = state
+            .properties
+            .get(&workshop_id)
+            .expect("vacant workshop must remain present")
+            .value;
+        update_district_conditions(&mut state);
+        let after_second = state
+            .properties
+            .get(&workshop_id)
+            .expect("vacant workshop must remain present")
+            .value;
+        let rent_index = state
+            .districts
+            .get(&district_id)
+            .expect("district must exist")
+            .rent_index_basis_points;
+
+        let expected_target = anchor.saturating_mul_ratio(i64::from(rent_index), 10_000);
+        for observed in [after_first, after_second] {
+            let deviation = expected_target.copper().abs_diff(observed.copper());
+            assert!(
+                deviation * 2 <= expected_target.copper().unsigned_abs(),
+                "the vacant workshop must hold near its anchored value {expected_target}, not collapse (observed {observed})"
+            );
+        }
+    }
+
+    #[test]
+    fn residence_appreciation_is_bounded_by_its_anchor_and_fully_settles() {
+        // Regression: residences used to revalue against their own drifting
+        // value, so any district with an above-neutral rent index compounded
+        // appreciation month after month without bound. With the persisted
+        // anchor, appreciation is capped by the anchored repricing and the
+        // monthly step decays geometrically until the value fully settles.
+        let mut state = make_test_campaign();
+        let residence_id = state
+            .properties
+            .values()
+            .find(|property| property.kind == PropertyKind::Residence)
+            .map(crate::core::Property::id)
+            .expect("campaign must contain a residence");
+        {
+            let district = state
+                .districts
+                .get_mut(
+                    &state
+                        .properties
+                        .get(&residence_id)
+                        .expect("residence must exist")
+                        .district_id,
+                )
+                .expect("residence district must exist");
+            district.safety_basis_points = 10_000;
+            district.sanitation_basis_points = 10_000;
+        }
+
+        let anchor = state
+            .properties
+            .get(&residence_id)
+            .expect("residence must exist")
+            .anchor_value;
+        // One pass applies the raised desirability to the district's rent
+        // index; from there the index is stable because its inputs are fixed.
+        update_district_conditions(&mut state);
+        let rent_index = state
+            .districts
+            .get(
+                &state
+                    .properties
+                    .get(&residence_id)
+                    .expect("residence must exist")
+                    .district_id,
+            )
+            .expect("residence district must exist")
+            .rent_index_basis_points;
+        let ceiling = anchor.saturating_mul_ratio(i64::from(rent_index), 10_000);
+        assert!(
+            ceiling > anchor,
+            "precondition: the district must be desirable enough to appreciate the residence"
+        );
+
+        let mut settled = state
+            .properties
+            .get(&residence_id)
+            .expect("residence must exist")
+            .value;
+        for _ in 0..120 {
+            update_district_conditions(&mut state);
+            settled = state
+                .properties
+                .get(&residence_id)
+                .expect("residence must exist")
+                .value;
+            assert!(
+                settled <= ceiling,
+                "appreciation must stay at the anchored repricing {ceiling}, never compound past it (observed {settled})"
+            );
+        }
+        let gap = ceiling.copper().abs_diff(settled.copper());
+        assert!(
+            gap <= 12,
+            "repeated revaluation must converge onto its anchored repricing; {gap} copper of the target remains"
+        );
+    }
 }

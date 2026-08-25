@@ -84,7 +84,7 @@ pub fn build_state_summary(registry: &Registry, state: &AppState) -> StateSummar
         });
     let average_food_satisfaction_basis_points =
         crate::core::population_weighted_food_satisfaction_basis_points(state.households.iter())
-            .unwrap_or(0);
+            .unwrap_or(crate::core::NEUTRAL_FOOD_SATISFACTION_BASIS_POINTS);
 
     StateSummary {
         scenario_name: registry.scenario().name().to_owned(),
@@ -753,7 +753,7 @@ fn build_district_projections(registry: &Registry, state: &AppState) -> Vec<Dist
             let food = crate::core::population_weighted_food_satisfaction_basis_points(
                 households.iter().copied(),
             )
-            .unwrap_or(0);
+            .unwrap_or(crate::core::NEUTRAL_FOOD_SATISFACTION_BASIS_POINTS);
             DistrictProjection {
                 id: definition.id(),
                 name: definition.name().to_owned(),
@@ -1779,21 +1779,34 @@ fn append_notice_attention(projection: &CampaignProjection, items: &mut Vec<Atte
     // header metric can never disagree when the recent-notice window is
     // truncated; the window only picks the latest subject to show.
     let unread = projection.unread_notifications;
-    if unread > 0
-        && let Some(latest) = projection
-            .notifications
-            .iter()
-            .rev()
-            .find(|notification| !notification.acknowledged)
+    if unread == 0 {
+        return;
+    }
+    let (detail, action) = match projection
+        .notifications
+        .iter()
+        .rev()
+        .find(|notification| !notification.acknowledged)
     {
-        items.push(attention(
-            AttentionTone::Info,
-            "Notices",
-            format!("{unread} unread notices"),
+        Some(latest) => (
             format!("Latest: {}", latest.subject),
             format!("Review and acknowledge notice #{} when handled.", latest.id),
-        ));
-    }
+        ),
+        // Every unread notice predates the dashboard's recent-notice window.
+        // The card still reports the true total instead of silently
+        // disappearing while the header keeps counting it.
+        None => (
+            "All unread notices are older than the dashboard's recent-notice window.".to_owned(),
+            "Open the notification ledger to review and acknowledge them.".to_owned(),
+        ),
+    };
+    items.push(attention(
+        AttentionTone::Info,
+        "Notices",
+        format!("{unread} unread notices"),
+        detail,
+        action,
+    ));
 }
 
 fn render_employment_rows(agreements: &[EmploymentProjection]) -> String {
@@ -2103,7 +2116,10 @@ fn law_effect_summary(kind: LawKind, value: i64) -> String {
         }
         LawKind::EmergencyImports => {
             format!(
-                "Adds {} units of grain to the market each day.",
+                // The import supply lands in `apply_law_economic_effects`,
+                // which weekly settlement runs; the wording must not claim a
+                // daily rate the simulation does not deliver.
+                "Adds {} units of grain to the market each week.",
                 value.max(0)
             )
         }

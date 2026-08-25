@@ -974,6 +974,7 @@ fn validate_financial_numeric_ranges(state: &AppState) -> Result<(), String> {
     }
     for property in state.properties.values() {
         if property.value <= Money::ZERO
+            || property.anchor_value < Money::ZERO
             || property.weekly_rent < Money::ZERO
             || property.condition_basis_points > 10_000
         {
@@ -2317,8 +2318,12 @@ fn validate_legal_claim_source(
             let contract = state.contracts.get(&contract_id).ok_or_else(|| {
                 format!("legal case {case_id} references missing contract {contract_id}")
             })?;
+            // Recoverable breach debt grounds on the attributed parties from
+            // the first attributable miss, which exists while the contract is
+            // still Active (breach status needs three misses). This mirrors
+            // the runtime invariant; requiring `Breached` here would reject
+            // saves the simulation itself produces.
             if legal_case.kind != LegalCaseKind::ContractBreach
-                || contract.status != crate::core::ContractStatus::Breached
                 || contract.breaching_dynasty_id != Some(legal_case.defendant_dynasty_id)
                 || contract.breach_victim_dynasty_id != Some(legal_case.plaintiff_dynasty_id)
             {

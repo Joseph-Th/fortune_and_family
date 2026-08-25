@@ -753,6 +753,10 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
             "Lifecycle Validity: property value must be positive and rent nonnegative"
         );
         debug_assert!(
+            !property.anchor_value.is_negative(),
+            "Lifecycle Validity: property revaluation anchor must be nonnegative"
+        );
+        debug_assert!(
             property.condition_basis_points <= 10_000,
             "Lifecycle Validity: property condition is outside basis-point range"
         );

@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 28;
+pub const CURRENT_SCHEMA_VERSION: u32 = 29;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGameConfig {
@@ -450,6 +450,11 @@ pub(crate) fn population_weighted_food_satisfaction_basis_points<'a>(
     let average = weighted_total.checked_div(total_members)?;
     Some(u16::try_from(average).expect("population-weighted satisfaction must fit u16"))
 }
+
+/// Satisfaction assumed wherever no population exists to average over: a
+/// district without households is neither starving nor sated. The simulation's
+/// unrest model and every read model share this one neutral value.
+pub const NEUTRAL_FOOD_SATISFACTION_BASIS_POINTS: u16 = 5_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct NextIds {

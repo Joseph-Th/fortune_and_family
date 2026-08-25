@@ -19,7 +19,7 @@ This project applies the Universal, Stateful Application, Deterministic System, 
 |---|---|
 | Campaign construction | `src/systems/bootstrap.rs` |
 | Player commands | `src/systems/commands.rs` |
-| Daily/scheduled simulation | `src/systems/simulation.rs`, `src/systems/strategic.rs` |
+| Daily/scheduled simulation | `src/systems/simulation.rs`, `src/systems/strategic/` |
 | Legal/progression | `src/systems/legal.rs`, `src/systems/progression.rs` |
 | Persistence | `src/persistence.rs` |
 | Read models/HTML | `src/projection.rs` |
