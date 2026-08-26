@@ -1268,10 +1268,6 @@ pub(crate) fn can_afford_crisis_response(
     crisis: &crate::core::Crisis,
     response: CrisisResponse,
 ) -> bool {
-    let dynasty = state
-        .dynasties
-        .get(&state.player_dynasty_id)
-        .expect("player dynasty must exist");
     // Standing-reserve policy: legitimacy is the house's scarce political
     // resource — offices, laws, and heir designations all spend it. Below
     // this floor the agent declines standing-burning responses entirely,
@@ -1280,6 +1276,10 @@ pub(crate) fn can_afford_crisis_response(
     const STANDING_RESERVE_BASIS_POINTS: u16 = 2_500;
     let standing_reserve =
         CRISIS_SUPPRESS_LEGITIMACY_COST.saturating_add(STANDING_RESERVE_BASIS_POINTS);
+    let dynasty = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist");
     match response {
         CrisisResponse::Relief => {
             dynasty.treasury() >= crisis_relief_cost(crisis.severity_basis_points)
@@ -2209,77 +2209,100 @@ pub(crate) fn generate_business_acquisition_candidates(
         .iter()
         .filter(|business| business.owner_dynasty_id() != state.player_dynasty_id)
     {
-        let going_concern = business.status() == BusinessStatus::Active;
-        // A premium purchase must buy a real going concern: an active firm
-        // whose equipment has already run down is a distress sale waiting to
-        // happen, and paying a controlling premium for it is not growth.
-        if going_concern && business.operations.condition_basis_points < 5_000 {
-            continue;
-        }
-        let Ok(quote) =
-            quote_business_acquisition(registry, state, state.player_dynasty_id, business.id())
-        else {
-            continue;
-        };
-        let Some(recapitalization) = acquisition_recapitalization(registry, state, business, quote)
-        else {
-            continue;
-        };
-        let required = quote.purchase_price.saturating_add(recapitalization);
-        let player_treasury = state
-            .dynasties
-            .get(&state.player_dynasty_id)
-            .expect("player dynasty must exist")
-            .treasury();
-        let mut expansion_reserve = recapitalization_dynasty_reserve(persona, false)
-            .saturating_add(Money::from_copper(
-                i64::try_from(player_businesses.len())
-                    .unwrap_or(i64::MAX)
-                    .saturating_mul(2_000),
-            ));
-        if going_concern {
-            // Paying a controlling premium drains the treasury materially:
-            // hold back half the price again so the exchange cannot strip
-            // every reserve the house keeps for obligations and shocks.
-            expansion_reserve = expansion_reserve
-                .saturating_add(Money::from_copper(quote.purchase_price.copper() / 2));
-        }
-        if player_treasury < required.saturating_add(expansion_reserve) {
-            continue;
-        }
-        if !acquisition_has_turnaround_thesis(registry, state, business) {
-            continue;
-        }
-        // A rescue of a failing trade outranks a premium purchase of a healthy
-        // one: distress discounts are scarce, while going concerns are always
-        // theoretically for sale at the right price.
-        let bonus = if going_concern {
-            persona_bonus / 2 + recovery_bonus / 2
-        } else {
-            persona_bonus + recovery_bonus
-        };
-        push_candidate(
+        push_acquisition_candidate(
+            registry,
+            state,
+            persona,
+            business,
+            manager_id,
+            i64::try_from(player_businesses.len()).unwrap_or(i64::MAX),
+            persona_bonus + recovery_bonus,
+            recovery_bonus,
             candidates,
-            GameplayCommandKind::AcquireBusiness,
-            PlayerCommand::AcquireBusiness {
-                business_id: business.id(),
-                manager_id,
-                recapitalization,
-            },
-            format!(
-                "acquire {}{} for {} with {} working capital",
-                if going_concern {
-                    "the going concern "
-                } else {
-                    ""
-                },
-                business_label(state, business.id()),
-                quote.purchase_price,
-                recapitalization
-            ),
-            bonus,
         );
     }
+}
+
+/// Evaluates one acquisition target under the agent's affordability and thesis
+/// policies. A rescue of a failing trade outranks a premium purchase of a
+/// healthy one: distress discounts are scarce, while going concerns are always
+/// theoretically for sale at the right price.
+#[allow(clippy::too_many_arguments)]
+fn push_acquisition_candidate(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    business: &crate::core::Business,
+    manager_id: crate::ids::CharacterId,
+    owned_business_count: i64,
+    rescue_bonus: i64,
+    recovery_bonus: i64,
+    candidates: &mut Vec<Candidate>,
+) {
+    let going_concern = business.status() == BusinessStatus::Active;
+    // A premium purchase must buy a real going concern: an active firm whose
+    // equipment has already run down is a distress sale waiting to happen, and
+    // paying a controlling premium for it is not growth.
+    if going_concern && business.operations.condition_basis_points < 5_000 {
+        return;
+    }
+    let Ok(quote) =
+        quote_business_acquisition(registry, state, state.player_dynasty_id, business.id())
+    else {
+        return;
+    };
+    let Some(recapitalization) = acquisition_recapitalization(registry, state, business, quote)
+    else {
+        return;
+    };
+    let required = quote.purchase_price.saturating_add(recapitalization);
+    let player_treasury = state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    let mut expansion_reserve = recapitalization_dynasty_reserve(persona, false).saturating_add(
+        Money::from_copper(owned_business_count.saturating_mul(2_000)),
+    );
+    if going_concern {
+        // Paying a controlling premium drains the treasury materially: hold
+        // back half the price again so the exchange cannot strip every reserve
+        // the house keeps for obligations and shocks.
+        expansion_reserve =
+            expansion_reserve.saturating_add(Money::from_copper(quote.purchase_price.copper() / 2));
+    }
+    if player_treasury < required.saturating_add(expansion_reserve) {
+        return;
+    }
+    if !acquisition_has_turnaround_thesis(registry, state, business) {
+        return;
+    }
+    let bonus = if going_concern {
+        rescue_bonus / 2 + recovery_bonus / 2
+    } else {
+        rescue_bonus
+    };
+    push_candidate(
+        candidates,
+        GameplayCommandKind::AcquireBusiness,
+        PlayerCommand::AcquireBusiness {
+            business_id: business.id(),
+            manager_id,
+            recapitalization,
+        },
+        format!(
+            "acquire {}{} for {} with {} working capital",
+            if going_concern {
+                "the going concern "
+            } else {
+                ""
+            },
+            business_label(state, business.id()),
+            quote.purchase_price,
+            recapitalization
+        ),
+        bonus,
+    );
 }
 
 /// A turnaround thesis: recapitalization fixes condition and working capital,
@@ -3492,22 +3515,20 @@ pub(crate) fn eligible_lending_restructuring_borrower(
         .min_by_key(|dynasty| dynasty.treasury())
 }
 
-pub(crate) fn has_extend_credit_opportunity(
-    registry: &Registry,
-    state: &AppState,
-    persona: GameplayPersona,
-) -> bool {
+pub(crate) fn has_extend_credit_opportunity(registry: &Registry, state: &AppState) -> bool {
+    // Mirror the canonical routes (`IssueLoan` with the player as lender): a
+    // fresh loan to an eligible counterparty, or a restructuring offer to the
+    // dynasty's own defaulted borrower. Lending reserves, portfolio limits,
+    // and persona risk appetite are agent policy and stay in the generator.
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist");
-    let (lending_reserve, lending_limit) = lending_limits(persona);
-    let can_restructure = player.treasury() >= Money::from_copper(1_000)
-        && eligible_lending_restructuring_borrower(state).is_some();
-    can_restructure
-        || (player.treasury() >= lending_reserve
-            && active_player_lending(state) < lending_limit
-            && eligible_lending_borrower(registry, state).is_some())
+    if player.treasury() < Money::from_copper(1_000) {
+        return false;
+    }
+    eligible_lending_borrower(registry, state).is_some()
+        || eligible_lending_restructuring_borrower(state).is_some()
 }
 
 pub(crate) fn add_lend_candidate(

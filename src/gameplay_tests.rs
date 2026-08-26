@@ -5,7 +5,9 @@ use crate::core::{
     AuditKind, AuditRecord, Crisis, CrisisKind, FamilyLinkKind, OutboxKind, OutboxMessage,
 };
 use crate::ids::{DynastyId, OutboxMessageId};
-use crate::systems::{INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_INTERVAL_DAYS};
+use crate::systems::{
+    INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT, INSTITUTION_SUPPORT_INTERVAL_DAYS, active_law_value,
+};
 use crate::systems::{OFFICE_POWER_ESTABLISHMENT_DAYS, OFFICE_TERM_DAYS, issue_loan};
 use crate::test_support::{assert_set_eq, make_test_campaign, rivergate_registry_for_test};
 use std::sync::OnceLock;
@@ -2490,10 +2492,6 @@ mod candidates {
     }
 
     #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "this test verifies the complete restructuring command contract end to end"
-    )]
     fn player_lender_can_offer_an_aged_default_restructuring() {
         let registry = rivergate_registry_for_test();
         let (mut state, borrower_id, loan_id, principal_before, balance_before) =
@@ -2505,11 +2503,7 @@ mod candidates {
             .get(&player_id)
             .expect("player dynasty must exist")
             .treasury();
-        assert!(has_extend_credit_opportunity(
-            registry,
-            &state,
-            GameplayPersona::PowerBroker
-        ));
+        assert!(has_extend_credit_opportunity(registry, &state));
         let mut accumulator = CampaignAccumulator::new();
         let generated_kinds =
             ranked_candidates(registry, &state, GameplayPersona::PowerBroker, &accumulator).1;
@@ -3178,6 +3172,71 @@ mod candidates {
             &state,
             &settlement
         ));
+    }
+
+    #[test]
+    fn business_policy_activation_ignores_persona_preference() {
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.first())
+            .copied()
+            .expect("player dynasty must own a business");
+        {
+            // A healthy firm whose current policy already equals the steward's
+            // preferred "premium" template: the persona-preferred route offers
+            // no change, but the other templates do, and the canonical game
+            // accepts any distinct tuple.
+            let business = state.businesses.get_mut(business_id).unwrap();
+            business.operations.quality_basis_points = 8_000;
+            business.finance.cash = Money::from_copper(10_000);
+            business.policy.target_input_days = 7;
+            business.policy.target_output_days = 3;
+            business.policy.minimum_cash_reserve = Money::from_copper(4_000);
+            business.policy.maintenance_basis_points = 1_800;
+            business.policy.quality_target_basis_points = 9_000;
+        }
+
+        assert!(
+            has_business_policy_opportunity(&state),
+            "an off-cooldown business with any differing template must stay an executable opportunity regardless of persona preference"
+        );
+    }
+
+    #[test]
+    fn institution_support_activation_is_canonical_affordability_not_discretionary_floor() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        {
+            let player = state.dynasties.get_mut(&player_id).unwrap();
+            player.resources.reputation_quality_basis_points = 9_000;
+            // Exactly the unsurcharged contribution: canonically affordable,
+            // but below the agent's emergency-reserve discretionary floor.
+            player.resources.treasury = crate::systems::INSTITUTION_SUPPORT_COST;
+        }
+        for contract in state.contracts.values_mut() {
+            contract
+                .fulfilled_deliveries_by_dynasty
+                .insert(player_id, 999);
+        }
+        // Remove any active entry-restriction law so the contribution equals
+        // the unsurcharged base cost the treasury is set to.
+        for law in state.laws.values_mut() {
+            if law.kind == LawKind::GuildEntryRestriction {
+                law.active = false;
+            }
+        }
+        assert_eq!(
+            active_law_value(&state, LawKind::GuildEntryRestriction),
+            None
+        );
+
+        assert!(
+            has_institution_support_opportunity(registry, &state),
+            "the activation predicate must mirror the canonical affordability gate, not the agent's discretionary floor"
+        );
     }
 
     #[test]

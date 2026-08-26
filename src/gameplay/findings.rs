@@ -1777,6 +1777,10 @@ pub(crate) const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> 
             // the canonical acceptance their activation predicate mirrors.
             | GameplayCommandKind::BorrowFunds
             | GameplayCommandKind::SetHouseGovernance
+            // Lending carries persona reserves, portfolio limits, and
+            // restructuring framing: a house whose policy declines to lend
+            // leaves canonically valid credit routes unbuilt by design.
+            | GameplayCommandKind::ExtendCredit
             // Sponsorship is gated on office-power establishment, a 360-day
             // cooldown, per-district duplicates, and an upfront contribution;
             // an activation without a candidate there means one of the

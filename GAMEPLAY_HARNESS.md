@@ -67,7 +67,7 @@ Every run prints a concise progress line to stderr: elapsed time, campaign count
 
 | Option | Meaning | Default |
 |---|---|---|
-| `--start-seed` | First deterministic seed | `1` |
+| `--start-seed` | First deterministic seed; omit to rotate deterministically by UTC day | Daily rotation |
 | `--seeds` | Number of consecutive seeds; omit to use the configured default | `3` |
 | `--days` | Simulated days per campaign | `1080` |
 | `--decision-interval` | Normal days advanced after a player decision | `30` |
@@ -89,6 +89,8 @@ The decision interval is an observation cadence, not a limit on how many command
 Independent campaigns run in parallel with the machine's available parallelism; each campaign owns its `AppState` and the registry is immutable, so scheduling changes no results. Report ordering is fixed by seed, background, and persona. A single-campaign matrix stays serial and probes its counterfactuals on a small bounded worker set instead.
 
 The default matrix samples three independent world seeds. Personas share a world whenever the seed is fixed, so world-content claims — crisis variety, counterparty failure rates, civic drift — need several worlds before "never detected" means anything. Agent-choice claims (persona variety, command coverage) aggregate across every campaign.
+
+Recurring runs should not replay identical worlds forever: the CLI rotates its default seed base deterministically by UTC calendar day (printed as `world seed base` on stderr), so scheduled gates sample fresh worlds while every run remains exactly reproducible from the configuration recorded in its report or log line. Pass `--start-seed` to pin a world explicitly; the library-level `GameplayHarnessConfig::default` stays fully deterministic.
 
 ## Personas
 
@@ -179,6 +181,7 @@ A no-action cycle happens when the agent has no viable substantive choice. Each 
 Rules that keep the diagnosis honest:
 
 - Every command kind has an activation predicate answering *would the canonical game accept some concrete command of this kind in this state?* Predicates mirror the game's own resource, cooldown, eligibility, capacity, and target gates and never encode the agent's portfolio or spending policy. An activation is therefore recorded even when no candidate is generated, so a quiet cycle is never misread as dormant just because a generator declined an offered action.
+- This mirror is mechanically enforced: every decision cycle fails with `ActivationPredicateDrift` if a probe proves a command kind canonically viable while its predicate did not fire. Predicate drift cannot accumulate silently.
 - Generators that deliberately narrow a broadly valid route — distress sales, wage-fairness cadence, succession-pressure designations, commission pacing, persona-relevant law sponsorship, discretionary floors for education, wards, endowments, and similar thresholds — classify an unfired activation as agent restraint rather than a generator gap. This keeps `generator_gaps` meaning "an offered action with no construction logic", so true coverage holes stay visible.
 - Operational fallback actions (portfolio cash transfers, withdrawals) are context, not causes: an operational-only cycle carries that note in its `no_action_reason` on top of the classified strategic cause.
 

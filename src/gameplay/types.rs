@@ -2106,6 +2106,10 @@ pub enum GameplayHarnessError {
         declared: GameplayCommandKind,
         actual: GameplayCommandKind,
     },
+    #[error(
+        "activation predicates missed canonically viable command kinds {kinds:?}; a world predicate has drifted from its canonical validation route"
+    )]
+    ActivationPredicateDrift { kinds: Vec<GameplayCommandKind> },
     #[error("gameplay harness counterfactual worker panicked")]
     CounterfactualWorkerPanicked,
     #[error("gameplay harness campaign worker panicked")]

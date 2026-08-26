@@ -1380,6 +1380,20 @@ pub(crate) fn run_decision_cycle_internal(
         parallel_counterfactuals,
         accumulator,
     )?;
+    // Staleness tripwire: a canonically viable probe proves the world offered
+    // that route, so its activation predicate must have fired. A miss means a
+    // predicate drifted from its canonical validation route and quiet-cycle
+    // diagnosis would misclassify the family as dormant.
+    let world_activations = pure_world_activation_set(registry, state, persona);
+    let drifted: Vec<_> = probe
+        .viable_command_kinds
+        .iter()
+        .filter(|kind| !world_activations.contains(kind))
+        .copied()
+        .collect();
+    if !drifted.is_empty() {
+        return Err(GameplayHarnessError::ActivationPredicateDrift { kinds: drifted });
+    }
     let no_action_reason = record_quiet_diagnostic(
         accumulator,
         &probe,
@@ -2009,13 +2023,17 @@ pub(crate) fn record_generated_candidates(
     }
 }
 
-pub(crate) fn record_activation_opportunities(
+/// Pure world-state activation set: every command kind whose canonical
+/// validation route would accept some concrete action in this state. Reactive
+/// predicates include the command's executable resource and cooldown gates;
+/// world predicates mirror each family's canonical validation. Agent policy
+/// (reserves, portfolio caps, persona targeting) never appears here.
+pub(crate) fn pure_world_activation_set(
     registry: &Registry,
     state: &AppState,
     persona: GameplayPersona,
-    accumulator: &mut CampaignAccumulator,
-    generated_kinds: &BTreeSet<GameplayCommandKind>,
-) {
+) -> BTreeSet<GameplayCommandKind> {
+    let mut active = BTreeSet::new();
     let crisis_opportunity = state.crises.values().any(|crisis| {
         crisis.status.is_active()
             && !crisis_has_containment_response(state, crisis.id)
@@ -2024,6 +2042,9 @@ pub(crate) fn record_activation_opportunities(
                     && can_afford_crisis_response(state, crisis, response)
             })
     });
+    if crisis_opportunity {
+        active.insert(GameplayCommandKind::RespondToCrisis);
+    }
     let labor_opportunity = state.employment.values().any(|agreement| {
         agreement.status == EmploymentStatus::Disputed
             && state
@@ -2032,42 +2053,45 @@ pub(crate) fn record_activation_opportunities(
                 .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
             && preferred_labor_response(state, agreement, persona).is_some()
     });
-    let legal_opportunity = has_legal_filing_opportunity(state);
-    let property_liquidation_opportunity = has_property_liquidation_opportunity(registry, state);
-    let institution_withdrawal_opportunity = has_institution_withdrawal_opportunity(state);
-    let extend_credit_opportunity = has_extend_credit_opportunity(registry, state, persona);
-    let transfer_cash_opportunity = has_transfer_cash_opportunity(state);
-    let withdrawal_cash_opportunity = has_withdrawal_cash_opportunity(registry, state);
+    if labor_opportunity {
+        active.insert(GameplayCommandKind::ResolveLaborDispute);
+    }
     for (kind, available) in [
-        (GameplayCommandKind::RespondToCrisis, crisis_opportunity),
-        (GameplayCommandKind::ResolveLaborDispute, labor_opportunity),
-        (GameplayCommandKind::FileLegalCase, legal_opportunity),
+        (
+            GameplayCommandKind::FileLegalCase,
+            has_legal_filing_opportunity(state),
+        ),
         (
             GameplayCommandKind::SettleLegalCase,
             has_legal_settlement_opportunity(state),
         ),
         (
             GameplayCommandKind::SellProperty,
-            property_liquidation_opportunity,
+            has_property_liquidation_opportunity(registry, state),
         ),
         (
             GameplayCommandKind::WithdrawFromInstitution,
-            institution_withdrawal_opportunity,
+            has_institution_withdrawal_opportunity(state),
         ),
-        (GameplayCommandKind::ExtendCredit, extend_credit_opportunity),
+        (
+            GameplayCommandKind::ExtendCredit,
+            has_extend_credit_opportunity(registry, state),
+        ),
         (
             GameplayCommandKind::TransferBusinessCash,
-            transfer_cash_opportunity,
+            has_transfer_cash_opportunity(state),
         ),
         (
             GameplayCommandKind::WithdrawBusinessCash,
-            withdrawal_cash_opportunity,
+            has_withdrawal_cash_opportunity(registry, state),
         ),
     ] {
-        record_activation_opportunity(accumulator, kind, available);
+        if available {
+            active.insert(kind);
+        }
     }
-    for kind in ALL_COMMAND_KINDS.iter().copied().filter(|kind| {
-        !matches!(
+    for kind in ALL_COMMAND_KINDS.iter().copied() {
+        if !matches!(
             kind,
             GameplayCommandKind::RespondToCrisis
                 | GameplayCommandKind::ResolveLaborDispute
@@ -2078,11 +2102,30 @@ pub(crate) fn record_activation_opportunities(
                 | GameplayCommandKind::ExtendCredit
                 | GameplayCommandKind::TransferBusinessCash
                 | GameplayCommandKind::WithdrawBusinessCash
-        )
-    }) {
-        let available = has_world_opportunity(registry, state, persona, kind)
-            || generated_kinds.contains(&kind);
-        record_activation_opportunity(accumulator, kind, available);
+        ) && has_world_opportunity(registry, state, persona, kind)
+        {
+            active.insert(kind);
+        }
+    }
+    active
+}
+
+pub(crate) fn record_activation_opportunities(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    accumulator: &mut CampaignAccumulator,
+    generated_kinds: &BTreeSet<GameplayCommandKind>,
+) {
+    // A generated candidate also counts as an offered action: the generator is
+    // part of the agent, so its construction proves an actionable route even
+    // where a predicate's executable-resource gate reads narrower.
+    let mut world = pure_world_activation_set(registry, state, persona);
+    for kind in generated_kinds {
+        world.insert(*kind);
+    }
+    for kind in ALL_COMMAND_KINDS.iter().copied() {
+        record_activation_opportunity(accumulator, kind, world.contains(&kind));
     }
 }
 
@@ -2112,7 +2155,7 @@ pub(crate) fn has_world_opportunity(
         GameplayCommandKind::AdoptWard => has_ward_adoption_opportunity(state),
         GameplayCommandKind::EducateFamilyMember => has_family_education_opportunity(state),
         GameplayCommandKind::CultivateInstitutionSupport => {
-            has_institution_support_opportunity(registry, state, persona)
+            has_institution_support_opportunity(registry, state)
         }
         GameplayCommandKind::EndowInstitution => has_institution_endowment_opportunity(state),
         GameplayCommandKind::NominateForOffice => {
@@ -2140,9 +2183,7 @@ pub(crate) fn has_world_opportunity(
         | GameplayCommandKind::WithdrawBusinessCash => false,
         GameplayCommandKind::AcquireBusiness
         | GameplayCommandKind::InvestInBusiness
-        | GameplayCommandKind::SetBusinessPolicy => {
-            has_business_opportunity(registry, state, persona, kind)
-        }
+        | GameplayCommandKind::SetBusinessPolicy => has_business_opportunity(registry, state, kind),
     }
 }
 
@@ -2557,36 +2598,51 @@ pub(crate) fn has_family_education_opportunity(state: &AppState) -> bool {
         })
 }
 
-pub(crate) fn has_institution_support_opportunity(
-    registry: &Registry,
-    state: &AppState,
-    persona: GameplayPersona,
-) -> bool {
-    let characters = eligible_office_characters(state);
-    let controlled_powers = player_controlled_office_powers(state);
-    let player_has_institutional_foothold = has_player_institutional_foothold(state);
+pub(crate) fn has_institution_support_opportunity(registry: &Registry, state: &AppState) -> bool {
+    let player_id = state.player_dynasty_id;
+    let Some(player) = state.dynasties.get(&player_id) else {
+        return false;
+    };
+    // Mirror the canonical route (`apply_institution_support`): an active
+    // player character can join an institution when the house passes the
+    // standing and commercial-record gates, the character is not already a
+    // member, membership capacity is open, the pair is off cooldown, and the
+    // treasury covers the guild-restriction-surcharged contribution. Which
+    // institution the agent targets is generator policy.
+    let entry_restriction = crate::systems::active_law_value(state, LawKind::GuildEntryRestriction)
+        .unwrap_or(0)
+        .clamp(0, 10_000);
+    let support_cost =
+        INSTITUTION_SUPPORT_COST.saturating_mul_ratio(10_000 + entry_restriction / 2, 10_000);
+    if player.treasury() < support_cost {
+        return false;
+    }
+    let best_reputation = player
+        .resources
+        .reputation_quality_basis_points
+        .max(player.resources.reputation_reliability_basis_points);
+    if best_reputation < INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT {
+        return false;
+    }
+    let delivered = player_contract_deliveries(state);
     state.institutions.values().any(|institution| {
-        if !institution_is_strategic_target(
-            state,
-            institution,
-            &controlled_powers,
-            player_has_institutional_foothold,
-            persona,
-        ) {
-            return false;
-        }
-        let institution_kind = registry
-            .get_institution(institution.institution_id)
-            .expect("runtime institution must have a registry definition")
-            .kind();
-        strongest_institution_support_candidate(
-            registry,
-            state,
-            institution,
-            &characters,
-            institution_kind,
-        )
-        .is_some()
+        let institution_id = institution.institution_id;
+        state.characters.iter().any(|character| {
+            character.dynasty_id() == player_id
+                && character.status() == CharacterStatus::Active
+                && !institution.members.contains(&character.id())
+                && institution_membership_count(state, character.id())
+                    < MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER
+                && institution_support_next_day(state, institution_id, character.id())
+                    .is_none_or(|day| state.clock.day() >= day)
+                && delivered
+                    >= institution_support_delivery_requirement(
+                        registry,
+                        state,
+                        institution_id,
+                        character.id(),
+                    )
+        })
     })
 }
 
@@ -2745,14 +2801,13 @@ pub(crate) fn has_notification_acknowledgement_opportunity(state: &AppState) -> 
 pub(crate) fn has_business_opportunity(
     registry: &Registry,
     state: &AppState,
-    persona: GameplayPersona,
     kind: GameplayCommandKind,
 ) -> bool {
     match kind {
         GameplayCommandKind::InvestInBusiness => has_business_investment_opportunity(state),
-        GameplayCommandKind::SetBusinessPolicy => has_business_policy_opportunity(state, persona),
+        GameplayCommandKind::SetBusinessPolicy => has_business_policy_opportunity(state),
         GameplayCommandKind::AcquireBusiness => {
-            has_business_acquisition_opportunity(registry, state, persona)
+            has_business_acquisition_opportunity(registry, state)
         }
         _ => false,
     }
@@ -2778,7 +2833,7 @@ pub(crate) fn has_business_investment_opportunity(state: &AppState) -> bool {
         })
 }
 
-pub(crate) fn has_business_policy_opportunity(state: &AppState, persona: GameplayPersona) -> bool {
+pub(crate) fn has_business_policy_opportunity(state: &AppState) -> bool {
     state
         .businesses
         .iter()
@@ -2797,65 +2852,37 @@ pub(crate) fn has_business_policy_opportunity(state: &AppState, persona: Gamepla
                             && record.subject() == policy_subject)
                     },
                 );
+            // Mirror the canonical route (`apply_business_policy`): any policy
+            // tuple distinct from the current one is accepted off cooldown.
+            // Which tuple the agent prefers is generator policy, so the
+            // predicate scans the template space without persona narrowing.
             policy_change_available
-                && policy_templates(persona).into_iter().any(|template| {
-                    template.label == preferred_policy_label(persona, business)
-                        && (business.policy.target_input_days != template.target_input_days
+                && policy_templates(GameplayPersona::Steward)
+                    .into_iter()
+                    .any(|template| {
+                        business.policy.target_input_days != template.target_input_days
                             || business.policy.target_output_days != template.target_output_days
-                            || business.policy.minimum_cash_reserve
-                                != template.minimum_cash_reserve
+                            || business.policy.minimum_cash_reserve != template.minimum_cash_reserve
                             || business.policy.maintenance_basis_points
                                 != template.maintenance_basis_points
                             || business.policy.quality_target_basis_points
-                                != template.quality_target_basis_points)
-                })
+                                != template.quality_target_basis_points
+                    })
         })
 }
 
-pub(crate) fn has_business_acquisition_opportunity(
-    registry: &Registry,
-    state: &AppState,
-    persona: GameplayPersona,
-) -> bool {
-    let portfolio_limit = match persona {
-        GameplayPersona::Entrepreneur | GameplayPersona::Opportunist => 3,
-        GameplayPersona::Steward | GameplayPersona::PowerBroker => 2,
-    };
+pub(crate) fn has_business_acquisition_opportunity(registry: &Registry, state: &AppState) -> bool {
     let player_id = state.player_dynasty_id;
     let treasury = state
         .dynasties
         .get(&player_id)
         .map_or(Money::ZERO, crate::core::Dynasty::treasury);
-    let player_businesses: Vec<_> = state
-        .businesses
-        .ids_for_owner(player_id)
-        .into_iter()
-        .flatten()
-        .filter_map(|id| state.businesses.get(*id))
-        .collect();
-    if player_businesses.len() >= portfolio_limit
-        || !portfolio_ready_for_acquisition(state, &player_businesses)
-    {
-        return false;
-    }
-    let has_financially_stressed_business = player_businesses.iter().any(|business| {
-        matches!(
-            business.status(),
-            BusinessStatus::Distressed | BusinessStatus::Insolvent
-        )
-    });
-    let operating_businesses = player_businesses
-        .iter()
-        .filter(|business| {
-            matches!(
-                business.status(),
-                BusinessStatus::Active | BusinessStatus::Distressed
-            )
-        })
-        .count();
-    if operating_businesses > 0 && has_financially_stressed_business {
-        return false;
-    }
+    // Mirror the canonical route (`quote_business_acquisition` plus the
+    // purchase validation): any non-player firm is quotable — failing trades
+    // at a discount, going concerns at the controlling premium — and the
+    // canonical gate is affordability of price plus minimum recapitalization.
+    // Portfolio caps, readiness screens, and expansion reserves are agent
+    // policy and stay in the candidate generator.
     state.businesses.iter().any(|business| {
         business.owner_dynasty_id() != player_id
             && quote_business_acquisition(registry, state, player_id, business.id()).is_ok_and(

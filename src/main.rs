@@ -87,9 +87,10 @@ struct ArtArgs {
     /// Write the review sheet here.
     #[arg(long, default_value = "sprite-review.html")]
     output: PathBuf,
-    /// First character seed.
-    #[arg(long, default_value_t = 1)]
-    start_seed: u64,
+    /// First character seed. Omit to rotate deterministically by UTC date so
+    /// recurring sprite reviews sample fresh procedural variations.
+    #[arg(long)]
+    start_seed: Option<u64>,
     /// Characters generated per role.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..))]
     seeds: u32,
@@ -374,9 +375,11 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
 
 #[derive(Args, Debug)]
 struct PlaytestArgs {
-    /// First deterministic campaign seed.
-    #[arg(long, default_value_t = 1)]
-    start_seed: u64,
+    /// First deterministic campaign seed. Omit to rotate deterministically by
+    /// UTC date, so recurring gates sample fresh worlds while any single run
+    /// stays exactly reproducible from the seed recorded in its report.
+    #[arg(long)]
+    start_seed: Option<u64>,
     /// Number of consecutive seeds to run. Omit to use the configured default,
     /// which samples several independent worlds so world-content findings
     /// (crisis variety, breach rates, civic drift) are not single-world reads.
@@ -420,6 +423,19 @@ struct PlaytestArgs {
     minimum_overall: Option<u16>,
 }
 
+/// Deterministically rotates the default seed base by UTC calendar day: a
+/// recurring harness run samples fresh worlds without sacrificing
+/// reproducibility, because every run records its exact configuration. The
+/// library-level `GameplayHarnessConfig::default` stays fully deterministic;
+/// rotation is an adapter-layer choice for recurring CLI invocations.
+fn rotated_default_start_seed() -> u64 {
+    const ROTATION_MODULUS: u64 = 997;
+    let day = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() / 86_400);
+    1 + day % ROTATION_MODULUS
+}
+
 fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError> {
     let personas = if args.persona.is_empty() {
         GameplayPersona::all().to_vec()
@@ -435,8 +451,10 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
     } else {
         args.background.into_iter().map(Into::into).collect()
     };
+    let start_seed = args.start_seed.unwrap_or_else(rotated_default_start_seed);
+    eprintln!("world seed base: {start_seed}");
     let config = GameplayHarnessConfig {
-        start_seed: args.start_seed,
+        start_seed,
         seed_count: args
             .seeds
             .unwrap_or(GameplayHarnessConfig::default().seed_count),
@@ -516,7 +534,7 @@ fn run_art(args: ArtArgs) -> Result<(), CliError> {
     };
     let review = build_art_review(ArtReviewConfig {
         roles,
-        start_seed: args.start_seed,
+        start_seed: args.start_seed.unwrap_or_else(rotated_default_start_seed),
         seeds: args.seeds,
         height: args.height,
         scale: args.scale,
