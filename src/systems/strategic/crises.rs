@@ -240,21 +240,31 @@ pub(crate) fn detect_and_advance_crises(
         .values()
         .any(|crisis| crisis.kind == CrisisKind::GrainShortage && crisis.status.is_active());
     if !has_grain_crisis {
-        let bread_stock_low = registry
-            .get_good_id("bread")
-            .and_then(|id| state.market.get_quote(id))
-            .is_some_and(|quote| quote.stock() < Quantity::from_units(100));
-        let average_satisfaction = crate::core::population_weighted_food_satisfaction_basis_points(
-            state.households.iter(),
-        )
-        .unwrap_or(10_000);
-        if bread_stock_low && average_satisfaction < 4_000 {
+        // The staple chain starts at the granary: a blockade drains grain
+        // long before bakers stop producing bread, so detection watches both
+        // staples against their own target stock instead of an absolute
+        // shelf floor that normal fluctuation can never approach.
+        let staple_thinning = ["grain", "bread"].iter().any(|good_key| {
+            registry
+                .get_good_id(good_key)
+                .and_then(|id| state.market.get_quote(id))
+                .is_some_and(|quote| {
+                    quote.stock() < quote.target_stock.saturating_mul_ratio(4_000, 10_000)
+                })
+        });
+        // Detection must precede empty shelves, or response routes have
+        // nothing left to protect. A shortage is declared while the squeeze is
+        // still building: regional access is failing or daily resupply has
+        // fallen visibly behind consumption.
+        let supply_stressed =
+            crate::systems::simulation::import_trade_availability_basis_points(state) < 5_000;
+        if staple_thinning && supply_stressed {
             insert_crisis(
                 state,
                 CrisisKind::GrainShortage,
                 None,
                 4_500,
-                "Bread inventories and household food satisfaction fell below safe levels.",
+                "Disrupted regional supply left city staple stores thinning against demand.",
             )?;
         }
     }

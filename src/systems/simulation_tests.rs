@@ -5,7 +5,7 @@ use crate::core::{
     BusinessStatus, ContractStatus, EnactedLaw, LawKind, NewGameConfig, StartingBackground,
 };
 use crate::ids::{FamilyLinkId, GoodId, InstitutionId};
-use crate::systems::{build_new_game, validate_invariants};
+use crate::systems::{DailyCapacityScratch, build_new_game, validate_invariants};
 use crate::test_support::{
     assert_state_unchanged, make_test_campaign, rivergate_registry_for_test,
 };
@@ -539,6 +539,97 @@ mod transfer_boundaries {
             "regional income must not draw on the market clearing account"
         );
         validate_invariants(rivergate_registry_for_test(), &state);
+    }
+
+    #[test]
+    fn disrupted_routes_throttle_import_trade_production() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        // A fully healthy importer at full capacity: its output is limited
+        // only by equipment, workforce, and regional access.
+        let importer_id = state
+            .businesses
+            .iter()
+            .find(|business| {
+                registry
+                    .get_recipe(business.recipe_id())
+                    .expect("business recipe must exist")
+                    .inputs()
+                    .is_empty()
+            })
+            .map(crate::core::Business::id)
+            .expect("campaign fixture must contain an import trade");
+        {
+            let importer = state.businesses.get_mut(importer_id).unwrap();
+            importer.operations.condition_basis_points = 10_000;
+            importer.operations.status = BusinessStatus::Active;
+            // Enough nominal capacity that regional availability, not integer
+            // rounding of one or two batches, is the binding limit.
+            importer.operations.capacity_batches_per_day = 8;
+            for agreement in state.employment.values_mut() {
+                if agreement.business_id == importer_id {
+                    agreement.workers = agreement.workers.max(20);
+                    agreement.status = EmploymentStatus::Active;
+                }
+            }
+        }
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("tools good must exist");
+        let production_line = |state: &AppState| {
+            decide_business_production(
+                registry,
+                state,
+                state.businesses.get(importer_id).unwrap(),
+                &DailyCapacityScratch::collect(state),
+                tools_id,
+                Quantity::from_milliunits(i64::MAX),
+                Money::from_copper(1),
+            )
+            .expect("a healthy importer must produce")
+        };
+
+        let healthy = production_line(&state);
+        // Two of four routes half-disrupted, so import trades see the same
+        // 7,500 bp average availability households do.
+        let route_ids: Vec<_> = state.external_routes.keys().copied().collect();
+        let [_, _, first_disrupted, second_disrupted] = route_ids.as_slice() else {
+            panic!("campaign fixture must define at least four external routes");
+        };
+        for disrupted_id in [first_disrupted, second_disrupted] {
+            state
+                .external_routes
+                .get_mut(disrupted_id)
+                .expect("disrupted route must exist")
+                .disruption_basis_points = 5_000;
+        }
+        let disrupted = production_line(&state);
+
+        assert!(
+            disrupted.output_quantity < healthy.output_quantity,
+            "route disruption must throttle import-trade output below its healthy rate"
+        );
+        // Batches truncate to whole days of work: derive them from the
+        // operating cost and assert the exact availability arithmetic.
+        let daily_cost = registry
+            .get_recipe(
+                state
+                    .businesses
+                    .get(importer_id)
+                    .expect("importer must exist")
+                    .recipe_id(),
+            )
+            .expect("import recipe must exist")
+            .daily_operating_cost()
+            .copper();
+        assert!(daily_cost > 0, "import recipes must have operating costs");
+        let healthy_batches = healthy.operating_cost.copper() / daily_cost;
+        let disrupted_batches = disrupted.operating_cost.copper() / daily_cost;
+        assert_eq!(
+            disrupted_batches,
+            (healthy_batches * 7_500 + 5_000) / 10_000,
+            "throttled batches must follow regional availability with half-up rounding"
+        );
     }
 
     #[test]

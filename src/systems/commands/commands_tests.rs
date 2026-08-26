@@ -6058,6 +6058,88 @@ mod crises {
     }
 
     #[test]
+    fn repeated_crisis_service_earns_diminishing_standing() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(1_000_000);
+        let respond = |state: &mut AppState, index: u16| {
+            let crisis_id = state.next_ids.crisis();
+            state.crises.insert(
+                crisis_id,
+                crate::core::Crisis {
+                    id: crisis_id,
+                    kind: crate::core::CrisisKind::NobleDemand,
+                    district_id: None,
+                    started_day: state.clock.day(),
+                    severity_basis_points: 4_000,
+                    status: CrisisStatus::Active,
+                    cause: "test repeated service".to_owned(),
+                },
+            );
+            apply_player_command(
+                registry,
+                state,
+                PlayerCommand::RespondToCrisis {
+                    crisis_id,
+                    response: CrisisResponse::Relief,
+                },
+            )
+            .unwrap_or_else(|error| panic!("relief {index} must succeed: {error}"));
+        };
+
+        let legitimacy_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        respond(&mut state, 1);
+        respond(&mut state, 2);
+        respond(&mut state, 3);
+        respond(&mut state, 4);
+        let legitimacy_after = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+
+        // Full, half, quarter, and one-eighth credit: 500 + 250 + 125 + 62.
+        assert_eq!(
+            u32::from(legitimacy_after - legitimacy_before),
+            937u32,
+            "repeated service inside the window must earn halving standing gains"
+        );
+
+        // A year later the city has forgotten the streak: full credit again.
+        crate::systems::advance_days(registry, &mut state, 361)
+            .expect("advancing past the window must succeed");
+        let before_new_window = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        respond(&mut state, 5);
+        let after_new_window = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        assert_eq!(
+            u32::from(after_new_window - before_new_window),
+            500u32,
+            "service outside the window must restore full standing gains"
+        );
+    }
+
+    #[test]
     fn exploitation_gain_is_bounded_by_the_market_clearing_pool() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

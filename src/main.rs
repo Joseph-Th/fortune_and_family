@@ -377,9 +377,11 @@ struct PlaytestArgs {
     /// First deterministic campaign seed.
     #[arg(long, default_value_t = 1)]
     start_seed: u64,
-    /// Number of consecutive seeds to run.
-    #[arg(long, default_value_t = 1)]
-    seeds: u16,
+    /// Number of consecutive seeds to run. Omit to use the configured default,
+    /// which samples several independent worlds so world-content findings
+    /// (crisis variety, breach rates, civic drift) are not single-world reads.
+    #[arg(long)]
+    seeds: Option<u16>,
     /// Simulated days per campaign.
     #[arg(long, default_value_t = 1_080)]
     days: u32,
@@ -435,7 +437,9 @@ fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError>
     };
     let config = GameplayHarnessConfig {
         start_seed: args.start_seed,
-        seed_count: args.seeds,
+        seed_count: args
+            .seeds
+            .unwrap_or(GameplayHarnessConfig::default().seed_count),
         days_per_campaign: args.days,
         decision_interval_days: args.decision_interval,
         max_candidate_probes: args.max_probes,

@@ -620,6 +620,39 @@ impl CampaignAccumulator {
         self.last_observed_snapshot = Some(snapshot.clone());
     }
 
+    /// Replaces an observation-granularity succession day with the exact event
+    /// day the chronicle recorded, when available. Decision windows can straddle
+    /// a year boundary, and milestone timing should reflect when succession
+    /// actually executed rather than when the next observation noticed it.
+    pub fn refine_succession_day(&mut self, state: &AppState) {
+        let Some(recorded) = self.fantasy_arc.first_succession_day else {
+            return;
+        };
+        let Some(observed) = self.last_observed_snapshot.as_ref().map(|s| s.generation) else {
+            return;
+        };
+        if self
+            .starting_generation
+            .is_none_or(|start| observed <= start)
+        {
+            return;
+        }
+        if let Some(entry) = state.chronicle.iter().rev().find(|entry| {
+            entry.kind == crate::core::ChronicleKind::Succession
+                && entry
+                    .summary
+                    .starts_with(&format!("Dynasty {} passed", state.player_dynasty_id))
+        }) && entry.day < recorded
+        {
+            self.fantasy_arc.first_succession_day = Some(entry.day);
+            if let Some(transition) = self.succession_transition.as_mut()
+                && transition.day > entry.day
+            {
+                transition.day = entry.day;
+            }
+        }
+    }
+
     pub fn observe_fantasy_arc(&mut self, snapshot: &GameplaySnapshot) {
         let has_reputation = snapshot
             .quality_reputation
@@ -1549,6 +1582,7 @@ pub(crate) fn advance_decision_time(
             advance_days_scratch(registry, state, step_days)?;
             let campaign_after_time = GameplaySnapshot::capture(state);
             accumulator.observe_snapshot(&campaign_after_time);
+            accumulator.refine_succession_day(state);
             accumulator.record_recovery_pressure(step_days, &campaign_after_time);
             if let Some(consequence_state) = consequence_state.as_mut() {
                 advance_days_scratch(registry, consequence_state, consequence_horizon)?;
@@ -1801,24 +1835,30 @@ pub(crate) fn apply_notification_housekeeping(
     if unread < NOTIFICATION_BATCH_THRESHOLD {
         return Ok(());
     }
-    let message_id = state
+    // Acknowledge the whole backlog in one housekeeping pass: acknowledging a
+    // single message per cycle lets unread mail grow without bound between
+    // decisions, which buries player-facing signals under stale notices.
+    let mut acknowledged = 0_u32;
+    while let Some(message_id) = state
         .outbox
         .iter()
         .rev()
         .find(|message| !message.acknowledged)
-        .expect("an unread backlog must contain a latest message")
-        .id;
-    apply_player_command(
-        registry,
-        state,
-        PlayerCommand::AcknowledgeNotification { message_id },
-    )
-    .map_err(|source| GameplayHarnessError::SelectedCommandRejected {
-        description: format!(
-            "acknowledge {unread} notifications through notification {message_id}"
-        ),
-        source,
-    })?;
+        .map(|message| message.id)
+    {
+        apply_player_command(
+            registry,
+            state,
+            PlayerCommand::AcknowledgeNotification { message_id },
+        )
+        .map_err(|source| GameplayHarnessError::SelectedCommandRejected {
+            description: format!(
+                "acknowledge {unread} notifications through notification {message_id}"
+            ),
+            source,
+        })?;
+        acknowledged = acknowledged.saturating_add(1);
+    }
     let command_stats = accumulator
         .commands
         .get_mut(&GameplayCommandKind::AcknowledgeNotification)
@@ -1831,7 +1871,7 @@ pub(crate) fn apply_notification_housekeeping(
     command_stats.generated = command_stats.generated.saturating_add(1);
     command_stats.considered = command_stats.considered.saturating_add(1);
     command_stats.viable = command_stats.viable.saturating_add(1);
-    command_stats.executed = command_stats.executed.saturating_add(1);
+    command_stats.executed = command_stats.executed.saturating_add(acknowledged);
     command_stats
         .changed_domains
         .insert(GameplayDomain::Feedback);
@@ -1843,7 +1883,13 @@ pub(crate) fn apply_notification_housekeeping(
 }
 
 pub(crate) fn gameplay_phase(arc: &GameplayFantasyArc) -> GameplayPhase {
-    if arc.first_succession_day.is_some() {
+    // The phase ladder follows the dynasty's durable milestones rather than
+    // capping at the first succession: a house whose head dies before it ever
+    // shaped the city is still climbing the establishment-to-ascent arc under
+    // its heir, and only a governing dynasty navigating life after succession
+    // has entered the legacy era the design reserves for testing whether the
+    // organization outlives its founder.
+    if arc.first_succession_day.is_some() && arc.first_city_shaping_action_day.is_some() {
         GameplayPhase::SuccessionLegacy
     } else if arc.first_city_shaping_action_day.is_some() {
         GameplayPhase::DynasticGovernance
@@ -2812,10 +2858,6 @@ pub(crate) fn has_business_acquisition_opportunity(
     }
     state.businesses.iter().any(|business| {
         business.owner_dynasty_id() != player_id
-            && matches!(
-                business.status(),
-                BusinessStatus::Distressed | BusinessStatus::Insolvent | BusinessStatus::Closed
-            )
             && quote_business_acquisition(registry, state, player_id, business.id()).is_ok_and(
                 |quote| {
                     // Mirror the canonical affordability route; the agent's

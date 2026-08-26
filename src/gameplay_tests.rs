@@ -15,7 +15,10 @@ static FOCUSED_REPORT_60_DAYS: OnceLock<GameplayHarnessReport> = OnceLock::new()
 static FOCUSED_REPORT_180_DAYS: OnceLock<GameplayHarnessReport> = OnceLock::new();
 
 fn focused_config(days: u32) -> GameplayHarnessConfig {
+    // The focused fixture isolates one campaign so finding and phase rules
+    // can be asserted against known single-campaign arithmetic.
     GameplayHarnessConfig {
+        seed_count: 1,
         days_per_campaign: days,
         max_candidate_probes: 16,
         trace_limit_per_campaign: 16,
@@ -6378,7 +6381,11 @@ mod metrics {
     #[test]
     fn terminal_phase_transition_requests_one_decision_cycle() {
         let mut accumulator = CampaignAccumulator::new();
+        // The legacy era begins only when a governing dynasty lives through
+        // succession: both the city-shaping and succession milestones must be
+        // present for the phase ladder to reach SuccessionLegacy.
         accumulator.fantasy_arc.first_succession_day = Some(7_200);
+        accumulator.fantasy_arc.first_city_shaping_action_day = Some(6_900);
 
         assert!(terminal_phase_needs_decision(&accumulator));
 
@@ -9923,9 +9930,22 @@ mod findings {
     fn short_horizon_absent_reactive_commands_are_informational() {
         let report = cached_focused_report(30);
 
-        let finding = finding_with_title(
+        // Absent routes aggregate into one informational finding whose
+        // evidence names each never-offered kind.
+        let dormant = finding_with_title(
             &report.findings,
-            "crisis-response was not exercised in this horizon",
+            "Command kinds were not exercised in this horizon",
+        );
+        assert_eq!(dormant.severity, GameplayFindingSeverity::Info);
+        assert!(
+            dormant.evidence.contains("crisis-response"),
+            "crisis-response belongs in the dormant list: {}",
+            dormant.evidence
+        );
+        assert!(
+            dormant.evidence.contains("legal-case"),
+            "legal-case belongs in the dormant list: {}",
+            dormant.evidence
         );
         // Contract supply routes are only player-responsive when an executable
         // route exists: an uncontracted counterparty pair with capacity. The
@@ -9942,22 +9962,16 @@ mod findings {
             }),
             "an activation predicate must not claim player responsiveness without an executable route"
         );
-        let legal_finding = finding_with_title(
-            &report.findings,
-            "legal-case was not exercised in this horizon",
-        );
         let crisis_domain_finding = finding_with_title(
             &report.findings,
             "crises domain was inactive in this horizon",
         );
 
-        assert_eq!(finding.severity, GameplayFindingSeverity::Info);
         assert_eq!(
             contract_finding.severity,
             GameplayFindingSeverity::Info,
             "a domain that changed only before any player route existed is informational, not a broken player route"
         );
-        assert_eq!(legal_finding.severity, GameplayFindingSeverity::Info);
         assert_eq!(
             crisis_domain_finding.severity,
             GameplayFindingSeverity::Info
@@ -9976,9 +9990,17 @@ mod findings {
             .activation_opportunities = 1;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
-        let finding = finding_with_title(&findings, "labor-response had no reachable candidate");
+        let finding = finding_with_title(
+            &findings,
+            "Command routes fired activations but no generator ever built a candidate",
+        );
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Critical);
+        assert!(
+            finding.evidence.contains("labor-response"),
+            "the unreachable-route list must name labor-response: {}",
+            finding.evidence
+        );
     }
 
     #[test]
@@ -9999,13 +10021,19 @@ mod findings {
             let findings = derive_findings(&report.aggregate, &report.campaigns);
             let finding = finding_with_title(
                 &findings,
-                &format!("{} had no reachable candidate", kind.label()),
+                "Deliberately-narrowed routes fired activations but built no candidate",
             );
 
             assert_eq!(
                 finding.severity,
                 GameplayFindingSeverity::Warning,
                 "an idle liquidity route reflects the agent's rebalancing policy, not a broken game route"
+            );
+            assert!(
+                finding.evidence.contains(kind.label()),
+                "the restrained-route list must name {}: {}",
+                kind.label(),
+                finding.evidence
             );
         }
     }
@@ -10016,23 +10044,17 @@ mod findings {
         report.aggregate.simulated_days = 7_200;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
-        let labor_finding = finding_with_title(
+        let dormant = finding_with_title(
             &findings,
-            "labor-response was not exercised in this horizon",
+            "Command kinds were not exercised in this horizon",
         );
-        let office_finding =
-            finding_with_title(&findings, "office-power was not exercised in this horizon");
         // Settlement is only reachable when a case exists against the dynasty
         // that quotes a settlement; no such event fires in this horizon, so
-        // the unexercised route stays informational.
-        let settlement_finding = finding_with_title(
-            &findings,
-            "legal-settlement was not exercised in this horizon",
-        );
-
-        assert_eq!(labor_finding.severity, GameplayFindingSeverity::Info);
-        assert_eq!(office_finding.severity, GameplayFindingSeverity::Info);
-        assert_eq!(settlement_finding.severity, GameplayFindingSeverity::Info);
+        // the unexercised routes stay informational and aggregated.
+        assert_eq!(dormant.severity, GameplayFindingSeverity::Info);
+        assert!(dormant.evidence.contains("labor-response"));
+        assert!(dormant.evidence.contains("office-power"));
+        assert!(dormant.evidence.contains("legal-settlement"));
     }
 
     #[test]
@@ -10050,13 +10072,18 @@ mod findings {
             &findings,
             "commission-intelligence appeared only as a rare unselected alternative",
         );
-        let leverage = finding_with_title(
+        let dormant = finding_with_title(
             &findings,
-            "leverage-intelligence was not exercised in this horizon",
+            "Command kinds were not exercised in this horizon",
         );
 
         assert_eq!(commission.severity, GameplayFindingSeverity::Info);
-        assert_eq!(leverage.severity, GameplayFindingSeverity::Info);
+        assert_eq!(dormant.severity, GameplayFindingSeverity::Info);
+        assert!(
+            dormant.evidence.contains("leverage-intelligence"),
+            "leverage-intelligence belongs in the dormant list: {}",
+            dormant.evidence
+        );
     }
 
     #[test]
@@ -10082,10 +10109,15 @@ mod findings {
         let findings = derive_findings(&report.aggregate, &report.campaigns);
         let finding = finding_with_title(
             &findings,
-            "commission-intelligence had no reachable candidate",
+            "Deliberately-narrowed routes fired activations but built no candidate",
         );
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        assert!(
+            finding.evidence.contains("commission-intelligence"),
+            "the restrained-route list must name commissioning: {}",
+            finding.evidence
+        );
     }
 
     #[test]
@@ -10107,9 +10139,17 @@ mod findings {
         stats.viable = 0;
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
-        let finding = finding_with_title(&findings, "crisis-response had no reachable candidate");
+        let finding = finding_with_title(
+            &findings,
+            "Command routes fired activations but no generator ever built a candidate",
+        );
 
         assert_eq!(finding.severity, GameplayFindingSeverity::Critical);
+        assert!(
+            finding.evidence.contains("crisis-response"),
+            "the unreachable-route list must name crisis-response: {}",
+            finding.evidence
+        );
     }
 
     #[test]

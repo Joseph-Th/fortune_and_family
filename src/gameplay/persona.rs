@@ -123,7 +123,11 @@ impl Default for GameplayHarnessConfig {
     fn default() -> Self {
         Self {
             start_seed: 1,
-            seed_count: 1,
+            // Three world seeds: personas share a world when the seed is
+            // fixed, so world-content claims (crisis variety, breach rates,
+            // civic drift) need several independent worlds to be meaningful.
+            // Agent-choice claims still aggregate across every campaign.
+            seed_count: 3,
             days_per_campaign: 1_080,
             decision_interval_days: 30,
             max_candidate_probes: 16,

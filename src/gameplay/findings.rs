@@ -1793,42 +1793,55 @@ pub(crate) fn add_command_findings(
     aggregate: &GameplayAggregate,
     findings: &mut Vec<GameplayFinding>,
 ) {
+    // Unexecuted routes with no candidates share one of three causes: the
+    // world never offered an activation, the agent's standing policy
+    // deliberately narrowed a valid route, or the generator missed a route
+    // the world offered. Each cause gets one aggregated finding so the
+    // finding list reads as design signals instead of thirty near-duplicates.
+    let mut dormant_routes: Vec<&'static str> = Vec::new();
+    let mut restrained_routes: Vec<&'static str> = Vec::new();
+    let mut unreachable_routes: Vec<&'static str> = Vec::new();
     for kind in ALL_COMMAND_KINDS {
         let stats = aggregate
             .commands
             .get(&kind)
             .expect("every command kind must have aggregate statistics");
-        if stats.executed == 0 {
-            let (severity, title) = if stats.generated == 0 {
-                if command_route_expected(aggregate, kind) {
-                    if is_policy_gated_command_route(kind) {
-                        (
-                            GameplayFindingSeverity::Warning,
-                            format!("{} had no reachable candidate", kind.label()),
-                        )
-                    } else {
-                        (
-                            GameplayFindingSeverity::Critical,
-                            format!("{} had no reachable candidate", kind.label()),
-                        )
-                    }
+        if stats.executed == 0 && stats.generated == 0 {
+            if command_route_expected(aggregate, kind) {
+                if is_policy_gated_command_route(kind) {
+                    restrained_routes.push(kind.label());
                 } else {
-                    (
-                        GameplayFindingSeverity::Info,
-                        format!("{} was not exercised in this horizon", kind.label()),
-                    )
+                    unreachable_routes.push(kind.label());
                 }
-            } else if stats.considered == 0 {
-                (
-                    GameplayFindingSeverity::Warning,
-                    format!("{} candidates were never probed", kind.label()),
-                )
-            } else if stats.viable == 0 {
-                (
-                    GameplayFindingSeverity::Critical,
-                    format!("{} was always rejected", kind.label()),
-                )
-            } else if !is_substantive_command_kind(kind) {
+            } else {
+                // No activation opportunity fired anywhere in the horizon:
+                // the world simply offered nothing of this kind.
+                dormant_routes.push(kind.label());
+            }
+        } else if stats.executed == 0 && stats.generated > 0 && stats.considered == 0 {
+            findings.push(GameplayFinding {
+                severity: GameplayFindingSeverity::Warning,
+                title: format!("{} candidates were never probed", kind.label()),
+                evidence: format!(
+                    "activation_opportunities={}, offered_cycles={}, generated={}; probe capacity never reached them",
+                    stats.activation_opportunities, stats.offered_cycles, stats.generated
+                ),
+            });
+        } else if stats.executed == 0 && stats.viable == 0 && stats.generated > 0 {
+            findings.push(GameplayFinding {
+                severity: GameplayFindingSeverity::Critical,
+                title: format!("{} was always rejected", kind.label()),
+                evidence: format!(
+                    "activation_opportunities={}, offered_cycles={}, generated={}, considered={}, rejected={}; canonical validation declined every candidate",
+                    stats.activation_opportunities,
+                    stats.offered_cycles,
+                    stats.generated,
+                    stats.considered,
+                    stats.rejected
+                ),
+            });
+        } else if stats.executed == 0 {
+            let (severity, title) = if !is_substantive_command_kind(kind) {
                 // Operational liquidity plumbing is deliberately excluded from
                 // substantive-action metrics; an unselected rebalancing route
                 // is routine portfolio discipline, not a design warning.
@@ -1870,6 +1883,60 @@ pub(crate) fn add_command_findings(
                 evidence: format!("The command executed {} times.", stats.executed),
             });
         }
+    }
+    if !unreachable_routes.is_empty() || !restrained_routes.is_empty() || !dormant_routes.is_empty()
+    {
+        push_route_summary_findings(
+            &unreachable_routes,
+            &restrained_routes,
+            &dormant_routes,
+            findings,
+        );
+    }
+}
+
+/// One finding per unexecuted-route cause, so the finding list reads as design
+/// signals instead of thirty near-duplicates.
+fn push_route_summary_findings(
+    unreachable_routes: &[&str],
+    restrained_routes: &[&str],
+    dormant_routes: &[&str],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if !unreachable_routes.is_empty() {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Critical,
+            title: "Command routes fired activations but no generator ever built a candidate"
+                .to_owned(),
+            evidence: format!(
+                "{} route(s): {}; the canonical game accepted some concrete action of each kind in observed states, yet no configured agent could construct one",
+                unreachable_routes.len(),
+                unreachable_routes.join(", ")
+            ),
+        });
+    }
+    if !restrained_routes.is_empty() {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Deliberately-narrowed routes fired activations but built no candidate"
+                .to_owned(),
+            evidence: format!(
+                "{} route(s): {}; these generators narrow the canonical offer to strategic-need conditions by standing policy, so an unfired opportunity is agent restraint rather than a coverage hole",
+                restrained_routes.len(),
+                restrained_routes.join(", ")
+            ),
+        });
+    }
+    if !dormant_routes.is_empty() {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Info,
+            title: "Command kinds were not exercised in this horizon".to_owned(),
+            evidence: format!(
+                "{} kind(s): {}; no activation opportunity fired and no configured agent executed them, so this horizon offered nothing to do with these commands",
+                dormant_routes.len(),
+                dormant_routes.join(", ")
+            ),
+        });
     }
 }
 

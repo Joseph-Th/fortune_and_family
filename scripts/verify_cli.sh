@@ -253,6 +253,7 @@ run_gameplay_smoke() {
 
   "$binary" playtest \
     --days 30 \
+    --seeds 1 \
     --persona steward \
     --background baker \
     --trace-limit 3 \

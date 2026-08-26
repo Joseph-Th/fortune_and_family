@@ -298,7 +298,7 @@ if art["critical_findings"] != 0:
         New-Item -ItemType Directory -Path $playtestDir -Force | Out-Null
         $playtest = Join-Path $playtestDir "playtest.json"
 
-        $res = Run-ProcessWithCapture @("playtest", "--days", "30", "--persona", "steward", "--background", "baker", "--trace-limit", "3", "--json", "--output", $playtest)
+        $res = Run-ProcessWithCapture @("playtest", "--days", "30", "--seeds", "1", "--persona", "steward", "--background", "baker", "--trace-limit", "3", "--json", "--output", $playtest)
         if ($res.ExitCode -ne 0) { Fail "gameplay harness command failed" $res.StdErrPath }
         Require-NonEmptyFile $playtest "gameplay harness JSON report"
 

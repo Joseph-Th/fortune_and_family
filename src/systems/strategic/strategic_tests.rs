@@ -345,6 +345,130 @@ mod arithmetic_boundaries {
     }
 
     #[test]
+    fn acquisition_quotes_a_going_concern_at_a_controlling_premium() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+            .expect("campaign must contain a non-player business")
+            .id();
+        let (recipe_id, capacity) = {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("selected business must exist");
+            // A healthy going concern: full equipment condition and quality.
+            business.operations.status = BusinessStatus::Active;
+            business.operations.condition_basis_points = 10_000;
+            business.operations.quality_basis_points = 10_000;
+            business.finance.cash = Money::ZERO;
+            business.inventory.clear();
+            (
+                business.recipe_id(),
+                business.operations.capacity_batches_per_day,
+            )
+        };
+        let operating_cost = registry
+            .get_recipe(recipe_id)
+            .expect("business recipe must exist")
+            .daily_operating_cost()
+            .copper();
+        // Equipment at 10,000 bp condition plus goodwill at 10,000 bp quality,
+        // priced at the 14,000 bp controlling premium.
+        let equipment_value =
+            i128::from(operating_cost) * i128::from(capacity) * 60 * 10_000 / 10_000;
+        let goodwill_value =
+            i128::from(operating_cost) * i128::from(capacity) * 30 * 10_000 / 10_000;
+        let expected = Money::from_copper(
+            i64::try_from((equipment_value + goodwill_value) * 14_000 / 10_000)
+                .expect("premium price must fit money"),
+        );
+
+        let quote =
+            quote_business_acquisition(registry, &state, state.player_dynasty_id, business_id)
+                .expect("an active business must be quotable at a premium");
+
+        assert_eq!(quote.purchase_price, expected);
+    }
+
+    #[test]
+    fn acquisition_of_a_going_concern_transfers_cash_to_the_seller() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let buyer_id = state.player_dynasty_id;
+        let seller_id = state
+            .businesses
+            .iter()
+            .find(|business| business.owner_dynasty_id() != buyer_id)
+            .map(crate::core::Business::owner_dynasty_id)
+            .expect("campaign must contain a non-player business");
+        let business_id = state
+            .businesses
+            .iter()
+            .find(|business| {
+                business.owner_dynasty_id() != buyer_id
+                    && business.operations.condition_basis_points >= 5_000
+            })
+            .expect("campaign must contain a healthy rival firm")
+            .id();
+        let quote = quote_business_acquisition(registry, &state, buyer_id, business_id)
+            .expect("a going concern must remain quotable");
+        let manager_id = state
+            .dynasties
+            .get(&buyer_id)
+            .and_then(crate::core::Dynasty::heir_id)
+            .expect("player dynasty must have an eligible manager");
+        let recapitalization = quote.minimum_recapitalization;
+        {
+            let buyer = state.dynasties.get_mut(&buyer_id).expect("buyer exists");
+            buyer.resources.treasury = quote
+                .purchase_price
+                .checked_add(recapitalization)
+                .expect("test treasury covers the purchase")
+                .checked_add(Money::from_copper(1))
+                .expect("test treasury headroom fits money");
+        }
+        let seller_treasury_before = state
+            .dynasties
+            .get(&seller_id)
+            .expect("seller must exist")
+            .treasury();
+
+        acquire_business(
+            registry,
+            &mut state,
+            buyer_id,
+            business_id,
+            manager_id,
+            recapitalization,
+        )
+        .expect("the premium acquisition must commit");
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("acquired business must exist")
+                .owner_dynasty_id(),
+            buyer_id,
+            "ownership must transfer to the buyer"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&seller_id)
+                .expect("seller must exist")
+                .treasury(),
+            seller_treasury_before
+                .checked_add(quote.purchase_price)
+                .expect("seller proceeds must fit"),
+            "the seller must be paid the full controlling premium"
+        );
+    }
+
+    #[test]
     fn acquisition_quote_rejects_an_unrepresentable_discounted_valuation() {
         let registry = test_registry();
         let mut state = make_test_campaign();
@@ -6826,6 +6950,65 @@ mod crises {
                 .food_satisfaction_basis_points,
             unaffected_before,
             "epidemic onset must remain localized to the affected district"
+        );
+    }
+
+    #[test]
+    fn grain_shortage_detection_uses_relative_stock_and_supply_stress() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let grain_id = registry
+            .get_good_id("grain")
+            .expect("registry must define grain");
+
+        // Normal variance: deep staple stores over healthy routes detect
+        // nothing.
+        detect_and_advance_crises(registry, &mut state).expect("crisis detection must succeed");
+        assert!(
+            !state
+                .crises
+                .values()
+                .any(|crisis| crisis.kind == CrisisKind::GrainShortage),
+            "a well-stocked market must not detect a grain shortage"
+        );
+
+        // Thinning staples alone is not a shortage either: healthy routes
+        // refill the granary.
+        {
+            let quote = state
+                .market
+                .quotes
+                .get_mut(&grain_id)
+                .expect("grain quote must exist");
+            quote.stock = Quantity::from_units(400);
+            quote.target_stock = Quantity::from_units(2_400);
+        }
+        detect_and_advance_crises(registry, &mut state).expect("crisis detection must succeed");
+        assert!(
+            !state
+                .crises
+                .values()
+                .any(|crisis| crisis.kind == CrisisKind::GrainShortage),
+            "thin stores over healthy resupply must not raise a grain shortage"
+        );
+
+        // Thinning staples while regional access collapses is exactly the
+        // designed trigger: the squeeze is building before shelves are empty.
+        let route_ids: Vec<_> = state.external_routes.keys().copied().collect();
+        for route_id in &route_ids {
+            state
+                .external_routes
+                .get_mut(route_id)
+                .expect("route must exist")
+                .disruption_basis_points = 9_000;
+        }
+        detect_and_advance_crises(registry, &mut state).expect("crisis detection must succeed");
+        assert!(
+            state
+                .crises
+                .values()
+                .any(|crisis| crisis.kind == CrisisKind::GrainShortage),
+            "thinning staple stores under collapsed regional supply must raise a grain shortage"
         );
     }
 

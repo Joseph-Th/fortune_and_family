@@ -83,7 +83,7 @@ The CLI prints a concise progress line to stderr on every run: elapsed time, cam
 | Option | Meaning | Default |
 |---|---|---|
 | `--start-seed` | First deterministic seed | `1` |
-| `--seeds` | Number of consecutive seeds | `1` |
+| `--seeds` | Number of consecutive seeds; omit to use the configured default | `3` |
 | `--days` | Simulated days per campaign | `1080` |
 | `--decision-interval` | Normal days advanced after a player decision | `30` |
 | `--max-probes` | Maximum candidate commands validated per decision | `16` |
@@ -100,6 +100,13 @@ The CLI prints a concise progress line to stderr on every run: elapsed time, cam
 The normal decision interval is an observation cadence, not a gameplay rule limiting the number of commands a human player could issue.
 
 Independent campaigns in a matrix run in parallel using the machine's available parallelism. Each campaign builds and advances its own `AppState` from the shared immutable registry, so parallelism never changes the state of another campaign. Report ordering is fixed by seed, background, and persona regardless of scheduling; a matrix with one campaign remains serial.
+
+The default matrix samples three independent world seeds. Personas share a
+world whenever the seed is fixed, so world-content claims — crisis variety,
+counterparty failure rates, civic drift, route stress — need several
+independent worlds before "never detected" or "never fails" means anything.
+Agent-choice claims (persona variety, command coverage) still aggregate across
+every campaign in the matrix.
 
 When the matrix contains one campaign, its independent counterfactual probes
 run in a small bounded worker set. Matrix runs use campaign-level parallelism
@@ -162,7 +169,17 @@ Decision cycles are grouped into product phases:
 | Establishment | Reputation standing is established |
 | Institutional ascent | Full commercial standing is established |
 | Dynastic governance | The dynasty commits a city-shaping law, public work, or active office directive |
-| Succession and legacy | The first succession completes |
+| Succession and legacy | A governing dynasty — one that has already shaped the city — completes its first succession |
+
+The phase ladder follows the dynasty's durable milestones rather than capping
+at the first succession. A house whose founder dies before it ever shaped the
+city is still climbing the establishment-to-ascent arc under its heir, so its
+post-succession cycles read as institutional ascent, not legacy. Only a
+governing dynasty navigating life after succession enters the legacy era the
+design reserves for testing whether the organization outlives its founder.
+This keeps ascent-phase pacing measurable in campaigns where succession lands
+early — which, given founder ages and the annual succession check at the year
+boundary, is most campaigns.
 
 Phase diagnostics evaluate actionability, quiet/blocked time, viable choice breadth, consequence differentiation, strategic diversity, civic endpoints, recovery pressure, and post-succession continuity. Exact thresholds belong in `src/gameplay/` and their tests.
 
@@ -303,6 +320,17 @@ Reports contain:
   outcome, and quiet-cycle reason family lists are capped with a remainder
   count in the human log; the structured report keeps full lists.
 - Findings and stated limitations
+
+Unexecuted command routes aggregate into three summary findings by cause:
+world-offered activations with no candidate construction (Critical when the
+route is not a deliberate-restraint route, Warning when it is), and kinds the
+world never offered at all (Info). Per-kind findings remain only for more
+specific conditions — candidates that were never probed, always rejected, or
+viable but never selected.
+
+Milestone days prefer the exact event day recorded in the chronicle over the
+coarser observation day: decision windows can straddle a year boundary, so a
+succession recorded as day 367 may actually have executed on day 360.
 
 Each retained trace step includes its phase, three measured consequence profiles: immediate
 changes at command commit, changes attributable to the selected command at the

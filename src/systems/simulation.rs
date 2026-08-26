@@ -596,10 +596,12 @@ pub(crate) fn business_status_after_capitalization(
 
 /// Annual succession-chance pressure per year of head age past the
 /// eligibility threshold. The rate keeps the median first transition inside
-/// the standard multi-year session (roughly the second or third campaign
-/// year), so dynastic continuity is part of ordinary play rather than only
+/// the standard multi-year session (roughly the middle of the third campaign
+/// year), late enough that a founder who pursues institutional standing has an
+/// organization worth testing when succession arrives, yet early enough that
+/// dynastic continuity is part of ordinary play rather than only
 /// generation-length simulations.
-const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 520;
+const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 380;
 
 fn decide_business_production(
     registry: &Registry,
@@ -637,6 +639,17 @@ fn decide_business_production(
     batches = batches.min(capacity_scratch.worker_limited_batches(business.id()));
     batches = batches.min(input_limited_batches(business, recipe));
     batches = batches.min(cash_limited_batches(business, recipe));
+    // An input-less recipe is an import trade: it converts regional access
+    // into goods rather than processing local inputs. A disrupted road must
+    // throttle the city's import houses exactly as it throttles direct route
+    // supply, so sustained disruption reaches the staple chains downstream
+    // instead of stopping at the gatehouses.
+    if recipe.inputs().is_empty() {
+        let availability = i64::from(import_trade_availability_basis_points(state));
+        batches = u16::try_from((i64::from(batches) * availability + 5_000) / 10_000)
+            .unwrap_or(batches)
+            .min(batches);
+    }
     if recipe.output_good_id() != tools_id {
         batches = batches.min(tool_limited_batches(
             batches,
@@ -2414,10 +2427,19 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
 /// availability.
 const REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS: u16 = 2_500;
 
-fn regional_demand_availability_basis_points(state: &AppState) -> u16 {
+/// Import trades keep a smaller blockade floor than households: a closed road
+/// strands most of the regional trade but never stops every cart, river barge,
+/// and smuggler, so a total blockade leaves a trickle rather than zero.
+const IMPORT_TRADE_MIN_AVAILABILITY_BASIS_POINTS: u16 = 1_000;
+
+/// Average availability across active external routes, floored so a total
+/// blockade degrades to the caller's minimum instead of perfect health.
+/// Campaigns whose regional economy is not modeled through routes keep full
+/// availability.
+fn average_route_availability_basis_points(state: &AppState, minimum: u16) -> u16 {
     if state.external_routes.is_empty() {
-        // The campaign models no regional economy through routes: household
-        // earning power cannot depend on route health that does not exist.
+        // The campaign models no regional economy through routes: availability
+        // cannot depend on route health that does not exist.
         return 10_000;
     }
     let routes = state
@@ -2427,8 +2449,8 @@ fn regional_demand_availability_basis_points(state: &AppState) -> u16 {
         .collect::<Vec<_>>();
     if routes.is_empty() {
         // A modeled route network with no active route is a total blockade,
-        // not a perfectly healthy one: the subsistence floor applies.
-        return REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS;
+        // not a perfectly healthy one: the caller's floor applies.
+        return minimum;
     }
     let total = routes
         .iter()
@@ -2437,12 +2459,18 @@ fn regional_demand_availability_basis_points(state: &AppState) -> u16 {
             sum.saturating_add(u32::from(availability))
         });
     let count = u32::try_from(routes.len()).unwrap_or(u32::MAX);
-    u16::try_from(
-        (total / count)
-            .max(u32::from(REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS))
-            .min(10_000),
-    )
-    .expect("availability clamped into basis-point range must fit u16")
+    u16::try_from((total / count).max(u32::from(minimum)).min(10_000))
+        .expect("availability clamped into basis-point range must fit u16")
+}
+
+fn regional_demand_availability_basis_points(state: &AppState) -> u16 {
+    average_route_availability_basis_points(state, REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS)
+}
+
+/// Availability import trades depend on: the same route health households feel,
+/// with a trader's floor instead of a subsistence floor.
+pub(crate) fn import_trade_availability_basis_points(state: &AppState) -> u16 {
+    average_route_availability_basis_points(state, IMPORT_TRADE_MIN_AVAILABILITY_BASIS_POINTS)
 }
 
 fn process_year_boundary(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {

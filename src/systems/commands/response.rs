@@ -3,6 +3,29 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// Window over which repeated crisis service earns diminishing standing:
+/// the city rewards fresh service, not a house that lives from crisis to
+/// crisis. Material relief is never diminished — only the legitimacy credit.
+const CRISIS_STANDING_WINDOW_DAYS: i64 = 360;
+
+/// Standing multiplier for a crisis response given prior responses inside the
+/// window: full credit, then half, quarter, and one-eighth as the floor.
+fn scale_repeated_service_standing(state: &AppState, base_gain: u16) -> u16 {
+    let window_start = state
+        .clock
+        .day()
+        .saturating_sub(CRISIS_STANDING_WINDOW_DAYS);
+    let prior_responses = state
+        .audit_log
+        .iter()
+        .rev()
+        .take_while(|record| record.day() >= window_start)
+        .filter(|record| record.kind() == AuditKind::CrisisResponse)
+        .count();
+    let shift = u32::try_from(prior_responses).unwrap_or(u32::MAX).min(3);
+    u16::try_from((i64::from(base_gain) * i64::from(10_000 >> shift)) / 10_000).unwrap_or(base_gain)
+}
+
 pub(crate) fn apply_crisis_response(
     registry: &Registry,
     state: &mut AppState,
@@ -57,13 +80,15 @@ pub(crate) fn apply_crisis_response(
         CrisisResponse::Relief => {
             spend_player_treasury_to_market(state, crisis_relief_cost(severity))?;
             reduce_crisis(state, crisis_id, organized_response_severity_reduction);
-            adjust_player_legitimacy(state, CRISIS_RELIEF_LEGITIMACY_GAIN, true);
+            let standing = scale_repeated_service_standing(state, CRISIS_RELIEF_LEGITIMACY_GAIN);
+            adjust_player_legitimacy(state, standing, true);
             adjust_district_unrest(state, district_id, CRISIS_RELIEF_UNREST_REDUCTION, false);
         }
         CrisisResponse::Reform => {
             spend_player_treasury_to_market(state, CRISIS_REFORM_COST)?;
             reduce_crisis(state, crisis_id, organized_response_severity_reduction);
-            adjust_player_legitimacy(state, CRISIS_REFORM_LEGITIMACY_GAIN, true);
+            let standing = scale_repeated_service_standing(state, CRISIS_REFORM_LEGITIMACY_GAIN);
+            adjust_player_legitimacy(state, standing, true);
             adjust_district_unrest(state, district_id, CRISIS_REFORM_UNREST_REDUCTION, false);
         }
         CrisisResponse::Suppress => {

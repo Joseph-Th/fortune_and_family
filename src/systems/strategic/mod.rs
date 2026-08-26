@@ -328,11 +328,6 @@ pub enum StrategicError {
         business_id: BusinessId,
         buyer_dynasty_id: DynastyId,
     },
-    #[error("business {business_id} with status {status:?} is not available for acquisition")]
-    BusinessNotAcquirable {
-        business_id: BusinessId,
-        status: BusinessStatus,
-    },
     #[error("character {manager_id} is not an active member of buyer dynasty {buyer_dynasty_id}")]
     InvalidAcquisitionManager {
         manager_id: CharacterId,

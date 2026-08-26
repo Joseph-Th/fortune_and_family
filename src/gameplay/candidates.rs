@@ -1272,6 +1272,14 @@ pub(crate) fn can_afford_crisis_response(
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist");
+    // Standing-reserve policy: legitimacy is the house's scarce political
+    // resource — offices, laws, and heir designations all spend it. Below
+    // this floor the agent declines standing-burning responses entirely,
+    // exactly as its spending policy reserves treasury against known
+    // obligations instead of converting every surprise into new borrowing.
+    const STANDING_RESERVE_BASIS_POINTS: u16 = 2_500;
+    let standing_reserve =
+        CRISIS_SUPPRESS_LEGITIMACY_COST.saturating_add(STANDING_RESERVE_BASIS_POINTS);
     match response {
         CrisisResponse::Relief => {
             dynasty.treasury() >= crisis_relief_cost(crisis.severity_basis_points)
@@ -1281,13 +1289,13 @@ pub(crate) fn can_afford_crisis_response(
         // gate so the agent never proposes a guaranteed rejection.
         CrisisResponse::Suppress => {
             dynasty.treasury() >= CRISIS_SUPPRESS_COST
-                && dynasty.resources.legitimacy_basis_points >= CRISIS_SUPPRESS_LEGITIMACY_COST
+                && dynasty.resources.legitimacy_basis_points >= standing_reserve
         }
         // Profiteering spends standing equal to its requirement and extracts
         // from the panicked market's clearing pool, so an empty pool or an
         // empty legitimacy reserve makes the attempt a guaranteed rejection.
         CrisisResponse::Exploit => {
-            dynasty.resources.legitimacy_basis_points >= CRISIS_EXPLOIT_LEGITIMACY_COST
+            dynasty.resources.legitimacy_basis_points >= standing_reserve
                 && state.market.clearing_account > Money::ZERO
         }
     }
@@ -2196,13 +2204,18 @@ pub(crate) fn generate_business_acquisition_candidates(
         GameplayPersona::PowerBroker => 280,
     };
     let recovery_bonus = if operating_businesses == 0 { 1_000 } else { 0 };
-    for business in state.businesses.iter().filter(|business| {
-        business.owner_dynasty_id() != state.player_dynasty_id
-            && matches!(
-                business.status(),
-                BusinessStatus::Distressed | BusinessStatus::Insolvent | BusinessStatus::Closed
-            )
-    }) {
+    for business in state
+        .businesses
+        .iter()
+        .filter(|business| business.owner_dynasty_id() != state.player_dynasty_id)
+    {
+        let going_concern = business.status() == BusinessStatus::Active;
+        // A premium purchase must buy a real going concern: an active firm
+        // whose equipment has already run down is a distress sale waiting to
+        // happen, and paying a controlling premium for it is not growth.
+        if going_concern && business.operations.condition_basis_points < 5_000 {
+            continue;
+        }
         let Ok(quote) =
             quote_business_acquisition(registry, state, state.player_dynasty_id, business.id())
         else {
@@ -2218,18 +2231,33 @@ pub(crate) fn generate_business_acquisition_candidates(
             .get(&state.player_dynasty_id)
             .expect("player dynasty must exist")
             .treasury();
-        let expansion_reserve =
-            recapitalization_dynasty_reserve(persona, false).saturating_add(Money::from_copper(
+        let mut expansion_reserve = recapitalization_dynasty_reserve(persona, false)
+            .saturating_add(Money::from_copper(
                 i64::try_from(player_businesses.len())
                     .unwrap_or(i64::MAX)
                     .saturating_mul(2_000),
             ));
+        if going_concern {
+            // Paying a controlling premium drains the treasury materially:
+            // hold back half the price again so the exchange cannot strip
+            // every reserve the house keeps for obligations and shocks.
+            expansion_reserve = expansion_reserve
+                .saturating_add(Money::from_copper(quote.purchase_price.copper() / 2));
+        }
         if player_treasury < required.saturating_add(expansion_reserve) {
             continue;
         }
         if !acquisition_has_turnaround_thesis(registry, state, business) {
             continue;
         }
+        // A rescue of a failing trade outranks a premium purchase of a healthy
+        // one: distress discounts are scarce, while going concerns are always
+        // theoretically for sale at the right price.
+        let bonus = if going_concern {
+            persona_bonus / 2 + recovery_bonus / 2
+        } else {
+            persona_bonus + recovery_bonus
+        };
         push_candidate(
             candidates,
             GameplayCommandKind::AcquireBusiness,
@@ -2239,12 +2267,17 @@ pub(crate) fn generate_business_acquisition_candidates(
                 recapitalization,
             },
             format!(
-                "acquire {} for {} with {} working capital",
+                "acquire {}{} for {} with {} working capital",
+                if going_concern {
+                    "the going concern "
+                } else {
+                    ""
+                },
                 business_label(state, business.id()),
                 quote.purchase_price,
                 recapitalization
             ),
-            persona_bonus.saturating_add(recovery_bonus),
+            bonus,
         );
     }
 }
@@ -7333,7 +7366,6 @@ pub(crate) const fn strategic_error_category(error: &StrategicError) -> &'static
             "strategic: property sale cannot settle lien"
         }
         StrategicError::BusinessAlreadyOwned { .. } => "strategic: business already owned",
-        StrategicError::BusinessNotAcquirable { .. } => "strategic: business not acquirable",
         StrategicError::InvalidAcquisitionManager { .. } => {
             "strategic: invalid acquisition manager"
         }

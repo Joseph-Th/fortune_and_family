@@ -256,7 +256,7 @@ pub(crate) fn business_recapitalization_target(
 /// # Errors
 ///
 /// Returns an error when the business or buyer is missing, the buyer already owns the business,
-/// the business is still active and therefore not available for acquisition, or the discounted
+/// the discounted
 /// valuation cannot fit the supported money range.
 ///
 /// # Panics
@@ -285,16 +285,16 @@ pub fn quote_business_acquisition(
             buyer_dynasty_id,
         });
     }
+    // Failing trades change hands at a discount to book value; a going
+    // concern changes hands at a controlling premium, because an owner
+    // parts with a healthy firm only for materially more than it is worth.
+    // The premium keeps expansion a real wealth-for-capacity conversion
+    // rather than a discount snowball: the seller ends the exchange richer.
     let discount_basis_points = match business.status() {
         BusinessStatus::Distressed => 7_000_i64,
         BusinessStatus::Insolvent => 4_000,
         BusinessStatus::Closed => 2_500,
-        BusinessStatus::Active => {
-            return Err(StrategicError::BusinessNotAcquirable {
-                business_id,
-                status: business.status(),
-            });
-        }
+        BusinessStatus::Active => 14_000,
     };
     let purchase_price =
         resolve_business_purchase_price(registry, state, business, discount_basis_points)?;
