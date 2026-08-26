@@ -819,28 +819,38 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
                 );
             }
         }
-        if let Some(loan_id) = property.collateral_loan_id {
-            let loan = state.loans.get(&loan_id);
-            debug_assert!(
-                loan.is_some(),
-                "Record Reference Validity: property collateral loan does not exist"
+        validate_property_collateral(state, *property_id, property);
+    }
+}
+
+/// Collateral-pledge consistency for one property: the loan must reference it
+/// back, sit on the owner's books, and still be live.
+fn validate_property_collateral(
+    state: &AppState,
+    property_id: crate::ids::PropertyId,
+    property: &crate::core::Property,
+) {
+    if let Some(loan_id) = property.collateral_loan_id {
+        let loan = state.loans.get(&loan_id);
+        debug_assert!(
+            loan.is_some(),
+            "Record Reference Validity: property collateral loan does not exist"
+        );
+        if let Some(loan) = loan {
+            debug_assert_eq!(
+                loan.collateral_property_id,
+                Some(property_id),
+                "Derived Data Consistency: collateral property and loan references differ"
             );
-            if let Some(loan) = loan {
-                debug_assert_eq!(
-                    loan.collateral_property_id,
-                    Some(*property_id),
-                    "Derived Data Consistency: collateral property and loan references differ"
-                );
-                debug_assert_eq!(
-                    property.owner_dynasty_id,
-                    Some(loan.borrower_dynasty_id),
-                    "Ownership Exclusivity: pledged property is not owned by its borrower"
-                );
-                debug_assert!(
-                    !matches!(loan.status, LoanStatus::Defaulted | LoanStatus::Repaid),
-                    "Lifecycle Validity: settled loan retains an active collateral pledge"
-                );
-            }
+            debug_assert_eq!(
+                property.owner_dynasty_id,
+                Some(loan.borrower_dynasty_id),
+                "Ownership Exclusivity: pledged property is not owned by its borrower"
+            );
+            debug_assert!(
+                !matches!(loan.status, LoanStatus::Defaulted | LoanStatus::Repaid),
+                "Lifecycle Validity: settled loan retains an active collateral pledge"
+            );
         }
     }
 }

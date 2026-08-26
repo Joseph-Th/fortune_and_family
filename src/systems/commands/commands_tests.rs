@@ -1920,6 +1920,7 @@ mod business_acquisition {
         (registry, state, business_id, manager_id, quote)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn assert_acquired_business_state(
         state: &AppState,
         business_id: BusinessId,
@@ -4402,6 +4403,15 @@ mod politics {
             .get(&state.player_dynasty_id)
             .expect("player dynasty must exist")
             .head_id();
+        // The cooldown advance crosses a campaign-year boundary, which rolls
+        // founder succession. Pin the head below eligibility age so this
+        // bounded portfolio test cannot hinge on that annual roll.
+        state
+            .characters
+            .get_mut(character_id)
+            .expect("head character must exist")
+            .identity
+            .birth_day = state.clock.day().saturating_sub(40 * 360);
         let institution_ids: Vec<_> = state.institutions.keys().copied().take(3).collect();
         let [
             first_institution_id,

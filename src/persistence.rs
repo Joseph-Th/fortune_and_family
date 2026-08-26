@@ -760,48 +760,46 @@ impl<'a> JsonDuplicateScanner<'a> {
                     b't' => result.push('\t'),
                     b'u' => {
                         let first_code = self.parse_unicode_escape_hex()?;
-                        match char::from_u32(u32::from(first_code)) {
-                            Some(ch) => result.push(ch),
-                            None => {
-                                // High surrogate: a valid escape pair must
-                                // immediately follow with the low surrogate.
-                                if !(0xD8_00..0xDC_00).contains(&u32::from(first_code)) {
-                                    return Err(PersistenceError::Parse {
-                                        path: self.path.to_path_buf(),
-                                        source: serde_json::Error::io(std::io::Error::new(
-                                            std::io::ErrorKind::InvalidData,
-                                            "lone unicode surrogate escape",
-                                        )),
-                                    });
-                                }
-                                if self.pos + 6 >= self.bytes.len()
-                                    || self.bytes[self.pos + 1] != b'\\'
-                                    || self.bytes[self.pos + 2] != b'u'
-                                {
-                                    return Err(PersistenceError::Parse {
-                                        path: self.path.to_path_buf(),
-                                        source: serde_json::Error::io(std::io::Error::new(
-                                            std::io::ErrorKind::InvalidData,
-                                            "unpaired high surrogate escape",
-                                        )),
-                                    });
-                                }
-                                self.pos += 2; // skip '\u' of the low surrogate
-                                let second_code = self.parse_unicode_escape_hex()?;
-                                let scalar = 0x10_000
-                                    + ((u32::from(first_code) - 0xD8_00) << 10)
-                                    + (u32::from(second_code) - 0xDC_00);
-                                let ch = char::from_u32(scalar).ok_or_else(|| {
-                                    PersistenceError::Parse {
-                                        path: self.path.to_path_buf(),
-                                        source: serde_json::Error::io(std::io::Error::new(
-                                            std::io::ErrorKind::InvalidData,
-                                            "invalid unicode surrogate pair",
-                                        )),
-                                    }
-                                })?;
-                                result.push(ch);
+                        if let Some(ch) = char::from_u32(u32::from(first_code)) {
+                            result.push(ch);
+                        } else {
+                            // High surrogate: a valid escape pair must
+                            // immediately follow with the low surrogate.
+                            if !(0xD8_00..0xDC_00).contains(&u32::from(first_code)) {
+                                return Err(PersistenceError::Parse {
+                                    path: self.path.to_path_buf(),
+                                    source: serde_json::Error::io(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "lone unicode surrogate escape",
+                                    )),
+                                });
                             }
+                            if self.pos + 6 >= self.bytes.len()
+                                || self.bytes[self.pos + 1] != b'\\'
+                                || self.bytes[self.pos + 2] != b'u'
+                            {
+                                return Err(PersistenceError::Parse {
+                                    path: self.path.to_path_buf(),
+                                    source: serde_json::Error::io(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "unpaired high surrogate escape",
+                                    )),
+                                });
+                            }
+                            self.pos += 2; // skip '\u' of the low surrogate
+                            let second_code = self.parse_unicode_escape_hex()?;
+                            let scalar = 0x10_000
+                                + ((u32::from(first_code) - 0xD8_00) << 10)
+                                + (u32::from(second_code) - 0xDC_00);
+                            let ch =
+                                char::from_u32(scalar).ok_or_else(|| PersistenceError::Parse {
+                                    path: self.path.to_path_buf(),
+                                    source: serde_json::Error::io(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "invalid unicode surrogate pair",
+                                    )),
+                                })?;
+                            result.push(ch);
                         }
                     }
                     _ => result.push(b as char),
@@ -2080,7 +2078,6 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
         .iter()
         .filter(|record| record.kind() == AuditKind::InstitutionPatronage)
         .filter_map(|record| record.audit_subject().institution_character_ids())
-        .map(|(institution_id, character_id)| (institution_id, character_id))
         .collect();
     let mut officeholders = BTreeSet::new();
     let mut player_memberships = BTreeMap::new();

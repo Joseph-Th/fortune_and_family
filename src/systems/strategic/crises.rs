@@ -298,9 +298,11 @@ pub(crate) fn detect_and_advance_crises(
     }
     detect_trade_disruption(state)?;
     if day > 0
-        && day % 720 == 0
+        && day % NOBLE_DEMAND_CHECK_INTERVAL_DAYS == 0
         && !has_active_crisis(state, CrisisKind::NobleDemand)
-        && state.rng.is_chance_success(2_500)
+        && state
+            .rng
+            .is_chance_success(NOBLE_DEMAND_CHANCE_BASIS_POINTS)
     {
         // The prince's extraordinary levy lands where the money is: the
         // district with the highest current rent index, ties broken by the

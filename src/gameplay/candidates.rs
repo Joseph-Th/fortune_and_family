@@ -2441,41 +2441,104 @@ pub(crate) fn generate_contract_candidates(
             .expect("business recipe must exist");
         for input in recipe.inputs() {
             for seller in contract_sellers(registry, state, input.good_id(), player_id) {
-                add_contract_candidate(
-                    registry,
-                    state,
-                    candidates,
-                    ContractCandidateInput {
+                // Commit near the buyer's real consumption, sized down to what
+                // the working-cash cushion supports. A token contract cannot
+                // secure supply, and a supplier that never owes enough to hurt
+                // makes counterparty reliability invisible. The five-day basis
+                // matches the canonical `CONTRACT_CAPACITY_COMMITMENT_DAYS`,
+                // keeping open-market trade possible alongside the contract.
+                let weekly_need = input.quantity().saturating_mul_ratio(
+                    i64::from(business.operations.capacity_batches_per_day)
+                        .saturating_mul(AGENT_CONTRACT_COMMITMENT_DAYS),
+                    1,
+                );
+                for quantity in contract_size_ladder(weekly_need) {
+                    let candidate = ContractCandidateInput {
                         kind: GameplayCommandKind::SecureSupply,
                         buyer_business_id: business.id(),
                         seller_business_id: seller,
                         good_id: input.good_id(),
-                        quantity_per_week: input
-                            .quantity()
-                            .saturating_mul_ratio(secure_supply_batches(business), 1),
+                        quantity_per_week: quantity,
                         bonus: secure_supply_bonus(persona),
-                    },
-                );
+                    };
+                    if contract_candidate_fits(registry, state, &candidate) {
+                        add_contract_candidate(registry, state, candidates, candidate);
+                        break;
+                    }
+                }
             }
         }
         for buyer in contract_buyers(registry, state, recipe.output_good_id(), player_id) {
-            add_contract_candidate(
-                registry,
-                state,
-                candidates,
-                ContractCandidateInput {
+            // Outgoing commitments stay deliberately lighter than incoming
+            // ones: a three-day basis leaves the seller margin to absorb a bad
+            // production week, so signing away most of the firm's capacity is
+            // an aggressive bet the player can decline rather than a trap.
+            let weekly_output = recipe.output_quantity().saturating_mul_ratio(
+                i64::from(business.operations.capacity_batches_per_day)
+                    .saturating_mul(AGENT_SELL_COMMITMENT_DAYS),
+                1,
+            );
+            for quantity in contract_size_ladder(weekly_output) {
+                let candidate = ContractCandidateInput {
                     kind: GameplayCommandKind::SellOutput,
                     buyer_business_id: buyer,
                     seller_business_id: business.id(),
                     good_id: recipe.output_good_id(),
-                    quantity_per_week: recipe
-                        .output_quantity()
-                        .saturating_mul_ratio(STANDARD_CONTRACT_BATCHES_PER_WEEK, 1),
+                    quantity_per_week: quantity,
                     bonus: sell_output_bonus(persona),
-                },
-            );
+                };
+                if contract_candidate_fits(registry, state, &candidate) {
+                    add_contract_candidate(registry, state, candidates, candidate);
+                    break;
+                }
+            }
         }
     }
+}
+
+/// Commitment bases mirror the canonical five-day contract capacity window:
+/// incoming supply commits a fuller week than outgoing sales, because a buyer
+/// wants dependable input while a prudent seller reserves slack.
+const AGENT_CONTRACT_COMMITMENT_DAYS: i64 = 5;
+const AGENT_SELL_COMMITMENT_DAYS: i64 = 3;
+
+/// Candidate sizes to try, largest first: the full commitment, then halves,
+/// so a house with thin working cash still secures some supply instead of
+/// dropping the route entirely.
+fn contract_size_ladder(full: Quantity) -> Vec<Quantity> {
+    let half = full.saturating_mul_ratio(1, 2);
+    let quarter = full.saturating_mul_ratio(1, 4);
+    vec![full, half, quarter]
+}
+
+/// Whether this exact contract would pass the shared support checks used by
+/// [`add_contract_candidate`], so size ladders stop at the largest viable rung.
+fn contract_candidate_fits(
+    registry: &Registry,
+    state: &AppState,
+    candidate: &ContractCandidateInput,
+) -> bool {
+    if candidate.quantity_per_week <= Quantity::ZERO {
+        return false;
+    }
+    let Some(quote) = state.market.quotes.get(&candidate.good_id) else {
+        return false;
+    };
+    let unit_price = contract_candidate_unit_price(
+        state,
+        candidate.buyer_business_id,
+        candidate.seller_business_id,
+        quote.price,
+    );
+    can_support_contract_terms(
+        registry,
+        state,
+        candidate.buyer_business_id,
+        candidate.seller_business_id,
+        candidate.good_id,
+        candidate.quantity_per_week,
+        unit_price,
+    )
 }
 
 pub(crate) fn secure_supply_batches(business: &crate::core::Business) -> i64 {

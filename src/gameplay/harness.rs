@@ -248,6 +248,8 @@ pub(crate) struct CampaignAccumulator {
     pub longest_recovery_pressure_days: u32,
     pub commission_leverage_pairs: u16,
     pub player_debt_enforcement_cases: u16,
+    pub peak_route_disruption_basis_points: u16,
+    pub peak_city_distressed_businesses: u16,
     pub last_information_commission_day: Option<i64>,
     pub starting_generation: Option<u16>,
     pub fantasy_arc: GameplayFantasyArc,
@@ -320,6 +322,8 @@ impl CampaignAccumulator {
             longest_recovery_pressure_days: 0,
             commission_leverage_pairs: 0,
             player_debt_enforcement_cases: 0,
+            peak_route_disruption_basis_points: 0,
+            peak_city_distressed_businesses: 0,
             last_information_commission_day: None,
             starting_generation: None,
             fantasy_arc: GameplayFantasyArc::default(),
@@ -731,6 +735,12 @@ impl CampaignAccumulator {
         self.maximum_contract_relationship_pressure_basis_points = self
             .maximum_contract_relationship_pressure_basis_points
             .max(snapshot.maximum_contract_relationship_pressure_basis_points);
+        self.peak_route_disruption_basis_points = self
+            .peak_route_disruption_basis_points
+            .max(snapshot.maximum_route_disruption_basis_points);
+        self.peak_city_distressed_businesses = self
+            .peak_city_distressed_businesses
+            .max(snapshot.city_distressed_businesses);
     }
 }
 
@@ -1114,12 +1124,96 @@ pub(crate) fn finish_campaign_report(
         terminal_recovery_pressure_days: accumulator.current_recovery_pressure_days,
         commission_leverage_pairs: accumulator.commission_leverage_pairs,
         player_debt_enforcement_cases: accumulator.player_debt_enforcement_cases,
+        peak_route_disruption_basis_points: accumulator.peak_route_disruption_basis_points,
+        peak_city_distressed_businesses: accumulator.peak_city_distressed_businesses,
+        rival_context: build_rival_context(state),
         fantasy_arc: accumulator.fantasy_arc,
         succession_transition: accumulator.succession_transition,
         quiet_diagnostic: accumulator.quiet_diagnostic,
         trace,
     }
 }
+
+/// Ranks every house in the city at campaign end so the report shows whether
+/// the player is actually competing for standing, not just accumulating.
+pub(crate) fn build_rival_context(state: &AppState) -> GameplayRivalContext {
+    let offices_by_dynasty = |dynasty_id: DynastyId| -> u16 {
+        usize_to_u16(
+            state
+                .institutions
+                .values()
+                .filter(|institution| {
+                    institution
+                        .office_holder_id
+                        .and_then(|character_id| state.characters.get(character_id))
+                        .is_some_and(|character| character.dynasty_id() == dynasty_id)
+                })
+                .count(),
+        )
+    };
+    let standings: Vec<GameplayRivalStanding> = state
+        .dynasties
+        .values()
+        .map(|dynasty| {
+            let operating_businesses = state
+                .businesses
+                .ids_for_owner(dynasty.id())
+                .into_iter()
+                .flatten()
+                .filter_map(|business_id| state.businesses.get(*business_id))
+                .filter(|business| {
+                    !matches!(
+                        business.status(),
+                        BusinessStatus::Insolvent | BusinessStatus::Closed
+                    )
+                })
+                .count();
+            GameplayRivalStanding {
+                dynasty_id: dynasty.id(),
+                name: dynasty.name().to_owned(),
+                is_player: dynasty.id() == state.player_dynasty_id,
+                treasury: dynasty.treasury(),
+                legitimacy_basis_points: dynasty.resources.legitimacy_basis_points,
+                offices_held: offices_by_dynasty(dynasty.id()),
+                operating_businesses: usize_to_u16(operating_businesses),
+            }
+        })
+        .collect();
+    let mut by_treasury = standings.clone();
+    // Stable descending wealth order; the dynasty ID breaks ties so parallel
+    // runs and repeated renders cannot reorder the leaderboard.
+    by_treasury.sort_by(|a, b| {
+        b.treasury
+            .cmp(&a.treasury)
+            .then(a.dynasty_id.cmp(&b.dynasty_id))
+    });
+    let player_treasury_rank = by_treasury
+        .iter()
+        .position(|standing| standing.is_player)
+        .map_or(0, |index| usize_to_u16(index + 1));
+    let mut by_legitimacy = standings;
+    by_legitimacy.sort_by(|a, b| {
+        b.legitimacy_basis_points
+            .cmp(&a.legitimacy_basis_points)
+            .then(a.dynasty_id.cmp(&b.dynasty_id))
+    });
+    let player_legitimacy_rank = by_legitimacy
+        .iter()
+        .position(|standing| standing.is_player)
+        .map_or(0, |index| usize_to_u16(index + 1));
+    GameplayRivalContext {
+        dynasty_count: usize_to_u16(state.dynasties.len()),
+        player_treasury_rank,
+        player_legitimacy_rank,
+        leaders_by_treasury: by_treasury
+            .into_iter()
+            .take(RIVAL_LEADERBOARD_SIZE)
+            .collect(),
+    }
+}
+
+/// How many houses the campaign summary leaderboard shows.
+const RIVAL_LEADERBOARD_SIZE: usize = 4;
 
 pub(crate) fn run_terminal_phase_if_needed(
     registry: &Registry,

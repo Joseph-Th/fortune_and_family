@@ -280,6 +280,14 @@ Reports contain:
 - Per-campaign `peak_player_treasury` and `minimum_unowned_property_value`
   observations, so an unexercised acquisition route can be read as an
   affordability ceiling rather than a declined choice
+- Per-campaign rival context: every house's end-of-campaign wealth, legitimacy,
+  offices, and operating firms, the player's treasury and legitimacy ranks, and
+  a leaderboard of the strongest houses, so rivalry pressure or its absence is
+  readable instead of implied
+- Aggregate world-stress observations: city-wide attributed breach contracts,
+  cumulative legal filings, peak external-route disruption, and peak counts of
+  distressed firms, so the presence or absence of material failure is part of
+  the design read
 - Per-campaign `player_breach_victim_contracts`, counting contracts that
   record the player dynasty as their attributed breach victim, so
   counterparty wrongdoing that could ground a court claim is visible even
@@ -374,6 +382,10 @@ Findings use `Info`, `Warning`, or `Critical` severity. They identify conditions
   detection, response options, and persistent consequences, so a kind absent
   from every campaign in a matrix is dead detection content rather than rare
   drama
+- Counterparty performance that never fails: a matrix in which no city-wide
+  delivery ever misses, no contract records an attributed breach victim, and no
+  legal case is ever filed means breach penalties, grounded claims, settlements,
+  and seizure drama are unreachable content rather than risky routes
 
 Finding-rule unit tests should arrange the minimum report fields needed to test the rule. They should not run a long simulation merely to obtain a mutable report template.
 

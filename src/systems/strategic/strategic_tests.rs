@@ -8475,6 +8475,17 @@ mod ai {
         );
     }
 
+    /// The canonical rival-upkeep formula lives in
+    /// [`crate::systems::strategic::ai_dynasty_monthly_upkeep`]; tests assert
+    /// against it directly so the expectation cannot drift from the rule.
+    fn ai_upkeep_expected_for_test(
+        treasury: Money,
+        family_members: usize,
+        business_count: usize,
+    ) -> Money {
+        ai_dynasty_monthly_upkeep(treasury, family_members, business_count)
+    }
+
     #[test]
     fn ai_households_pay_proportional_monthly_upkeep() {
         let mut state = make_test_campaign();
@@ -8500,15 +8511,7 @@ mod ai {
             .ids_for_owner(dynasty_id)
             .expect("rival owner index must exist")
             .len();
-        let expected = AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY
-            .saturating_add(
-                AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER
-                    .saturating_mul(i64::try_from(family_members).unwrap_or(i64::MAX)),
-            )
-            .saturating_add(
-                AI_DYNASTY_UPKEEP_PER_BUSINESS
-                    .saturating_mul(i64::try_from(business_count).unwrap_or(i64::MAX)),
-            );
+        let expected = ai_upkeep_expected_for_test(treasury_before, family_members, business_count);
         assert!(
             expected > Money::ZERO,
             "rival household upkeep must be nonzero"
@@ -8577,14 +8580,11 @@ mod ai {
             .expect("rival dynasty must have a family council")
             .members
             .len();
-        let expected = AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY
-            .saturating_add(
-                AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER
-                    .saturating_mul(i64::try_from(family_members).unwrap_or(i64::MAX)),
-            )
-            .saturating_add(AI_DYNASTY_UPKEEP_PER_BUSINESS.saturating_mul(
-                i64::try_from(business_count_before.saturating_sub(1)).unwrap_or(i64::MAX),
-            ));
+        let expected = ai_upkeep_expected_for_test(
+            treasury_before,
+            family_members,
+            business_count_before.saturating_sub(1),
+        );
 
         apply_ai_dynasty_upkeep(&mut state).expect("AI dynasty upkeep must commit");
 

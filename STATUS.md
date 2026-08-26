@@ -12,7 +12,7 @@ This document defines the current implementation surface, schemas, runtime guara
 | Save schema | 30 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 68 |
+| Gameplay report schema | 69 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -50,8 +50,8 @@ Civic Dynasty campaigns support deterministic continuation across multiple gener
 | Civic systems | Laws, differentiated public works, district conditions, grounded legal cases and settlements with filing fees funding the Civic Court, crisis response, municipal debt, and private funding of any unfinished public work — a dynasty's own project or another house's stalled one, with external contributions earning visible legitimacy and sponsor gratitude. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, and interaction dates. |
 | Information | Source, confidence, subject, summary, creation, expiry, passive reports, and paid market/district/counterparty intelligence. |
-| AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; monthly household upkeep penalizing shortfalls; private-credit participation funding sound firms first, with punitive speculative credit once a house carries a live loan, so repayment failure, seizure, and grounded legal claims arise organically. The debt objective pays the most urgent repayment-active loan first and leaves defaulted paper to restructuring or the court. |
-| Crises | Grain, banking, fire, epidemic, guild, external-authority, and trade crises with detection, escalation, response, resolution, and recovery. A response counts as ongoing containment for a bounded window; after it, on a persistent or re-escalated crisis, organized responses are legitimate again. A paid trade-disruption response never raises tracked severity; the disruption resolves when every route heals below detection. A resolved panic raises the default bar for three years. |
+| AI | Deterministic objectives for property, supply, office, debt, legitimacy, liquidity, and rival pressure; monthly household upkeep with great-house wealth stewardship penalizing hoards; private-credit participation funding sound firms first, with punitive speculative credit reserved for liquidity-strained houses or structurally losing firms. Rival supply contracts commit near real weekly input need at penalties scaled to scheduled value. |
+| Crises | Seven kinds with detection, escalation, response, resolution, and recovery: grain, banking, fire, epidemic, guild revolt, noble demand, and trade disruption. A response counts as containment for a bounded window; afterwards persistent crises may be answered again. Trade disruption resolves when every route heals below detection; paid responses never inflate severity. Route spikes outweigh calm healing and the levy is annual. A resolved panic raises the default bar for three years. |
 | Observability | State summary, campaign projection, HTML dashboard, outbox, chronicle, audit history, validation, campaign progression, gameplay reports with causal feedback traces, and art review reports. |
 
 ## Player command surface

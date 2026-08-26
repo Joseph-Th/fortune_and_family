@@ -243,6 +243,10 @@ pub(crate) struct HealthSummary {
     pub defaulted_civic_debts: u64,
     pub completed_works: u64,
     pub suspended_works: u64,
+    pub attributed_breach_contracts: u64,
+    pub legal_cases_filed_total: u64,
+    pub route_disruption_peak: (u16, u16),
+    pub city_distressed_business_peak: (u16, u16),
 }
 
 impl HealthSummary {
@@ -299,6 +303,16 @@ impl HealthSummary {
             defaulted_civic_debts: 0,
             completed_works: 0,
             suspended_works: 0,
+            attributed_breach_contracts: 0,
+            legal_cases_filed_total: 0,
+            route_disruption_peak: (
+                first.peak_route_disruption_basis_points,
+                first.peak_route_disruption_basis_points,
+            ),
+            city_distressed_business_peak: (
+                first.peak_city_distressed_businesses,
+                first.peak_city_distressed_businesses,
+            ),
         }
     }
 
@@ -400,6 +414,24 @@ impl HealthSummary {
         self.suspended_works = self
             .suspended_works
             .saturating_add(u64::from(campaign.end.suspended_public_works));
+        self.observe_world_stress(campaign);
+    }
+
+    fn observe_world_stress(&mut self, campaign: &GameplayCampaignReport) {
+        self.attributed_breach_contracts = self
+            .attributed_breach_contracts
+            .saturating_add(u64::from(campaign.end.attributed_breach_contracts));
+        self.legal_cases_filed_total = self
+            .legal_cases_filed_total
+            .saturating_add(u64::from(campaign.end.legal_cases_filed_total));
+        update_range(
+            &mut self.route_disruption_peak,
+            campaign.peak_route_disruption_basis_points,
+        );
+        update_range(
+            &mut self.city_distressed_business_peak,
+            campaign.peak_city_distressed_businesses,
+        );
     }
 
     pub fn observe_civic_conditions(&mut self, snapshot: &GameplaySnapshot) {
@@ -482,6 +514,16 @@ pub(crate) fn render_health_summary(report: &GameplayHarnessReport, output: &mut
         summary.defaulted_civic_debts,
         summary.completed_works,
         summary.suspended_works,
+    );
+    let _ = writeln!(
+        output,
+        "  world stress: attributed breach contracts {} | legal cases filed {} | route disruption peak {}-{} bp | city distressed-firm peak {}-{}",
+        summary.attributed_breach_contracts,
+        summary.legal_cases_filed_total,
+        summary.route_disruption_peak.0,
+        summary.route_disruption_peak.1,
+        summary.city_distressed_business_peak.0,
+        summary.city_distressed_business_peak.1,
     );
     let _ = writeln!(
         output,
@@ -829,6 +871,31 @@ pub(crate) fn render_campaign_summaries(report: &GameplayHarnessReport, output: 
             Money::from_copper(ledger_margin),
             campaign.end.player_business_cash
         );
+        let _ = writeln!(
+            output,
+            "      city | houses {} | wealth rank {}/{} | legitimacy rank {}/{} | breach victims seen {} | cases filed {} | route disruption peak {} bp | distressed firms peak {}",
+            campaign.rival_context.dynasty_count,
+            campaign.rival_context.player_treasury_rank,
+            campaign.rival_context.dynasty_count,
+            campaign.rival_context.player_legitimacy_rank,
+            campaign.rival_context.dynasty_count,
+            campaign.end.attributed_breach_contracts,
+            campaign.end.legal_cases_filed_total,
+            campaign.peak_route_disruption_basis_points,
+            campaign.peak_city_distressed_businesses
+        );
+        for leader in &campaign.rival_context.leaders_by_treasury {
+            let _ = writeln!(
+                output,
+                "        {}{} | treasury {} | legit {:.0}% | offices {} | firms {}",
+                if leader.is_player { "> " } else { "" },
+                leader.name,
+                leader.treasury,
+                f64::from(leader.legitimacy_basis_points) / 100.0,
+                leader.offices_held,
+                leader.operating_businesses
+            );
+        }
         if let Some(transition) = campaign.succession_transition {
             let _ = writeln!(
                 output,
@@ -1179,8 +1246,10 @@ pub(crate) fn truncate_label(text: &str, max_chars: usize) -> String {
     if total <= max_chars {
         return text.to_owned();
     }
-    let prefix: String = characters.take(max_chars.saturating_sub(1)).collect();
-    format!("{prefix}…")
+    // An ASCII ellipsis keeps console output legible on code pages where the
+    // Unicode character renders as mojibake.
+    let prefix: String = characters.take(max_chars.saturating_sub(3)).collect();
+    format!("{prefix}...")
 }
 
 pub(crate) fn trace_signal_labels(signals: &BTreeSet<GameplayTraceSignal>) -> String {

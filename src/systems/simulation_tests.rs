@@ -3680,7 +3680,7 @@ mod health_and_succession {
                 .filter(|character| {
                     character.dynasty_id() == dynasty_id && character.id() != head_id
                 })
-                .map(|character| character.id())
+                .map(Character::id)
                 .collect();
             for member_id in non_active {
                 council.members.remove(&member_id);

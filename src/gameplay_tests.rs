@@ -8272,6 +8272,52 @@ mod findings {
     }
 
     #[test]
+    fn findings_surface_a_city_where_counterparty_performance_never_fails() {
+        let report = cached_focused_report(30);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        let campaigns: Vec<_> = (1_u64..=3)
+            .map(|seed| {
+                let mut campaign = template.clone();
+                campaign.seed = seed;
+                campaign.end.contract_failures = 0;
+                campaign.end.attributed_breach_contracts = 0;
+                campaign.end.legal_cases_filed_total = 0;
+                campaign
+            })
+            .collect();
+        let mut findings = Vec::new();
+
+        add_counterparty_risk_finding(&campaigns, &mut findings);
+
+        let finding = finding_with_title(
+            &findings,
+            "Counterparty performance never fails, so enforcement stays unreachable",
+        );
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+        assert!(
+            finding
+                .evidence
+                .contains("zero city-wide contract deliveries"),
+            "the evidence must name the missing grievance flow"
+        );
+
+        // One attributed breach somewhere in the city means grievances exist
+        // and the enforcement chain is reachable; no finding is due.
+        let mut one_failure = template.clone();
+        one_failure.end.attributed_breach_contracts = 1;
+        let mut healthy_findings = Vec::new();
+        add_counterparty_risk_finding(&[one_failure], &mut healthy_findings);
+        assert!(
+            healthy_findings.is_empty(),
+            "a matrix with attributed breaches must not produce the risk-free finding"
+        );
+    }
+
+    #[test]
     fn findings_surface_mature_liquidity_without_financial_pressure() {
         let report = cached_focused_report(30);
         let template = report

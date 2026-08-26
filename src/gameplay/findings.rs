@@ -24,6 +24,7 @@ pub(crate) fn derive_findings(
     add_welfare_dynamism_finding(aggregate, campaigns, &mut findings);
     add_long_horizon_risk_findings(aggregate, campaigns, &mut findings);
     add_player_borrowing_distress_finding(campaigns, &mut findings);
+    add_counterparty_risk_finding(campaigns, &mut findings);
     add_mature_capital_pressure_finding(campaigns, &mut findings);
     add_starting_trade_economic_balance_finding(campaigns, &mut findings);
     add_rival_commercial_pressure_finding(aggregate, campaigns, &mut findings);
@@ -1354,6 +1355,43 @@ pub(crate) fn add_background_route_coverage_findings(
             });
         }
     }
+}
+
+/// Detects a city whose commercial obligations never fail: no contract
+/// delivery ever misses, no counterparty is ever recorded as a breach victim,
+/// and no legal case is ever filed. Under those conditions the courts, breach
+/// penalties, and enforcement claims are unreachable content rather than
+/// risky routes, so the report names the missing grievance flow directly.
+pub(crate) fn add_counterparty_risk_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if campaigns.is_empty() {
+        return;
+    }
+    let total_contract_failures: u64 = campaigns
+        .iter()
+        .map(|campaign| u64::from(campaign.end.contract_failures))
+        .sum();
+    let total_attributed_breaches: u64 = campaigns
+        .iter()
+        .map(|campaign| u64::from(campaign.end.attributed_breach_contracts))
+        .sum();
+    let total_legal_cases: u64 = campaigns
+        .iter()
+        .map(|campaign| u64::from(campaign.end.legal_cases_filed_total))
+        .sum();
+    if total_contract_failures > 0 || total_attributed_breaches > 0 || total_legal_cases > 0 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Counterparty performance never fails, so enforcement stays unreachable".to_owned(),
+        evidence: format!(
+            "Across {} campaign(s), zero city-wide contract deliveries were missed, no contract recorded an attributed breach victim, and no legal case was ever filed. Breach penalties, grounded court claims, settlements, and debt-seizure drama cannot occur without an originating grievance; treat the absence as a fulfillment-risk tuning signal rather than agent restraint.",
+            campaigns.len(),
+        ),
+    });
 }
 
 pub(crate) fn add_debt_enforcement_ecosystem_finding(

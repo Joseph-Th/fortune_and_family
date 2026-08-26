@@ -314,6 +314,14 @@ pub struct GameplaySnapshot {
     pub open_legal_cases: u16,
     pub player_open_legal_cases_as_defendant: u16,
     pub decided_legal_cases: u16,
+    /// Contracts city-wide that ever recorded an attributed breach victim,
+    /// whether or not the penalty has since been discharged.
+    pub attributed_breach_contracts: u16,
+    /// Every legal case ever filed in the city, in any status. Cases are
+    /// retained, so this is cumulative filing volume rather than a stock.
+    pub legal_cases_filed_total: u16,
+    pub maximum_route_disruption_basis_points: u16,
+    pub city_distressed_businesses: u16,
     pub legal_case_state_checksum: u64,
     pub active_crises: u16,
     pub escalated_crises: u16,
@@ -1075,6 +1083,10 @@ pub(crate) struct WorldSnapshotPart {
     pub open_legal_cases: u16,
     pub player_open_legal_cases_as_defendant: u16,
     pub decided_legal_cases: u16,
+    pub attributed_breach_contracts: u16,
+    pub legal_cases_filed_total: u16,
+    pub maximum_route_disruption_basis_points: u16,
+    pub city_distressed_businesses: u16,
     pub active_crises: u16,
     pub escalated_crises: u16,
     pub resolved_crises: u16,
@@ -1106,6 +1118,27 @@ impl WorldSnapshotPart {
             open_legal_cases: count_open_legal_cases(state),
             player_open_legal_cases_as_defendant: count_player_open_legal_cases_as_defendant(state),
             decided_legal_cases: count_decided_legal_cases(state),
+            attributed_breach_contracts: usize_to_u16(
+                state
+                    .contracts
+                    .values()
+                    .filter(|contract| contract.breach_victim_dynasty_id.is_some())
+                    .count(),
+            ),
+            legal_cases_filed_total: usize_to_u16(state.legal_cases.len()),
+            maximum_route_disruption_basis_points: state
+                .external_routes
+                .values()
+                .map(|route| route.disruption_basis_points)
+                .max()
+                .unwrap_or(0),
+            city_distressed_businesses: usize_to_u16(
+                state
+                    .businesses
+                    .iter()
+                    .filter(|business| business.status() == BusinessStatus::Distressed)
+                    .count(),
+            ),
             active_crises: usize_to_u16(
                 state
                     .crises
@@ -1309,6 +1342,10 @@ macro_rules! assemble_gameplay_snapshot {
             open_legal_cases: $world.open_legal_cases,
             player_open_legal_cases_as_defendant: $world.player_open_legal_cases_as_defendant,
             decided_legal_cases: $world.decided_legal_cases,
+            attributed_breach_contracts: $world.attributed_breach_contracts,
+            legal_cases_filed_total: $world.legal_cases_filed_total,
+            maximum_route_disruption_basis_points: $world.maximum_route_disruption_basis_points,
+            city_distressed_businesses: $world.city_distressed_businesses,
             legal_case_state_checksum: stable_serialized_checksum(&$state.legal_cases),
             active_crises: $world.active_crises,
             escalated_crises: $world.escalated_crises,
@@ -1792,6 +1829,31 @@ pub struct GameplayFantasyArc {
     pub first_succession_day: Option<i64>,
 }
 
+/// One dynasty's end-of-campaign standing in the city power ranking.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameplayRivalStanding {
+    pub dynasty_id: DynastyId,
+    pub name: String,
+    pub is_player: bool,
+    pub treasury: Money,
+    pub legitimacy_basis_points: u16,
+    pub offices_held: u16,
+    pub operating_businesses: u16,
+}
+
+/// Where the player's house stands among the city's dynasties at campaign
+/// end, so rivalry pressure (or its absence) is readable instead of implied.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameplayRivalContext {
+    pub dynasty_count: u16,
+    /// 1-based rank of the player's treasury among all houses.
+    pub player_treasury_rank: u16,
+    /// 1-based rank of the player's legitimacy among all houses.
+    pub player_legitimacy_rank: u16,
+    /// The strongest rival houses plus the player, ordered by treasury.
+    pub leaders_by_treasury: Vec<GameplayRivalStanding>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameplaySuccessionTransition {
     pub day: i64,
@@ -1949,6 +2011,9 @@ pub struct GameplayCampaignReport {
     pub terminal_recovery_pressure_days: u32,
     pub commission_leverage_pairs: u16,
     pub player_debt_enforcement_cases: u16,
+    pub peak_route_disruption_basis_points: u16,
+    pub peak_city_distressed_businesses: u16,
+    pub rival_context: GameplayRivalContext,
     pub fantasy_arc: GameplayFantasyArc,
     pub succession_transition: Option<GameplaySuccessionTransition>,
     pub quiet_diagnostic: GameplayQuietDiagnostic,

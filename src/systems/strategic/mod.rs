@@ -43,6 +43,13 @@ const OFFICE_STIPEND_PER_POWER: Money = Money::from_copper(40);
 const AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY: Money = Money::from_copper(500);
 const AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER: Money = Money::from_copper(250);
 const AI_DYNASTY_UPKEEP_PER_BUSINESS: Money = Money::from_copper(400);
+/// Standing costs of great-house display grow with stored wealth: retainers,
+/// obligations, and civic expectation scale off everything above this
+/// threshold each month. Hoarded treasure therefore bleeds instead of
+/// compounding without limit, keeping rivals reachably mortal and the city's
+/// wealth circulating through the same economy everyone else uses.
+const AI_DYNASTY_WEALTH_UPKEEP_THRESHOLD: Money = Money::from_copper(40_000);
+const AI_DYNASTY_WEALTH_UPKEEP_BASIS_POINTS: i64 = 150;
 const AI_DYNASTY_UPKEEP_SHORTFALL_LEGITIMACY_PENALTY: u16 = 60;
 const AI_DYNASTY_UPKEEP_SHORTFALL_RELIABILITY_PENALTY: u16 = 120;
 const OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS: i64 = 90;
@@ -85,16 +92,21 @@ const DISTRICT_FORMAL_EMPLOYMENT_BASIS_POINTS_PER_WORKER: u32 = 100;
 const DISTRICT_MAX_FORMAL_EMPLOYMENT_BONUS_BASIS_POINTS: u32 = 4_500;
 const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = 2_500;
 
-/// Speculative credit terms: risk capital carries roughly double the standard
-/// rate on a shorter book, is capped below the working-capital ceiling, and is
-/// secured by whatever unpledged property the borrower can offer, so a failed
-/// speculation costs the borrower real assets instead of only reputation.
-const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 1_500;
-const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 52;
-const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(6_000);
-/// Monthly risk-appetite draw per liquid house: speculative offers are rare
-/// enough that a campaign accumulates a handful, not a debt spiral.
-const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 3_000;
+/// Speculative credit terms: risk capital carries a punishing rate on a short,
+/// heavy book, is capped near the working-capital ceiling, and is secured by
+/// whatever unpledged property the borrower can offer, so a failed speculation
+/// costs the borrower real assets instead of only reputation. The installment
+/// is deliberately large relative to a losing firm's distribution stream:
+/// some of these loans rescue the borrower, others miss installments within
+/// months, fall delinquent, default, and ground the enforcement claims that
+/// keep courts, seizure, and banking panics reachable inside one session.
+const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 2_500;
+const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 22;
+const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(10_000);
+/// Monthly risk-appetite draw per liquid house: speculative offers stay a
+/// minority of the lending book while still arriving several times per
+/// campaign instead of roughly once per session.
+const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 4_500;
 
 mod ai;
 mod businesses;

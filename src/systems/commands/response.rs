@@ -209,7 +209,7 @@ pub(crate) fn validate_crisis_response_history(
         .rev()
         .take_while(|record| record.day() >= window_cutoff)
         .filter(|record| record.kind() == AuditKind::CrisisResponse && record.subject() == subject)
-        .any(|record| crate::systems::strategic::crisis_response_contains_crisis(record));
+        .any(crate::systems::strategic::crisis_response_contains_crisis);
     let has_exploitation_response = state.audit_log.iter().any(|record| {
         record.kind() == AuditKind::CrisisResponse
             && record.subject() == subject

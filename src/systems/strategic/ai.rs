@@ -11,6 +11,33 @@ pub(crate) enum ObjectiveProgress {
 
 pub(crate) const AI_OBJECTIVE_REVIEW_DAYS: i64 = 720;
 pub(crate) const AI_BUSINESS_RECOVERY_TREASURY_RESERVE: Money = Money::from_copper(20_000);
+/// Routine patronage buys rival legitimacy only up to this plateau: standing
+/// above it must come from offices, works, and crisis stewardship rather than
+/// a monthly stipend, so passive rivals cannot out-rank an actively governing
+/// house indefinitely.
+pub(crate) const AI_LEGITIMACY_OBJECTIVE_CEILING_BASIS_POINTS: u16 = 5_800;
+
+/// The canonical rival-house monthly upkeep: household base, per-member and
+/// per-business charges, plus great-house wealth stewardship — a percentage of
+/// everything the house holds above the threshold, so hoards bleed toward
+/// levels the house's real income can sustain instead of compounding forever.
+pub(crate) fn ai_dynasty_monthly_upkeep(
+    treasury: Money,
+    family_members: usize,
+    business_count: usize,
+) -> Money {
+    let family = AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER
+        .saturating_mul(i64::try_from(family_members).unwrap_or(i64::MAX));
+    let portfolio = AI_DYNASTY_UPKEEP_PER_BUSINESS
+        .saturating_mul(i64::try_from(business_count).unwrap_or(i64::MAX));
+    let excess_wealth = treasury.saturating_sub(AI_DYNASTY_WEALTH_UPKEEP_THRESHOLD);
+    let wealth_stewardship =
+        excess_wealth.saturating_mul_ratio(AI_DYNASTY_WEALTH_UPKEEP_BASIS_POINTS, 10_000);
+    AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY
+        .saturating_add(family)
+        .saturating_add(portfolio)
+        .saturating_add(wealth_stewardship)
+}
 
 impl ObjectiveProgress {
     const fn from_achieved(achieved: bool) -> Self {
@@ -65,13 +92,7 @@ pub(crate) fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), Simula
     let mut total_upkeep = Money::ZERO;
     let mut total_shortfall = Money::ZERO;
     for (dynasty_id, family_members, business_count, treasury) in dynasties {
-        let family = AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER
-            .saturating_mul(i64::try_from(family_members).unwrap_or(i64::MAX));
-        let portfolio = AI_DYNASTY_UPKEEP_PER_BUSINESS
-            .saturating_mul(i64::try_from(business_count).unwrap_or(i64::MAX));
-        let required = AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY
-            .saturating_add(family)
-            .saturating_add(portfolio);
+        let required = ai_dynasty_monthly_upkeep(treasury, family_members, business_count);
         if required == Money::ZERO {
             continue;
         }
@@ -365,8 +386,15 @@ pub(crate) fn ai_credit_lending_offer(
     speculative_lending_offer(registry, state, player_id, lender_id, active_book)
 }
 
-/// The punitive recovery-loan pool: the most undercapitalized losing firm of an
-/// otherwise unleveraged rival house.
+/// The punitive recovery-loan pool: the most undercapitalized losing firm of
+/// an otherwise unleveraged rival house.
+///
+/// The borrower must genuinely need the money: a house whose treasury could
+/// fund the shortfall itself recapitalizes directly instead of paying punitive
+/// interest, so speculative books land on houses whose own liquidity is too
+/// thin to rescue the firm. That overextension is what makes some of these
+/// loans miss installments, default, and ground enforcement claims instead of
+/// being risk-free theater.
 pub(crate) fn speculative_lending_offer(
     registry: &Registry,
     state: &mut AppState,
@@ -374,7 +402,7 @@ pub(crate) fn speculative_lending_offer(
     lender_id: DynastyId,
     active_book: &ActiveAiLoanBook,
 ) -> Option<AiCreditLendingOffer> {
-    state
+    let candidates: Vec<(AiCreditLendingOffer, Money)> = state
         .dynasties
         .keys()
         .copied()
@@ -383,19 +411,48 @@ pub(crate) fn speculative_lending_offer(
             if active_book.has_active_borrowing(candidate_id) {
                 return None;
             }
-            best_speculative_business(registry, state, candidate_id).map(
-                |(business_id, shortfall)| AiCreditLendingOffer {
+            let candidate = best_speculative_business(registry, state, candidate_id)?;
+            let (_, shortfall) = candidate;
+            let treasury = state
+                .dynasties
+                .get(&candidate_id)
+                .map_or(Money::ZERO, crate::core::Dynasty::treasury);
+            // Two borrower profiles justify punitive risk capital: a house
+            // too thin to fund the recapitalization itself, or any house
+            // whose firm is structurally losing rather than temporarily
+            // short. Both are genuine recovery bets; a rich house rescuing a
+            // merely undercapitalized profitable firm is not, and its certain
+            // repayment would make the speculative book risk-free theater.
+            let firm_is_structural_loser =
+                state.businesses.get(candidate.0).is_some_and(|business| {
+                    business.finance.lifetime_costs > business.finance.lifetime_revenue
+                });
+            let house_cannot_self_fund =
+                treasury < shortfall.saturating_add(AI_BUSINESS_RECOVERY_TREASURY_RESERVE);
+            if !firm_is_structural_loser && !house_cannot_self_fund {
+                return None;
+            }
+            Some((
+                AiCreditLendingOffer {
                     borrower_dynasty_id: candidate_id,
-                    business_id,
+                    business_id: candidate.0,
                     shortfall,
                     principal_cap: SPECULATIVE_LOAN_MAX_PRINCIPAL,
                     interest_basis_points: SPECULATIVE_LOAN_INTEREST_BASIS_POINTS,
                     term_weeks: SPECULATIVE_LOAN_TERM_WEEKS,
                     collateral_property_id: unpledged_borrower_property(state, candidate_id),
                 },
-            )
+                treasury,
+            ))
         })
-        .max_by_key(|offer| offer.shortfall)
+        .collect();
+    // Among equal needs, lend down: the thinnest treasury is both the house
+    // most dependent on outside capital and the one whose repayment is a real
+    // bet instead of a formality.
+    candidates
+        .into_iter()
+        .max_by_key(|(offer, treasury)| (offer.shortfall, std::cmp::Reverse(*treasury)))
+        .map(|(offer, _)| offer)
 }
 
 /// The most undercapitalized creditworthy business owned by a dynasty, when its
@@ -940,12 +997,18 @@ pub(crate) fn advance_ai_supply_objective(
         })
         .collect();
     for buyer_id in owner_businesses {
-        let buyer = state
+        let buyer_capacity_batches_per_day = state
             .businesses
             .get(buyer_id)
-            .expect("indexed business must exist");
+            .map_or(0, |buyer| buyer.operations.capacity_batches_per_day);
         let recipe = registry
-            .get_recipe(buyer.recipe_id())
+            .get_recipe(
+                state
+                    .businesses
+                    .get(buyer_id)
+                    .expect("indexed business must exist")
+                    .recipe_id(),
+            )
             .expect("business recipe must resolve");
         for input in recipe.inputs() {
             let already = state.contracts.values().any(|contract| {
@@ -975,13 +1038,43 @@ pub(crate) fn advance_ai_supply_objective(
                 .get_quote(input.good_id())
                 .expect("market quote must exist")
                 .price();
+            // Commit most of the buyer's real weekly consumption rather than
+            // a token batch count: a commitment sized near genuine need makes
+            // seller performance matter, so a bad month at the selling firm
+            // can produce an attributable miss instead of every obligation
+            // being serviced perfectly forever. The five-day basis matches
+            // `CONTRACT_CAPACITY_COMMITMENT_DAYS`, keeping open-market trade
+            // possible alongside the contract.
+            let weekly_need = input.quantity().saturating_mul_ratio(
+                i64::from(buyer_capacity_batches_per_day)
+                    .saturating_mul(CONTRACT_CAPACITY_COMMITMENT_DAYS),
+                1,
+            );
+            let capacity = available_supply_contract_capacity(
+                registry,
+                state,
+                buyer_id,
+                seller_id,
+                input.good_id(),
+            );
+            let quantity_per_week = capacity.map_or_else(
+                || input.quantity().saturating_mul_ratio(4, 1),
+                |capacity| weekly_need.min(capacity.buyer).min(capacity.seller),
+            );
+            if quantity_per_week <= Quantity::ZERO {
+                continue;
+            }
+            let weekly_payment = cost_for(quantity_per_week, price);
+            let Some(penalty) = weekly_payment.checked_mul_ratio(2, 1) else {
+                continue;
+            };
             let terms = SupplyContractTerms {
                 buyer_business_id: buyer_id,
                 seller_business_id: seller_id,
                 good_id: input.good_id(),
-                quantity_per_week: input.quantity().saturating_mul_ratio(4, 1),
+                quantity_per_week,
                 unit_price: price,
-                penalty: Money::from_copper(500),
+                penalty,
                 duration_weeks: 26,
             };
             if ai_strategic_attempt(&sign_supply_contract(registry, state, terms))? {
@@ -1047,9 +1140,12 @@ pub(crate) fn advance_ai_legitimacy_objective(
         .resources
         .legitimacy_basis_points;
     // Bootstrap houses start near 4,500 bp and this objective's own patronage
-    // yields at most +120 bp per month within a two-year review window, so the
-    // target must stay inside that envelope (4,500 + 24 x 120 = 7,380).
-    if legitimacy_before >= 7_000 {
+    // yields at most +120 bp per month. The ceiling stays deliberately below
+    // the old 7,000: a rival house that merely pays routine patronage must not
+    // tower over an actively governing player whose city-shaping commands
+    // spend legitimacy, so idle prestige plateaus mid-scale while earned
+    // standing (offices, works, crisis response) remains the way upward.
+    if legitimacy_before >= AI_LEGITIMACY_OBJECTIVE_CEILING_BASIS_POINTS {
         return Ok(ObjectiveProgress::Achieved);
     }
     let spend = state

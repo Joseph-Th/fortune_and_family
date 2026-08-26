@@ -40,7 +40,6 @@ pub(crate) fn advance_legal_case_hearings(state: &mut AppState) -> Result<(), Si
 }
 
 pub(crate) fn resolve_legal_cases(state: &mut AppState) -> Result<(), SimulationError> {
-    let day = state.clock.day();
     let due: Vec<_> = state
         .legal_cases
         .values()
@@ -48,7 +47,7 @@ pub(crate) fn resolve_legal_cases(state: &mut AppState) -> Result<(), Simulation
             matches!(
                 case.status,
                 LegalCaseStatus::Filed | LegalCaseStatus::Hearing
-            ) && case.hearing_day <= day
+            ) && case.hearing_day <= state.clock.day()
         })
         .map(|case| {
             (
@@ -64,92 +63,121 @@ pub(crate) fn resolve_legal_cases(state: &mut AppState) -> Result<(), Simulation
         })
         .collect();
     for (id, plaintiff_id, defendant_id, kind, claim_source, evidence, attention, damages) in due {
-        let plaintiff_legitimacy = state
-            .dynasties
-            .get(&plaintiff_id)
-            .expect("legal plaintiff must exist")
-            .resources
-            .legitimacy_basis_points;
-        let defendant_legitimacy = state
-            .dynasties
-            .get(&defendant_id)
-            .expect("legal defendant must exist")
-            .resources
-            .legitimacy_basis_points;
-        let plaintiff_score = u32::from(evidence)
-            .saturating_mul(2)
-            .saturating_add(u32::from(attention))
-            .saturating_add(u32::from(plaintiff_legitimacy));
-        let defendant_score = 10_000_u32
-            .saturating_sub(u32::from(evidence))
-            .saturating_mul(2)
-            .saturating_add(u32::from(defendant_legitimacy));
-        let plaintiff_wins = plaintiff_score >= defendant_score;
-        let (awarded, paid) = if plaintiff_wins {
-            let awarded = recoverable_legal_damages(state, claim_source, damages);
-            let paid = settle_legal_damages(state, plaintiff_id, defendant_id, awarded)?;
-            settle_legal_claim_source(
-                state,
-                claim_source,
-                plaintiff_id,
-                defendant_id,
-                paid,
-                false,
-                true,
-            );
-            (awarded, paid)
-        } else {
-            (Money::ZERO, Money::ZERO)
-        };
-        // Winning a grounded claim over an obligation that no longer exists is
-        // a hollow victory: the court rules on the paperwork, but a dispute
-        // over a cured debt must not poison the relationship as if real
-        // damages had been suffered.
-        let hollow_victory = plaintiff_wins && claim_source.is_some() && awarded == Money::ZERO;
-        state
-            .legal_cases
-            .get_mut(&id)
-            .expect("legal case must exist")
-            .status = if plaintiff_wins {
-            LegalCaseStatus::DecidedForPlaintiff
-        } else {
-            LegalCaseStatus::DecidedForDefendant
-        };
-        adjust_dynasty_relationship(
+        decide_legal_case(
             state,
+            id,
             plaintiff_id,
             defendant_id,
-            if hollow_victory {
-                RelationshipDelta::new(-5, 5, 5, 20, 0)
-            } else {
-                RelationshipDelta::new(-60, 20, 50, 120, 0)
-            },
+            kind,
+            claim_source,
+            evidence,
+            attention,
+            damages,
+        )?;
+    }
+    Ok(())
+}
+
+/// Hears one due case: weighs evidence and standing, settles whatever the
+/// losing party can pay against the grounded claim source, and records the
+/// relational aftermath.
+#[allow(clippy::too_many_arguments)]
+fn decide_legal_case(
+    state: &mut AppState,
+    id: crate::ids::LegalCaseId,
+    plaintiff_id: DynastyId,
+    defendant_id: DynastyId,
+    kind: LegalCaseKind,
+    claim_source: Option<LegalClaimSource>,
+    evidence: u16,
+    attention: u16,
+    damages: Money,
+) -> Result<(), SimulationError> {
+    let plaintiff_legitimacy = state
+        .dynasties
+        .get(&plaintiff_id)
+        .expect("legal plaintiff must exist")
+        .resources
+        .legitimacy_basis_points;
+    let defendant_legitimacy = state
+        .dynasties
+        .get(&defendant_id)
+        .expect("legal defendant must exist")
+        .resources
+        .legitimacy_basis_points;
+    let plaintiff_score = u32::from(evidence)
+        .saturating_mul(2)
+        .saturating_add(u32::from(attention))
+        .saturating_add(u32::from(plaintiff_legitimacy));
+    let defendant_score = 10_000_u32
+        .saturating_sub(u32::from(evidence))
+        .saturating_mul(2)
+        .saturating_add(u32::from(defendant_legitimacy));
+    let plaintiff_wins = plaintiff_score >= defendant_score;
+    let (awarded, paid) = if plaintiff_wins {
+        let awarded = recoverable_legal_damages(state, claim_source, damages);
+        let paid = settle_legal_damages(state, plaintiff_id, defendant_id, awarded)?;
+        settle_legal_claim_source(
+            state,
+            claim_source,
+            plaintiff_id,
+            defendant_id,
+            paid,
+            false,
+            true,
         );
-        if plaintiff_id == state.player_dynasty_id || defendant_id == state.player_dynasty_id {
-            try_push_outbox(
-                state,
-                OutboxKind::Legal,
-                format!("Legal case {id} decided"),
-                if !plaintiff_wins {
-                    format!(
-                        "The court decided the {kind:?} claim for dynasty {defendant_id}; no damages were awarded."
-                    )
-                } else if hollow_victory {
-                    format!(
-                        "The court decided the {kind:?} claim for dynasty {plaintiff_id}, but the underlying obligation had already been cured, so no damages were due."
-                    )
+        (awarded, paid)
+    } else {
+        (Money::ZERO, Money::ZERO)
+    };
+    // Winning a grounded claim over an obligation that no longer exists is
+    // a hollow victory: the court rules on the paperwork, but a dispute
+    // over a cured debt must not poison the relationship as if real
+    // damages had been suffered.
+    let hollow_victory = plaintiff_wins && claim_source.is_some() && awarded == Money::ZERO;
+    state
+        .legal_cases
+        .get_mut(&id)
+        .expect("legal case must exist")
+        .status = if plaintiff_wins {
+        LegalCaseStatus::DecidedForPlaintiff
+    } else {
+        LegalCaseStatus::DecidedForDefendant
+    };
+    adjust_dynasty_relationship(
+        state,
+        plaintiff_id,
+        defendant_id,
+        if hollow_victory {
+            RelationshipDelta::new(-5, 5, 5, 20, 0)
+        } else {
+            RelationshipDelta::new(-60, 20, 50, 120, 0)
+        },
+    );
+    if plaintiff_id == state.player_dynasty_id || defendant_id == state.player_dynasty_id {
+        try_push_outbox(
+            state,
+            OutboxKind::Legal,
+            format!("Legal case {id} decided"),
+            if !plaintiff_wins {
+                format!(
+                    "The court decided the {kind:?} claim for dynasty {defendant_id}; no damages were awarded."
+                )
+            } else if hollow_victory {
+                format!(
+                    "The court decided the {kind:?} claim for dynasty {plaintiff_id}, but the underlying obligation had already been cured, so no damages were due."
+                )
+            } else {
+                let settlement_note = if claim_source.is_some() {
+                    " The grounded source obligation is settled by the judgment."
                 } else {
-                    let settlement_note = if claim_source.is_some() {
-                        " The grounded source obligation is settled by the judgment."
-                    } else {
-                        ""
-                    };
-                    format!(
-                        "The court decided the {kind:?} claim for dynasty {plaintiff_id}, awarded {awarded}, and recovered {paid} immediately.{settlement_note}"
-                    )
-                },
-            )?;
-        }
+                    ""
+                };
+                format!(
+                    "The court decided the {kind:?} claim for dynasty {plaintiff_id}, awarded {awarded}, and recovered {paid} immediately.{settlement_note}"
+                )
+            },
+        )?;
     }
     Ok(())
 }
@@ -347,9 +375,21 @@ pub(crate) fn execute_judgment_against_collateral(
 }
 
 /// A single bad month adds between these bounds of route disruption.
-pub(crate) const ROUTE_DISRUPTION_SPIKE_MIN_BASIS_POINTS: u16 = 1_500;
-pub(crate) const ROUTE_DISRUPTION_SPIKE_RANGE_BASIS_POINTS: u32 = 1_500;
+///
+/// The spike must outweigh routine calm-month recovery by a wide margin on
+/// the risky routes: with the seeded 9-15% monthly spike chances, a typical
+/// month drifts upward by roughly 150-360 basis points, so a standard
+/// multi-year session can realistically push a route past the trade-
+/// disruption detection threshold while calm years still heal it.
+pub(crate) const ROUTE_DISRUPTION_SPIKE_MIN_BASIS_POINTS: u16 = 2_000;
+pub(crate) const ROUTE_DISRUPTION_SPIKE_RANGE_BASIS_POINTS: u32 = 2_500;
 /// Routine calm months remove this much accumulated route disruption.
 pub(crate) const ROUTE_DISRUPTION_CALM_RECOVERY_BASIS_POINTS: u16 = 150;
 /// Post-crisis healing removes this much accumulated route disruption.
 pub(crate) const ROUTE_DISRUPTION_HEALING_BASIS_POINTS: u16 = 250;
+
+/// The prince's levy is checked at this cadence, each check passing this
+/// often. A standard three-year session should see roughly one demand in a
+/// third of campaigns instead of the demand being effectively unreachable.
+pub(crate) const NOBLE_DEMAND_CHECK_INTERVAL_DAYS: i64 = 360;
+pub(crate) const NOBLE_DEMAND_CHANCE_BASIS_POINTS: u16 = 1_200;

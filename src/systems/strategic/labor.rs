@@ -88,6 +88,7 @@ pub(crate) fn market_reference_weekly_wage(registry: &Registry, state: &AppState
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn settle_employment_agreement(
     registry: &Registry,
     state: &mut AppState,
