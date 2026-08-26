@@ -108,21 +108,18 @@ Records contain identity, references, local values, and lifecycle state. Consequ
 
 Character, household, and business stores own records plus derived indexes. Use store methods for insertion, removal, and ownership changes; do not update backing records and indexes independently.
 
-Append-only history text (audit subjects and details) is immutable after construction and shared through reference counting, so working-copy clones of long campaigns do not re-allocate the entire history. The serialized save shape is plain strings either way.
+Histories (audit log, chronicle, outbox) are `HistoryLog` sequences: entries append to an exclusive tail over shared immutable storage, so transactional working-copy clones stay cheap as histories grow across generations. Iteration order and serialized save shape match a plain vector; use push, iteration, retain, and `partition_point` rather than assuming one contiguous buffer.
 
-The audit log, chronicle, and outbox are `HistoryLog` sequences: entries append into a short exclusive tail while the immutable bulk is shared through an arc, so transactional working-copy clones stay cheap as histories grow across generations. Iteration order and the serialized save shape are identical to a plain vector; use push, iteration, retain, and partition_point rather than assuming one contiguous buffer.
+Rules that keep history access correct:
 
-`HistoryLog`'s iterator specializes `nth`/`nth_back`, so adapters such as `Skip` position in constant time instead of walking the folded bulk.
+- Append-only history text (audit subjects and details) is immutable after construction.
+- Audit days are chronologically nondecreasing (an enforced invariant). Cooldown and recency scans must stop at the relevant day boundary instead of walking full history; `latest_cooldown_audit_day`, the gameplay `audit_records_from`/`audit_records_within_cooldown` helpers, and `partition_point` positioning all rely on this.
+- Unbounded reverse scans are correct only for predicates that genuinely depend on arbitrarily old records ("has this ever happened").
+- Fingerprint whole stores with `stable_serialized_checksum`; fingerprint a history through `HistoryLog::structural_checksum`, which stays flat-cost across campaign length. Do not reserialize a history to derive its checksum.
 
-Non-persisted derivation memos are allowed only as pure functions of persisted state. They are excluded from serialization and from `AppState` equality (the hand-written `PartialEq` must be extended when fields are added), rebuilt lazily behind guards that detect history replacement, and never influence observable results.
+Non-persisted derivation memos exist only as pure functions of persisted state: excluded from serialization and from `AppState` equality (extend the hand-written `PartialEq` when adding fields), rebuilt lazily behind guards that detect history replacement, and never observable in results.
 
-Two memos currently exist. `CampaignEvidenceMemo` in `src/core/state.rs` folds campaign-phase audit evidence incrementally for `refresh_campaign_phases`. The `HistoryLog` checksum memo maintains a running structural fold of the entry stream (see `src/core/checksum.rs`): appends extend it in constant time, non-append mutations (`retain`, `iter_mut`, reordering) mark it stale so the next read rebuilds once, and the value it produces is a pure function of the entries.
-
-Observation paths that fingerprint whole stores use `stable_serialized_checksum`; history fingerprints go through `HistoryLog::structural_checksum`, which stays flat-cost across campaign length. Do not reserialize an entire history to derive its checksum.
-
-Audit days are chronologically nondecreasing (an enforced invariant). Cooldown and recency questions over the audit log must therefore bound their scan at the relevant day boundary instead of walking the full history; a record older than its cooldown can never change the answer. `latest_cooldown_audit_day`, the gameplay `audit_records_from`/`audit_records_within_cooldown` helpers, and `partition_point` positioning all exploit this.
-
-Unbounded reverse scans remain correct only for predicates that genuinely depend on arbitrarily old records (for example, "has this ever happened").
+Two memos exist. `CampaignEvidenceMemo` in `src/core/state.rs` folds campaign-phase audit evidence incrementally for `refresh_campaign_phases`. The `HistoryLog` checksum memo in `src/core/checksum.rs` extends a running structural fold of the entry stream in constant time; non-append mutations (`retain`, `iter_mut`, reordering) mark it stale so the next read rebuilds once, and the value remains a pure function of the entries.
 
 ## Canonical flows
 

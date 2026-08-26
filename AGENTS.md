@@ -2,16 +2,14 @@
 
 This file is the execution card for repository work. [ARCHITECTURE.md](ARCHITECTURE.md) owns implementation structure and mutation contracts, [STATUS.md](STATUS.md) owns current capability, [TESTING.md](TESTING.md) owns test policy and completion gates, and [DESIGN.md](DESIGN.md) owns product intent.
 
-## Start here
+## Procedure
 
-1. Read [`../AGENTS.md`](../AGENTS.md) and preserve unrelated working-tree state.
+1. Read [`../AGENTS.md`](../AGENTS.md) if it exists, and preserve unrelated working-tree state (`git status --short` before editing).
 2. Read [README.md](README.md), [STATUS.md](STATUS.md), and only the relevant section of [ARCHITECTURE.md](ARCHITECTURE.md).
 3. Identify the owning source module and sibling tests; trace the public entry point to canonical mutation and invariant validation.
-4. Identify the narrowest proving test before changing behavior. Run it before editing only when reproducing a failure or establishing a baseline the task actually needs; otherwise execute it when the behavior is ready for proof.
+4. Identify the narrowest test that proves the change. Run it before editing only to reproduce a failure or baseline the task needs; otherwise run it once the behavior is ready for proof.
 5. Use [TESTING.md](TESTING.md) to choose the smallest completion lane that owns the changed surface.
 6. Update the one document that owns any changed architecture, behavior, schema, API, command, harness, or scope contract.
-
-This project applies the Universal, Stateful Application, Deterministic System, and Automated Behavior Evaluation portfolio profiles.
 
 ## Primary owners
 
@@ -33,18 +31,15 @@ This project applies the Universal, Stateful Application, Deterministic System, 
 - Multi-record work resolves the complete result before commit or uses a consumed `Validated*` with current-state revalidation.
 - Preserve state-owned deterministic randomness, stable ordered iteration/tie-breaking, fixed-point `Money`/`Quantity`, checked scheduling, and explicit overflow handling.
 - Persistent identity uses typed IDs; optional relationships are explicit; authoritative records and owned indexes/lifecycle memberships update coherently.
-- Core systems perform no implicit IO. Durable external work is represented before the adapter performs it.
+- Core systems perform no implicit IO. Durable external work is represented in state before an adapter performs it.
 - Project-owned enums are exhaustive; consequential fields are private; domain failures use contextual typed errors; replaced internal paths are deleted.
 - Ad hoc saves, gameplay reports, CLI captures, benchmark evidence, and scratch copies belong under ignored `target/agent-output/<task>/` (or an operating-system temporary directory), never in `../` or the workspace root. Remove task-owned transient output before handoff.
 - Repository verification is local. Do not create or depend on GitHub Actions workflows.
 
 ## Completion
 
-Use `bash scripts/test.sh fast <filter>` (or `.\scripts\test.ps1 fast <filter>`
-on Windows) for focused iteration when it shortens feedback or isolates a failure.
-When ordinary work is ready for completion, go directly to `standard` instead of running `fast`
-immediately beforehand merely as a prelude. For specialized surfaces, run the smallest lane from
-[TESTING.md](TESTING.md) that owns the changed contract, plus only genuinely distinct evidence that lane
-does not already contain. Deeper lanes are required only when their distinct contract changed. Confirm
-canonical ownership, deterministic/persistence/invariant behavior, current documentation, and clean diff
-hygiene.
+Use `bash scripts/test.sh fast <filter>` (or `.\scripts\test.ps1 fast <filter>` on Windows) for focused iteration when it shortens feedback or isolates a failure. When ordinary work is ready for completion, go directly to `standard`; running `fast` immediately beforehand adds nothing.
+
+For specialized surfaces, run the smallest lane from [TESTING.md](TESTING.md) that owns the changed contract, plus only genuinely distinct evidence that lane does not already contain. Deeper lanes are required only when their distinct contract changed.
+
+Before handing off, confirm canonical ownership, deterministic/persistence/invariant behavior, current documentation, and clean diff hygiene.

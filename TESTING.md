@@ -28,69 +28,38 @@ This document defines test tiers, suite organization, assertion standards, and c
 | Full deep design gate | `bash scripts/test.sh deep` |
 | Complete scripted test tier | `bash scripts/test.sh all` |
 
-Successful test and smoke steps print concise summaries with elapsed time. Failures print the complete command output, including compiler diagnostics when a CLI build fails. A filter matching no executable library test exits with code 2.
+Successful steps print concise summaries with elapsed time. Failures print the complete command output, including compiler diagnostics when a CLI build fails. A filter matching no executable library test exits with code 2.
 
-For the tightest edit-test loop, use `bash scripts/test.sh fast <filter>` (e.g., `fast simulation`, `fast strategic`) or `bash scripts/test.sh quick <filter>` for library-only iteration that never triggers docs or CLI builds. `quick` is an alias for `fast` optimized for rapid solo iteration. The `standard` lane (shell checks, library, docs, core CLI) is the normal pre-commit; deeper lanes (`soak`, `adapters`, `gameplay`, `ci-gates`, `all`) are for cross-cutting or release work.
+On Windows without bash on PATH, every mode is also available through `.\scripts\test.ps1 <mode> [filter]`, which mirrors `scripts/test.sh` including receipts, CLI reuse, and lane timing.
 
-Pass `CIVIC_DYNASTY_JOBS=<n>` to forward `--jobs <n>` to every `cargo test`
-or `cargo build` the runner invokes. The default is Cargo's own parallelism,
-which already uses the machine's cores; lowering it can keep a heavily used
-development machine responsive.
+## Runner environment
 
-The `dev` and `test` profiles build this crate at `opt-level = 1` with
-dependencies fully optimized. Simulation-heavy tests then finish in seconds
-rather than tens of seconds, so the edit-test loop is dominated by incremental
-compile time instead of debug-mode execution. Keep new tests out of sleeps and
-wall-clock dependence so that speedup applies to them; use release lanes for
-throughput-critical evidence.
+| Variable | Effect |
+|---|---|
+| `CIVIC_DYNASTY_JOBS=<n>` | Forwards `--jobs <n>` to every `cargo test` / `cargo build`; lower it to keep a busy machine responsive. |
+| `CIVIC_DYNASTY_NEXTEST=1` | Runs library tests under `cargo-nextest` instead of plain `cargo test`: per-test isolation at some warm-run speed. |
+| `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` | Skips CLI rebuilds when iterating on library code only. |
+| `CIVIC_DYNASTY_PROFILE=release` | Makes adapter smoke groups use a release binary. |
+| `CIVIC_DYNASTY_BINARY=<path>` | Uses an existing binary for smoke groups so gates share one build. |
+| `CIVIC_DYNASTY_BINARY_OVERRIDE=<path>` | Pins an exact binary over every profile choice. Gameplay gates still rebuild release when a debug binary would otherwise leak into them. |
+| `CIVIC_DYNASTY_PRE_PUSH=standard` | Strengthens the pre-push hook from its `quick` default. |
+| `CIVIC_DYNASTY_PYTHON=<interpreter>` | Selects the Python interpreter (auto-detects `python3`, `python`, Windows `py`). |
 
-The `release` profile is the everyday optimized profile for soaks, adapter
-smokes, and gameplay gates: parallel codegen units with incremental reuse and
-no cross-crate LTO keep an edited source file's optimized rebuild in seconds,
-while simulation throughput stays within roughly ten percent of peak and all
-gameplay output stays identical. Build `--profile release-max` only when peak
-performance itself is under measurement; routine verification does not need
-it.
+## Build profiles
 
-- Plain `cargo test` is the default and fastest runner on this suite (tests
-  share campaign-fixture setup inside one process). Set
-  `CIVIC_DYNASTY_NEXTEST=1` to run library tests under `cargo-nextest` instead,
-  trading warm-run speed for per-test isolation, timing, and failure capture.
-- On Windows without bash on PATH, every mode in this table is also available
-  through the native PowerShell runner: `.\scripts\test.ps1 <mode> [filter]`.
-  It mirrors `scripts/test.sh`, including receipts, CLI reuse, and lane timing.
-- Set `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` to skip CLI rebuilds when iterating on
-  library code only.
-- The pre-push hook defaults to `quick` for snappy pushes; set
-  `CIVIC_DYNASTY_PRE_PUSH=standard` to enforce the fuller gate.
-- Successful unfiltered `quick`/`fast`, `standard`, and `all` runs record a
-  content-addressed receipt under the local Git metadata. The pre-push hook
-  reuses a current receipt of equal or broader routine strength instead of
-  compiling the same repository bytes again. Staging and committing those
-  unchanged bytes do not invalidate the receipt; any tracked or non-ignored
-  file-content change does. Receipt-eligible lanes fingerprint before and after
-  validation and refuse to issue evidence if another process changes repository
-  bytes while the gate is running.
+- `dev` / `test`: this crate builds at `opt-level = 1` with dependencies fully optimized, so simulation-heavy tests finish in seconds. Keep new tests free of sleeps and wall-clock dependence.
+- `release`: the everyday optimized profile for soaks, adapter smokes, and gameplay gates — parallel codegen units keep an edited file's optimized rebuild in seconds while throughput stays near peak and gameplay output stays identical.
+- `release-max`: build only when peak performance itself is under measurement.
 
-The CLI smoke runner accepts `CIVIC_DYNASTY_PROFILE=release` when a release
-binary is desired, or `CIVIC_DYNASTY_BINARY` when a caller has already built
-the exact binary to exercise. CI uses the latter so adapter and gameplay
-gates share one release build instead of compiling a debug CLI first.
-`CIVIC_DYNASTY_BINARY_OVERRIDE` takes precedence over every profile choice and
-is intended for tooling that must pin an exact binary; the gameplay gates
-always rebuild the release CLI when a debug binary selected by an earlier
-smoke group would otherwise leak into the optimized gate run.
-The `adapters` and `gameplay` modes also build their local CLI once and reuse
-it across all sub-gates. Python-backed checks use `python3`, `python`, or
-Windows `py` automatically; set `CIVIC_DYNASTY_PYTHON` to select an explicit
-interpreter.
-Long-running gameplay JSON assertions are centralized in
-`scripts/check_gameplay.py`, which derives expected persona coverage from the
-report configuration and prints a compact validation summary.
-The harness parallelizes independent counterfactual probes for a single
-campaign with a bounded worker count; campaign matrices parallelize campaigns
-instead to keep memory use predictable. Probe results retain deterministic
-candidate ordering.
+Plain `cargo test` shares campaign-fixture setup inside one process and is the fastest default runner. Long-running gameplay JSON assertions live in `scripts/check_gameplay.py`.
+
+The `adapters` and `gameplay` modes build their local CLI once and reuse it across all sub-gates.
+
+## Receipts and hooks
+
+Successful unfiltered `quick`/`fast`, `standard`, and `all` runs record a content-addressed receipt under local Git metadata. The pre-push hook reuses a current receipt of equal or broader routine strength instead of recompiling identical repository bytes; any tracked or non-ignored content change invalidates it, and receipt-eligible lanes refuse to issue evidence if repository bytes change mid-run.
+
+Optional hooks install with `bash scripts/install_hooks.sh`: pre-commit runs format, shell syntax, and whitespace checks; pre-push defaults to `quick`. Use `git commit --no-verify` during focused iteration.
 
 ## Test tiers
 
@@ -108,9 +77,7 @@ candidate ordering.
 | Deep | The complete design gate: slow gates plus gameplay audit | Design review and deepest verification |
 | All | Standard + soak + adapters + gameplay gates | Cross-cutting test coverage |
 
-Fast tests must not use sleeps, wall-clock time, external services, or environment-dependent behavior.
-
-Soak tests always run in release mode: the multi-thousand-day simulations finish in seconds instead of tens of seconds, while the assertions stay identical.
+Fast tests must not use sleeps, wall-clock time, external services, or environment-dependent behavior. Soak tests always run in release mode; their assertions stay identical across profiles.
 
 ## Suite organization
 
@@ -137,7 +104,7 @@ Use stable nested modules so filters remain useful. Put a test in the narrowest 
 - `make_test_campaign` returns an isolated clone of the deterministic default campaign.
 - `make_test_campaign_with` is for tests whose seed, name, or starting background is part of the contract.
 
-Select fixture data semantically. Prefer “property owned by the player and not pledged” over a hard-coded ID or collection position.
+Select fixture data semantically. Prefer "property owned by the player and not pledged" over a hard-coded ID or collection position.
 
 Extract setup helpers when they describe reusable domain conditions. Extract assertion helpers only when reuse improves clarity or diagnostics; mark shared assertion helpers `#[track_caller]`.
 
@@ -183,9 +150,7 @@ Collection helpers should show observed members. Candidate and finding helpers s
 
 ## Completion gate
 
-Run the narrowest relevant subset while editing. Once behavior is ready, run one routine completion lane rather than climbing through progressively broader tiers.
-
-For ordinary changes:
+Run the narrowest relevant subset while editing. Once behavior is ready, run one routine completion lane rather than climbing through progressively broader tiers:
 
 ```bash
 bash scripts/test.sh standard
@@ -200,16 +165,8 @@ Specialized lanes are selected by the contract that changed:
 - `slow` for release-profile behavior that can differ from development;
 - `ci-gates`, `all`, or `deep` only for verification topology, dependency/security work, broadly shared build configuration, or a deliberate release/deep-design checkpoint.
 
-Persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and
-gameplay-report schemas require focused owner coverage plus the relevant specialized lane above. This is
-a coverage requirement, not automatically two separate invocations: when the selected completion lane
-already executes the necessary owner coverage, do not rerun a focused test immediately beforehand. They
-do not automatically require every deep command in the repository. A deeper lane discovered while
-reading this document is not an additional completion requirement unless the changed contract owns that
-lane.
+Persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and gameplay-report schemas require focused owner coverage plus the relevant specialized lane above. This is a coverage requirement, not automatically two invocations: when the selected lane already executes the necessary owner coverage, do not rerun a focused test beforehand. They do not automatically require every deep command in the repository.
 
-Do not run a compile-only or lint build immediately before an executable lane that necessarily recompiles the same changed surface unless the separate diagnostic is itself required. Prefer one build-producing operation per checkpoint when practical. GitHub Actions and hosted runners are not part of the verification path.
+Do not run a compile-only or lint build immediately before an executable lane that necessarily recompiles the same changed surface unless the separate diagnostic is itself required. Prefer one build-producing operation per checkpoint. GitHub Actions and hosted runners are not part of the verification path.
 
-Optional local git hooks provide a fast safety net: `bash scripts/install_hooks.sh` installs a pre-commit gate (format, shell syntax, whitespace) and a pre-push gate that defaults to `quick` (or `standard` when `CIVIC_DYNASTY_PRE_PUSH=standard`). If the exact repository content already has a current equal-or-broader validation receipt, pre-push reuses that evidence instead of rebuilding it. Use `git commit --no-verify` to skip the pre-commit gate during focused iteration.
-
-The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier reuses one debug CLI build across all adapter smoke groups and remains an explicit broad tier rather than a routine prerequisite.
+The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier reuses one debug CLI build across adapter smoke groups and remains an explicit broad tier rather than a routine prerequisite.
