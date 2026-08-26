@@ -11,7 +11,6 @@ pub(crate) enum ObjectiveProgress {
 
 pub(crate) const AI_OBJECTIVE_REVIEW_DAYS: i64 = 720;
 pub(crate) const AI_BUSINESS_RECOVERY_TREASURY_RESERVE: Money = Money::from_copper(20_000);
-pub(crate) const STANDARD_CONTRACT_BATCHES_PER_WEEK: i64 = 2;
 
 impl ObjectiveProgress {
     const fn from_achieved(achieved: bool) -> Self {
@@ -639,12 +638,7 @@ pub(crate) fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
         }
         let owner_dynasty_id = business.owner_dynasty_id();
         let target_cash = business_recapitalization_target(registry, state, business);
-        let shortfall = Money::from_copper(
-            target_cash
-                .copper()
-                .saturating_sub(business.cash().copper())
-                .max(0),
-        );
+        let shortfall = target_cash.saturating_sub(business.cash()).max(Money::ZERO);
         if shortfall == Money::ZERO {
             continue;
         }
@@ -653,12 +647,9 @@ pub(crate) fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
             .get(&owner_dynasty_id)
             .expect("AI business owner dynasty must exist")
             .treasury();
-        let available = Money::from_copper(
-            treasury
-                .copper()
-                .saturating_sub(AI_BUSINESS_RECOVERY_TREASURY_RESERVE.copper())
-                .max(0),
-        );
+        let available = treasury
+            .saturating_sub(AI_BUSINESS_RECOVERY_TREASURY_RESERVE)
+            .max(Money::ZERO);
         // A rescue must fund the full operating target in one commit. Trickle
         // capitalization that only crosses the daily lifecycle recovery bar
         // produces weekly distressed-to-recovered churn: the firm re-enters
@@ -749,9 +740,6 @@ pub(crate) fn advance_ai_objectives(
                     id: new_id,
                     dynasty_id,
                     kind: next_objective_kind(kind),
-                    // Replacement objectives are self-directed routes to
-                    // durable power, not campaigns against a named rival.
-                    target_dynasty_id: None,
                     priority: 50,
                     created_day: day,
                     status: ObjectiveStatus::Pursuing,
@@ -1008,10 +996,22 @@ pub(crate) fn advance_ai_debt_objective(
     state: &mut AppState,
     dynasty_id: DynastyId,
 ) -> Result<ObjectiveProgress, SimulationError> {
+    // Repay the most urgent obligation first: delinquent loans are one missed
+    // installment away from default, so they outrank current ones, and higher
+    // balances outrank lower ones within a status. Defaulted paper never
+    // qualifies — it must cure through restructuring or the court, not
+    // through this objective's quiet side-door payments.
     let loan_id = state
         .loans
         .values()
-        .find(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status != LoanStatus::Repaid)
+        .filter(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status.is_repayment_active())
+        .max_by_key(|loan| {
+            (
+                u8::from(loan.status == LoanStatus::Delinquent),
+                loan.balance.copper(),
+                u32::MAX - loan.id.value(),
+            )
+        })
         .map(|loan| loan.id);
     let Some(loan_id) = loan_id else {
         return Ok(ObjectiveProgress::Achieved);

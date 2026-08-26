@@ -189,8 +189,8 @@ required_summary = {
     "dynasty_name",
     "businesses",
     "population_groups",
-    "outstanding_civic_debts",
-    "civic_debt_balance",
+    "city_outstanding_civic_debts",
+    "city_civic_debt_balance",
 }
 missing_summary = sorted(required_summary - summary.keys())
 if missing_summary:

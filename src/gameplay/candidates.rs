@@ -1242,12 +1242,10 @@ pub(crate) fn crisis_has_containment_response(
     crisis_id: crate::ids::CrisisId,
 ) -> bool {
     let subject = format!("crisis:{crisis_id}");
-    // Responses cannot predate the crisis, so the scan starts there.
-    let earliest_day = state
-        .crises
-        .get(&crisis_id)
-        .map_or(0, crate::core::Crisis::started_day);
-    audit_records_from(state, earliest_day)
+    // Mirrors the canonical validator: a response counts as ongoing
+    // containment only for the bounded response window, so a cheap response
+    // years ago neither grants permanent immunity nor blocks a fresh one.
+    audit_records_within_cooldown(state, crate::systems::CRISIS_RESPONSE_WINDOW_DAYS)
         .any(|record| record.subject() == subject && crisis_response_contains_crisis(record))
 }
 
@@ -1279,11 +1277,17 @@ pub(crate) fn can_afford_crisis_response(
             dynasty.treasury() >= crisis_relief_cost(crisis.severity_basis_points)
         }
         CrisisResponse::Reform => dynasty.treasury() >= CRISIS_REFORM_COST,
-        CrisisResponse::Suppress => dynasty.treasury() >= CRISIS_SUPPRESS_COST,
-        // Profiteering extracts from the panicked market's clearing pool, so an
-        // empty pool makes the attempt a guaranteed rejection.
+        // Suppression pays in treasury and standing, mirroring the canonical
+        // gate so the agent never proposes a guaranteed rejection.
+        CrisisResponse::Suppress => {
+            dynasty.treasury() >= CRISIS_SUPPRESS_COST
+                && dynasty.resources.legitimacy_basis_points >= CRISIS_SUPPRESS_LEGITIMACY_COST
+        }
+        // Profiteering spends standing equal to its requirement and extracts
+        // from the panicked market's clearing pool, so an empty pool or an
+        // empty legitimacy reserve makes the attempt a guaranteed rejection.
         CrisisResponse::Exploit => {
-            dynasty.resources.legitimacy_basis_points >= 600
+            dynasty.resources.legitimacy_basis_points >= CRISIS_EXPLOIT_LEGITIMACY_COST
                 && state.market.clearing_account > Money::ZERO
         }
     }
@@ -2265,7 +2269,12 @@ pub(crate) fn acquisition_has_turnaround_thesis(
     // The same sustainable unit cost the market's production price floors are
     // built from, so the agent's thesis can never drift from the simulation's
     // own definition of "sells above break-even".
-    let unit_cost = business_sustainable_unit_cost(registry, state, business);
+    let unit_cost = business_sustainable_unit_cost(
+        registry,
+        state,
+        business,
+        crate::systems::dynasty_office_administrative_load(state, business.owner_dynasty_id()),
+    );
     quote_price.price >= unit_cost
 }
 
@@ -4431,16 +4440,10 @@ pub(crate) fn generate_public_work_candidates(
         return;
     }
     let subject = format!("dynasty:{}", state.player_dynasty_id);
-    let sponsorship_available = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| record.kind() == AuditKind::PublicWorkStarted && record.subject() == subject)
-        .is_none_or(|record| {
-            state.clock.day()
-                >= record
-                    .day()
-                    .saturating_add(PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS)
+    // Windowed scan: a sponsorship outside the cooldown interval cannot block.
+    let sponsorship_available =
+        audit_records_within_cooldown(state, PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS).all(|record| {
+            !(record.kind() == AuditKind::PublicWorkStarted && record.subject() == subject)
         });
     if !sponsorship_available {
         return;
@@ -4757,19 +4760,11 @@ pub(crate) fn generate_family_candidates(
         .get(&state.player_dynasty_id)
         .expect("player family council must exist");
     let governance_subject = format!("dynasty:{}", state.player_dynasty_id);
-    let governance_available = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::HouseGovernanceChange
-                && record.subject() == governance_subject
-        })
-        .is_none_or(|record| {
-            record
-                .day()
-                .saturating_add(HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS)
-                <= state.clock.day()
+    // Windowed scan: only a change inside the cooldown interval can block.
+    let governance_available =
+        audit_records_within_cooldown(state, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS).all(|record| {
+            !(record.kind() == AuditKind::HouseGovernanceChange
+                && record.subject() == governance_subject)
         });
     if governance_available
         && council.unity_basis_points >= HOUSE_GOVERNANCE_UNITY_COST
@@ -4875,18 +4870,10 @@ pub(crate) fn generate_family_council_candidate(
         return;
     }
     let subject = format!("dynasty:{dynasty_id};council-meeting");
-    let available = state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::FamilyCouncilMeeting && record.subject() == subject
-        })
-        .is_none_or(|record| {
-            record
-                .day()
-                .saturating_add(FAMILY_COUNCIL_MEETING_INTERVAL_DAYS)
-                <= state.clock.day()
+    // Windowed scan: only a meeting inside the cooldown interval can block.
+    let available =
+        audit_records_within_cooldown(state, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS).all(|record| {
+            !(record.kind() == AuditKind::FamilyCouncilMeeting && record.subject() == subject)
         });
     if !available {
         return;
@@ -4966,17 +4953,14 @@ pub(crate) fn preferred_house_governance(
     })
 }
 
-/// The most recent canonical heir-designation audit record, if any.
-fn last_heir_designation_day(state: &AppState) -> Option<i64> {
+/// Whether any canonical heir-designation audit record exists for the
+/// dynasty. Formal preparation is an "ever happened" predicate, so unlike
+/// cooldown questions it may legitimately scan the full append-only history.
+fn dynasty_has_heir_designation(state: &AppState) -> bool {
     let designation_subject = format!("dynasty:{}", state.player_dynasty_id);
-    state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::HeirDesignation && record.subject() == designation_subject
-        })
-        .map(AuditRecord::day)
+    state.audit_log.iter().any(|record| {
+        record.kind() == AuditKind::HeirDesignation && record.subject() == designation_subject
+    })
 }
 
 pub(crate) fn generate_heir_designation_candidates(
@@ -4993,9 +4977,9 @@ pub(crate) fn generate_heir_designation_candidates(
     }
     // A designation is available once the canonical cadence since the last
     // recorded designation has elapsed.
-    let last_designation_day = last_heir_designation_day(state);
-    if !last_designation_day.is_none_or(|last_day| {
-        state.clock.day() >= last_day.saturating_add(HEIR_DESIGNATION_INTERVAL_DAYS)
+    if !audit_records_within_cooldown(state, HEIR_DESIGNATION_INTERVAL_DAYS).all(|record| {
+        !(record.kind() == AuditKind::HeirDesignation
+            && record.subject() == format!("dynasty:{}", state.player_dynasty_id))
     }) {
         return;
     }
@@ -5088,7 +5072,7 @@ pub(crate) fn generate_heir_designation_candidates(
         current_heir,
         head_age,
         head_health,
-        last_designation_day.is_some(),
+        dynasty_has_heir_designation(state),
     );
 }
 
@@ -5278,20 +5262,11 @@ pub(crate) fn office_power_directive_available(
     state: &AppState,
     institution_id: InstitutionId,
 ) -> bool {
-    state
-        .audit_log
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == AuditKind::OfficeDirective
-                && record.audit_subject().institution_id() == Some(institution_id)
-        })
-        .is_none_or(|record| {
-            state.clock.day()
-                >= record
-                    .day()
-                    .saturating_add(OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS)
-        })
+    // Windowed scan: a directive outside the cooldown interval cannot block.
+    audit_records_within_cooldown(state, OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS).all(|record| {
+        !(record.kind() == AuditKind::OfficeDirective
+            && record.audit_subject().institution_id() == Some(institution_id))
+    })
 }
 
 pub(crate) fn district_food_satisfaction(state: &AppState, district_id: DistrictId) -> u16 {
@@ -5821,18 +5796,14 @@ pub(crate) fn generate_ward_adoption_candidates(
         && state.family_councils.get(&state.player_dynasty_id).is_some_and(
             |council| council.unity_basis_points >= WARD_ADOPTION_UNITY_COST,
         )
-        && state
-            .audit_log
-            .iter()
-            .rev()
-            .find(|record| {
-                record.kind() == AuditKind::WardAdoption
+        // Windowed scan: an adoption outside the cooldown interval cannot
+        // block the next one.
+        && audit_records_within_cooldown(state, WARD_ADOPTION_INTERVAL_DAYS)
+            .all(|record| {
+                !(record.kind() == AuditKind::WardAdoption
                     && record
                         .subject()
-                        .starts_with(&format!("dynasty:{}:", state.player_dynasty_id))
-            })
-            .is_none_or(|record| {
-                state.clock.day() >= record.day().saturating_add(WARD_ADOPTION_INTERVAL_DAYS)
+                        .starts_with(&format!("dynasty:{}:", state.player_dynasty_id)))
             });
     if !adoption_available {
         return;

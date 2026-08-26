@@ -226,6 +226,10 @@ pub(crate) fn apply_legal_settlement(
         player_id,
         quote.amount,
         settles_in_full,
+        // A negotiated settlement is amicable: any remaining obligation
+        // stands on its own terms instead of executing against pledged
+        // collateral in the same breath as a relationship repair.
+        false,
     );
     state
         .legal_cases

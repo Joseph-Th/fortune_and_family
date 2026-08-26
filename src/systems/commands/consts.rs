@@ -5,6 +5,8 @@ use super::*;
 
 /// Maximum idle cash a policy may hold: one year of operating cover.
 pub(crate) const BUSINESS_RESERVE_MAX_OPERATING_DAYS: i64 = 360;
+/// Days between operating-policy amendments for one business.
+pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 180;
 /// Weeks between wage renegotiations for one business. Wage posture is a
 /// standing labor commitment, so it changes on a slower cadence than policy.
 pub(crate) const BUSINESS_WAGE_CHANGE_INTERVAL_DAYS: i64 = 90;
@@ -94,9 +96,10 @@ pub(crate) const CRISIS_SUPPRESS_LEGITIMACY_COST: u16 = 450;
 pub(crate) const CRISIS_RELIEF_UNREST_REDUCTION: u16 = 800;
 pub(crate) const CRISIS_REFORM_UNREST_REDUCTION: u16 = 500;
 pub(crate) const CRISIS_SUPPRESS_UNREST_INCREASE: u16 = 700;
-pub(crate) const CRISIS_EXPLOIT_LEGITIMACY_REQUIREMENT: u16 = 600;
-pub(crate) const CRISIS_EXPLOIT_SEVERITY_INCREASE: u16 = 500;
+/// Exploit gates on and pays the same legitimacy: profiteering spends standing
+/// outright rather than merely requiring it.
 pub(crate) const CRISIS_EXPLOIT_LEGITIMACY_COST: u16 = 600;
+pub(crate) const CRISIS_EXPLOIT_SEVERITY_INCREASE: u16 = 500;
 pub(crate) const CRISIS_EXPLOIT_UNREST_INCREASE: u16 = 600;
 pub(crate) const INFORMATION_REPORT_LIFETIME_DAYS: i64 = 540;
 pub(crate) const COMMISSIONED_INFORMATION_SOURCE: &str = "Commissioned intelligence";

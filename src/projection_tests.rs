@@ -406,8 +406,8 @@ mod coverage {
         );
 
         let summary = build_state_summary(registry, &state);
-        assert_eq!(summary.outstanding_civic_debts, 1);
-        assert_eq!(summary.civic_debt_balance, Money::from_copper(10_000));
+        assert_eq!(summary.city_outstanding_civic_debts, 1);
+        assert_eq!(summary.city_civic_debt_balance, Money::from_copper(10_000));
 
         let debt = state
             .civic_debts
@@ -418,8 +418,8 @@ mod coverage {
         debt.status = CivicDebtStatus::Repaid;
 
         let summary = build_state_summary(registry, &state);
-        assert_eq!(summary.outstanding_civic_debts, 0);
-        assert_eq!(summary.civic_debt_balance, Money::ZERO);
+        assert_eq!(summary.city_outstanding_civic_debts, 0);
+        assert_eq!(summary.city_civic_debt_balance, Money::ZERO);
     }
 
     #[test]

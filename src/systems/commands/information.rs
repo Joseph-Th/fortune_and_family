@@ -558,7 +558,7 @@ pub(crate) fn apply_information_leverage_effect(
             let memory = format!(
                 "intelligence-backed contract renegotiation changed unit price from {previous_price} to {new_price}"
             );
-            adjust_information_relationship(state, counterparty_id, -75, 50, 125, 0, &memory);
+            adjust_information_relationship(state, counterparty_id, -75, -50, 150, 125, 0, &memory);
         }
         InformationLeverageEffect::Counterparty { dynasty_id } => {
             adjust_information_relationship(
@@ -566,6 +566,7 @@ pub(crate) fn apply_information_leverage_effect(
                 dynasty_id,
                 300,
                 200,
+                0,
                 -200,
                 2,
                 "targeted outreach based on a commissioned house brief",
@@ -583,14 +584,16 @@ pub(crate) fn apply_information_leverage_effect(
                 .expect("validated counterparty contract must exist")
                 .unit_price = new_price;
             // Forcing a price concession with commissioned intelligence reads
-            // to the target exactly like the market-brief squeeze: distrust
-            // and resentment, not gratitude. Positive deltas are reserved for
-            // outreach that extracts no price change.
+            // to the target exactly like the market-brief squeeze: distrust,
+            // lost esteem, intimidation, and resentment. Positive trust and
+            // respect are reserved for outreach that extracts no price
+            // change.
             adjust_information_relationship(
                 state,
                 dynasty_id,
                 -75,
-                50,
+                -50,
+                150,
                 125,
                 0,
                 &format!(
@@ -630,11 +633,13 @@ pub(crate) fn apply_information_leverage_effect(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn adjust_information_relationship(
     state: &mut AppState,
     counterparty_id: DynastyId,
     trust_change: i16,
     respect_change: i16,
+    fear_change: i16,
     resentment_change: i16,
     obligation_change: i32,
     memory: &str,
@@ -647,7 +652,7 @@ pub(crate) fn adjust_information_relationship(
         crate::systems::strategic::RelationshipDelta::new(
             trust_change,
             respect_change,
-            0,
+            fear_change,
             resentment_change,
             obligation_change,
         ),

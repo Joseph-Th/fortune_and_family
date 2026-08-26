@@ -90,15 +90,20 @@ pub(crate) fn apply_family_council_meeting(
     let member_ids: Vec<_> = council.members.iter().copied().collect();
     let unity_before = council.unity_basis_points;
     spend_player_treasury_to_market(state, FAMILY_COUNCIL_MEETING_COST)?;
+    // Track what the loyalty grant actually applied: members already at the
+    // cap gain nothing, and claiming otherwise would make the feedback lie.
+    let mut members_gaining_loyalty = 0_u32;
     for character_id in member_ids {
         if let Some(character) = state.characters.get_mut(character_id)
             && character.status() == CharacterStatus::Active
+            && character.runtime.loyalty_basis_points < 10_000
         {
             character.runtime.loyalty_basis_points = character
                 .runtime
                 .loyalty_basis_points
                 .saturating_add(FAMILY_COUNCIL_MEETING_LOYALTY_GAIN)
                 .min(10_000);
+            members_gaining_loyalty += 1;
         }
     }
     let council = state
@@ -122,17 +127,22 @@ pub(crate) fn apply_family_council_meeting(
             FAMILY_COUNCIL_MEETING_COST.copper()
         ).into(),
     });
+    let loyalty_note = if members_gaining_loyalty > 0 {
+        format!("{members_gaining_loyalty} active council member(s) gained loyalty.")
+    } else {
+        "Every active council member was already at the loyalty cap and gained nothing.".to_owned()
+    };
     crate::systems::strategic::try_push_outbox(
         state,
         OutboxKind::Family,
         "Family council convened".to_owned(),
         if unity_gain > 0 {
             format!(
-                "The dynasty spent {FAMILY_COUNCIL_MEETING_COST} on settlements, hospitality, and internal obligations. Family unity rose from {unity_before} to {unity_after} bp and active council members gained loyalty."
+                "The dynasty spent {FAMILY_COUNCIL_MEETING_COST} on settlements, hospitality, and internal obligations. Family unity rose from {unity_before} to {unity_after} bp and {loyalty_note}"
             )
         } else {
             format!(
-                "The dynasty spent {FAMILY_COUNCIL_MEETING_COST} on settlements, hospitality, and internal obligations. Family unity held at {unity_before} bp and active council members gained loyalty."
+                "The dynasty spent {FAMILY_COUNCIL_MEETING_COST} on settlements, hospitality, and internal obligations. Family unity held at {unity_before} bp and {loyalty_note}"
             )
         },
     )?;

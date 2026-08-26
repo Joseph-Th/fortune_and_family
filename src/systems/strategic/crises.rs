@@ -3,6 +3,13 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// How long a player response counts as an ongoing containment effort. One
+/// cheap response years ago must neither grant a crisis permanent immunity
+/// against escalation nor permanently lock the house out of responding while
+/// the underlying condition persists; once this window closes on a crisis
+/// that is still active, organized responses are legitimate again.
+pub(crate) const CRISIS_RESPONSE_WINDOW_DAYS: i64 = OFFICE_DUTY_FORFEITURE_WINDOW_DAYS;
+
 pub(crate) fn apply_crisis_daily_effects(
     registry: &Registry,
     state: &mut AppState,
@@ -319,10 +326,6 @@ pub(crate) fn advance_existing_crises(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
-    // A response counts as an ongoing containment effort only for a bounded
-    // window: one cheap response years ago must not grant a crisis permanent
-    // immunity while its underlying condition persists or worsens.
-    const CRISIS_RESPONSE_WINDOW_DAYS: i64 = OFFICE_DUTY_FORFEITURE_WINDOW_DAYS;
     let mut resolved = Vec::new();
     let mut escalated = Vec::new();
     let day = state.clock.day();

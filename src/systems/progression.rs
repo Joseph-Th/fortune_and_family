@@ -37,7 +37,7 @@ pub(crate) fn contract_deliveries_for_dynasty(state: &AppState, dynasty_id: Dyna
 /// [`CampaignEvidenceMemo`] and rescans only the small live maps (laws,
 /// public works, contracts) per refresh, producing identical answers.
 #[derive(Default, Clone, PartialEq, Debug)]
-struct CampaignPhaseEvidence {
+pub(crate) struct CampaignPhaseEvidence {
     city_shaping: BTreeSet<DynastyId>,
     nominations: BTreeSet<DynastyId>,
     patronage: BTreeSet<DynastyId>,
@@ -47,8 +47,10 @@ struct CampaignPhaseEvidence {
 impl CampaignPhaseEvidence {
     /// Uncached collection: builds the evidence from scratch through a
     /// throwaway memo. Used by immutable validation paths that run too rarely
-    /// to keep a memo warm.
-    fn collect(state: &AppState) -> Self {
+    /// to keep a memo warm; callers validating many dynasties at once should
+    /// collect once and pass the evidence to
+    /// [`campaign_phase_is_consistent_with`].
+    pub(crate) fn collect(state: &AppState) -> Self {
         Self::synchronize(&mut CampaignEvidenceMemo::default(), state)
     }
 
@@ -283,11 +285,35 @@ fn campaign_phase_has_required_durable_evidence(
 /// sit below the reconstructed rank (promotion is monotonic, so evidence that
 /// later softens does not invalidate an already-earned phase).
 pub(crate) fn campaign_phase_is_consistent(state: &AppState, dynasty_id: DynastyId) -> bool {
+    let evidence = CampaignPhaseEvidence::collect(state);
+    campaign_phase_is_consistent_with(&evidence, state, dynasty_id)
+}
+
+/// Whole-campaign consistency check that collects the audit-derived evidence
+/// exactly once for every dynasty. Validation callers (the daily invariant
+/// battery and the persistence boundary) run this per dynasty; a naive loop
+/// over the single-dynasty form would rescan the unbounded audit log once per
+/// house.
+pub(crate) fn campaign_phases_are_consistent(state: &AppState) -> bool {
+    let evidence = CampaignPhaseEvidence::collect(state);
+    state
+        .dynasties
+        .keys()
+        .all(|dynasty_id| campaign_phase_is_consistent_with(&evidence, state, *dynasty_id))
+}
+
+/// Single-dynasty consistency check against pre-collected evidence. Callers
+/// validating many dynasties collect the evidence once via
+/// [`CampaignPhaseEvidence::collect`] and share it here.
+pub(crate) fn campaign_phase_is_consistent_with(
+    evidence: &CampaignPhaseEvidence,
+    state: &AppState,
+    dynasty_id: DynastyId,
+) -> bool {
     let Some(dynasty) = state.dynasties.get(&dynasty_id) else {
         return false;
     };
-    let evidence = CampaignPhaseEvidence::collect(state);
-    if !campaign_phase_has_required_durable_evidence(&evidence, state, dynasty_id) {
+    if !campaign_phase_has_required_durable_evidence(evidence, state, dynasty_id) {
         return false;
     }
     if dynasty.runtime.generation > 1 {
@@ -295,7 +321,7 @@ pub(crate) fn campaign_phase_is_consistent(state: &AppState, dynasty_id: Dynasty
     }
     campaign_phase_rank(dynasty.runtime.phase)
         >= campaign_phase_rank(reconstructed_campaign_phase_with(
-            &evidence, state, dynasty_id,
+            evidence, state, dynasty_id,
         ))
 }
 

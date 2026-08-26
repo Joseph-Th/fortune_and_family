@@ -307,6 +307,7 @@ fn decide_business_purchases(
     for business in state.businesses.iter() {
         available_cash[business.id().value() as usize] = business.cash();
     }
+    let capacity_scratch = super::DailyCapacityScratch::collect(state);
     let mut lines = Vec::new();
 
     for business in state.businesses.iter() {
@@ -319,16 +320,25 @@ fn decide_business_purchases(
         let recipe = registry
             .get_recipe(business.recipe_id())
             .expect("business recipe reference must be valid");
-        // Reorder against the capacity the business can actually use â€”
+        // Reorder against the capacity the business can actually use:
         // administrative/status capacity further limited by its workforce
-        // and sellable output headroom â€” so struggling or blocked firms do
+        // and sellable output headroom, so struggling or blocked firms do
         // not spend their remaining liquidity stockpiling inputs they
         // cannot process. The three batch limits depend on the business and
         // its recipe, not on the individual input good, so they are resolved
         // once per business instead of once per input.
-        let effective_batches = effective_capacity_batches(state, business)
-            .min(output_limited_batches(state, business, recipe))
-            .min(worker_limited_batches(state, business.id()));
+        let effective_batches = effective_capacity_batches(
+            state,
+            business,
+            capacity_scratch.office_administrative_load(business.owner_dynasty_id()),
+        )
+        .min(output_limited_batches(
+            state,
+            business,
+            recipe,
+            capacity_scratch.business_contract_reserve(business.id(), recipe.output_good_id()),
+        ))
+        .min(capacity_scratch.worker_limited_batches(business.id()));
         for input in recipe.inputs() {
             let target_batches = i64::from(effective_batches)
                 .saturating_mul(i64::from(business.policy.target_input_days));
@@ -490,12 +500,14 @@ fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
         .expect("Rivergate market must define tools");
     let tools_price = tools_quote.price;
     let mut remaining_tools_stock = tools_quote.stock;
+    let capacity_scratch = super::DailyCapacityScratch::collect(state);
     let mut lines = Vec::new();
     for business in state.businesses.iter() {
         let Some(line) = decide_business_production(
             registry,
             state,
             business,
+            &capacity_scratch,
             tools_id,
             remaining_tools_stock,
             tools_price,
@@ -523,11 +535,64 @@ const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 50;
 /// head does not carry a guaranteed next-year collapse into office.
 const SUCCESSION_ACCESSION_HEALTH_FLOOR: u16 = 1_000;
 
+/// Survivable health floor for characters the lifecycle cannot retire: a
+/// designated heir awaiting succession and a head with no possible successor.
+/// Active records must keep positive health (lifecycle invariant), and these
+/// roles are exempt from or required by succession machinery that runs in the
+/// same annual pass.
+const COLLAPSED_HEALTH_SURVIVABLE_FLOOR: u16 = 1;
+
 /// Falling into distress needs two days of operating cover.
 const ACTIVE_CASH_DAYS_OF_OPERATING_COST: i64 = 2;
 /// Climbing out needs six, so a business near the threshold cannot flap
 /// between `Distressed` and `Active` on daily price noise.
 const RECOVERY_CASH_DAYS_OF_OPERATING_COST: i64 = 6;
+
+/// Canonical business operating status after its cash or inventory changes:
+/// the same thresholds and rehabilitation clamp the daily lifecycle pass
+/// applies, evaluated immediately so a capital injection or acquisition can
+/// never leap past the documented `Insolvent -> Distressed -> Active`
+/// recovery path or install an `Active` status its cash cannot sustain.
+pub(crate) fn business_status_after_capitalization(
+    prior_status: BusinessStatus,
+    cash: Money,
+    has_inventory: bool,
+    minimum_cash_reserve: Money,
+    daily_operating_cost: Money,
+) -> BusinessStatus {
+    // Recovery carries a higher cash bar than distress onset so a business
+    // sitting near the threshold cannot flap between `Distressed` and
+    // `Active` on daily price noise: falling into distress needs two days
+    // of operating cover, but climbing out needs six.
+    let active_status_cash_days = if matches!(
+        prior_status,
+        BusinessStatus::Distressed | BusinessStatus::Insolvent
+    ) {
+        RECOVERY_CASH_DAYS_OF_OPERATING_COST
+    } else {
+        ACTIVE_CASH_DAYS_OF_OPERATING_COST
+    };
+    let candidate_status =
+        if prior_status == BusinessStatus::Insolvent && cash == Money::ZERO && !has_inventory {
+            BusinessStatus::Closed
+        } else if cash == Money::ZERO && !has_inventory {
+            BusinessStatus::Insolvent
+        } else if cash
+            < minimum_cash_reserve
+                .saturating_add(daily_operating_cost.saturating_mul(active_status_cash_days))
+        {
+            BusinessStatus::Distressed
+        } else {
+            BusinessStatus::Active
+        };
+    match (prior_status, candidate_status) {
+        // An insolvent business that receives capital must pass back through
+        // `Distressed` rehabilitation before regaining full operation; it may
+        // not leap directly from insolvency to `Active`.
+        (BusinessStatus::Insolvent, BusinessStatus::Active) => BusinessStatus::Distressed,
+        (_, status) => status,
+    }
+}
 
 /// Annual succession-chance pressure per year of head age past the
 /// eligibility threshold. The rate keeps the median first transition inside
@@ -540,6 +605,7 @@ fn decide_business_production(
     registry: &Registry,
     state: &AppState,
     business: &crate::core::Business,
+    capacity_scratch: &super::DailyCapacityScratch,
     tools_id: GoodId,
     available_tools: Quantity,
     tools_price: Money,
@@ -557,9 +623,18 @@ fn decide_business_production(
         .characters
         .get(business.manager_id())
         .expect("business manager reference must be valid");
-    let mut batches = effective_capacity_batches(state, business);
-    batches = batches.min(output_limited_batches(state, business, recipe));
-    batches = batches.min(worker_limited_batches(state, business.id()));
+    let mut batches = effective_capacity_batches(
+        state,
+        business,
+        capacity_scratch.office_administrative_load(business.owner_dynasty_id()),
+    );
+    batches = batches.min(output_limited_batches(
+        state,
+        business,
+        recipe,
+        capacity_scratch.business_contract_reserve(business.id(), recipe.output_good_id()),
+    ));
+    batches = batches.min(capacity_scratch.worker_limited_batches(business.id()));
     batches = batches.min(input_limited_batches(business, recipe));
     batches = batches.min(cash_limited_batches(business, recipe));
     if recipe.output_good_id() != tools_id {
@@ -658,6 +733,7 @@ fn tool_limited_batches(
 pub(crate) fn effective_capacity_batches(
     state: &AppState,
     business: &crate::core::Business,
+    office_administrative_load: u16,
 ) -> u16 {
     let dynasty = state
         .dynasties
@@ -672,9 +748,9 @@ pub(crate) fn effective_capacity_batches(
     // full bonus: the ratio divides once instead of compounding truncations.
     let weighted_administrative_capacity = u32::from(dynasty.administrative_capacity())
         .saturating_mul(governance_administrative_multiplier(governance));
-    let effective_administrative_load = dynasty.administrative_load().saturating_add(
-        super::strategic::dynasty_office_administrative_load(state, dynasty.id()),
-    );
+    let effective_administrative_load = dynasty
+        .administrative_load()
+        .saturating_add(office_administrative_load);
     let administrative_efficiency = if effective_administrative_load == 0 {
         // Nothing to administer: no load can throttle capacity.
         10_000_u16
@@ -715,10 +791,10 @@ fn output_limited_batches(
     state: &AppState,
     business: &crate::core::Business,
     recipe: &RecipeDef,
+    contract_reserve: Quantity,
 ) -> u16 {
     let output_good_id = recipe.output_good_id();
     let policy_reserve = super::business_policy_reserve(business, recipe.output_quantity());
-    let contract_reserve = super::business_contract_reserve(state, business.id(), output_good_id);
     let market_capacity = super::market_absorption_capacity(state, output_good_id);
     let output_headroom = policy_reserve
         .saturating_add(contract_reserve)
@@ -730,24 +806,6 @@ fn output_limited_batches(
         return 0;
     }
     u16::try_from((output_headroom.milliunits() / output_per_batch).max(0)).unwrap_or(u16::MAX)
-}
-
-pub(crate) fn worker_limited_batches(state: &AppState, business_id: BusinessId) -> u16 {
-    let active_workers = super::saturating_worker_count(
-        state
-            .employment
-            .values()
-            .filter(|agreement| agreement.business_id == business_id)
-            .map(|agreement| match agreement.status {
-                EmploymentStatus::Active => u32::from(agreement.workers),
-                // A disputed crew works at half strength; an odd worker sits
-                // out with the even half rather than rounding up to full
-                // capacity, which would make disputes free for small crews.
-                EmploymentStatus::Disputed => u32::from(agreement.workers) / 2,
-                EmploymentStatus::Suspended | EmploymentStatus::Ended => 0,
-            }),
-    );
-    u16::try_from(active_workers / u32::from(super::WORKERS_PER_BATCH)).unwrap_or(u16::MAX)
 }
 
 fn input_limited_batches(business: &crate::core::Business, recipe: &RecipeDef) -> u16 {
@@ -967,6 +1025,7 @@ fn decide_business_sales(
             .max(Quantity::ZERO);
     }
     let mut lines = Vec::new();
+    let capacity_scratch = super::DailyCapacityScratch::collect(state);
 
     for business in state.businesses.iter() {
         if matches!(
@@ -975,7 +1034,9 @@ fn decide_business_sales(
         ) {
             continue;
         }
-        let Some(mut candidate) = plan_sale_candidate(registry, state, business)? else {
+        let Some(mut candidate) =
+            plan_sale_candidate(registry, state, business, &capacity_scratch)?
+        else {
             continue;
         };
         // Sellers share one absorption ceiling per good: each placement
@@ -1018,6 +1079,7 @@ fn plan_sale_candidate(
     registry: &Registry,
     state: &AppState,
     business: &crate::core::Business,
+    capacity_scratch: &super::DailyCapacityScratch,
 ) -> Result<Option<BusinessSaleCandidate>, SimulationError> {
     let recipe = registry
         .get_recipe(business.recipe_id())
@@ -1029,7 +1091,7 @@ fn plan_sale_candidate(
     let good_id = recipe.output_good_id();
     let inventory = business.inventory_quantity(good_id);
     let policy_reserve = super::business_policy_reserve(business, recipe.output_quantity());
-    let contract_reserve = super::business_contract_reserve(state, business.id(), good_id);
+    let contract_reserve = capacity_scratch.business_contract_reserve(business.id(), good_id);
     let policy_reserve_basis_points = match business.status() {
         BusinessStatus::Active
             if business.cash() < recipe.daily_operating_cost().saturating_mul(2) =>
@@ -1669,7 +1731,25 @@ fn maintenance_line(
         } else {
             0
         };
-    let quality_decline = if maintenance_succeeds { 0 } else { 3 };
+    // Quality above its target mean-reverts under successful maintenance:
+    // losing a guild-trained manager or lowering the policy target must let
+    // the old excellence decay instead of ratcheting upward forever.
+    let quality_target_excess_decline =
+        if maintenance_succeeds && quality_basis_points > quality_target_basis_points {
+            i16::try_from(
+                (quality_basis_points - quality_target_basis_points)
+                    .min(u16::try_from(effect_points).expect("maintenance effect is nonnegative"))
+                    .div_ceil(4),
+            )
+            .expect("bounded quality decline must fit i16")
+        } else {
+            0
+        };
+    let quality_decline = if maintenance_succeeds {
+        quality_target_excess_decline
+    } else {
+        3
+    };
     MaintenanceLine {
         business_id,
         cost: if maintenance_succeeds {
@@ -1987,6 +2067,7 @@ pub(crate) fn business_sustainable_unit_cost(
     registry: &Registry,
     state: &AppState,
     business: &crate::core::Business,
+    office_administrative_load: u16,
 ) -> Money {
     let recipe = registry
         .get_recipe(business.recipe_id())
@@ -2018,7 +2099,12 @@ pub(crate) fn business_sustainable_unit_cost(
     // Labor and maintenance accrue once per day, so unit break-even spreads
     // them across every batch the business expects to run rather than
     // charging a full day of overhead to a single batch of output.
-    let expected_batches = i64::from(effective_capacity_batches(state, business)).max(1);
+    let expected_batches = i64::from(effective_capacity_batches(
+        state,
+        business,
+        office_administrative_load,
+    ))
+    .max(1);
     let overhead_per_batch = daily_labor
         .saturating_add(daily_maintenance)
         .saturating_mul_ratio_ceil_nonnegative(1_000, expected_batches * 1_000);
@@ -2071,6 +2157,7 @@ fn expected_output_efficiency(state: &AppState, business: &crate::core::Business
 
 fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<GoodId, Money> {
     let mut floors: BTreeMap<GoodId, Vec<Money>> = BTreeMap::new();
+    let office_loads = super::strategic::dynasty_office_administrative_loads(state);
     for business in state.businesses.iter().filter(|business| {
         !matches!(
             business.status(),
@@ -2086,7 +2173,15 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
         floors
             .entry(recipe.output_good_id())
             .or_default()
-            .push(business_sustainable_unit_cost(registry, state, business));
+            .push(business_sustainable_unit_cost(
+                registry,
+                state,
+                business,
+                office_loads
+                    .get(&business.owner_dynasty_id())
+                    .copied()
+                    .unwrap_or(0),
+            ));
     }
     // The market's sustainable price is what the TYPICAL producer needs to
     // keep operating, not the single luckiest one. A pure minimum lets one
@@ -2191,52 +2286,18 @@ fn update_business_lifecycle(
         snapshots
     {
         if prior_status == BusinessStatus::Closed {
-            super::synchronize_employment_for_business_status(
-                state,
-                business_id,
-                BusinessStatus::Closed,
-            );
             continue;
         }
         let recipe = registry
             .get_recipe(recipe_id)
             .expect("business recipe reference must be valid");
-        // An insolvent business that receives capital must pass back through
-        // `Distressed` rehabilitation before regaining full operation; it may
-        // not leap directly from insolvency to `Active`.
-        //
-        // Recovery carries a higher cash bar than distress onset so a business
-        // sitting near the threshold cannot flap between `Distressed` and
-        // `Active` on daily price noise: falling into distress needs two days
-        // of operating cover, but climbing out needs six.
-        let active_status_cash_days = if matches!(
+        let new_status = business_status_after_capitalization(
             prior_status,
-            BusinessStatus::Distressed | BusinessStatus::Insolvent
-        ) {
-            RECOVERY_CASH_DAYS_OF_OPERATING_COST
-        } else {
-            ACTIVE_CASH_DAYS_OF_OPERATING_COST
-        };
-        let candidate_status =
-            if prior_status == BusinessStatus::Insolvent && cash == Money::ZERO && !has_inventory {
-                BusinessStatus::Closed
-            } else if cash == Money::ZERO && !has_inventory {
-                BusinessStatus::Insolvent
-            } else if cash
-                < minimum_cash_reserve.saturating_add(
-                    recipe
-                        .daily_operating_cost()
-                        .saturating_mul(active_status_cash_days),
-                )
-            {
-                BusinessStatus::Distressed
-            } else {
-                BusinessStatus::Active
-            };
-        let new_status = match (prior_status, candidate_status) {
-            (BusinessStatus::Insolvent, BusinessStatus::Active) => BusinessStatus::Distressed,
-            (_, status) => status,
-        };
+            cash,
+            has_inventory,
+            minimum_cash_reserve,
+            recipe.daily_operating_cost(),
+        );
         if new_status != prior_status {
             state
                 .businesses
@@ -2244,12 +2305,22 @@ fn update_business_lifecycle(
                 .expect("lifecycle business must exist")
                 .operations
                 .status = new_status;
+            super::synchronize_employment_for_business_status(state, business_id, new_status);
             events.push((business_id, prior_status, new_status));
         }
-        super::synchronize_employment_for_business_status(state, business_id, new_status);
     }
 
     for (business_id, prior_status, new_status) in events {
+        // A business that loses active standing cannot stay bound to scheduled
+        // supply: terminate its active contracts immediately so the
+        // no-inactive-contract-party lifecycle invariant holds every day,
+        // not only at week boundaries.
+        if matches!(
+            new_status,
+            BusinessStatus::Insolvent | BusinessStatus::Closed
+        ) {
+            super::strategic::terminate_active_contracts_for_business(state, business_id)?;
+        }
         let (kind, summary) = match new_status {
             BusinessStatus::Distressed | BusinessStatus::Insolvent => (
                 ChronicleKind::BusinessDistress,
@@ -2344,15 +2415,19 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
 const REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS: u16 = 2_500;
 
 fn regional_demand_availability_basis_points(state: &AppState) -> u16 {
+    if state.external_routes.is_empty() {
+        // The campaign models no regional economy through routes: household
+        // earning power cannot depend on route health that does not exist.
+        return 10_000;
+    }
     let routes = state
         .external_routes
         .values()
         .filter(|route| route.active)
         .collect::<Vec<_>>();
     if routes.is_empty() {
-        // No modeled or active route is a total blockade, not a perfectly
-        // healthy one: the subsistence floor still applies, matching the
-        // fully disrupted-route case below.
+        // A modeled route network with no active route is a total blockade,
+        // not a perfectly healthy one: the subsistence floor applies.
         return REGIONAL_DEMAND_MIN_AVAILABILITY_BASIS_POINTS;
     }
     let total = routes
@@ -2410,6 +2485,17 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
         .values()
         .filter_map(crate::core::Dynasty::heir_id)
         .collect();
+    // Heads whose entire house has collapsed alongside them have no possible
+    // emergency successor; count active members per dynasty up front so the
+    // mutation pass below stays within one borrow.
+    let mut active_members_per_dynasty: BTreeMap<DynastyId, u32> = BTreeMap::new();
+    for character in state.characters.iter() {
+        if character.status() == CharacterStatus::Active {
+            *active_members_per_dynasty
+                .entry(character.dynasty_id())
+                .or_default() += 1;
+        }
+    }
     let mut newly_incapacitated = Vec::new();
     for character in state.characters.iter_mut() {
         if character.status() != CharacterStatus::Active {
@@ -2425,12 +2511,24 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
         // survivable floor for this year instead of becoming incapacitated:
         // succession needs a live designated heir, and the floor is lifted on
         // accession (SUCCESSION_ACCESSION_HEALTH_FLOOR).
-        character.runtime.health_basis_points =
-            if resolved_health == 0 && heir_ids.contains(&character.id()) {
-                1
-            } else {
-                resolved_health
-            };
+        //
+        // A head with no possible successor is pinned the same way: heads are
+        // exempt from incapacitation, succession needs a live head to retire,
+        // and a house whose entire membership is its own failing head has no
+        // one left to designate. Without the pin the house would keep an
+        // active zero-health head forever, violating the positive-health
+        // lifecycle invariant and producing an unloadable save.
+        let is_sole_active_member = active_members_per_dynasty
+            .get(&character.dynasty_id())
+            .is_some_and(|count| *count == 1);
+        let pinned_at_survivable_floor = resolved_health == 0
+            && (heir_ids.contains(&character.id())
+                || (head_ids.contains(&character.id()) && is_sole_active_member));
+        character.runtime.health_basis_points = if pinned_at_survivable_floor {
+            COLLAPSED_HEALTH_SURVIVABLE_FLOOR
+        } else {
+            resolved_health
+        };
         if character.runtime.health_basis_points == 0 && !head_ids.contains(&character.id()) {
             if character.runtime.incapacitated_day.is_none() {
                 character.runtime.incapacitated_day = Some(state.clock.day());

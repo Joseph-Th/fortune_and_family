@@ -962,21 +962,21 @@ mod validation {
     }
 
     #[test]
-    fn rejects_planned_ai_objective_without_runtime_progression() {
+    fn rejects_missing_pursuing_ai_objective_for_one_dynasty() {
         let mut state = make_test_campaign();
-        state
+        let objective_id = *state
             .ai_objectives
-            .values_mut()
+            .keys()
             .next()
-            .expect("campaign must contain an AI objective")
-            .status = crate::core::ObjectiveStatus::Planned;
+            .expect("campaign must contain an AI objective");
+        state.ai_objectives.remove(&objective_id);
         let value = serde_json::to_value(state).expect("state must serialize");
-        let (_directory, path) = write_test_json_fixture("planned-ai-objective.json", &value);
+        let (_directory, path) = write_test_json_fixture("missing-ai-objective.json", &value);
 
         assert_invalid_state(
             load_state(&path),
             StateValidationKind::StrategicRecords,
-            "unsupported planned lifecycle state",
+            "does not have exactly one pursuing AI objective",
         );
     }
 
@@ -3083,6 +3083,9 @@ mod duplicate_json_members {
 
     #[test]
     fn rejects_duplicate_root_member() {
+        // Scanner-level fixtures: duplicate rejection is a byte-level
+        // precondition that runs before deserialization, so the contract is
+        // the reported path and member, not a full loadable campaign.
         let json_text = r#"{
             "schema_version": 22,
             "scenario_key": "rivergate",
@@ -3092,8 +3095,9 @@ mod duplicate_json_members {
         let directory = tempfile::tempdir().expect("temporary directory must be created");
         let path = directory.path().join("duplicate-root.json");
         std::fs::write(&path, json_text).expect("fixture must write");
+        let bytes = std::fs::read(&path).expect("fixture must read");
 
-        match load_state(&path) {
+        match super::validate_no_duplicate_json_members(&bytes, &path) {
             Err(PersistenceError::DuplicateMember {
                 json_path, member, ..
             }) => {
@@ -3118,8 +3122,9 @@ mod duplicate_json_members {
         let directory = tempfile::tempdir().expect("temporary directory must be created");
         let path = directory.path().join("duplicate-nested.json");
         std::fs::write(&path, json_text).expect("fixture must write");
+        let bytes = std::fs::read(&path).expect("fixture must read");
 
-        match load_state(&path) {
+        match super::validate_no_duplicate_json_members(&bytes, &path) {
             Err(PersistenceError::DuplicateMember {
                 json_path, member, ..
             }) => {
@@ -3144,8 +3149,9 @@ mod duplicate_json_members {
         let directory = tempfile::tempdir().expect("temporary directory must be created");
         let path = directory.path().join("duplicate-array.json");
         std::fs::write(&path, json_text).expect("fixture must write");
+        let bytes = std::fs::read(&path).expect("fixture must read");
 
-        match load_state(&path) {
+        match super::validate_no_duplicate_json_members(&bytes, &path) {
             Err(PersistenceError::DuplicateMember {
                 json_path, member, ..
             }) => {
@@ -3154,6 +3160,35 @@ mod duplicate_json_members {
             }
             other => panic!("expected DuplicateMember error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn load_rejects_duplicate_members_in_current_schema_saves() {
+        // End-to-end: a genuine current-schema save carrying one textual
+        // duplicate root member is rejected by the full load pipeline.
+        let state = make_test_campaign();
+        let serialized = serde_json::to_string(&state).expect("state must serialize");
+        assert!(
+            serialized.contains(r#""registry_fingerprint":"#),
+            "fixture assumes the standard root members"
+        );
+        let poisoned = serialized.replacen(
+            r#""registry_fingerprint":"#,
+            r#""registry_fingerprint":0,"registry_fingerprint":"#,
+            1,
+        );
+        assert_ne!(
+            poisoned, serialized,
+            "fixture injection must alter the document"
+        );
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("duplicate-save.json");
+        std::fs::write(&path, poisoned).expect("fixture must write");
+
+        assert!(matches!(
+            load_state(&path),
+            Err(PersistenceError::DuplicateMember { .. })
+        ));
     }
 
     #[test]

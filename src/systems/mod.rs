@@ -2,6 +2,7 @@
 
 use crate::ids::{CharacterId, RecipeId};
 use crate::registry::Registry;
+use std::collections::BTreeMap;
 
 mod bootstrap;
 mod commands;
@@ -152,39 +153,6 @@ pub(crate) fn business_policy_reserve(
     output_quantity.saturating_mul_ratio(reserve_batches, 1)
 }
 
-/// Weekly quantity promised by a business's active supply contracts for one
-/// good. Every output-planning decision must hold this reserve back — unless
-/// the firm is distressed. A distressed firm cannibalizes its commitments to
-/// survive: it liquidates everything it can into the market, so its scheduled
-/// deliveries can genuinely fail, penalties and breach attribution follow,
-/// and buyers who rely on a struggling supplier face real shortage risk.
-#[must_use]
-pub(crate) fn business_contract_reserve(
-    state: &crate::core::AppState,
-    business_id: crate::ids::BusinessId,
-    good_id: crate::ids::GoodId,
-) -> crate::money::Quantity {
-    let Some(business) = state.businesses.get(business_id) else {
-        return crate::money::Quantity::ZERO;
-    };
-    if business.status() == crate::core::BusinessStatus::Distressed {
-        return crate::money::Quantity::ZERO;
-    }
-    state
-        .contracts
-        .values()
-        .fold(crate::money::Quantity::ZERO, |total, contract| {
-            if contract.status == crate::core::ContractStatus::Active
-                && contract.seller_business_id == business_id
-                && contract.good_id == good_id
-            {
-                total.saturating_add(contract.quantity_per_week)
-            } else {
-                total
-            }
-        })
-}
-
 /// How much more of one good the market can absorb before stock exceeds the
 /// 150%-of-target placement ceiling.
 #[must_use]
@@ -219,6 +187,109 @@ pub(crate) fn public_work_progress_basis_points(
         0
     };
     u16::try_from(ratio.clamp(0, 10_000)).expect("clamped public-work progress must fit u16")
+}
+
+/// Per-day capacity inputs resolved once for all businesses instead of
+/// rescanning employment agreements, contracts, and institutions once per
+/// business per planning phase.
+///
+/// Business statuses do not change between the purchase, production, and
+/// sale planning phases (lifecycle evaluation runs after all three), so a
+/// collection taken at the start of a phase answers identically to the
+/// per-business scans it replaces. Stores are ordered, so collection and
+/// lookups stay deterministic.
+pub(crate) struct DailyCapacityScratch {
+    /// Effective workforce per business slot: active crews at full strength,
+    /// disputed crews at half strength, suspended and ended crews absent,
+    /// summed before the workers-per-batch division.
+    worker_capacity_workers: Vec<u32>,
+    /// Weekly contracted output owed by each business per good. Distressed
+    /// sellers hold no contract reserve: they cannibalize their commitments
+    /// to survive, so scheduled deliveries can genuinely fail and buyers who
+    /// rely on a struggling supplier face real shortage risk.
+    contract_reserves:
+        BTreeMap<(crate::ids::BusinessId, crate::ids::GoodId), crate::money::Quantity>,
+    office_administrative_loads: BTreeMap<crate::ids::DynastyId, u16>,
+}
+
+impl DailyCapacityScratch {
+    pub(crate) fn collect(state: &crate::core::AppState) -> Self {
+        let business_slots = state
+            .businesses
+            .records()
+            .keys()
+            .next_back()
+            .map_or(0, |id| id.value() as usize + 1);
+        let mut worker_capacity_workers = vec![0_u32; business_slots];
+        for agreement in state.employment.values() {
+            let weighted = match agreement.status {
+                crate::core::EmploymentStatus::Active => u32::from(agreement.workers),
+                // A disputed crew works at half strength; an odd worker sits
+                // out with the even half rather than rounding up to full
+                // capacity, which would make disputes free for small crews.
+                crate::core::EmploymentStatus::Disputed => u32::from(agreement.workers) / 2,
+                crate::core::EmploymentStatus::Suspended | crate::core::EmploymentStatus::Ended => {
+                    0
+                }
+            };
+            let slot = agreement.business_id.value() as usize;
+            if let Some(capacity) = worker_capacity_workers.get_mut(slot) {
+                *capacity = capacity.saturating_add(weighted);
+            }
+        }
+        let mut contract_reserves = BTreeMap::new();
+        for contract in state.contracts.values() {
+            if contract.status != crate::core::ContractStatus::Active {
+                continue;
+            }
+            let Some(seller) = state.businesses.get(contract.seller_business_id) else {
+                continue;
+            };
+            if seller.status() == crate::core::BusinessStatus::Distressed {
+                continue;
+            }
+            let entry = contract_reserves
+                .entry((contract.seller_business_id, contract.good_id))
+                .or_insert(crate::money::Quantity::ZERO);
+            *entry = entry.saturating_add(contract.quantity_per_week);
+        }
+        let office_administrative_loads = strategic::dynasty_office_administrative_loads(state);
+        Self {
+            worker_capacity_workers,
+            contract_reserves,
+            office_administrative_loads,
+        }
+    }
+
+    /// Batch ceiling from the workforce recorded at collection time.
+    pub(crate) fn worker_limited_batches(&self, business_id: crate::ids::BusinessId) -> u16 {
+        let workers = self
+            .worker_capacity_workers
+            .get(business_id.value() as usize)
+            .copied()
+            .unwrap_or(0);
+        u16::try_from(workers / u32::from(WORKERS_PER_BATCH)).unwrap_or(u16::MAX)
+    }
+
+    /// Weekly contracted output owed by one business for one good.
+    pub(crate) fn business_contract_reserve(
+        &self,
+        business_id: crate::ids::BusinessId,
+        good_id: crate::ids::GoodId,
+    ) -> crate::money::Quantity {
+        self.contract_reserves
+            .get(&(business_id, good_id))
+            .copied()
+            .unwrap_or(crate::money::Quantity::ZERO)
+    }
+
+    /// Institutional office load recorded at collection time.
+    pub(crate) fn office_administrative_load(&self, dynasty_id: crate::ids::DynastyId) -> u16 {
+        self.office_administrative_loads
+            .get(&dynasty_id)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 pub(crate) fn saturating_worker_count(workers: impl Iterator<Item = u32>) -> u32 {
@@ -257,10 +328,13 @@ pub(crate) const fn is_employment_status_compatible(
                 crate::core::BusinessStatus::Active | crate::core::BusinessStatus::Distressed
             )
         }
-        crate::core::EmploymentStatus::Suspended => matches!(
-            business_status,
-            crate::core::BusinessStatus::Insolvent | crate::core::BusinessStatus::Closed
-        ),
+        // Suspension is the reversible state an insolvent employer's crews
+        // hold while recovery remains possible. Closure is terminal, so a
+        // closed firm's agreements end outright and release their workers
+        // back to the household labor pool.
+        crate::core::EmploymentStatus::Suspended => {
+            matches!(business_status, crate::core::BusinessStatus::Insolvent)
+        }
         crate::core::EmploymentStatus::Ended => true,
     }
 }
@@ -272,14 +346,22 @@ pub(crate) fn synchronize_employment_for_business_status(
 ) {
     match business_status {
         crate::core::BusinessStatus::Active | crate::core::BusinessStatus::Distressed => {
+            // Resumed operation recalls every withheld crew as disputed:
+            // suspended crews return while their insolvent employer
+            // rehabilitates, and ended crews return when an explicit
+            // acquisition reopens a closed firm under a new owner.
             for agreement in state.employment.values_mut().filter(|agreement| {
                 agreement.business_id == business_id
-                    && agreement.status == crate::core::EmploymentStatus::Suspended
+                    && matches!(
+                        agreement.status,
+                        crate::core::EmploymentStatus::Suspended
+                            | crate::core::EmploymentStatus::Ended
+                    )
             }) {
                 agreement.status = crate::core::EmploymentStatus::Disputed;
             }
         }
-        crate::core::BusinessStatus::Insolvent | crate::core::BusinessStatus::Closed => {
+        crate::core::BusinessStatus::Insolvent => {
             for agreement in state.employment.values_mut().filter(|agreement| {
                 agreement.business_id == business_id
                     && matches!(
@@ -289,6 +371,17 @@ pub(crate) fn synchronize_employment_for_business_status(
                     )
             }) {
                 agreement.status = crate::core::EmploymentStatus::Suspended;
+            }
+        }
+        // A closed business never reopens: ending its agreements releases the
+        // suspended crews to other employers instead of stranding them as
+        // permanently withheld household labor.
+        crate::core::BusinessStatus::Closed => {
+            for agreement in state.employment.values_mut().filter(|agreement| {
+                agreement.business_id == business_id
+                    && agreement.status != crate::core::EmploymentStatus::Ended
+            }) {
+                agreement.status = crate::core::EmploymentStatus::Ended;
             }
         }
     }
@@ -325,13 +418,14 @@ pub(crate) const OFFICE_RESIGNATION_AUDIT_DETAIL: &str = "resigned_office=true";
 pub(crate) use commands::apply_player_command_scratch;
 pub(crate) use commands::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS,
-    CIVIC_DEBT_CREDITOR_RESERVE, COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST,
-    CRISIS_SUPPRESS_COST, FAMILY_COUNCIL_MEETING_COST, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS,
-    FAMILY_EDUCATION_COST, HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST,
-    HEIR_DESIGNATION_UNITY_COST, HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS,
-    HOUSE_GOVERNANCE_UNITY_COST, INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS,
-    INFORMATION_LEVERAGE_COST, INFORMATION_REPORT_LIFETIME_DAYS, INSTITUTION_ENDOWMENT_MAX,
-    INSTITUTION_ENDOWMENT_MIN, INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
+    CIVIC_DEBT_CREDITOR_RESERVE, COMMISSIONED_INFORMATION_SOURCE, CRISIS_EXPLOIT_LEGITIMACY_COST,
+    CRISIS_REFORM_COST, CRISIS_SUPPRESS_COST, CRISIS_SUPPRESS_LEGITIMACY_COST,
+    FAMILY_COUNCIL_MEETING_COST, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST,
+    HEIR_DESIGNATION_INTERVAL_DAYS, HEIR_DESIGNATION_LEGITIMACY_COST, HEIR_DESIGNATION_UNITY_COST,
+    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, HOUSE_GOVERNANCE_UNITY_COST,
+    INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
+    INFORMATION_REPORT_LIFETIME_DAYS, INSTITUTION_ENDOWMENT_MAX, INSTITUTION_ENDOWMENT_MIN,
+    INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
     INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, LABOR_CONDITIONS_IMPROVEMENT_COST,
     LABOR_NEGOTIATION_COST, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
     LAW_SPONSORSHIP_COST, LAW_SPONSORSHIP_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
@@ -370,7 +464,8 @@ pub(crate) use legal::{
     is_valid_legal_hearing_day, quote_grounded_legal_claim,
 };
 pub(crate) use progression::{
-    campaign_phase_is_consistent, contract_deliveries_for_dynasty, refresh_campaign_phases,
+    campaign_phase_is_consistent, campaign_phases_are_consistent, contract_deliveries_for_dynasty,
+    refresh_campaign_phases,
 };
 pub use simulation::advance_days;
 pub(crate) use simulation::{advance_days_scratch, business_sustainable_unit_cost};
@@ -382,12 +477,12 @@ pub use strategic::{
     SupplyContractTerms, quote_business_acquisition, quote_property_liquidation,
 };
 pub(crate) use strategic::{
-    DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, STANDARD_CONTRACT_BATCHES_PER_WEEK,
-    acquire_business, available_supply_contract_capacity, business_owner_distribution_reserve,
-    business_recapitalization_target, buy_unowned_property, capitalize_owned_business,
-    crisis_response_contains_crisis, distribute_owned_business_cash, district_unrest_pressures,
-    dynasty_office_administrative_load, effective_property_weekly_rent, expire_time_limited_state,
-    institution_capability_score, market_reference_weekly_wage,
+    CRISIS_RESPONSE_WINDOW_DAYS, DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS,
+    STANDARD_CONTRACT_BATCHES_PER_WEEK, acquire_business, available_supply_contract_capacity,
+    business_owner_distribution_reserve, business_recapitalization_target, buy_unowned_property,
+    capitalize_owned_business, crisis_response_contains_crisis, distribute_owned_business_cash,
+    district_unrest_pressures, dynasty_office_administrative_load, effective_property_weekly_rent,
+    expire_time_limited_state, institution_capability_score, market_reference_weekly_wage,
     projected_dynasty_monthly_office_duty,
     projected_dynasty_monthly_office_duty_with_additional_offices, sell_owned_property,
     validate_loan, validate_supply_contract,

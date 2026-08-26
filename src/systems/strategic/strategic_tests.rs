@@ -4857,6 +4857,69 @@ mod loans {
     }
 
     #[test]
+    fn installments_equal_to_weekly_interest_count_as_missed_payments() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let mut terms = make_test_loan_terms(&state);
+        // The boundary case: a payment that exactly matches the week's
+        // interest never reduces the balance, so servicing it would keep the
+        // loan perpetually "current" — collecting interest forever with its
+        // collateral locked away. Such an installment must count as missed.
+        terms.principal = Money::from_copper(1_000_000);
+        terms.interest_basis_points = 800;
+        terms.weekly_payment = crate::systems::strategic::weekly_interest_due(
+            terms.principal,
+            terms.interest_basis_points,
+        );
+        {
+            let lender = state
+                .dynasties
+                .get_mut(&terms.lender_dynasty_id)
+                .expect("lender dynasty must exist");
+            lender.resources.treasury = lender
+                .treasury()
+                .checked_add(terms.principal)
+                .expect("test funding must fit treasury");
+        }
+        {
+            let borrower = state
+                .dynasties
+                .get_mut(&terms.borrower_dynasty_id)
+                .expect("borrower dynasty must exist");
+            borrower.resources.treasury = borrower
+                .treasury()
+                .checked_add(Money::from_copper(10_000))
+                .expect("test funding must fit treasury");
+        }
+        let loan_id = issue_loan(&mut state, terms).expect("loan must be issued");
+        let due = {
+            let loan = state.loans.get(&loan_id).expect("issued loan must exist");
+            DueLoan {
+                id: loan.id,
+                lender_id: loan.lender_dynasty_id,
+                borrower_id: loan.borrower_dynasty_id,
+                weekly_payment: loan.weekly_payment,
+                balance: loan.balance,
+                interest_basis_points: loan.interest_basis_points,
+            }
+        };
+
+        settle_due_loan(&mut state, due, None).expect("settlement must resolve");
+
+        let loan = state
+            .loans
+            .get(&loan_id)
+            .expect("loan must remain recorded");
+        assert_eq!(
+            loan.status,
+            LoanStatus::Delinquent,
+            "an interest-only installment must not count as current"
+        );
+        assert!(loan.missed_payments >= 1);
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn issuing_a_loan_creates_relationship_memory_and_counterparty_intelligence() {
         let mut state = make_test_campaign();
         let terms = make_test_loan_terms(&state);
@@ -7714,7 +7777,7 @@ mod ai {
             .expect("borrower dynasty must have an AI objective")
             .id;
         for objective in state.ai_objectives.values_mut() {
-            objective.status = ObjectiveStatus::Planned;
+            objective.status = ObjectiveStatus::Abandoned;
         }
         let objective = state
             .ai_objectives
@@ -7857,7 +7920,7 @@ mod ai {
             .values_mut()
             .filter(|objective| objective.id != objective_id)
         {
-            objective.status = ObjectiveStatus::Planned;
+            objective.status = ObjectiveStatus::Abandoned;
         }
         state
             .dynasties
@@ -8108,7 +8171,7 @@ mod ai {
     }
 
     #[test]
-    fn debt_objective_cures_defaulted_balance_instead_of_declaring_success() {
+    fn debt_objective_leaves_defaulted_paper_to_restructuring_and_the_court() {
         let mut state = make_test_campaign();
         let loan_id = current_loan_id(&state);
         let borrower_id = state
@@ -8152,15 +8215,90 @@ mod ai {
             .resources
             .treasury = Money::from_copper(1_000);
 
+        // A defaulted obligation cures through restructuring or the court,
+        // never through this objective's quiet side-door payments; with no
+        // repayment-active balance left, the objective is satisfied.
         assert_eq!(
             advance_ai_debt_objective(&mut state, borrower_id)
-                .expect("AI debt objective must service defaulted debt"),
+                .expect("AI debt objective must handle a defaulted-only book"),
             ObjectiveProgress::Achieved
         );
         assert_eq!(
             state.loans.get(&loan_id).expect("loan must exist").status,
-            LoanStatus::Repaid,
-            "a defaulted balance remains an outstanding liability until it is actually repaid"
+            LoanStatus::Defaulted,
+            "defaulted paper must stay with the restructuring and court paths"
+        );
+        assert_eq!(
+            state.loans.get(&loan_id).expect("loan must exist").balance,
+            Money::from_copper(500),
+        );
+    }
+
+    #[test]
+    fn debt_objective_prioritizes_delinquent_over_current_loans() {
+        let mut state = make_test_campaign();
+        let current_loan_id_value = current_loan_id(&state);
+        let borrower_id = state
+            .loans
+            .get(&current_loan_id_value)
+            .expect("loan must exist")
+            .borrower_dynasty_id;
+        // A second, delinquent loan from another lender: one missed payment
+        // away from default, so it outranks the healthy current loan.
+        let delinquent_loan_id = state.next_ids.try_loan().expect("loan id");
+        let lender_id = state
+            .loans
+            .values()
+            .find(|loan| loan.borrower_dynasty_id != borrower_id)
+            .map(|loan| loan.lender_dynasty_id)
+            .expect("campaign must contain another dynasty's loan");
+        state.loans.insert(
+            delinquent_loan_id,
+            crate::core::Loan {
+                id: delinquent_loan_id,
+                lender_dynasty_id: lender_id,
+                borrower_dynasty_id: borrower_id,
+                principal: Money::from_copper(4_000),
+                weekly_payment: Money::from_copper(40),
+                interest_basis_points: 800,
+                balance: Money::from_copper(4_000),
+                next_due_day: state.clock.day() + 7,
+                missed_payments: 1,
+                status: LoanStatus::Delinquent,
+                collateral_property_id: None,
+            },
+        );
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .treasury = Money::from_copper(10_000);
+
+        advance_ai_debt_objective(&mut state, borrower_id)
+            .expect("AI debt objective must service outstanding debt");
+
+        assert_eq!(
+            state
+                .loans
+                .get(&delinquent_loan_id)
+                .expect("delinquent loan must exist")
+                .balance,
+            Money::from_copper(3_000),
+            "the delinquent loan receives the accelerated paydown first"
+        );
+        assert_eq!(
+            state
+                .loans
+                .get(&current_loan_id_value)
+                .expect("current loan must exist")
+                .balance,
+            state
+                .loans
+                .get(&current_loan_id_value)
+                .expect("current loan must exist")
+                .principal,
+            "the healthy current loan is untouched while a delinquent one stands"
         );
     }
 

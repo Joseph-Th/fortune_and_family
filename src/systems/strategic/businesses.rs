@@ -390,6 +390,7 @@ pub(crate) struct ValidatedBusinessAcquisition {
     business_finance_version_after: u64,
     seller_administrative_load_after: u16,
     buyer_administrative_load_after: u16,
+    daily_operating_cost: Money,
 }
 
 /// Acquires a troubled business, installs an eligible manager, and supplies enough working
@@ -507,10 +508,10 @@ pub(crate) fn validate_business_acquisition(
     let business_finance_version_after = checked_next_business_finance_version(business)
         .ok_or(StrategicError::BusinessFinanceVersionExhausted { business_id })?;
     let recipe_id = business.recipe_id();
-    let administrative_load = registry
+    let recipe = registry
         .get_recipe(recipe_id)
-        .expect("business recipe references must be validated")
-        .administrative_load();
+        .expect("business recipe references must be validated");
+    let administrative_load = recipe.administrative_load();
     let (seller_administrative_load_after, buyer_administrative_load_after) =
         validate_acquisition_administrative_load(
             state,
@@ -527,6 +528,7 @@ pub(crate) fn validate_business_acquisition(
         business_finance_version_after,
         seller_administrative_load_after,
         buyer_administrative_load_after,
+        daily_operating_cost: recipe.daily_operating_cost(),
     })
 }
 
@@ -616,13 +618,33 @@ pub(crate) fn commit_business_acquisition(
         .quality_basis_points
         .saturating_add(rehabilitation / 2)
         .min(10_000);
-    business.operations.status = BusinessStatus::Active;
-    synchronize_business_property_tenancy(state, business_id, buyer_dynasty_id);
-    crate::systems::synchronize_employment_for_business_status(
-        state,
-        business_id,
-        BusinessStatus::Active,
+    // Route the acquired firm through the canonical lifecycle evaluation
+    // instead of force-setting `Active`: a distressed or insolvent target
+    // must pass back through `Distressed` rehabilitation, and even an active
+    // target keeps `Active` only when its post-recapitalization cash clears
+    // the operating bar the daily pass would apply.
+    let prior_status = business.status();
+    let has_inventory = business
+        .inventory
+        .values()
+        .any(|quantity| !quantity.is_zero());
+    business.operations.status = crate::systems::simulation::business_status_after_capitalization(
+        prior_status,
+        business.cash(),
+        has_inventory,
+        business.policy.minimum_cash_reserve,
+        validated.daily_operating_cost,
     );
+    let acquired_status = business.operations.status;
+    synchronize_business_property_tenancy(state, business_id, buyer_dynasty_id);
+    crate::systems::synchronize_employment_for_business_status(state, business_id, acquired_status);
+    if matches!(
+        acquired_status,
+        BusinessStatus::Insolvent | BusinessStatus::Closed
+    ) {
+        super::terminate_active_contracts_for_business(state, business_id)
+            .map_err(StrategicError::Simulation)?;
+    }
     cancel_internalized_contracts(state, business_id, buyer_dynasty_id)?;
 
     record_business_acquisition(state, buyer_dynasty_id, manager_id, recapitalization, quote)?;

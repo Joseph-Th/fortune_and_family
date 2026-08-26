@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 29;
+pub const CURRENT_SCHEMA_VERSION: u32 = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGameConfig {
@@ -499,6 +499,10 @@ macro_rules! try_next_id_method {
 macro_rules! next_id_method {
     ($method:ident, $try_method:ident, $field:ident, $id_type:ident, $error:ident) => {
         try_next_id_method!($try_method, $field, $id_type, $error);
+        /// Panics on identifier exhaustion. Production callers are the
+        /// fresh-campaign constructors, where a brand-new allocator cannot
+        /// be exhausted; every incremental system path uses the `try_*`
+        /// variant so exhaustion surfaces as a typed error.
         pub(crate) const fn $method(&mut self) -> $id_type {
             match self.$try_method() {
                 Ok(id) => id,
@@ -509,8 +513,8 @@ macro_rules! next_id_method {
 }
 
 /// Generates both the fallible `try_*` allocator (a production path used by
-/// every consequential system) and a panicking twin whose callers are
-/// test-only fixtures that treat identifier exhaustion as unreachable.
+/// every consequential system) and a panicking twin compiled only for tests,
+/// where fixtures treat identifier exhaustion as unreachable.
 macro_rules! test_next_id_method {
     ($method:ident, $try_method:ident, $field:ident, $id_type:ident, $error:ident) => {
         try_next_id_method!($try_method, $field, $id_type, $error);

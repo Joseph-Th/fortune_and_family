@@ -216,6 +216,10 @@ fn validate_characters(state: &AppState) {
 }
 
 fn validate_dynasties(state: &AppState) {
+    // One audit-derived evidence fold for every dynasty in this battery run:
+    // per-dynasty collection would rescan the unbounded audit log per house.
+    let campaign_phase_evidence =
+        crate::systems::progression::CampaignPhaseEvidence::collect(state);
     for dynasty in state.dynasties.values() {
         debug_assert!(
             !dynasty.name().trim().is_empty(),
@@ -277,7 +281,11 @@ fn validate_dynasties(state: &AppState) {
             "Lifecycle Validity: dynasty generation must be positive and retain succession headroom"
         );
         debug_assert!(
-            super::campaign_phase_is_consistent(state, dynasty.id()),
+            super::progression::campaign_phase_is_consistent_with(
+                &campaign_phase_evidence,
+                state,
+                dynasty.id(),
+            ),
             "Derived Data Consistency: dynasty {} campaign phase is stale or incompatible with progression",
             dynasty.id()
         );
@@ -795,6 +803,11 @@ fn validate_properties(state: &AppState, ids: &RegistryIds) {
                     business.district_id(),
                     property.district_id,
                     "Ownership Exclusivity: business and occupied property districts differ"
+                );
+                debug_assert_eq!(
+                    business.premises_property_id(),
+                    Some(*property_id),
+                    "Derived Data Consistency: occupied property and business premises pointers differ"
                 );
                 let expected_tenant = property
                     .owner_dynasty_id
@@ -1378,16 +1391,6 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
                 && objective.dynasty_id != state.player_dynasty_id,
             "Record Reference Validity: AI objective dynasty does not exist or is the player"
         );
-        if let Some(target_id) = objective.target_dynasty_id {
-            debug_assert!(
-                state.dynasties.contains_key(&target_id),
-                "Record Reference Validity: AI objective target dynasty does not exist"
-            );
-            debug_assert_ne!(
-                target_id, objective.dynasty_id,
-                "Lifecycle Validity: AI objective cannot target its own dynasty"
-            );
-        }
         debug_assert!(
             objective.created_day <= state.clock.day(),
             "No Lost Runtime State: AI objective is created in the future"
@@ -1395,11 +1398,6 @@ fn validate_information_and_ai(state: &AppState, ids: &RegistryIds) {
         debug_assert!(
             !objective.rationale.trim().is_empty(),
             "No Lost Runtime State: AI objective has no rationale"
-        );
-        debug_assert_ne!(
-            objective.status,
-            crate::core::ObjectiveStatus::Planned,
-            "Lifecycle Validity: planned AI objectives are not supported by the runtime"
         );
         if objective.status == crate::core::ObjectiveStatus::Pursuing {
             *pursuing_objectives.entry(objective.dynasty_id).or_default() += 1;

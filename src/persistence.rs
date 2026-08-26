@@ -402,8 +402,11 @@ pub fn load_state_with_revision(
     let path = path.as_ref();
     let bytes = read_bounded_save(path)?;
     let revision = SaveRevision::of_bytes(&bytes);
-    validate_no_duplicate_json_members(&bytes, path)?;
+    // The schema probe scans only the version member, so foreign or
+    // non-current documents reject on the cheapest pass before the
+    // full-document duplicate scan runs.
     require_current_schema(&bytes, path)?;
+    validate_no_duplicate_json_members(&bytes, path)?;
     let state: AppState =
         serde_json::from_slice(&bytes).map_err(|source| PersistenceError::Parse {
             path: path.to_path_buf(),
@@ -531,6 +534,16 @@ struct JsonDuplicateScanner<'a> {
     bytes: &'a [u8],
     pos: usize,
     path: &'a Path,
+    /// Enclosing member names and array indices for the node being scanned.
+    /// The formatted JSON path is only materialized when a duplicate is
+    /// actually reported, so scanning a large document does not format a path
+    /// string per object member and array element.
+    path_stack: Vec<ScannerPathSegment>,
+}
+
+enum ScannerPathSegment {
+    Member(String),
+    Index(usize),
 }
 
 impl<'a> JsonDuplicateScanner<'a> {
@@ -539,7 +552,28 @@ impl<'a> JsonDuplicateScanner<'a> {
             bytes,
             pos: 0,
             path,
+            path_stack: Vec::new(),
         }
+    }
+
+    /// Renders the current position as a JSON path, matching the historical
+    /// `$`-rooted dotted/bracketed form.
+    fn current_json_path(&self) -> String {
+        let mut rendered = String::from("$");
+        for segment in &self.path_stack {
+            match segment {
+                ScannerPathSegment::Member(member) => {
+                    rendered.push('.');
+                    rendered.push_str(member);
+                }
+                ScannerPathSegment::Index(index) => {
+                    rendered.push('[');
+                    rendered.push_str(&index.to_string());
+                    rendered.push(']');
+                }
+            }
+        }
+        rendered
     }
 
     fn skip_whitespace(&mut self) {
@@ -556,7 +590,7 @@ impl<'a> JsonDuplicateScanner<'a> {
         self.bytes.get(self.pos).copied()
     }
 
-    fn parse_value(&mut self, current_path: &str) -> Result<(), PersistenceError> {
+    fn parse_value_member(&mut self, member_key: Option<&str>) -> Result<(), PersistenceError> {
         self.skip_whitespace();
         let b = self
             .bytes
@@ -570,8 +604,28 @@ impl<'a> JsonDuplicateScanner<'a> {
                 )),
             })?;
         match b {
-            b'{' => self.parse_object(current_path),
-            b'[' => self.parse_array(current_path),
+            b'{' => {
+                if let Some(member_key) = member_key {
+                    self.path_stack
+                        .push(ScannerPathSegment::Member(member_key.to_owned()));
+                }
+                let result = self.parse_object();
+                if member_key.is_some() {
+                    self.path_stack.pop();
+                }
+                result
+            }
+            b'[' => {
+                if let Some(member_key) = member_key {
+                    self.path_stack
+                        .push(ScannerPathSegment::Member(member_key.to_owned()));
+                }
+                let result = self.parse_array();
+                if member_key.is_some() {
+                    self.path_stack.pop();
+                }
+                result
+            }
             b'"' => {
                 self.parse_string()?;
                 Ok(())
@@ -594,7 +648,7 @@ impl<'a> JsonDuplicateScanner<'a> {
         }
     }
 
-    fn parse_object(&mut self, current_path: &str) -> Result<(), PersistenceError> {
+    fn parse_object(&mut self) -> Result<(), PersistenceError> {
         self.pos += 1; // skip '{'
         let mut seen_keys = BTreeSet::new();
         loop {
@@ -616,7 +670,7 @@ impl<'a> JsonDuplicateScanner<'a> {
             if !seen_keys.insert(key.clone()) {
                 return Err(PersistenceError::DuplicateMember {
                     path: self.path.to_path_buf(),
-                    json_path: current_path.to_owned(),
+                    json_path: self.current_json_path(),
                     member: key,
                 });
             }
@@ -631,12 +685,7 @@ impl<'a> JsonDuplicateScanner<'a> {
                 });
             }
             self.pos += 1; // skip ':'
-            let child_path = if current_path == "$" {
-                format!("$.{key}")
-            } else {
-                format!("{current_path}.{key}")
-            };
-            self.parse_value(&child_path)?;
+            self.parse_value_member(Some(&key))?;
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -658,17 +707,19 @@ impl<'a> JsonDuplicateScanner<'a> {
         Ok(())
     }
 
-    fn parse_array(&mut self, current_path: &str) -> Result<(), PersistenceError> {
+    fn parse_array(&mut self) -> Result<(), PersistenceError> {
         self.pos += 1; // skip '['
-        let mut index = 0;
+        let mut index = 0_usize;
         loop {
             self.skip_whitespace();
             if self.peek() == Some(b']') {
                 self.pos += 1;
                 break;
             }
-            let child_path = format!("{current_path}[{index}]");
-            self.parse_value(&child_path)?;
+            self.path_stack.push(ScannerPathSegment::Index(index));
+            let result = self.parse_value_member(None);
+            self.path_stack.pop();
+            result?;
             index += 1;
             self.skip_whitespace();
             match self.peek() {
@@ -708,38 +759,50 @@ impl<'a> JsonDuplicateScanner<'a> {
                     b'r' => result.push('\r'),
                     b't' => result.push('\t'),
                     b'u' => {
-                        if self.pos + 4 >= self.bytes.len() {
-                            return Err(PersistenceError::Parse {
-                                path: self.path.to_path_buf(),
-                                source: serde_json::Error::io(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    "incomplete unicode escape",
-                                )),
-                            });
-                        }
-                        let hex_slice = std::str::from_utf8(
-                            &self.bytes[self.pos + 1..=self.pos + 4],
-                        )
-                        .map_err(|_| PersistenceError::Parse {
-                            path: self.path.to_path_buf(),
-                            source: serde_json::Error::io(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "invalid utf8 in unicode escape",
-                            )),
-                        })?;
-                        let code = u32::from_str_radix(hex_slice, 16).map_err(|_| {
-                            PersistenceError::Parse {
-                                path: self.path.to_path_buf(),
-                                source: serde_json::Error::io(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    "invalid hex in unicode escape",
-                                )),
+                        let first_code = self.parse_unicode_escape_hex()?;
+                        match char::from_u32(u32::from(first_code)) {
+                            Some(ch) => result.push(ch),
+                            None => {
+                                // High surrogate: a valid escape pair must
+                                // immediately follow with the low surrogate.
+                                if !(0xD8_00..0xDC_00).contains(&u32::from(first_code)) {
+                                    return Err(PersistenceError::Parse {
+                                        path: self.path.to_path_buf(),
+                                        source: serde_json::Error::io(std::io::Error::new(
+                                            std::io::ErrorKind::InvalidData,
+                                            "lone unicode surrogate escape",
+                                        )),
+                                    });
+                                }
+                                if self.pos + 6 >= self.bytes.len()
+                                    || self.bytes[self.pos + 1] != b'\\'
+                                    || self.bytes[self.pos + 2] != b'u'
+                                {
+                                    return Err(PersistenceError::Parse {
+                                        path: self.path.to_path_buf(),
+                                        source: serde_json::Error::io(std::io::Error::new(
+                                            std::io::ErrorKind::InvalidData,
+                                            "unpaired high surrogate escape",
+                                        )),
+                                    });
+                                }
+                                self.pos += 2; // skip '\u' of the low surrogate
+                                let second_code = self.parse_unicode_escape_hex()?;
+                                let scalar = 0x10_000
+                                    + ((u32::from(first_code) - 0xD8_00) << 10)
+                                    + (u32::from(second_code) - 0xDC_00);
+                                let ch = char::from_u32(scalar).ok_or_else(|| {
+                                    PersistenceError::Parse {
+                                        path: self.path.to_path_buf(),
+                                        source: serde_json::Error::io(std::io::Error::new(
+                                            std::io::ErrorKind::InvalidData,
+                                            "invalid unicode surrogate pair",
+                                        )),
+                                    }
+                                })?;
+                                result.push(ch);
                             }
-                        })?;
-                        if let Some(ch) = char::from_u32(code) {
-                            result.push(ch);
                         }
-                        self.pos += 4;
                     }
                     _ => result.push(b as char),
                 }
@@ -789,6 +852,39 @@ impl<'a> JsonDuplicateScanner<'a> {
         }
     }
 
+    /// Reads the four hex digits of a `\uXXXX` escape (the caller has already
+    /// consumed `\u`) and returns the raw 16-bit code unit.
+    fn parse_unicode_escape_hex(&mut self) -> Result<u16, PersistenceError> {
+        if self.pos + 4 >= self.bytes.len() {
+            return Err(PersistenceError::Parse {
+                path: self.path.to_path_buf(),
+                source: serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "incomplete unicode escape",
+                )),
+            });
+        }
+        let hex_slice =
+            std::str::from_utf8(&self.bytes[self.pos + 1..=self.pos + 4]).map_err(|_| {
+                PersistenceError::Parse {
+                    path: self.path.to_path_buf(),
+                    source: serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid utf8 in unicode escape",
+                    )),
+                }
+            })?;
+        let code = u16::from_str_radix(hex_slice, 16).map_err(|_| PersistenceError::Parse {
+            path: self.path.to_path_buf(),
+            source: serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid hex in unicode escape",
+            )),
+        })?;
+        self.pos += 4;
+        Ok(code)
+    }
+
     fn parse_number(&mut self) {
         while self.pos < self.bytes.len() {
             match self.bytes[self.pos] {
@@ -801,18 +897,24 @@ impl<'a> JsonDuplicateScanner<'a> {
 
 fn validate_no_duplicate_json_members(bytes: &[u8], path: &Path) -> Result<(), PersistenceError> {
     let mut scanner = JsonDuplicateScanner::new(bytes, path);
-    scanner.parse_value("$")?;
+    scanner.parse_value_member(None)?;
     scanner.skip_whitespace();
     Ok(())
 }
 
 fn validate_campaign_phase_consistency(state: &AppState) -> Result<(), String> {
-    for dynasty_id in state.dynasties.keys().copied() {
-        if !crate::systems::campaign_phase_is_consistent(state, dynasty_id) {
-            return Err(format!(
-                "dynasty {dynasty_id} has a stale or incompatible campaign phase"
-            ));
-        }
+    // One audit-evidence fold for the whole campaign: collecting per dynasty
+    // would rescan the unbounded audit log once per house on every save/load.
+    if !crate::systems::campaign_phases_are_consistent(state) {
+        let offending = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| !crate::systems::campaign_phase_is_consistent(state, *dynasty_id))
+            .expect("batch consistency failed so some dynasty must disagree");
+        return Err(format!(
+            "dynasty {offending} has a stale or incompatible campaign phase"
+        ));
     }
     Ok(())
 }
@@ -1970,6 +2072,16 @@ fn validate_family_councils(state: &AppState) -> Result<(), String> {
 }
 
 fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String> {
+    // One bounded pass over the audit log builds the patronage-pair set the
+    // per-member checks below need; scanning the unbounded log once per
+    // player member would make load cost grow with campaign length.
+    let patronage_pairs: BTreeSet<(crate::ids::InstitutionId, crate::ids::CharacterId)> = state
+        .audit_log
+        .iter()
+        .filter(|record| record.kind() == AuditKind::InstitutionPatronage)
+        .filter_map(|record| record.audit_subject().institution_character_ids())
+        .map(|(institution_id, character_id)| (institution_id, character_id))
+        .collect();
     let mut officeholders = BTreeSet::new();
     let mut player_memberships = BTreeMap::new();
     for (institution_id, institution) in &state.institutions {
@@ -1981,12 +2093,7 @@ fn validate_institution_and_misc_records(state: &AppState) -> Result<(), String>
                     character.dynasty_id() == state.player_dynasty_id
                         && institution.office_holder_id != Some(*character_id)
                 })
-                && !state.audit_log.iter().any(|record| {
-                    record.kind() == AuditKind::InstitutionPatronage
-                        && record
-                            .audit_subject()
-                            .references_institution_character(*institution_id, *character_id)
-                })
+                && !patronage_pairs.contains(&(*institution_id, *character_id))
         });
         if institution.institution_id != *institution_id
             || institution.members.iter().any(|character_id| {
@@ -2137,10 +2244,6 @@ fn validate_ai_objective_records(state: &AppState) -> Result<(), String> {
             || !state.dynasties.contains_key(&objective.dynasty_id)
             || objective.dynasty_id == state.player_dynasty_id
             || objective.created_day > state.clock.day()
-            || objective
-                .target_dynasty_id
-                .is_some_and(|dynasty_id| !state.dynasties.contains_key(&dynasty_id))
-            || objective.target_dynasty_id == Some(objective.dynasty_id)
         {
             return Err(format!(
                 "AI objective {objective_id} has an invalid reference"
@@ -2148,11 +2251,6 @@ fn validate_ai_objective_records(state: &AppState) -> Result<(), String> {
         }
         if objective.rationale.trim().is_empty() {
             return Err(format!("AI objective {objective_id} has no rationale"));
-        }
-        if objective.status == crate::core::ObjectiveStatus::Planned {
-            return Err(format!(
-                "AI objective {objective_id} uses an unsupported planned lifecycle state"
-            ));
         }
         if objective.status == crate::core::ObjectiveStatus::Pursuing {
             let count = pursuing_objectives.entry(objective.dynasty_id).or_default();
@@ -2527,9 +2625,10 @@ fn validate_office_duty_audit_reference(
 /// The only member the loader must inspect before a full deserialize.
 ///
 /// Deserializing this probe skips every other member without building the
-/// intermediate value tree, so loading does not parse the whole document
-/// twice just to learn its schema version. Unknown members are deliberately
-/// allowed; duplicates were already rejected before this runs.
+/// intermediate value tree, so loading rejects foreign or non-current
+/// documents on this cheapest pass before the full-document duplicate scan.
+/// Unknown members are deliberately allowed; duplicates are rejected right
+/// after this probe and before deserialization.
 #[derive(Deserialize)]
 struct SchemaVersionProbe {
     schema_version: u64,

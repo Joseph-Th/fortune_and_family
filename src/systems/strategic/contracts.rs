@@ -3,6 +3,10 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// Nominal weekly throughput assumed when sizing a supply contract against a
+/// producer whose exact capacity is not the point of the calculation.
+pub(crate) const STANDARD_CONTRACT_BATCHES_PER_WEEK: i64 = 2;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupplyContractTerms {
     pub buyer_business_id: BusinessId,
@@ -712,6 +716,86 @@ pub(crate) fn terminate_inactive_contract(
         format!("Contract {} terminated", due.id),
         "An inactive contract party could no longer perform the scheduled obligation.".to_owned(),
     )?;
+    Ok(())
+}
+
+/// Immediately terminates every active supply contract naming an insolvent or
+/// closed business.
+///
+/// The daily lifecycle pass flips businesses to inactive statuses as soon as
+/// their cash and inventory run out; leaving their contracts `Active` until
+/// the next weekly settlement would rest the simulation in a state its own
+/// lifecycle invariant forbids. Each termination follows the canonical
+/// inactive-party path: breach attribution, penalty collection up to the
+/// payer's cash with the remainder accruing as recoverable breach debt, and
+/// durable relationship and information records.
+pub(crate) fn terminate_active_contracts_for_business(
+    state: &mut AppState,
+    business_id: BusinessId,
+) -> Result<(), SimulationError> {
+    let affected: Vec<crate::ids::ContractId> = state
+        .contracts
+        .values()
+        .filter(|contract| {
+            contract.status == ContractStatus::Active
+                && (contract.buyer_business_id == business_id
+                    || contract.seller_business_id == business_id)
+        })
+        .map(|contract| contract.id)
+        .collect();
+    for contract_id in affected {
+        let due = {
+            let contract = state
+                .contracts
+                .get(&contract_id)
+                .expect("collected contract must exist");
+            DueContract {
+                id: contract.id,
+                buyer_id: contract.buyer_business_id,
+                seller_id: contract.seller_business_id,
+                good_id: contract.good_id,
+                quantity: contract.quantity_per_week,
+                unit_price: contract.unit_price,
+                penalty: contract.penalty,
+                due_day: state.clock.day(),
+                end_day: contract.end_day,
+            }
+        };
+        let buyer_active = state.businesses.get(due.buyer_id).is_some_and(|business| {
+            !matches!(
+                business.status(),
+                BusinessStatus::Insolvent | BusinessStatus::Closed
+            )
+        });
+        let seller_active = state.businesses.get(due.seller_id).is_some_and(|business| {
+            !matches!(
+                business.status(),
+                BusinessStatus::Insolvent | BusinessStatus::Closed
+            )
+        });
+        debug_assert!(
+            !buyer_active || !seller_active,
+            "termination sweep must target a contract with an inactive party"
+        );
+        let buyer_owner_id = state
+            .businesses
+            .get(due.buyer_id)
+            .expect("contract buyer must exist")
+            .owner_dynasty_id();
+        let seller_owner_id = state
+            .businesses
+            .get(due.seller_id)
+            .expect("contract seller must exist")
+            .owner_dynasty_id();
+        terminate_inactive_contract(
+            state,
+            &due,
+            buyer_owner_id,
+            seller_owner_id,
+            buyer_active,
+            seller_active,
+        )?;
+    }
     Ok(())
 }
 

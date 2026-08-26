@@ -1928,6 +1928,7 @@ mod business_acquisition {
         quote: crate::systems::BusinessAcquisitionQuote,
         buyer_id: DynastyId,
         condition_before: u16,
+        expected_status: crate::core::BusinessStatus,
     ) {
         let business = state
             .businesses
@@ -1935,7 +1936,11 @@ mod business_acquisition {
             .expect("acquired business must remain present");
         assert_eq!(business.owner_dynasty_id(), buyer_id);
         assert_eq!(business.manager_id(), manager_id);
-        assert_eq!(business.status(), crate::core::BusinessStatus::Active);
+        assert_eq!(
+            business.status(),
+            expected_status,
+            "acquisition must land on the status its post-recapitalization cash sustains"
+        );
         assert_eq!(business.cash(), quote.minimum_recapitalization);
         let rehabilitation =
             u16::try_from((quote.minimum_recapitalization.copper() / 2).clamp(0, 3_000))
@@ -2047,6 +2052,11 @@ mod business_acquisition {
             quote,
             buyer_id,
             condition_before,
+            // The floor recapitalization buys working capital but not the
+            // deeper six-day recovery cushion, so the firm lands in
+            // `Distressed` rehabilitation instead of leaping straight to
+            // full operation.
+            crate::core::BusinessStatus::Distressed,
         );
         assert_acquisition_finances(
             &state,
@@ -2059,6 +2069,84 @@ mod business_acquisition {
             state.audit_log.last().map(crate::core::AuditRecord::kind),
             Some(crate::core::AuditKind::BusinessAcquisition)
         );
+    }
+
+    #[test]
+    fn fuller_recapitalization_restores_active_operation() {
+        let (registry, mut state, business_id, manager_id, quote) = acquisition_fixture();
+        let premises_id = state
+            .properties
+            .values()
+            .find(|property| property.occupant_business_id == Some(business_id))
+            .expect("business must occupy premises")
+            .id;
+        let condition_before = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .operations
+            .condition_basis_points;
+        let recipe_daily_cost = {
+            let business = state
+                .businesses
+                .get(business_id)
+                .expect("business must exist");
+            registry
+                .get_recipe(business.recipe_id())
+                .expect("recipe must exist")
+                .daily_operating_cost()
+        };
+        let reserve = state
+            .businesses
+            .get(business_id)
+            .expect("business must exist")
+            .policy
+            .minimum_cash_reserve;
+        // Cash starts at zero in the fixture, so recapitalizing to exactly
+        // the six-day recovery bar clears the lifecycle's Active threshold.
+        let recapitalization = reserve.saturating_add(recipe_daily_cost.saturating_mul(6));
+        assert!(
+            recapitalization > quote.minimum_recapitalization,
+            "the deeper recovery bar must exceed the quoted minimum for this fixture"
+        );
+        let required = quote.purchase_price.saturating_add(recapitalization);
+        let buyer_id = state.player_dynasty_id;
+        state
+            .dynasties
+            .get_mut(&buyer_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = required;
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::AcquireBusiness {
+                business_id,
+                manager_id,
+                recapitalization,
+            },
+        )
+        .expect("funded acquisition must succeed");
+        validate_invariants(registry, &state);
+
+        let business = state
+            .businesses
+            .get(business_id)
+            .expect("acquired business must remain present");
+        assert_eq!(business.status(), crate::core::BusinessStatus::Active);
+        assert_eq!(business.cash(), recapitalization);
+        let rehabilitation = u16::try_from((recapitalization.copper() / 2).clamp(0, 3_000))
+            .expect("bounded rehabilitation must fit u16");
+        assert_eq!(
+            business.operations.condition_basis_points,
+            condition_before.saturating_add(rehabilitation).min(10_000),
+        );
+        let premises = state
+            .properties
+            .get(&premises_id)
+            .expect("business premises must remain present");
+        assert_eq!(premises.tenant_dynasty_id, Some(buyer_id));
     }
 
     #[test]
@@ -6060,6 +6148,69 @@ mod crises {
     }
 
     #[test]
+    fn expired_containment_window_reopens_organized_responses_on_a_persistent_crisis() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let crisis_id = state.next_ids.crisis();
+        // The crisis is old enough that its one prior containment response
+        // sits outside the bounded window, and it has re-escalated since:
+        // the house must be able to respond again instead of being locked
+        // out forever while the threat worsens.
+        state.crises.insert(
+            crisis_id,
+            crate::core::Crisis {
+                id: crisis_id,
+                kind: crate::core::CrisisKind::NobleDemand,
+                district_id: None,
+                started_day: 0,
+                severity_basis_points: 9_000,
+                status: CrisisStatus::Escalated,
+                cause: "test crisis".to_owned(),
+            },
+        );
+        state.audit_log.push(AuditRecord {
+            day: 0,
+            kind: AuditKind::CrisisResponse,
+            subject: format!("crisis:{crisis_id}").into(),
+            detail: crate::systems::strategic::crisis_response_audit_detail(CrisisResponse::Relief)
+                .into(),
+        });
+        // Advance past the containment window itself: at exactly `window`
+        // days the prior response still counts as ongoing (both the
+        // validator and the escalation engine include that boundary), so a
+        // fresh response becomes legitimate one day after.
+        for _ in 0..=crate::systems::CRISIS_RESPONSE_WINDOW_DAYS {
+            state.clock.advance_one_day();
+        }
+        let treasury_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id,
+                response: CrisisResponse::Reform,
+            },
+        )
+        .expect("an expired containment window must permit a fresh response");
+
+        assert!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury()
+                < treasury_before,
+            "the fresh response must actually charge the dynasty"
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn crisis_can_be_contained_after_one_exploitation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -6614,9 +6765,12 @@ mod information {
             .get(&fixture.pair)
             .expect("contract relationship must remain present");
         assert!(relationship.trust_basis_points < fixture.relationship_before.trust_basis_points);
+        // A forced price concession reads as coercion: the target loses
+        // esteem for the house, is intimidated by it, and resents it.
         assert!(
-            relationship.respect_basis_points > fixture.relationship_before.respect_basis_points
+            relationship.respect_basis_points < fixture.relationship_before.respect_basis_points
         );
+        assert!(relationship.fear_basis_points > fixture.relationship_before.fear_basis_points);
         assert!(
             relationship.resentment_basis_points
                 > fixture.relationship_before.resentment_basis_points
@@ -6876,12 +7030,14 @@ mod information {
             .get(&fixture.pair)
             .expect("counterparty relationship must remain present");
         // Forcing a price concession with commissioned intelligence costs
-        // goodwill: the target trusts the player less and resents the squeeze,
-        // mirroring the market-brief renegotiation signature.
+        // goodwill: the target trusts and esteems the player less, is
+        // intimidated, and resents the squeeze, mirroring the market-brief
+        // renegotiation signature.
         assert!(relationship.trust_basis_points < fixture.relationship_before.trust_basis_points);
         assert!(
-            relationship.respect_basis_points > fixture.relationship_before.respect_basis_points
+            relationship.respect_basis_points < fixture.relationship_before.respect_basis_points
         );
+        assert!(relationship.fear_basis_points > fixture.relationship_before.fear_basis_points);
         assert!(
             relationship.resentment_basis_points
                 > fixture.relationship_before.resentment_basis_points

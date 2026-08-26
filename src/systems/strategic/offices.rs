@@ -169,6 +169,26 @@ pub(crate) fn dynasty_office_administrative_load(state: &AppState, dynasty_id: D
         })
 }
 
+/// Office administrative load for every dynasty in one pass over the
+/// institutions, so per-business daily planning resolves each holder once
+/// instead of rescanning every institution per business.
+pub(crate) fn dynasty_office_administrative_loads(state: &AppState) -> BTreeMap<DynastyId, u16> {
+    let mut loads: BTreeMap<DynastyId, u16> = BTreeMap::new();
+    for institution in state.institutions.values() {
+        let Some(holder_id) = institution.office_holder_id else {
+            continue;
+        };
+        let Some(holder) = state.characters.get(holder_id) else {
+            continue;
+        };
+        let power_count = u16::try_from(institution.powers.len()).unwrap_or(u16::MAX);
+        let entry = loads.entry(holder.dynasty_id()).or_default();
+        *entry =
+            entry.saturating_add(power_count.saturating_mul(OFFICE_ADMINISTRATIVE_LOAD_PER_POWER));
+    }
+    loads
+}
+
 pub(crate) fn office_duty_required(power_count: usize, office_count: usize) -> Money {
     if power_count == 0 || office_count == 0 {
         return Money::ZERO;

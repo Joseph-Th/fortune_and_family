@@ -1013,6 +1013,14 @@ mod inventory_policy {
                 .businesses
                 .get(business_id)
                 .expect("business must exist"),
+            crate::systems::strategic::dynasty_office_administrative_load(
+                &state,
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("business must exist")
+                    .owner_dynasty_id(),
+            ),
         )
         .min(super::output_limited_batches(
             &state,
@@ -1021,8 +1029,13 @@ mod inventory_policy {
                 .get(business_id)
                 .expect("business must exist"),
             recipe,
+            crate::systems::DailyCapacityScratch::collect(&state)
+                .business_contract_reserve(business_id, recipe.output_good_id()),
         ))
-        .min(super::worker_limited_batches(&state, business_id));
+        .min(
+            crate::systems::DailyCapacityScratch::collect(&state)
+                .worker_limited_batches(business_id),
+        );
         let target_batches = i64::from(usable_batches).saturating_mul(i64::from(target_days));
         assert!(
             input.quantity().saturating_mul_ratio(target_batches, 1) < stocked_inventory,
@@ -1859,6 +1872,7 @@ mod office_exposure {
                 .businesses
                 .get(business_id)
                 .expect("player business must exist"),
+            0,
         );
         let holder_id = state
             .dynasties
@@ -1880,6 +1894,14 @@ mod office_exposure {
                 .businesses
                 .get(business_id)
                 .expect("player business must exist"),
+            crate::systems::strategic::dynasty_office_administrative_load(
+                &state,
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("player business must exist")
+                    .owner_dynasty_id(),
+            ),
         );
 
         assert!(
@@ -2256,8 +2278,100 @@ mod business_lifecycle {
                 .employment
                 .values()
                 .filter(|agreement| agreement.business_id == business_id)
-                .all(|agreement| agreement.status == EmploymentStatus::Suspended),
-            "closure must suspend labor agreements so an explicit acquisition can renegotiate them"
+                .all(|agreement| agreement.status == EmploymentStatus::Ended),
+            "closure is terminal, so its labor agreements end and release the workers"
+        );
+    }
+
+    #[test]
+    fn insolvent_business_terminates_its_active_contracts_immediately() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let business_id = state
+            .businesses
+            .iter()
+            .next()
+            .expect("campaign must contain a business")
+            .id();
+        // A counterparty firm with a signed active supply contract naming the
+        // failing business.
+        let (counterparty_id, contract_id) = {
+            let seller_id = state
+                .businesses
+                .iter()
+                .find(|business| business.id() != business_id)
+                .expect("campaign must contain a second business")
+                .id();
+            let contract_id = state.next_ids.try_contract().expect("contract id");
+            state.contracts.insert(
+                contract_id,
+                crate::core::SupplyContract {
+                    id: contract_id,
+                    buyer_business_id: business_id,
+                    seller_business_id: seller_id,
+                    good_id: registry.get_good_id("grain").expect("grain must exist"),
+                    quantity_per_week: crate::money::Quantity::from_units(2),
+                    unit_price: crate::money::Money::from_copper(20),
+                    penalty: crate::money::Money::from_copper(300),
+                    next_due_day: state.clock.day() + 7,
+                    end_day: state.clock.day() + 70,
+                    fulfilled_deliveries: 0,
+                    fulfilled_deliveries_by_dynasty: BTreeMap::new(),
+                    missed_deliveries: 0,
+                    status: crate::core::ContractStatus::Active,
+                    breaching_dynasty_id: None,
+                    breach_victim_dynasty_id: None,
+                    collected_breach_penalty: crate::money::Money::ZERO,
+                    unpaid_breach_penalty: crate::money::Money::ZERO,
+                },
+            );
+            (seller_id, contract_id)
+        };
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("business must exist");
+            business.finance.cash = Money::ZERO;
+            business.inventory.clear();
+        }
+
+        update_business_lifecycle(registry, &mut state)
+            .expect("business lifecycle update must succeed");
+
+        assert_eq!(
+            state
+                .businesses
+                .get(business_id)
+                .expect("must exist")
+                .status(),
+            BusinessStatus::Insolvent
+        );
+        let contract = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist");
+        assert_eq!(contract.status, crate::core::ContractStatus::Breached);
+        assert_eq!(
+            contract.breaching_dynasty_id,
+            Some(
+                state
+                    .businesses
+                    .get(business_id)
+                    .expect("must exist")
+                    .owner_dynasty_id()
+            ),
+            "the newly inactive party must own the breach attribution"
+        );
+        assert_eq!(
+            contract.breach_victim_dynasty_id,
+            Some(
+                state
+                    .businesses
+                    .get(counterparty_id)
+                    .expect("must exist")
+                    .owner_dynasty_id()
+            ),
         );
     }
 
@@ -3530,6 +3644,70 @@ mod health_and_succession {
     }
 
     #[test]
+    fn sole_collapsing_head_is_pinned_at_a_survivable_floor_instead_of_lingering_at_zero() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let head_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        // The house's entire remaining *active* membership is its own failing
+        // head: no heir, and every other member already incapacitated, so no
+        // possible successor exists anywhere in the line.
+        state
+            .dynasties
+            .get_mut(&dynasty_id)
+            .expect("player dynasty must exist")
+            .relationships
+            .heir_id = None;
+        let day = state.clock.day();
+        for member in state
+            .characters
+            .iter_mut()
+            .filter(|character| character.dynasty_id() == dynasty_id && character.id() != head_id)
+        {
+            member.runtime.status = CharacterStatus::Incapacitated;
+            member.runtime.incapacitated_day = Some(day);
+        }
+        // Incapacitated members have already left the family council, so the
+        // fixture removes them there as well.
+        if let Some(council) = state.family_councils.get_mut(&dynasty_id) {
+            let non_active: Vec<CharacterId> = state
+                .characters
+                .iter()
+                .filter(|character| {
+                    character.dynasty_id() == dynasty_id && character.id() != head_id
+                })
+                .map(|character| character.id())
+                .collect();
+            for member_id in non_active {
+                council.members.remove(&member_id);
+            }
+        }
+        state
+            .characters
+            .get_mut(head_id)
+            .expect("dynasty head must exist")
+            .runtime
+            .health_basis_points = 0;
+
+        super::update_character_health(&mut state).expect("the annual health pass must run");
+
+        let head = state
+            .characters
+            .get(head_id)
+            .expect("the pinned head must remain recorded");
+        assert_eq!(head.status(), CharacterStatus::Active);
+        assert_eq!(
+            head.runtime.health_basis_points, 1,
+            "a head with no possible successor is pinned at the survivable floor instead of violating the positive-health invariant"
+        );
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
     fn succession_chance_uses_health_and_recorded_risk() {
         let baseline = succession_chance_basis_points(60, 1_000, 9_000);
         let overextended = succession_chance_basis_points(60, 5_000, 9_000);
@@ -3804,6 +3982,14 @@ mod market_prices {
                 .businesses
                 .get(target_business_id)
                 .expect("target business must exist"),
+            crate::systems::strategic::dynasty_office_administrative_load(
+                &state,
+                state
+                    .businesses
+                    .get(target_business_id)
+                    .expect("target business must exist")
+                    .owner_dynasty_id(),
+            ),
         ));
         let minimum_labor_only_floor = Money::from_copper(
             i64::try_from(exact_daily_labor)
@@ -4002,12 +4188,16 @@ mod guild_economy {
             .operations
             .quality_basis_points;
         assert!(
-            control_quality == 7_050,
-            "funded quality above an unchartered target must hold still"
+            control_quality < 7_050,
+            "quality above an unchartered target must mean-revert instead of holding forever"
         );
         assert!(
             member_quality > 7_050,
             "a guild-trained master's charter bonus must sustain quality above the default target"
+        );
+        assert!(
+            member_quality > control_quality,
+            "the same maintenance budget must buy more quality under a chartered master"
         );
     }
 
@@ -4051,9 +4241,14 @@ mod guild_economy {
                 .businesses
                 .get(business_id)
                 .expect("business must exist");
-            plan_sale_candidate(registry, &state, business)
-                .expect("stocked surplus must plan a sale candidate")
-                .expect("sale candidate must be viable")
+            plan_sale_candidate(
+                registry,
+                &state,
+                business,
+                &crate::systems::DailyCapacityScratch::collect(&state),
+            )
+            .expect("stocked surplus must plan a sale candidate")
+            .expect("sale candidate must be viable")
         };
         assert_eq!(
             outsider_access.guild_access_basis_points, 8_000,
@@ -4066,9 +4261,14 @@ mod guild_economy {
                 .businesses
                 .get(business_id)
                 .expect("business must exist");
-            plan_sale_candidate(registry, &state, business)
-                .expect("stocked surplus must plan a sale candidate")
-                .expect("sale candidate must be viable")
+            plan_sale_candidate(
+                registry,
+                &state,
+                business,
+                &crate::systems::DailyCapacityScratch::collect(&state),
+            )
+            .expect("stocked surplus must plan a sale candidate")
+            .expect("sale candidate must be viable")
         };
         assert_eq!(
             member_access.guild_access_basis_points, 10_000,

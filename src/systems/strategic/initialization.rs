@@ -437,13 +437,17 @@ pub(crate) fn initialize_loans(state: &mut AppState) {
     // Opening credit is flavor between NPC houses only: player lending is a
     // deliberate player command, never an autonomous counterparty position
     // created before the player has acted.
+    //
+    // Independent lender/borrower pairs, not a chain: a chained arrangement
+    // would have one house borrowing in the same pass it lends, funding its
+    // own creditor position out of freshly borrowed principal.
     let dynasty_ids: Vec<_> = state
         .dynasties
         .keys()
         .copied()
         .filter(|id| *id != state.player_dynasty_id)
         .collect();
-    for pair in dynasty_ids.windows(2).take(2) {
+    for pair in dynasty_ids.chunks(2).take(2) {
         let [lender, borrower] = pair else {
             continue;
         };
@@ -456,7 +460,10 @@ pub(crate) fn initialize_loans(state: &mut AppState) {
             collateral_property_id: state
                 .properties
                 .values()
-                .find(|property| property.owner_dynasty_id == Some(*borrower))
+                .find(|property| {
+                    property.owner_dynasty_id == Some(*borrower)
+                        && property.collateral_loan_id.is_none()
+                })
                 .map(|property| property.id),
         };
         let token = validate_loan(state, terms)
@@ -490,9 +497,6 @@ pub(crate) fn initialize_objectives(state: &mut AppState) {
                 id,
                 dynasty_id,
                 kind,
-                // Opening objectives are self-directed routes to durable
-                // power, not campaigns against a named rival.
-                target_dynasty_id: None,
                 priority: 60 + u16::try_from(index).unwrap_or(0),
                 created_day: 0,
                 status: ObjectiveStatus::Pursuing,

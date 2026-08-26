@@ -2647,20 +2647,16 @@ pub(crate) fn has_business_policy_opportunity(state: &AppState, persona: Gamepla
         })
         .any(|business| {
             let policy_subject = format!("business:{}", business.id());
-            let policy_change_available = state
-                .audit_log
-                .iter()
-                .rev()
-                .find(|record| {
-                    record.kind() == AuditKind::BusinessPolicyChange
-                        && record.subject() == policy_subject
-                })
-                .is_none_or(|record| {
-                    state.clock.day()
-                        >= record
-                            .day()
-                            .saturating_add(BUSINESS_POLICY_CHANGE_INTERVAL_DAYS)
-                });
+            // Windowed scan: a record outside the cooldown interval can never
+            // change whether a change is available, so the newest-to-oldest
+            // walk stops at the window boundary instead of the whole log.
+            let policy_change_available =
+                audit_records_within_cooldown(state, BUSINESS_POLICY_CHANGE_INTERVAL_DAYS).all(
+                    |record| {
+                        !(record.kind() == AuditKind::BusinessPolicyChange
+                            && record.subject() == policy_subject)
+                    },
+                );
             policy_change_available
                 && policy_templates(persona).into_iter().any(|template| {
                     template.label == preferred_policy_label(persona, business)

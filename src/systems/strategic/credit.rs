@@ -541,12 +541,12 @@ pub(crate) fn settle_due_civic_debt(
         .checked_sub(amount_due)
         .expect("civic debt payment cannot exceed accrued balance");
     // The same rule the private-loan machinery enforces: a payment that
-    // cannot even cover the week's interest lets the balance grow while
-    // every installment "succeeds", producing a debt that is mathematically
-    // unrepayable yet never flagged. Such an installment counts as missed so
-    // the delinquency and default machinery handles unsustainable terms
-    // instead of collecting interest forever.
-    let payment_is_productive = remaining_balance == Money::ZERO || amount_due >= interest_due;
+    // cannot cover more than the week's interest never reduces the balance,
+    // producing a debt that is mathematically unrepayable yet perpetually
+    // "current". Such an installment counts as missed so the delinquency and
+    // default machinery handles unsustainable terms instead of collecting
+    // interest forever.
+    let payment_is_productive = remaining_balance == Money::ZERO || amount_due > interest_due;
     let payable = treasury_budget >= amount_due && payment_is_productive;
     if payable {
         let creditor_treasury = state
@@ -816,12 +816,12 @@ pub(crate) fn settle_due_loan(
         .expect("loan borrower must exist")
         .treasury();
     let remaining_balance = accrued_balance.saturating_sub(amount_due);
-    // A payment that cannot even cover the week's interest lets the balance
-    // grow while every installment "succeeds", producing a debt that is
-    // mathematically unrepayable yet never flagged. Such an installment
-    // counts as missed so the delinquency and default machinery handles
-    // unsustainable terms instead of collecting interest forever.
-    let payment_is_productive = remaining_balance == Money::ZERO || amount_due >= interest_due;
+    // A payment that cannot cover more than the week's interest never
+    // reduces the balance, producing a debt that is mathematically unrepayable
+    // yet perpetually "current" — collecting interest forever with collateral
+    // locked away. Such an installment counts as missed so the delinquency
+    // and default machinery handles unsustainable terms.
+    let payment_is_productive = remaining_balance == Money::ZERO || amount_due > interest_due;
     let payable = borrower_treasury >= amount_due && payment_is_productive;
     if payable {
         let lender_treasury = state

@@ -7,6 +7,9 @@ pub(crate) fn settle_employment(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
+    // One capacity collection for the whole settlement pass: per-agreement
+    // collection would rescan employment and contracts for every crew.
+    let capacity_scratch = crate::systems::DailyCapacityScratch::collect(state);
     let agreements: Vec<_> = state
         .employment
         .values()
@@ -30,6 +33,7 @@ pub(crate) fn settle_employment(
         settle_employment_agreement(
             registry,
             state,
+            &capacity_scratch,
             id,
             business_id,
             household_id,
@@ -87,6 +91,7 @@ pub(crate) fn market_reference_weekly_wage(registry: &Registry, state: &AppState
 pub(crate) fn settle_employment_agreement(
     registry: &Registry,
     state: &mut AppState,
+    capacity_scratch: &crate::systems::DailyCapacityScratch,
     employment_id: EmploymentId,
     business_id: BusinessId,
     household_id: HouseholdId,
@@ -94,7 +99,7 @@ pub(crate) fn settle_employment_agreement(
     prior_status: EmploymentStatus,
 ) -> Result<(), SimulationError> {
     let utilization_basis_points =
-        business_labor_utilization_basis_points(registry, state, business_id);
+        business_labor_utilization_basis_points(registry, state, business_id, capacity_scratch);
     let wage_ratio_basis_points =
         market_reference_weekly_wage(registry, state).map_or(10_000, |reference| {
             let agreement = state
@@ -243,13 +248,14 @@ pub(crate) fn pay_employment_wage(
     let recipe = registry
         .get_recipe(business.recipe_id())
         .expect("employment business recipe must exist");
-    // Wages settle weekly, so even a distressed employer retains one week of
-    // operating funds instead of spending down to a single day's cost.
-    let payroll_reserve = if business.status() == BusinessStatus::Distressed {
-        recipe.daily_operating_cost().saturating_mul(7)
-    } else {
-        business.policy.minimum_cash_reserve
-    };
+    // Wages settle weekly, so every employer retains one week of operating
+    // funds — or its policy reserve, whichever protects more — instead of
+    // letting payroll spend a healthy firm into distress while an already
+    // distressed one would have kept the cushion.
+    let payroll_reserve = business
+        .policy
+        .minimum_cash_reserve
+        .max(recipe.daily_operating_cost().saturating_mul(7));
     let spendable = business_cash.saturating_sub(payroll_reserve);
     if wage_due <= Money::ZERO || spendable <= Money::ZERO {
         return Ok(Money::ZERO);
@@ -386,14 +392,15 @@ pub(crate) fn update_fully_paid_employment(
         }
         return (false, false);
     }
-    // Disputed workforces reconcile toward fair pay: stingy wages stall the
-    // recovery that full payment would otherwise buy.
+    // Disputed workforces reconcile toward fair pay. Stingy wages stall the
+    // recovery entirely — the same under-reference pay that erodes an active
+    // workforce's loyalty cannot buy goodwill from a disputing one, so the
+    // dispute holds until wages become adequate again.
     let wage_ratio = environment.wage_ratio_basis_points;
-    let (loyalty_gain, condition_gain) = if wage_ratio < WAGE_ADEQUACY_STINGY_BASIS_POINTS {
-        (40, 10)
-    } else {
-        (180, 60)
-    };
+    if wage_ratio < WAGE_ADEQUACY_STINGY_BASIS_POINTS {
+        return (false, false);
+    }
+    let (loyalty_gain, condition_gain) = (180, 60);
     agreement.loyalty_basis_points = agreement
         .loyalty_basis_points
         .saturating_add(loyalty_gain)
@@ -512,6 +519,7 @@ pub(crate) fn business_labor_utilization_basis_points(
     registry: &Registry,
     state: &AppState,
     business_id: BusinessId,
+    capacity_scratch: &crate::systems::DailyCapacityScratch,
 ) -> u16 {
     const RETAINER_BASIS_POINTS: i64 = 2_500;
     let business = state
@@ -536,8 +544,7 @@ pub(crate) fn business_labor_utilization_basis_points(
         crate::systems::business_policy_reserve(business, recipe.output_quantity())
             .saturating_sub(business.inventory_quantity(output_good_id))
             .max(Quantity::ZERO);
-    let contract_reserve =
-        crate::systems::business_contract_reserve(state, business_id, output_good_id);
+    let contract_reserve = capacity_scratch.business_contract_reserve(business_id, output_good_id);
     // Crisis demand is pure price pressure: no buyer stands behind it and no
     // money moves with it. Wages follow work that real demand funds, so the
     // phantom share is excluded from the weekly demand estimate.
@@ -564,11 +571,8 @@ pub(crate) fn business_labor_utilization_basis_points(
     // Wages follow the work the present workforce can actually run: a firm
     // whose counted workers cannot assemble one batch produces nothing and
     // pays nothing, and a partially staffed firm pays proportionally.
-    let workforce_coverage = (i64::from(crate::systems::simulation::worker_limited_batches(
-        state,
-        business_id,
-    ))
-    .saturating_mul(10_000)
+    let workforce_coverage = (i64::from(capacity_scratch.worker_limited_batches(business_id))
+        .saturating_mul(10_000)
         / i64::from(business.operations.capacity_batches_per_day))
     .min(10_000);
     if workforce_coverage == 0 {

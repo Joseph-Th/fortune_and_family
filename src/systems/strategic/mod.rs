@@ -867,6 +867,17 @@ const ACKNOWLEDGED_OUTBOX_RETENTION_DAYS: i64 = 360;
 
 fn prune_acknowledged_outbox(state: &mut AppState) {
     let day = state.clock.day();
+    // Messages are appended in day order, so everything eligible for pruning
+    // sits in an aged prefix. When nothing qualifies, skip the mutation
+    // entirely: `retain` folds the log's tail and invalidates its incremental
+    // checksum, so an unconditional monthly prune would deep-copy the whole
+    // outbox every month even when not a single message aged out.
+    let has_prunable_prefix = state.outbox.iter().any(|message| {
+        message.acknowledged && day.saturating_sub(message.day) > ACKNOWLEDGED_OUTBOX_RETENTION_DAYS
+    });
+    if !has_prunable_prefix {
+        return;
+    }
     // Dropping a prefix of the append-only log preserves the strictly
     // increasing ID and day ordering every reader and validator relies on.
     state.outbox.retain(|message| {

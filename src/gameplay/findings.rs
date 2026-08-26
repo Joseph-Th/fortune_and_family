@@ -857,9 +857,12 @@ pub(crate) fn phase_quality_missed_thresholds(
             measures.action_share, thresholds.minimum_action_share
         ));
     }
-    if measures.static_quiet_share >= thresholds.maximum_static_quiet_share {
+    // A maximum expressed as an inclusive ceiling: landing exactly on the
+    // configured share satisfies it, matching the strict `>` used by every
+    // other maximum in this function.
+    if measures.static_quiet_share > thresholds.maximum_static_quiet_share {
         missed_thresholds.push(format!(
-            "static quiet share {}% >= {}%",
+            "static quiet share {}% > {}%",
             measures.static_quiet_share, thresholds.maximum_static_quiet_share
         ));
     }

@@ -125,17 +125,16 @@ pub(crate) fn apply_crisis_exploitation(
     severity: u16,
     district_id: Option<DistrictId>,
 ) -> Result<(), CommandError> {
-    let required_legitimacy = CRISIS_EXPLOIT_LEGITIMACY_REQUIREMENT;
     let available_legitimacy = state
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist")
         .resources
         .legitimacy_basis_points;
-    if available_legitimacy < required_legitimacy {
+    if available_legitimacy < CRISIS_EXPLOIT_LEGITIMACY_COST {
         return Err(CommandError::InsufficientPlayerLegitimacy {
             available: available_legitimacy,
-            required: required_legitimacy,
+            required: CRISIS_EXPLOIT_LEGITIMACY_COST,
         });
     }
     let desired_gain = crisis_relief_cost(severity);
@@ -189,25 +188,37 @@ pub(crate) fn validate_crisis_response_history(
         .map(|crisis| crisis.kind)
         .ok_or(CommandError::MissingCrisis { crisis_id })?;
     let subject = format!("crisis:{crisis_id}");
-    let prior_responses: Vec<_> = state
+    // A trade disruption is contained by healing its routes, and each response
+    // heals a bounded amount of the tracked disruption. Repeated organized
+    // responses are therefore a real strategy with real costs, not spam.
+    //
+    // Other crises accept one organized response per containment window: the
+    // escalation engine counts a response as an ongoing effort for that same
+    // bounded window, so once the window closes on a crisis that persists or
+    // has re-escalated, another organized response must be legitimate instead
+    // of locking the house out forever while the threat worsens.
+    let window_cutoff = state
+        .clock
+        .day()
+        .saturating_sub(crate::systems::strategic::CRISIS_RESPONSE_WINDOW_DAYS);
+    // Audit days are chronologically nondecreasing, so reverse iteration stops
+    // at the window boundary instead of sweeping the whole audit log.
+    let has_recent_containment_response = state
         .audit_log
         .iter()
         .rev()
+        .take_while(|record| record.day() >= window_cutoff)
         .filter(|record| record.kind() == AuditKind::CrisisResponse && record.subject() == subject)
-        .collect();
-    let has_containment_response = prior_responses
-        .iter()
         .any(|record| crate::systems::strategic::crisis_response_contains_crisis(record));
-    let has_exploitation_response = prior_responses.iter().any(|record| {
-        crate::systems::strategic::audit_record_crisis_response(record)
-            == Some(CrisisResponse::Exploit)
+    let has_exploitation_response = state.audit_log.iter().any(|record| {
+        record.kind() == AuditKind::CrisisResponse
+            && record.subject() == subject
+            && crate::systems::strategic::audit_record_crisis_response(record)
+                == Some(CrisisResponse::Exploit)
     });
-    // A trade disruption is contained by healing its routes, and each response
-    // heals a bounded amount of the tracked disruption. Repeated organized
-    // responses are therefore a real strategy with real costs, not spam; other
-    // crises remain one-organized-response problems.
-    let containment_locked = has_containment_response && crisis_kind != CrisisKind::TradeDisruption;
-    if containment_locked || (response == CrisisResponse::Exploit && has_exploitation_response) {
+    if (has_recent_containment_response && crisis_kind != CrisisKind::TradeDisruption)
+        || (response == CrisisResponse::Exploit && has_exploitation_response)
+    {
         return Err(CommandError::CrisisAlreadyAddressed { crisis_id });
     }
     Ok(subject)
@@ -243,7 +254,8 @@ pub(crate) fn reduce_crisis(state: &mut AppState, crisis_id: CrisisId, amount: u
         .crises
         .get_mut(&crisis_id)
         .expect("validated crisis must exist");
-    crisis.severity_basis_points = crisis.severity_basis_points.saturating_sub(amount);
+    let severity_before_response = crisis.severity_basis_points;
+    let reduced = severity_before_response.saturating_sub(amount);
     // A tracked trade disruption holds at the condition that spawned it: a
     // response cannot mark it resolved while any route remains disrupted at or
     // above the detection threshold, or the next monthly pass would immediately
@@ -258,8 +270,18 @@ pub(crate) fn reduce_crisis(state: &mut AppState, crisis_id: CrisisId, amount: u
         if worst_route_disruption
             >= crate::systems::strategic::TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD
         {
-            crisis.severity_basis_points = crisis.severity_basis_points.max(worst_route_disruption);
+            // The response re-anchors onto the tracked route condition without
+            // ever raising the metric it responds to: routes that deepened past
+            // this crisis's severity since detection are left for the monthly
+            // pass to reflect, instead of a paid response silently worsening
+            // the headline number.
+            crisis.severity_basis_points =
+                reduced.max(worst_route_disruption.min(severity_before_response));
+        } else {
+            crisis.severity_basis_points = reduced;
         }
+    } else {
+        crisis.severity_basis_points = reduced;
     }
     crisis.status = CrisisStatus::from_severity(crisis.severity_basis_points);
 }

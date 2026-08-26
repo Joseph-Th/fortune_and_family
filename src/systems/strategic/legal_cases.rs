@@ -88,7 +88,15 @@ pub(crate) fn resolve_legal_cases(state: &mut AppState) -> Result<(), Simulation
         let (awarded, paid) = if plaintiff_wins {
             let awarded = recoverable_legal_damages(state, claim_source, damages);
             let paid = settle_legal_damages(state, plaintiff_id, defendant_id, awarded)?;
-            settle_legal_claim_source(state, claim_source, plaintiff_id, defendant_id, paid, false);
+            settle_legal_claim_source(
+                state,
+                claim_source,
+                plaintiff_id,
+                defendant_id,
+                paid,
+                false,
+                true,
+            );
             (awarded, paid)
         } else {
             (Money::ZERO, Money::ZERO)
@@ -239,6 +247,7 @@ pub(crate) fn settle_legal_claim_source(
     defendant_id: DynastyId,
     discharged: Money,
     full_satisfaction: bool,
+    enforce_against_collateral: bool,
 ) {
     match claim_source {
         Some(LegalClaimSource::Loan { loan_id }) => {
@@ -271,10 +280,16 @@ pub(crate) fn settle_legal_claim_source(
                 .get(&loan_id)
                 .map_or(Money::ZERO, |loan| loan.balance);
             if outstanding > Money::ZERO {
-                // The unpaid remainder executes against pledged collateral;
-                // only when that still leaves a deficiency does the lender
-                // retain a live claim against the borrower.
-                execute_judgment_against_collateral(state, loan_id);
+                if enforce_against_collateral {
+                    // A court judgment executes against pledged collateral;
+                    // only when that still leaves a deficiency does the
+                    // lender retain a live claim against the borrower.
+                    execute_judgment_against_collateral(state, loan_id);
+                }
+                // Without enforcement the remainder simply stands: a
+                // negotiated settlement is amicable, so the pledged property
+                // stays pledged and the loan's own delinquency machinery —
+                // not the courtroom — decides what happens if it fails again.
             } else if let Some(property_id) = collateral_property_id
                 && let Some(property) = state.properties.get_mut(&property_id)
                 && property.collateral_loan_id == Some(loan_id)

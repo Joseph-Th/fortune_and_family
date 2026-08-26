@@ -30,16 +30,22 @@ pub struct StateSummary {
     pub phase: CampaignPhase,
     pub dynasty_treasury: Money,
     pub business_cash: Money,
+    /// Businesses owned by the player dynasty.
     pub businesses: usize,
     pub active_businesses: usize,
+    /// Households in the city.
     pub population_groups: usize,
     pub average_food_satisfaction_basis_points: u16,
     pub chronicle_entries: usize,
-    pub active_contracts: usize,
-    pub current_loans: usize,
-    pub outstanding_civic_debts: usize,
-    pub civic_debt_balance: Money,
-    pub properties: usize,
+    /// Active supply contracts anywhere in the city, not just the player's.
+    pub city_active_contracts: usize,
+    /// Private loans in repayment-active standing anywhere in the city.
+    pub city_current_loans: usize,
+    /// Municipal debts owed by the city treasury.
+    pub city_outstanding_civic_debts: usize,
+    pub city_civic_debt_balance: Money,
+    /// Properties in the whole city, not just player-owned ones.
+    pub city_properties: usize,
     pub active_crises: usize,
     pub unread_notifications: usize,
 }
@@ -100,29 +106,29 @@ pub fn build_state_summary(registry: &Registry, state: &AppState) -> StateSummar
         population_groups: state.households.records().len(),
         average_food_satisfaction_basis_points,
         chronicle_entries: state.chronicle.len(),
-        active_contracts: state
+        city_active_contracts: state
             .contracts
             .values()
             .filter(|contract| contract.status() == ContractStatus::Active)
             .count(),
-        current_loans: state
+        city_current_loans: state
             .loans
             .values()
             .filter(|loan| loan.status().is_repayment_active())
             .count(),
-        outstanding_civic_debts: state
+        city_outstanding_civic_debts: state
             .civic_debts
             .values()
             .filter(|debt| debt.status != CivicDebtStatus::Repaid)
             .count(),
-        civic_debt_balance: state
+        city_civic_debt_balance: state
             .civic_debts
             .values()
             .filter(|debt| debt.status != CivicDebtStatus::Repaid)
             .fold(Money::ZERO, |total, debt| {
                 total.saturating_add(debt.balance)
             }),
-        properties: state.properties.len(),
+        city_properties: state.properties.len(),
         active_crises: state
             .crises
             .values()
@@ -2004,11 +2010,10 @@ fn render_legal_case_rows(cases: &[LegalCaseProjection], player_id: DynastyId) -
         });
         write!(
             rows,
-            "<tr><td>#{}<br><small>{}</small></td><td>{}</td><td>{}<br><small>{}</small></td><td>{:.1}%</td><td>day {}</td><td>{}{}</td><td>{}</td></tr>",
+            "<tr><td>#{}<br><small>{}</small></td><td>{}</td><td>{}</td><td>{:.1}%</td><td>day {}</td><td>{}{}</td><td>{}</td></tr>",
             case.id,
             escape_html(&humanize_debug(&case.kind)),
             role,
-            escape_html(&humanize_debug(&case.kind)),
             escape_html(&source),
             f64::from(case.evidence_basis_points) / 100.0,
             case.hearing_day,

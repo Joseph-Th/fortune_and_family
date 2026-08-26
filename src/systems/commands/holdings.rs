@@ -12,7 +12,6 @@ pub(crate) struct BusinessPolicyInput {
     pub(crate) quality_target_basis_points: u16,
 }
 
-pub(crate) const BUSINESS_POLICY_CHANGE_INTERVAL_DAYS: i64 = 180;
 pub(crate) fn apply_business_acquisition(
     registry: &Registry,
     state: &mut AppState,

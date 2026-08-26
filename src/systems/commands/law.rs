@@ -65,10 +65,10 @@ pub(crate) fn validate_civic_debt_issuance(
 pub(crate) fn commit_civic_debt_issuance(
     state: &mut AppState,
     law_id: crate::ids::LawId,
+    civic_debt_id: crate::ids::CivicDebtId,
     sponsor_dynasty_id: DynastyId,
     issuance: ValidatedCivicDebtIssuance,
 ) -> Result<crate::ids::CivicDebtId, CommandError> {
-    let id = state.next_ids.try_civic_debt()?;
     state
         .dynasties
         .get_mut(&issuance.creditor_dynasty_id)
@@ -81,9 +81,9 @@ pub(crate) fn commit_civic_debt_issuance(
         .expect("validated civic treasury must exist")
         .budget = issuance.treasury_budget_after;
     state.civic_debts.insert(
-        id,
+        civic_debt_id,
         CivicDebt {
-            id,
+            id: civic_debt_id,
             creditor_dynasty_id: issuance.creditor_dynasty_id,
             authorizing_law_id: law_id,
             sponsor_dynasty_id: Some(sponsor_dynasty_id),
@@ -107,7 +107,7 @@ pub(crate) fn commit_civic_debt_issuance(
         state,
         sponsor_dynasty_id,
         issuance.creditor_dynasty_id,
-        &format!("Civic debt {id} financed the city treasury."),
+        &format!("Civic debt {civic_debt_id} financed the city treasury."),
     );
     crate::systems::strategic::try_record_counterparty_information(
         state,
@@ -115,7 +115,7 @@ pub(crate) fn commit_civic_debt_issuance(
         issuance.creditor_dynasty_id,
         "Municipal debt underwriting and treasury records",
     )?;
-    Ok(id)
+    Ok(civic_debt_id)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -200,8 +200,16 @@ pub(crate) fn apply_law(
     value: i64,
 ) -> Result<CommandOutcome, CommandError> {
     let validation = validate_law_sponsorship(registry, state, kind, value)?;
-    // Resolve every fallible step before the first mutation.
+    // Reserve every durable identifier the commit path needs so allocation
+    // exhaustion surfaces while state is still untouched. The trailing
+    // feedback pushes remain fallible and are covered by the caller's
+    // transactional working copy.
     let id = state.next_ids.try_law()?;
+    let reserved_civic_debt_id = validation
+        .civic_debt_issuance
+        .as_ref()
+        .map(|_| state.next_ids.try_civic_debt())
+        .transpose()?;
     spend_player_treasury_to_market(state, LAW_SPONSORSHIP_COST)?;
     state
         .dynasties
@@ -229,7 +237,15 @@ pub(crate) fn apply_law(
     );
     let civic_debt_id = validation
         .civic_debt_issuance
-        .map(|issuance| commit_civic_debt_issuance(state, id, state.player_dynasty_id, issuance))
+        .map(|issuance| {
+            commit_civic_debt_issuance(
+                state,
+                id,
+                reserved_civic_debt_id.expect("reserved civic debt id must exist with issuance"),
+                state.player_dynasty_id,
+                issuance,
+            )
+        })
         .transpose()?;
     crate::systems::strategic::try_push_outbox(
         state,

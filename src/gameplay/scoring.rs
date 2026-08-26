@@ -99,16 +99,14 @@ pub(crate) fn campaign_interconnection_score(
     executed: u32,
     command_coverage: u16,
 ) -> u16 {
-    let systemic_interactions = accumulator
+    let (count, total) = accumulator
         .interactions
         .iter()
-        .filter(|((_, domain), _)| *domain != GameplayDomain::Feedback);
-    interconnection_score(
-        usize_to_u32(systemic_interactions.clone().count()),
-        systemic_interactions.map(|(_, count)| *count).sum(),
-        executed,
-        u32::from(command_coverage),
-    )
+        .filter(|((_, domain), _)| *domain != GameplayDomain::Feedback)
+        .fold((0_u32, 0_u32), |(count, total), (_, count_value)| {
+            (count.saturating_add(1), total.saturating_add(*count_value))
+        });
+    interconnection_score(count, total, executed, u32::from(command_coverage))
 }
 
 pub(crate) fn campaign_feedback_score(accumulator: &CampaignAccumulator, executed: u32) -> u16 {
