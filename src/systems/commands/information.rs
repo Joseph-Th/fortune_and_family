@@ -163,7 +163,7 @@ pub(crate) fn resolve_counterparty_information(
                 && loan.borrower_dynasty_id == dynasty_id)
                 || (loan.lender_dynasty_id == dynasty_id
                     && loan.borrower_dynasty_id == state.player_dynasty_id))
-                && !matches!(loan.status, crate::core::LoanStatus::Repaid)
+                && !loan.status.is_settled()
         })
         .count();
     Ok(InformationCommissionPlan {

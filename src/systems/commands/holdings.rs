@@ -19,7 +19,7 @@ pub(crate) fn apply_business_acquisition(
     manager_id: CharacterId,
     recapitalization: Money,
 ) -> Result<CommandOutcome, CommandError> {
-    let quote = acquire_business(
+    let quote = acquire_business_scratch(
         registry,
         state,
         state.player_dynasty_id,

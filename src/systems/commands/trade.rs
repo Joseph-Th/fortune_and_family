@@ -255,15 +255,36 @@ pub(crate) fn ensure_non_player_loan_counterparty_accepts(
     let exposure = negotiated_loan_exposure(state, terms);
 
     if terms.lender_dynasty_id != player_id {
+        // Reworking this lender's own default is a recovery negotiation, not
+        // fresh credit. Unrelated lenders, however, refuse to let a borrower
+        // shop around an unresolved default and turn one failed obligation
+        // into a chain of new creditors.
+        let restructures_own_default = latest_defaulted_loan_for_pair(
+            state,
+            terms.lender_dynasty_id,
+            terms.borrower_dynasty_id,
+        )
+        .is_some();
+        if !restructures_own_default
+            && let Some(defaulted) = unresolved_default_owed_elsewhere(
+                state,
+                terms.borrower_dynasty_id,
+                terms.lender_dynasty_id,
+            )
+        {
+            return Err(CommandError::LoanCounterpartyBorrowerInDefault {
+                lender_dynasty_id: terms.lender_dynasty_id,
+                borrower_dynasty_id: terms.borrower_dynasty_id,
+                creditor_dynasty_id: defaulted.lender_dynasty_id,
+                loan_id: defaulted.id,
+            });
+        }
         let lender = state
             .dynasties
             .get(&terms.lender_dynasty_id)
             .expect("validated loan lender must exist");
-        let lender_after = lender
-            .treasury()
-            .checked_sub(terms.principal)
-            .expect("validated loan lender must cover principal");
-        if lender_after < PRIVATE_LOAN_COUNTERPARTY_RESERVE {
+        let lender_after = lender.treasury().saturating_sub(terms.principal);
+        if terms.principal > Money::ZERO && lender_after < PRIVATE_LOAN_COUNTERPARTY_RESERVE {
             return Err(CommandError::LoanCounterpartyLenderReserve {
                 lender_dynasty_id: terms.lender_dynasty_id,
                 available: lender.treasury(),

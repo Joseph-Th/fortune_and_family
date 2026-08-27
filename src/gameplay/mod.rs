@@ -13,12 +13,14 @@ use crate::registry::{GoodCategory, InstitutionKind, Registry};
 // this module's namespace; production gameplay code uses the scratch entry.
 #[cfg(test)]
 use crate::systems::advance_days;
+#[cfg(test)]
+use crate::systems::DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS;
 use crate::systems::{
     BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS,
     CIVIC_DEBT_CREDITOR_RESERVE, COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST,
     CRISIS_SUPPRESS_COST, CRISIS_SUPPRESS_LEGITIMACY_COST, CommandError, CrisisResponse,
-    DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS, EducationFocus, FAMILY_COUNCIL_MEETING_COST,
-    FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, HEIR_DESIGNATION_INTERVAL_DAYS,
+    EducationFocus, FAMILY_COUNCIL_MEETING_COST, FAMILY_COUNCIL_MEETING_INTERVAL_DAYS,
+    FAMILY_EDUCATION_COST, HEIR_DESIGNATION_INTERVAL_DAYS,
     HEIR_DESIGNATION_LEGITIMACY_COST, HEIR_DESIGNATION_UNITY_COST,
     HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, HOUSE_GOVERNANCE_UNITY_COST,
     INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
@@ -39,15 +41,17 @@ use crate::systems::{
     WARD_ADOPTION_LEGITIMACY_REQUIREMENT, WARD_ADOPTION_REPUTATION_REQUIREMENT,
     WARD_ADOPTION_UNITY_COST, active_player_ward_count, advance_days_scratch, apply_player_command,
     apply_player_command_scratch, available_household_workers, available_supply_contract_capacity,
-    build_new_game, business_operating_spendable_cash, business_owner_distribution_reserve,
-    business_recapitalization_target, business_sustainable_unit_cost,
-    contract_counterparty_price_bounds, contract_relationship_pressure_basis_points,
-    crisis_relief_cost, crisis_response_contains_crisis, family_education_next_day,
+    borrower_has_unresolved_default, build_new_game, business_operating_spendable_cash,
+    business_owner_distribution_reserve, business_recapitalization_target,
+    business_sustainable_unit_cost, contract_counterparty_price_bounds,
+    contract_relationship_pressure_basis_points, credit_pair_blocks_new_loan, crisis_relief_cost,
+    crisis_response_contains_crisis, defaulted_loan_restructuring_available,
+    family_education_next_day,
     has_established_player_institution_membership, has_established_player_office_power,
     has_player_office, institution_capability_score, institution_endowment_next_day,
     institution_membership_count, institution_support_day,
     institution_support_delivery_requirement, institution_support_next_day,
-    market_reference_weekly_wage, office_nomination_delivery_requirement,
+    latest_defaulted_loan_for_pair, market_reference_weekly_wage, office_nomination_delivery_requirement,
     office_nomination_next_day, player_contract_deliveries,
     private_loan_borrower_financing_pressure, projected_dynasty_monthly_office_duty,
     projected_dynasty_monthly_office_duty_with_additional_offices,
@@ -116,7 +120,7 @@ const ALL_DOMAINS: [GameplayDomain; 17] = [
 ];
 
 /// Version of the serialized gameplay-harness report contract.
-pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 70;
+pub const GAMEPLAY_REPORT_SCHEMA_VERSION: u16 = 71;
 #[cfg(test)]
 const HARNESS_OBSERVED_STATE_COMPONENTS: &[&str] = &[
     "clock",

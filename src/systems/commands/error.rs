@@ -29,6 +29,15 @@ pub enum CommandError {
         required_reserve: Money,
     },
     #[error(
+        "non-player lender {lender_dynasty_id} will not extend fresh credit to borrower {borrower_dynasty_id} while defaulted loan {loan_id} remains owed to dynasty {creditor_dynasty_id}"
+    )]
+    LoanCounterpartyBorrowerInDefault {
+        lender_dynasty_id: DynastyId,
+        borrower_dynasty_id: DynastyId,
+        creditor_dynasty_id: DynastyId,
+        loan_id: crate::ids::LoanId,
+    },
+    #[error(
         "non-player lender requires at least {minimum_basis_points} basis points of interest; proposed rate is {interest_basis_points}"
     )]
     LoanCounterpartyInterestTooLow {

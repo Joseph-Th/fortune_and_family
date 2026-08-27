@@ -1437,7 +1437,9 @@ pub(crate) fn add_credit_productive_link_finding(
     let Some(credit_stats) = aggregate.commands.get(&GameplayCommandKind::ExtendCredit) else {
         return;
     };
-    let credit_actions = credit_stats.executed;
+    let credit_actions = credit_stats
+        .productive_financing_actions
+        .saturating_add(credit_stats.nonproductive_financing_actions);
     if credit_actions < 10 {
         return;
     }
@@ -1448,9 +1450,10 @@ pub(crate) fn add_credit_productive_link_finding(
         severity: GameplayFindingSeverity::Warning,
         title: "Player lending is detached from productive financing".to_owned(),
         evidence: format!(
-            "Agents extended player credit {credit_actions} times, but only {} accepted loans immediately changed business state; {} remained treasury-only at command commit. Credit should usually finance a real commercial pressure rather than behave like an idle treasury transfer whose principal can fund its own repayment.",
+            "Agents advanced new player credit {credit_actions} times, but only {} accepted loans immediately changed business state; {} remained treasury-only at command commit. Another {} actions were zero-principal workouts and are excluded from the new-financing sample. Credit should usually finance a real commercial pressure rather than behave like an idle treasury transfer whose principal can fund its own repayment.",
             credit_stats.productive_financing_actions,
             credit_stats.nonproductive_financing_actions,
+            credit_stats.financing_workout_actions,
         ),
     });
 }
@@ -1763,6 +1766,7 @@ pub(crate) const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> 
             // its own strategic-need condition is stricter than the canonical
             // validation the activation predicate mirrors.
             | GameplayCommandKind::SetBusinessWages
+            | GameplayCommandKind::SetBusinessPolicy
             | GameplayCommandKind::ConveneFamilyCouncil
             | GameplayCommandKind::AcknowledgeNotification
             | GameplayCommandKind::DesignateHeir
@@ -1772,6 +1776,10 @@ pub(crate) const fn is_policy_gated_command_route(kind: GameplayCommandKind) -> 
             | GameplayCommandKind::LeverageInformation
             | GameplayCommandKind::CommissionInformation
             | GameplayCommandKind::BuyProperty
+            // Institution support only targets memberships the persona ranks
+            // as strategically useful, even though canonical validation may
+            // accept other institutions for the same character.
+            | GameplayCommandKind::CultivateInstitutionSupport
             // Borrowing and charter amendment generators only build when the
             // persona's strategic-need condition fires, which is stricter than
             // the canonical acceptance their activation predicate mirrors.

@@ -84,6 +84,10 @@ pub enum LoanStatus {
     Defaulted,
     Repaid,
     Restructured,
+    /// Terminal lender loss after final legal enforcement finds no remaining
+    /// collectible dynasty assets. Unlike `Repaid`, no money is fabricated:
+    /// the unpaid balance is explicitly recognized as a credit loss.
+    WrittenOff,
 }
 
 impl LoanStatus {
@@ -96,6 +100,7 @@ impl LoanStatus {
             Self::Defaulted => "Defaulted",
             Self::Repaid => "Repaid",
             Self::Restructured => "Restructured",
+            Self::WrittenOff => "Written off",
         }
     }
 
@@ -105,11 +110,19 @@ impl LoanStatus {
         matches!(self, Self::Current | Self::Delinquent | Self::Restructured)
     }
 
+    /// Returns whether no enforceable balance remains on the loan.
+    #[must_use]
+    pub const fn is_settled(self) -> bool {
+        matches!(self, Self::Repaid | Self::WrittenOff)
+    }
+
     /// Returns whether the stored missed-payment counter agrees with this lifecycle state.
     #[must_use]
     pub const fn has_consistent_arrears(self, missed_payments: u16) -> bool {
         match self {
-            Self::Current | Self::Restructured | Self::Repaid => missed_payments == 0,
+            Self::Current | Self::Restructured | Self::Repaid | Self::WrittenOff => {
+                missed_payments == 0
+            }
             Self::Delinquent => missed_payments == 1 || missed_payments == 2,
             Self::Defaulted => missed_payments >= 3,
         }

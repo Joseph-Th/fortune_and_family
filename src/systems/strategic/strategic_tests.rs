@@ -37,7 +37,7 @@ fn make_test_loan_terms(state: &AppState) -> LoanTerms {
             let has_unsettled_pair = state.loans.values().any(|loan| {
                 loan.lender_dynasty_id == lender.id()
                     && loan.borrower_dynasty_id == borrower.id()
-                    && loan.status != LoanStatus::Repaid
+                    && !loan.status.is_settled()
             });
             if !has_unsettled_pair {
                 return LoanTerms {
@@ -51,6 +51,7 @@ fn make_test_loan_terms(state: &AppState) -> LoanTerms {
             }
         }
     }
+
     panic!("test campaign must contain a dynasty pair without unsettled credit");
 }
 
@@ -106,6 +107,20 @@ mod arithmetic_boundaries {
             &state,
             "reserved business finance version must fail before capitalization mutates state",
         );
+    }
+
+    #[test]
+    fn active_ai_loan_book_records_lender_and_borrower_on_the_correct_sides() {
+        let state = make_test_campaign();
+        let terms = make_test_loan_terms(&state);
+        let mut book = ActiveAiLoanBook::default();
+
+        book.record(terms.lender_dynasty_id, terms.borrower_dynasty_id);
+
+        assert!(book.holds_active_loan(terms.lender_dynasty_id));
+        assert!(!book.has_active_borrowing(terms.lender_dynasty_id));
+        assert!(book.has_active_borrowing(terms.borrower_dynasty_id));
+        assert!(!book.holds_active_loan(terms.borrower_dynasty_id));
     }
 
     #[test]
@@ -436,7 +451,7 @@ mod arithmetic_boundaries {
             .expect("seller must exist")
             .treasury();
 
-        acquire_business(
+        acquire_business_scratch(
             registry,
             &mut state,
             buyer_id,
@@ -545,7 +560,7 @@ mod arithmetic_boundaries {
         let buyer_dynasty_id = state.player_dynasty_id;
         let before = state.clone();
 
-        let result = acquire_business(
+        let result = acquire_business_scratch(
             registry,
             &mut state,
             buyer_dynasty_id,
@@ -607,7 +622,7 @@ mod arithmetic_boundaries {
         buyer.resources.administrative_load = u16::MAX;
         let before = state.clone();
 
-        let result = acquire_business(
+        let result = acquire_business_scratch(
             registry,
             &mut state,
             buyer_dynasty_id,
@@ -683,7 +698,7 @@ mod arithmetic_boundaries {
             .checked_add(quote.minimum_recapitalization)
             .expect("test acquisition cost must fit");
 
-        acquire_business(
+        acquire_business_scratch(
             registry,
             &mut state,
             buyer_dynasty_id,
@@ -1085,6 +1100,109 @@ mod public_works {
 
         assert!(state.districts.values().all(|district| {
             district.employment_basis_points == DISTRICT_BACKGROUND_EMPLOYMENT_BASIS_POINTS
+        }));
+    }
+
+    #[test]
+    fn defendant_won_debt_judgment_writes_off_rejected_claim_without_payment() {
+        let mut state = make_test_campaign();
+        let plaintiff_id = state.player_dynasty_id;
+        let defendant_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != plaintiff_id)
+            .expect("campaign must contain a rival borrower");
+        let loan_id = make_defaulted_loan(&mut state, plaintiff_id, defendant_id);
+        let (balance, collateral_property_id) = {
+            let loan = state.loans.get(&loan_id).expect("source loan must exist");
+            (loan.balance, loan.collateral_property_id)
+        };
+        state
+            .dynasties
+            .get_mut(&plaintiff_id)
+            .expect("plaintiff must exist")
+            .resources
+            .legitimacy_basis_points = 0;
+        state
+            .dynasties
+            .get_mut(&defendant_id)
+            .expect("defendant must exist")
+            .resources
+            .legitimacy_basis_points = 10_000;
+        let plaintiff_treasury_before = state
+            .dynasties
+            .get(&plaintiff_id)
+            .expect("plaintiff must exist")
+            .treasury();
+        let defendant_treasury_before = state
+            .dynasties
+            .get(&defendant_id)
+            .expect("defendant must exist")
+            .treasury();
+        let hearing_day = state.clock.day();
+        let case_id = insert_test_case(
+            &mut state,
+            &TestLegalCase {
+                plaintiff_dynasty_id: plaintiff_id,
+                defendant_dynasty_id: defendant_id,
+                kind: crate::core::LegalCaseKind::Debt,
+                claim_source: Some(LegalClaimSource::Loan { loan_id }),
+                evidence_basis_points: 0,
+                public_attention_basis_points: 0,
+                damages: balance,
+                hearing_day,
+                status: LegalCaseStatus::Hearing,
+            },
+        );
+
+        resolve_legal_cases(&mut state).expect("final debt judgment must resolve");
+
+        let loan = state.loans.get(&loan_id).expect("source loan must remain auditable");
+        assert_eq!(loan.status, LoanStatus::WrittenOff);
+        assert_eq!(loan.balance, Money::ZERO);
+        assert_eq!(loan.missed_payments, 0);
+        assert_eq!(loan.collateral_property_id, None);
+        if let Some(property_id) = collateral_property_id {
+            assert_ne!(
+                state
+                    .properties
+                    .get(&property_id)
+                    .expect("collateral property must remain")
+                    .collateral_loan_id,
+                Some(loan_id),
+                "a rejected debt claim must release its lien"
+            );
+        }
+        assert_eq!(
+            state
+                .dynasties
+                .get(&plaintiff_id)
+                .expect("plaintiff must exist")
+                .treasury(),
+            plaintiff_treasury_before,
+            "a rejected claim is a creditor loss, not a payment"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&defendant_id)
+                .expect("defendant must exist")
+                .treasury(),
+            defendant_treasury_before
+        );
+        assert_eq!(
+            state
+                .legal_cases
+                .get(&case_id)
+                .expect("case must remain auditable")
+                .status,
+            LegalCaseStatus::DecidedForDefendant
+        );
+        assert!(state.outbox.iter().any(|message| {
+            message.kind == OutboxKind::Legal
+                && message.body.contains("written off")
+                && message.body.contains("no longer enforceable")
         }));
     }
 
@@ -4453,8 +4571,9 @@ mod property_liquidation {
             quote_property_liquidation(registry, &state, seller_id, buyer_id, property_id)
                 .expect("property must be liquidatable");
 
-        let quote = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id)
-            .expect("property sale must succeed");
+        let quote =
+            sell_owned_property_scratch(registry, &mut state, seller_id, buyer_id, property_id)
+                .expect("property sale must succeed");
 
         assert_eq!(quote, expected_quote);
         assert_eq!(
@@ -4510,7 +4629,8 @@ mod property_liquidation {
             .collateral_loan_id = Some(loan_id);
         let before = state.clone();
 
-        let result = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id);
+        let result =
+            sell_owned_property_scratch(registry, &mut state, seller_id, buyer_id, property_id);
 
         assert_eq!(
             result,
@@ -4581,8 +4701,9 @@ mod property_liquidation {
             .resources
             .reputation_reliability_basis_points;
 
-        let quote = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id)
-            .expect("sale proceeds must settle the lien");
+        let quote =
+            sell_owned_property_scratch(registry, &mut state, seller_id, buyer_id, property_id)
+                .expect("sale proceeds must settle the lien");
 
         assert_eq!(quote.lien_payoff, balance);
         assert_eq!(quote.seller_proceeds, quote.price.saturating_sub(balance));
@@ -4670,8 +4791,9 @@ mod property_liquidation {
             .expect("lender must exist")
             .treasury();
 
-        let quote = sell_owned_property(registry, &mut state, seller_id, lender_id, property_id)
-            .expect("purchase debit must create room for the lender's lien payoff");
+        let quote =
+            sell_owned_property_scratch(registry, &mut state, seller_id, lender_id, property_id)
+                .expect("purchase debit must create room for the lender's lien payoff");
 
         assert_eq!(quote.lien_payoff, balance);
         assert_eq!(quote.buyer_contribution, quote.price);
@@ -4755,7 +4877,8 @@ mod property_liquidation {
             .treasury = Money::from_copper(i64::MAX);
         let before = state.clone();
 
-        let result = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id);
+        let result =
+            sell_owned_property_scratch(registry, &mut state, seller_id, buyer_id, property_id);
 
         assert_eq!(
             result,
@@ -4831,8 +4954,9 @@ mod property_liquidation {
             .expect("seller must exist")
             .treasury();
 
-        let quote = sell_owned_property(registry, &mut state, seller_id, buyer_id, property_id)
-            .expect("civic guarantee must make the distressed auction liquid");
+        let quote =
+            sell_owned_property_scratch(registry, &mut state, seller_id, buyer_id, property_id)
+                .expect("civic guarantee must make the distressed auction liquid");
 
         assert_eq!(quote.buyer_contribution, Money::ZERO);
         assert_eq!(quote.civic_guarantee, quote.price);
@@ -5260,7 +5384,7 @@ mod loans {
                 !state.loans.values().any(|loan| {
                     loan.lender_dynasty_id == *lender_id
                         && loan.borrower_dynasty_id == existing_loan.borrower_dynasty_id
-                        && loan.status != LoanStatus::Repaid
+                        && !loan.status.is_settled()
                 })
             })
             .expect("fixture must contain an alternate lender without borrower exposure");
@@ -5312,6 +5436,18 @@ mod loans {
                 borrower_dynasty_id: existing.borrower_dynasty_id,
                 loan_id: existing.id,
             }
+        );
+    }
+
+    #[test]
+    fn fresh_credit_still_requires_a_positive_principal() {
+        let state = make_test_campaign();
+        let mut terms = make_test_loan_terms(&state);
+        terms.principal = Money::ZERO;
+
+        assert_eq!(
+            validate_loan(&state, terms).expect_err("a zero advance is not a fresh loan"),
+            StrategicError::NonPositiveAmount
         );
     }
 
@@ -5446,6 +5582,141 @@ mod loans {
                 .collateral_loan_id,
             None,
             "restructuring without replacement collateral must clear the old reverse pledge"
+        );
+    }
+
+    #[test]
+    fn aged_defaulted_credit_can_restructure_without_an_additional_advance() {
+        let mut state = make_test_campaign();
+        let terms = make_test_loan_terms(&state);
+        let lender_id = terms.lender_dynasty_id;
+        let borrower_id = terms.borrower_dynasty_id;
+        let loan_id = issue_loan(&mut state, terms.clone()).expect("loan must be issued");
+        let (principal_before, balance_before) = {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            let balances = (loan.principal, loan.balance);
+            loan.status = LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+            loan.next_due_day = state
+                .clock
+                .day()
+                .saturating_sub(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS);
+            balances
+        };
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let lender_before = state
+            .dynasties
+            .get(&lender_id)
+            .expect("lender must exist")
+            .treasury();
+        let borrower_before = state
+            .dynasties
+            .get(&borrower_id)
+            .expect("borrower must exist")
+            .treasury();
+        let loan_count = state.loans.len();
+        let refinancing = LoanTerms {
+            principal: Money::ZERO,
+            weekly_payment: balance_before.ceil_div_positive(208),
+            interest_basis_points: 900,
+            collateral_property_id: None,
+            ..terms
+        };
+
+        let returned_id = issue_loan(&mut state, refinancing)
+            .expect("an aged default must be able to restructure without new borrowing");
+
+        assert_eq!(returned_id, loan_id);
+        assert_eq!(state.loans.len(), loan_count);
+        let loan = state.loans.get(&loan_id).expect("loan must remain present");
+        assert_eq!(loan.status, LoanStatus::Restructured);
+        assert_eq!(loan.principal, principal_before);
+        assert_eq!(loan.balance, balance_before);
+        assert_eq!(loan.missed_payments, 0);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&lender_id)
+                .expect("lender must exist")
+                .treasury(),
+            lender_before
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&borrower_id)
+                .expect("borrower must exist")
+                .treasury(),
+            borrower_before
+        );
+        assert!(state.outbox.iter().any(|message| {
+            message.body.contains(&loan_id.to_string())
+                && message.body.contains("without increasing the debt")
+        }));
+    }
+
+    #[test]
+    fn aged_defaulted_credit_can_retain_its_existing_collateral() {
+        let mut state = make_test_campaign();
+        let mut terms = make_test_loan_terms(&state);
+        let lender_id = terms.lender_dynasty_id;
+        let borrower_id = terms.borrower_dynasty_id;
+        let property_id = state
+            .properties
+            .values()
+            .find(|property| {
+                property.owner_dynasty_id == Some(borrower_id)
+                    && property.collateral_loan_id.is_none()
+            })
+            .expect("borrower must own unpledged collateral")
+            .id;
+        terms.collateral_property_id = Some(property_id);
+        let loan_id = issue_loan(&mut state, terms.clone()).expect("loan must be issued");
+        {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.status = LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+            loan.next_due_day = state
+                .clock
+                .day()
+                .saturating_sub(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS);
+        }
+        state
+            .dynasties
+            .get_mut(&lender_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::from_copper(10_000);
+        let loan_count = state.loans.len();
+        let refinancing = LoanTerms {
+            principal: Money::from_copper(1_000),
+            weekly_payment: Money::from_copper(10),
+            interest_basis_points: 900,
+            collateral_property_id: Some(property_id),
+            ..terms
+        };
+
+        let returned_id = issue_loan(&mut state, refinancing)
+            .expect("a restructuring must be allowed to keep its own collateral");
+
+        assert_eq!(returned_id, loan_id);
+        assert_eq!(state.loans.len(), loan_count);
+        let loan = state.loans.get(&loan_id).expect("loan must remain present");
+        assert_eq!(loan.status, LoanStatus::Restructured);
+        assert_eq!(loan.collateral_property_id, Some(property_id));
+        assert_eq!(
+            state
+                .properties
+                .get(&property_id)
+                .expect("collateral must remain present")
+                .collateral_loan_id,
+            Some(loan_id),
+            "retained collateral must preserve the reverse pledge"
         );
     }
 
@@ -6346,7 +6617,7 @@ mod legal_cases {
             .find(|loan| {
                 loan.lender_dynasty_id == lender_id
                     && loan.borrower_dynasty_id == borrower_id
-                    && loan.status != LoanStatus::Repaid
+                    && !loan.status.is_settled()
             })
             .map(|loan| loan.id);
         let loan_id = if let Some(loan_id) = existing_loan_id {
@@ -6689,9 +6960,9 @@ mod legal_cases {
 
         resolve_legal_cases(&mut state).expect("grounded debt judgment must resolve");
 
-        // A judgment-proof defendant cannot have the debt erased cleaner than
-        // a bankruptcy: only the copper actually recovered discharges the
-        // obligation, and the unsecured remainder stays live.
+        // This borrower still owns an operating business and therefore is not
+        // judgment-proof in the model. Only the copper recovered now is
+        // discharged; the unsecured remainder stays live for future recovery.
         let loan = state.loans.get(&loan_id).expect("source loan must remain");
         assert_eq!(
             loan.balance,
@@ -6730,6 +7001,198 @@ mod legal_cases {
         resolve_legal_cases(&mut state).expect("decided case must not resolve twice");
 
         assert_eq!(state, after_first_resolution);
+    }
+
+    #[test]
+    fn final_debt_judgment_writes_off_assetless_deficiency_without_fabricating_payment() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let borrower_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival borrower");
+        let loan_id = make_defaulted_loan(&mut state, player_id, borrower_id);
+        let balance = state
+            .loans
+            .get(&loan_id)
+            .expect("source loan must exist")
+            .balance;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        for property in state
+            .properties
+            .values_mut()
+            .filter(|property| property.owner_dynasty_id == Some(borrower_id))
+        {
+            property.owner_dynasty_id = Some(player_id);
+        }
+        for business in state
+            .businesses
+            .iter_mut()
+            .filter(|business| business.owner_dynasty_id() == borrower_id)
+        {
+            business.operations.status = BusinessStatus::Distressed;
+        }
+        let reliability_before = state
+            .dynasties
+            .get(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .reputation_reliability_basis_points;
+        let legitimacy_before = state
+            .dynasties
+            .get(&borrower_id)
+            .expect("borrower must exist")
+            .resources
+            .legitimacy_basis_points;
+        let hearing_day = state.clock.day();
+        let case_id = insert_test_case(
+            &mut state,
+            &TestLegalCase {
+                plaintiff_dynasty_id: player_id,
+                defendant_dynasty_id: borrower_id,
+                kind: crate::core::LegalCaseKind::Debt,
+                claim_source: Some(LegalClaimSource::Loan { loan_id }),
+                evidence_basis_points: 10_000,
+                public_attention_basis_points: 10_000,
+                damages: balance,
+                hearing_day,
+                status: LegalCaseStatus::Hearing,
+            },
+        );
+
+        resolve_legal_cases(&mut state).expect("final debt judgment must resolve");
+
+        let loan = state.loans.get(&loan_id).expect("written-off loan remains auditable");
+        assert_eq!(loan.status, LoanStatus::WrittenOff);
+        assert_eq!(loan.balance, Money::ZERO);
+        assert_eq!(loan.missed_payments, 0);
+        assert_eq!(loan.collateral_property_id, None);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("lender must exist")
+                .treasury(),
+            Money::ZERO,
+            "write-off recognizes a lender loss and must not manufacture recovery cash"
+        );
+        let borrower = state
+            .dynasties
+            .get(&borrower_id)
+            .expect("borrower must remain present");
+        assert!(borrower.resources.reputation_reliability_basis_points < reliability_before);
+        assert!(borrower.resources.legitimacy_basis_points < legitimacy_before);
+        assert_eq!(
+            state
+                .legal_cases
+                .get(&case_id)
+                .expect("case remains auditable")
+                .status,
+            LegalCaseStatus::DecidedForPlaintiff
+        );
+        assert!(state.outbox.iter().any(|message| {
+            message.kind == OutboxKind::Legal
+                && message.body.contains("written off")
+                && message.body.contains("lender's loss")
+        }));
+    }
+
+    #[test]
+    fn existing_debt_judgment_completes_when_borrower_later_becomes_judgment_proof() {
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let borrower_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != player_id)
+            .expect("campaign must contain a rival borrower");
+        let loan_id = make_defaulted_loan(&mut state, player_id, borrower_id);
+        let balance = state
+            .loans
+            .get(&loan_id)
+            .expect("source loan must exist")
+            .balance;
+        state
+            .dynasties
+            .get_mut(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(100);
+        let hearing_day = state.clock.day();
+        insert_test_case(
+            &mut state,
+            &TestLegalCase {
+                plaintiff_dynasty_id: player_id,
+                defendant_dynasty_id: borrower_id,
+                kind: crate::core::LegalCaseKind::Debt,
+                claim_source: Some(LegalClaimSource::Loan { loan_id }),
+                evidence_basis_points: 10_000,
+                public_attention_basis_points: 10_000,
+                damages: balance,
+                hearing_day,
+                status: LegalCaseStatus::Hearing,
+            },
+        );
+
+        resolve_legal_cases(&mut state).expect("initial debt judgment must resolve");
+        assert_eq!(
+            state.loans.get(&loan_id).expect("loan must remain").status,
+            LoanStatus::Defaulted,
+            "an existing operating business keeps the deficiency collectible at judgment"
+        );
+
+        for property in state
+            .properties
+            .values_mut()
+            .filter(|property| property.owner_dynasty_id == Some(borrower_id))
+        {
+            property.owner_dynasty_id = Some(player_id);
+        }
+        for business in state
+            .businesses
+            .iter_mut()
+            .filter(|business| business.owner_dynasty_id() == borrower_id)
+        {
+            business.operations.status = BusinessStatus::Distressed;
+        }
+        state
+            .dynasties
+            .get_mut(&borrower_id)
+            .expect("borrower dynasty must remain")
+            .resources
+            .treasury = Money::ZERO;
+
+        resolve_legal_cases(&mut state)
+            .expect("the existing judgment must continue to execute without a duplicate claim");
+
+        let loan = state.loans.get(&loan_id).expect("loan remains auditable");
+        assert_eq!(loan.status, LoanStatus::WrittenOff);
+        assert_eq!(loan.balance, Money::ZERO);
+        assert!(state.outbox.iter().any(|message| {
+            message.kind == OutboxKind::Legal
+                && message.subject.contains("judgment completed")
+                && message.body.contains("lender's loss")
+        }));
     }
 
     #[test]
@@ -6828,6 +7291,113 @@ mod legal_cases {
                 .expect("legal case must remain")
                 .status,
             LegalCaseStatus::DecidedForPlaintiff
+        );
+    }
+
+    #[test]
+    fn defendant_won_contract_judgment_extinguishes_rejected_breach_penalty() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (plaintiff_id, defendant_id) = {
+            let contract = state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist");
+            let plaintiff_id = state
+                .businesses
+                .get(contract.seller_business_id)
+                .expect("seller must exist")
+                .owner_dynasty_id();
+            let defendant_id = state
+                .businesses
+                .get(contract.buyer_business_id)
+                .expect("buyer must exist")
+                .owner_dynasty_id();
+            (plaintiff_id, defendant_id)
+        };
+        {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.status = ContractStatus::Breached;
+            contract.breaching_dynasty_id = Some(defendant_id);
+            contract.breach_victim_dynasty_id = Some(plaintiff_id);
+            contract.penalty = Money::from_copper(500);
+            contract.unpaid_breach_penalty = Money::from_copper(300);
+        }
+        state
+            .dynasties
+            .get_mut(&plaintiff_id)
+            .expect("plaintiff must exist")
+            .resources
+            .legitimacy_basis_points = 0;
+        state
+            .dynasties
+            .get_mut(&defendant_id)
+            .expect("defendant must exist")
+            .resources
+            .legitimacy_basis_points = 10_000;
+        let plaintiff_treasury_before = state
+            .dynasties
+            .get(&plaintiff_id)
+            .expect("plaintiff must exist")
+            .treasury();
+        let defendant_treasury_before = state
+            .dynasties
+            .get(&defendant_id)
+            .expect("defendant must exist")
+            .treasury();
+        let hearing_day = state.clock.day();
+        let case_id = insert_test_case(
+            &mut state,
+            &TestLegalCase {
+                plaintiff_dynasty_id: plaintiff_id,
+                defendant_dynasty_id: defendant_id,
+                kind: crate::core::LegalCaseKind::ContractBreach,
+                claim_source: Some(LegalClaimSource::Contract { contract_id }),
+                evidence_basis_points: 0,
+                public_attention_basis_points: 0,
+                damages: Money::from_copper(300),
+                hearing_day,
+                status: LegalCaseStatus::Hearing,
+            },
+        );
+
+        resolve_legal_cases(&mut state).expect("final contract judgment must resolve");
+
+        assert_eq!(
+            state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must remain auditable")
+                .unpaid_breach_penalty,
+            Money::ZERO,
+            "the court-rejected penalty must not remain economically enforceable"
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&plaintiff_id)
+                .expect("plaintiff must exist")
+                .treasury(),
+            plaintiff_treasury_before
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&defendant_id)
+                .expect("defendant must exist")
+                .treasury(),
+            defendant_treasury_before
+        );
+        assert_eq!(
+            state
+                .legal_cases
+                .get(&case_id)
+                .expect("case must remain auditable")
+                .status,
+            LegalCaseStatus::DecidedForDefendant
         );
     }
 }
@@ -8160,7 +8730,7 @@ mod ai {
                 !state.loans.values().any(|loan| {
                     loan.lender_dynasty_id == dynasty.id()
                         && loan.borrower_dynasty_id == borrower_id
-                        && loan.status != LoanStatus::Repaid
+                        && !loan.status.is_settled()
                 })
             })
             .map(crate::core::Dynasty::id)
@@ -9027,6 +9597,132 @@ mod ai {
             state.loans.len(),
             loans_before,
             "a borrower with active repayment debt must not receive a second loan"
+        );
+    }
+
+    #[test]
+    fn ai_credit_workout_restructures_aged_default_without_increasing_debt() {
+        let mut state = make_test_campaign();
+        let loan_id = state
+            .loans
+            .values()
+            .find(|loan| {
+                loan.lender_dynasty_id != state.player_dynasty_id
+                    && loan.borrower_dynasty_id != state.player_dynasty_id
+                    && loan.status.is_repayment_active()
+            })
+            .expect("bootstrap must create rival credit")
+            .id;
+        let (lender_id, borrower_id, principal_before, balance_before) = {
+            let loan = state.loans.get_mut(&loan_id).expect("rival loan must exist");
+            let values = (
+                loan.lender_dynasty_id,
+                loan.borrower_dynasty_id,
+                loan.principal,
+                loan.balance,
+            );
+            loan.status = LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+            loan.next_due_day = state
+                .clock
+                .day()
+                .saturating_sub(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS);
+            values
+        };
+        let lender_before = state
+            .dynasties
+            .get(&lender_id)
+            .expect("rival lender must exist")
+            .treasury();
+        let borrower_before = state
+            .dynasties
+            .get(&borrower_id)
+            .expect("rival borrower must exist")
+            .treasury();
+        let mut active_book = ActiveAiLoanBook::collect(&state);
+
+        advance_ai_default_restructuring(&mut state, &mut active_book)
+            .expect("AI default workout must succeed");
+
+        let loan = state.loans.get(&loan_id).expect("rival loan must remain");
+        assert_eq!(loan.status, LoanStatus::Restructured);
+        assert_eq!(loan.principal, principal_before);
+        assert_eq!(loan.balance, balance_before);
+        assert_eq!(
+            loan.weekly_payment,
+            ai_loan_weekly_payment(balance_before, 208)
+        );
+        assert!((400..=900).contains(&loan.interest_basis_points));
+        assert_eq!(
+            state
+                .dynasties
+                .get(&lender_id)
+                .expect("rival lender must exist")
+                .treasury(),
+            lender_before
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&borrower_id)
+                .expect("rival borrower must exist")
+                .treasury(),
+            borrower_before
+        );
+        assert!(active_book.has_active_borrowing(borrower_id));
+    }
+
+    #[test]
+    fn ai_credit_does_not_offer_fresh_money_to_a_recent_default() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let (lender_id, borrower_id, loan_id) = state
+            .loans
+            .values()
+            .find(|loan| {
+                loan.lender_dynasty_id != state.player_dynasty_id
+                    && loan.borrower_dynasty_id != state.player_dynasty_id
+                    && loan.status.is_repayment_active()
+            })
+            .map(|loan| (loan.lender_dynasty_id, loan.borrower_dynasty_id, loan.id))
+            .expect("bootstrap must create rival credit");
+        for business in state.businesses.iter_mut() {
+            if business.owner_dynasty_id() != state.player_dynasty_id {
+                business.finance.cash = Money::from_copper(1_000_000);
+                business.finance.lifetime_costs = Money::ZERO;
+                business.finance.lifetime_revenue = Money::from_copper(1);
+            }
+        }
+        let borrower_business_id = *state
+            .businesses
+            .ids_for_owner(borrower_id)
+            .expect("rival borrower owner index must exist")
+            .iter()
+            .next()
+            .expect("rival borrower must own a business");
+        {
+            let business = state
+                .businesses
+                .get_mut(borrower_business_id)
+                .expect("rival borrower business must exist");
+            business.finance.cash = Money::ZERO;
+            business.finance.lifetime_costs = Money::from_copper(500);
+            business.finance.lifetime_revenue = Money::from_copper(1_000);
+            business.operations.status = BusinessStatus::Active;
+        }
+        {
+            let loan = state.loans.get_mut(&loan_id).expect("rival loan must exist");
+            loan.status = LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+            loan.next_due_day = state.clock.day();
+        }
+
+        let player_id = state.player_dynasty_id;
+        let offer = super::lending_offer_for_test(registry, &mut state, player_id, lender_id);
+
+        assert!(
+            offer.is_none(),
+            "a recent default must be worked out with its existing creditor, not refinanced as fresh AI credit"
         );
     }
 

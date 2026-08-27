@@ -12,6 +12,85 @@ pub struct LoanTerms {
     pub interest_basis_points: u16,
     pub collateral_property_id: Option<PropertyId>,
 }
+
+/// Newest defaulted loan for one lender/borrower pair.
+///
+/// Restructuring is pair-owned: a default can only be cured through the
+/// creditor that already owns that claim. Keeping the lookup in the credit
+/// system prevents command negotiation, gameplay policy, and AI underwriting
+/// from each reimplementing slightly different default semantics.
+pub(crate) fn latest_defaulted_loan_for_pair(
+    state: &AppState,
+    lender_dynasty_id: DynastyId,
+    borrower_dynasty_id: DynastyId,
+) -> Option<&Loan> {
+    state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.lender_dynasty_id == lender_dynasty_id
+                && loan.borrower_dynasty_id == borrower_dynasty_id
+                && loan.status == LoanStatus::Defaulted
+        })
+        .max_by_key(|loan| (loan.next_due_day, loan.id))
+}
+
+#[must_use]
+pub(crate) fn defaulted_loan_restructuring_available(state: &AppState, loan: &Loan) -> bool {
+    loan.status == LoanStatus::Defaulted
+        && state.clock.day()
+            >= loan
+                .next_due_day
+                .saturating_add(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS)
+}
+
+#[must_use]
+pub(crate) fn borrower_has_unresolved_default(
+    state: &AppState,
+    borrower_dynasty_id: DynastyId,
+) -> bool {
+    state.loans.values().any(|loan| {
+        loan.borrower_dynasty_id == borrower_dynasty_id && loan.status == LoanStatus::Defaulted
+    })
+}
+
+/// Defaulted claim held by somebody other than `proposed_lender_dynasty_id`.
+///
+/// A creditor may restructure its own claim even when the borrower has other
+/// defaults, allowing a badly damaged house to work through creditors one at
+/// a time. An unrelated lender uses this predicate to refuse fresh credit
+/// while another house still owns an unresolved default.
+pub(crate) fn unresolved_default_owed_elsewhere(
+    state: &AppState,
+    borrower_dynasty_id: DynastyId,
+    proposed_lender_dynasty_id: DynastyId,
+) -> Option<&Loan> {
+    state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.borrower_dynasty_id == borrower_dynasty_id
+                && loan.lender_dynasty_id != proposed_lender_dynasty_id
+                && loan.status == LoanStatus::Defaulted
+        })
+        .min_by_key(|loan| (loan.next_due_day, loan.id))
+}
+
+#[must_use]
+pub(crate) fn credit_pair_blocks_new_loan(
+    state: &AppState,
+    lender_dynasty_id: DynastyId,
+    borrower_dynasty_id: DynastyId,
+) -> bool {
+    state.loans.values().any(|loan| {
+        loan.lender_dynasty_id == lender_dynasty_id
+            && loan.borrower_dynasty_id == borrower_dynasty_id
+            && (loan.status.is_repayment_active()
+                || (loan.status == LoanStatus::Defaulted
+                    && !defaulted_loan_restructuring_available(state, loan)))
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DueLoan {
     pub(crate) id: crate::ids::LoanId,
@@ -199,9 +278,15 @@ pub(crate) fn commit_loan_reserved(
             format!("Loan {id} issued")
         },
         body: if restructured {
-            format!(
-                "House {lender_name} restructured loan {id} and advanced {principal} to House {borrower_name}."
-            )
+            if principal > Money::ZERO {
+                format!(
+                    "House {lender_name} restructured loan {id} and advanced {principal} to House {borrower_name}."
+                )
+            } else {
+                format!(
+                    "House {lender_name} restructured loan {id} for House {borrower_name} on revised repayment terms without increasing the debt."
+                )
+            }
         } else {
             format!("House {lender_name} lent {principal} to House {borrower_name}.")
         },
@@ -218,7 +303,11 @@ pub(crate) fn commit_loan_reserved(
         lender_dynasty_id,
         borrower_dynasty_id,
         &if restructured {
-            format!("Loan {id} was restructured with a {principal} advance.")
+            if principal > Money::ZERO {
+                format!("Loan {id} was restructured with a {principal} advance.")
+            } else {
+                format!("Loan {id} was restructured without increasing principal.")
+            }
         } else {
             format!("Loan {id} was issued for {principal}.")
         },
@@ -309,7 +398,10 @@ pub(crate) fn validate_loan_terms(
     if terms.lender_dynasty_id == terms.borrower_dynasty_id {
         return Err(StrategicError::SameLoanParty);
     }
-    if terms.principal <= Money::ZERO || terms.weekly_payment <= Money::ZERO {
+    // A restructuring may change repayment terms without forcing the
+    // defaulting house to borrow even more. Fresh loans still require a
+    // positive principal, and negative principal is never meaningful.
+    if terms.principal < Money::ZERO || terms.weekly_payment <= Money::ZERO {
         return Err(StrategicError::NonPositiveAmount);
     }
     if terms.interest_basis_points > 10_000 {
@@ -351,6 +443,9 @@ pub(crate) fn validate_loan_terms(
         });
     }
     let defaulted_loan_id = validate_defaulted_loan_restructuring(state, terms)?;
+    if terms.principal == Money::ZERO && defaulted_loan_id.is_none() {
+        return Err(StrategicError::NonPositiveAmount);
+    }
     if lender.treasury() < terms.principal {
         return Err(StrategicError::InsufficientDynastyFunds {
             dynasty_id: terms.lender_dynasty_id,
@@ -369,7 +464,9 @@ pub(crate) fn validate_loan_terms(
                 borrower_dynasty_id: terms.borrower_dynasty_id,
             });
         }
-        if let Some(loan_id) = property.collateral_loan_id {
+        if let Some(loan_id) = property.collateral_loan_id
+            && Some(loan_id) != defaulted_loan_id
+        {
             return Err(StrategicError::PropertyAlreadyPledged {
                 property_id,
                 loan_id,
@@ -382,15 +479,11 @@ pub(crate) fn validate_defaulted_loan_restructuring(
     state: &AppState,
     terms: &LoanTerms,
 ) -> Result<Option<crate::ids::LoanId>, StrategicError> {
-    let defaulted_loan = state
-        .loans
-        .values()
-        .filter(|loan| {
-            loan.lender_dynasty_id == terms.lender_dynasty_id
-                && loan.borrower_dynasty_id == terms.borrower_dynasty_id
-                && loan.status == LoanStatus::Defaulted
-        })
-        .max_by_key(|loan| (loan.next_due_day, loan.id));
+    let defaulted_loan = latest_defaulted_loan_for_pair(
+        state,
+        terms.lender_dynasty_id,
+        terms.borrower_dynasty_id,
+    );
     let Some(defaulted_loan) = defaulted_loan else {
         return Ok(None);
     };
@@ -878,7 +971,7 @@ pub(crate) fn settle_successful_loan_payment(
         loan.next_due_day = next_due_day;
     }
     loan.missed_payments = 0;
-    if loan.status != LoanStatus::Repaid {
+    if !loan.status.is_settled() {
         loan.status = LoanStatus::Current;
     }
     adjust_reliability_reputation(state, due.borrower_id, 10);

@@ -393,20 +393,12 @@ pub(crate) struct ValidatedBusinessAcquisition {
     daily_operating_cost: Money,
 }
 
-/// Acquires a troubled business, installs an eligible manager, and supplies enough working
-/// capital for it to resume active operation.
+/// Acquires a business on an exclusively owned transactional scratch state.
 ///
-/// # Errors
-///
-/// Returns an error for an unavailable business, invalid manager, insufficient recapitalization,
-/// insufficient buyer treasury funds, or identifier-allocation exhaustion while recording the
-/// acquisition and related feedback. Failed acquisitions leave state unchanged.
-///
-/// # Panics
-///
-/// Panics only if synchronized business, dynasty, character, or property records violate internal
-/// invariants after successful validation.
-pub fn acquire_business(
+/// Callers must discard `state` if this function returns an error. The player
+/// command layer already owns a whole-command scratch state, so this avoids a
+/// second whole-campaign copy while preserving command-level atomicity.
+pub(crate) fn acquire_business_scratch(
     registry: &Registry,
     state: &mut AppState,
     buyer_dynasty_id: DynastyId,
@@ -422,15 +414,13 @@ pub fn acquire_business(
         manager_id,
         recapitalization,
     )?;
-    let mut next_state = state.clone();
     commit_business_acquisition(
-        &mut next_state,
+        state,
         buyer_dynasty_id,
         manager_id,
         recapitalization,
         validated,
     )?;
-    *state = next_state;
     Ok(validated.quote)
 }
 

@@ -792,9 +792,9 @@ pub(crate) fn validate_office_power_directive(
             required: OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
         });
     }
-    // The directive cadence belongs to the issuing officeholder's dynasty, not
-    // to the institution: an elected successor must not inherit the previous
-    // holder's cooldown on their first directive.
+    // The directive cadence belongs to this institution-dynasty pairing: a
+    // successor house in the same institution must not inherit the previous
+    // house's cooldown on its first directive.
     if let Some(last_directive_day) = state
         .audit_log
         .iter()

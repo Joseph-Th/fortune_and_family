@@ -2774,15 +2774,31 @@ pub(crate) fn has_borrow_opportunity(state: &AppState) -> bool {
     if !state.dynasties.contains_key(&player_id) {
         return false;
     }
-    // The canonical borrow route (`apply_loan`) requires only a counterparty
-    // that can fund the loan and is not credit-blocked against the player.
-    // Borrowing triggers, office reserves, and legal requirements are the
-    // generator's persona policy and live in the candidate generator; the
-    // activation predicate mirrors the game so a fundable loan is never
-    // misread as dormant.
+    if state
+        .loans
+        .values()
+        .any(|loan| loan.borrower_dynasty_id == player_id && loan.status.is_repayment_active())
+    {
+        return false;
+    }
+    // An aged default creates a canonical workout opportunity with its
+    // existing creditor even when no new cash can be advanced.
+    if state.loans.values().any(|loan| {
+        loan.borrower_dynasty_id == player_id
+            && defaulted_loan_restructuring_available(state, loan)
+    }) {
+        return true;
+    }
+    // Until the workout window opens, unresolved defaulted debt closes the
+    // fresh NPC-lending market. The agent's borrowing threshold remains
+    // persona policy, but creditor-shopping after default is not a canonical
+    // opportunity anymore.
+    if borrower_has_unresolved_default(state, player_id) {
+        return false;
+    }
     state.dynasties.values().any(|dynasty| {
         dynasty.id() != player_id
-            && !same_pair_credit_blocks_new_loan(state, dynasty.id(), player_id)
+            && !credit_pair_blocks_new_loan(state, dynasty.id(), player_id)
             && dynasty
                 .treasury()
                 .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)

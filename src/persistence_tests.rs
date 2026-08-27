@@ -99,6 +99,46 @@ mod round_trip {
     }
 
     #[test]
+    fn preserves_written_off_private_credit() {
+        let mut state = make_test_campaign();
+        let loan_id = *state
+            .loans
+            .keys()
+            .next()
+            .expect("campaign must contain private credit");
+        let collateral_property_id = state
+            .loans
+            .get(&loan_id)
+            .expect("loan must exist")
+            .collateral_property_id;
+        if let Some(property_id) = collateral_property_id {
+            state
+                .properties
+                .get_mut(&property_id)
+                .expect("loan collateral must exist")
+                .collateral_loan_id = None;
+        }
+        {
+            let loan = state.loans.get_mut(&loan_id).expect("loan must exist");
+            loan.balance = Money::ZERO;
+            loan.missed_payments = 0;
+            loan.collateral_property_id = None;
+            loan.status = LoanStatus::WrittenOff;
+        }
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let path = directory.path().join("written-off-credit.json");
+
+        save_state(&path, &state).expect("written-off credit must save");
+        let loaded = load_state(&path).expect("written-off credit must load");
+
+        assert_state_eq(
+            &state,
+            &loaded,
+            "written-off lender losses must survive an exact current-schema round trip",
+        );
+    }
+
+    #[test]
     fn preserves_midweek_issued_loan_due_dates() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -156,6 +196,40 @@ mod round_trip {
             &state,
             &loaded,
             "save/load must preserve schedules signed between week boundaries",
+        );
+    }
+
+    #[test]
+    fn rejects_written_off_loan_with_retained_balance() {
+        let mut state = make_test_campaign();
+        let collateral_property_id = state
+            .loans
+            .values()
+            .next()
+            .expect("campaign must contain a loan")
+            .collateral_property_id;
+        if let Some(property_id) = collateral_property_id {
+            state
+                .properties
+                .get_mut(&property_id)
+                .expect("loan collateral must exist")
+                .collateral_loan_id = None;
+        }
+        let mut value = serde_json::to_value(state).expect("state must serialize");
+        let loan = value["loans"]
+            .as_object_mut()
+            .and_then(|loans| loans.values_mut().next())
+            .expect("serialized state must contain a loan");
+        loan["status"] = Value::String("WrittenOff".to_owned());
+        loan["missed_payments"] = Value::from(0);
+        loan["collateral_property_id"] = Value::Null;
+        let (_directory, path) =
+            write_test_json_fixture("written-off-loan-with-balance.json", &value);
+
+        assert_invalid_state(
+            load_state(&path),
+            StateValidationKind::StrategicRecords,
+            "written-off loan",
         );
     }
 
@@ -3087,7 +3161,7 @@ mod duplicate_json_members {
         // precondition that runs before deserialization, so the contract is
         // the reported path and member, not a full loadable campaign.
         let json_text = r#"{
-            "schema_version": 22,
+            "format_marker": 1,
             "scenario_key": "rivergate",
             "scenario_key": "rivergate",
             "registry_fingerprint": 0
@@ -3111,7 +3185,7 @@ mod duplicate_json_members {
     #[test]
     fn rejects_duplicate_nested_member() {
         let json_text = r#"{
-            "schema_version": 22,
+            "format_marker": 1,
             "scenario_key": "rivergate",
             "registry_fingerprint": 0,
             "clock": {
@@ -3138,7 +3212,7 @@ mod duplicate_json_members {
     #[test]
     fn rejects_duplicate_member_in_array_element() {
         let json_text = r#"{
-            "schema_version": 22,
+            "format_marker": 1,
             "scenario_key": "rivergate",
             "registry_fingerprint": 0,
             "items": [

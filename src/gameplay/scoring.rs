@@ -602,6 +602,9 @@ pub(crate) fn merge_campaign(
         target.nonproductive_financing_actions = target
             .nonproductive_financing_actions
             .saturating_add(source.nonproductive_financing_actions);
+        target.financing_workout_actions = target
+            .financing_workout_actions
+            .saturating_add(source.financing_workout_actions);
         target.changed_domains.extend(&source.changed_domains);
     }
     for (reason, count) in &campaign.rejection_reasons {

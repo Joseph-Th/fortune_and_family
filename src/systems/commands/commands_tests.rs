@@ -1228,6 +1228,165 @@ mod validation {
     }
 
     #[test]
+    fn non_player_lender_rejects_fresh_credit_while_borrower_owes_another_default() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let first_lender_id = non_player_credit_counterparty(&state, false);
+        state
+            .dynasties
+            .get_mut(&first_lender_id)
+            .expect("first lender must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let loan_id = crate::systems::issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id: first_lender_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(1_000),
+                weekly_payment: Money::from_copper(50),
+                interest_basis_points: 700,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture loan must issue");
+        {
+            let loan = state.loans.get_mut(&loan_id).expect("fixture loan must exist");
+            loan.status = LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+        }
+        let second_lender_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|candidate_id| {
+                *candidate_id != player_id
+                    && *candidate_id != first_lender_id
+                    && !state.loans.values().any(|loan| {
+                        loan.lender_dynasty_id == *candidate_id
+                            && loan.borrower_dynasty_id == player_id
+                            && !loan.status.is_settled()
+                    })
+            })
+            .expect("campaign must contain another unused lender");
+        state
+            .dynasties
+            .get_mut(&second_lender_id)
+            .expect("second lender must exist")
+            .resources
+            .treasury = Money::from_copper(100_000);
+        let terms = LoanTerms {
+            lender_dynasty_id: second_lender_id,
+            borrower_dynasty_id: player_id,
+            principal: Money::from_copper(1_000),
+            weekly_payment: Money::from_copper(50),
+            interest_basis_points: 700,
+            collateral_property_id: None,
+        };
+        let before = state.clone();
+
+        let result = apply_player_command(registry, &mut state, PlayerCommand::IssueLoan { terms });
+
+        assert_eq!(
+            result,
+            Err(CommandError::LoanCounterpartyBorrowerInDefault {
+                lender_dynasty_id: second_lender_id,
+                borrower_dynasty_id: player_id,
+                creditor_dynasty_id: first_lender_id,
+                loan_id,
+            })
+        );
+        assert_state_unchanged(
+            &before,
+            &state,
+            "an unresolved default must not be refinanced by shopping it to another NPC lender",
+        );
+    }
+
+    #[test]
+    fn non_player_creditor_accepts_zero_principal_workout_after_cooldown() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let player_id = state.player_dynasty_id;
+        let lender_dynasty_id = non_player_credit_counterparty(&state, false);
+        let loan_id = crate::systems::issue_loan(
+            &mut state,
+            LoanTerms {
+                lender_dynasty_id,
+                borrower_dynasty_id: player_id,
+                principal: Money::from_copper(1_000),
+                weekly_payment: Money::from_copper(50),
+                interest_basis_points: 700,
+                collateral_property_id: None,
+            },
+        )
+        .expect("fixture loan must issue");
+        let balance = {
+            let loan = state.loans.get_mut(&loan_id).expect("fixture loan must exist");
+            loan.status = LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+            loan.next_due_day = state
+                .clock
+                .day()
+                .saturating_sub(crate::systems::DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS);
+            loan.balance
+        };
+        state
+            .dynasties
+            .get_mut(&lender_dynasty_id)
+            .expect("lender must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let lender_before = state
+            .dynasties
+            .get(&lender_dynasty_id)
+            .expect("lender must exist")
+            .treasury();
+        let borrower_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .treasury();
+
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::IssueLoan {
+                terms: LoanTerms {
+                    lender_dynasty_id,
+                    borrower_dynasty_id: player_id,
+                    principal: Money::ZERO,
+                    weekly_payment: balance.ceil_div_positive(208),
+                    interest_basis_points: 900,
+                    collateral_property_id: None,
+                },
+            },
+        )
+        .expect("an aged default should be negotiable without a new cash advance");
+
+        let loan = state.loans.get(&loan_id).expect("loan must remain present");
+        assert_eq!(loan.status, LoanStatus::Restructured);
+        assert_eq!(loan.balance, balance);
+        assert_eq!(
+            state
+                .dynasties
+                .get(&lender_dynasty_id)
+                .expect("lender must exist")
+                .treasury(),
+            lender_before
+        );
+        assert_eq!(
+            state
+                .dynasties
+                .get(&player_id)
+                .expect("player dynasty must exist")
+                .treasury(),
+            borrower_before
+        );
+    }
+
+    #[test]
     fn non_player_lender_rejects_coerced_zero_interest_credit_without_mutation() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -3844,7 +4003,7 @@ mod politics {
             player_business_id,
         )
         .expect("distressed player business must be acquirable");
-        crate::systems::acquire_business(
+        crate::systems::acquire_business_scratch(
             registry,
             &mut state,
             new_owner_id,
@@ -3921,7 +4080,7 @@ mod politics {
             ambient_business_id,
         )
         .expect("distressed ambient business must be acquirable");
-        crate::systems::acquire_business(
+        crate::systems::acquire_business_scratch(
             registry,
             &mut inherited_state,
             player_dynasty_id,
@@ -7289,7 +7448,7 @@ mod legal_cases {
                     && !state.loans.values().any(|loan| {
                         loan.lender_dynasty_id == player_id
                             && loan.borrower_dynasty_id == *dynasty_id
-                            && loan.status != LoanStatus::Repaid
+                            && !loan.status.is_settled()
                     })
             })
             .expect("campaign must contain a rival available for player lending");

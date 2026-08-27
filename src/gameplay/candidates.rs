@@ -470,6 +470,10 @@ pub(crate) fn record_cycle(
                 signals: &signals,
                 productive_business_change: before.business_state_checksum
                     != after_command.business_state_checksum,
+                financing_workout: after_command.player_restructured_lending
+                    > before.player_restructured_lending
+                    && after_command.player_defaulted_lending < before.player_defaulted_lending
+                    && after_command.total_loan_balance == before.total_loan_balance,
             },
             accumulator,
         );
@@ -574,6 +578,7 @@ pub(crate) struct ActionConsequenceObservation<'a> {
     pub delayed: &'a BTreeSet<GameplayDomain>,
     pub signals: &'a BTreeSet<GameplayTraceSignal>,
     pub productive_business_change: bool,
+    pub financing_workout: bool,
 }
 
 pub(crate) fn record_action_consequences(
@@ -587,6 +592,7 @@ pub(crate) fn record_action_consequences(
         delayed,
         signals,
         productive_business_change,
+        financing_workout,
     } = observation;
     let immediate_feedback = signals.contains(&GameplayTraceSignal::ImmediateWorldFeedback);
     let delayed_feedback = signals.contains(&GameplayTraceSignal::DelayedWorldFeedback);
@@ -620,7 +626,10 @@ pub(crate) fn record_action_consequences(
             .saturating_add(1);
     }
     if kind == GameplayCommandKind::ExtendCredit {
-        if productive_business_change {
+        if financing_workout {
+            command_stats.financing_workout_actions =
+                command_stats.financing_workout_actions.saturating_add(1);
+        } else if productive_business_change {
             command_stats.productive_financing_actions =
                 command_stats.productive_financing_actions.saturating_add(1);
         } else {
@@ -3274,42 +3283,71 @@ pub(crate) fn add_borrow_candidate(
     let borrowing_trigger = office_reserve
         .max(base_borrowing_trigger)
         .max(legal_requirement);
-    if player.treasury() >= borrowing_trigger
-        || state
-            .loans
-            .values()
-            .any(|loan| loan.borrower_dynasty_id == player_id && loan.status.is_repayment_active())
+    if state
+        .loans
+        .values()
+        .any(|loan| loan.borrower_dynasty_id == player_id && loan.status.is_repayment_active())
     {
         return;
     }
-    let lender = state
-        .dynasties
+
+    // Defaults are recovery obligations, not a signal to shop the debt around
+    // the city. While any default remains unresolved, borrowing is restricted
+    // to an aged workout with the creditor that already owns the claim.
+    let restructuring_default = state
+        .loans
         .values()
-        .filter(|dynasty| dynasty.id() != player_id)
-        .filter(|dynasty| !same_pair_credit_blocks_new_loan(state, dynasty.id(), player_id))
-        .filter(|dynasty| {
-            dynasty
-                .treasury()
-                .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
-                .is_some_and(|available| available >= Money::from_copper(1_000))
+        .filter(|loan| {
+            loan.borrower_dynasty_id == player_id
+                && defaulted_loan_restructuring_available(state, loan)
         })
-        .max_by_key(|dynasty| dynasty.treasury());
-    let Some(lender) = lender else {
+        .min_by_key(|loan| (loan.next_due_day, loan.id));
+    if restructuring_default.is_none()
+        && (borrower_has_unresolved_default(state, player_id)
+            || player.treasury() >= borrowing_trigger)
+    {
         return;
+    }
+    let (lender, defaulted_loan) = if let Some(defaulted_loan) = restructuring_default {
+        (
+            state
+                .dynasties
+                .get(&defaulted_loan.lender_dynasty_id)
+                .expect("defaulted loan lender must exist"),
+            Some(defaulted_loan),
+        )
+    } else {
+        let Some(lender) = state
+            .dynasties
+            .values()
+            .filter(|dynasty| dynasty.id() != player_id)
+            .filter(|dynasty| !credit_pair_blocks_new_loan(state, dynasty.id(), player_id))
+            .filter(|dynasty| {
+                dynasty
+                    .treasury()
+                    .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+                    .is_some_and(|available| available >= Money::from_copper(1_000))
+            })
+            .max_by_key(|dynasty| dynasty.treasury())
+        else {
+            return;
+        };
+        (lender, None)
     };
-    let defaulted_loan = latest_defaulted_loan(state, lender.id(), player_id);
     let legal_shortfall = legal_funding_target.saturating_sub(player.treasury());
-    // The canonical route refuses any advance that would strip the lender's
-    // counterparty reserve, so the requested principal is clamped to what this
-    // lender can actually give; otherwise narrow treasury windows would emit a
-    // candidate that validation rejects with certainty.
     let lender_available = lender
         .treasury()
         .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
         .unwrap_or(Money::ZERO);
-    let principal = borrow_principal(lender.treasury(), defaulted_loan.is_some())
-        .max(legal_shortfall.min(lender_available))
-        .min(lender_available);
+    // A workout changes terms without forcing the distressed house to take
+    // another advance. Fresh borrowing still preserves the lender's reserve.
+    let principal = if defaulted_loan.is_some() {
+        Money::ZERO
+    } else {
+        borrow_principal(lender.treasury())
+            .max(legal_shortfall.min(lender_available))
+            .min(lender_available)
+    };
     let bonus = base_bonus(
         persona,
         defaulted_loan.is_some(),
@@ -3326,7 +3364,11 @@ pub(crate) fn add_borrow_candidate(
                 weekly_payment: restructure_payment_balance(defaulted_loan, principal)
                     .ceil_div_positive(borrow_amortization_weeks(defaulted_loan.is_some())),
                 interest_basis_points: if defaulted_loan.is_some() { 1_000 } else { 700 },
-                collateral_property_id: unpledged_player_property(state).map(|p| p.id),
+                collateral_property_id: if defaulted_loan.is_some() {
+                    None
+                } else {
+                    unpledged_player_property(state).map(|property| property.id)
+                },
             },
         },
         defaulted_loan.map_or_else(
@@ -3338,8 +3380,7 @@ pub(crate) fn add_borrow_candidate(
             },
             |loan| {
                 format!(
-                    "restructure defaulted loan {} with a {principal} recovery advance from {}",
-                    loan.id,
+                    "restructure defaulted loan {} on revised terms with {}", loan.id,
                     dynasty_label(state, lender.id())
                 )
             },
@@ -3348,8 +3389,8 @@ pub(crate) fn add_borrow_candidate(
     );
 }
 
-/// Ordinary advances size to the lender's treasury; restructuring an existing
-/// default sizes to cover the old balance plus a fresh operating cushion.
+/// Payment base for either a fresh advance or an existing default plus any
+/// optional recovery advance negotiated as part of its restructuring.
 pub(crate) fn restructure_payment_balance(
     defaulted_loan: Option<&crate::core::Loan>,
     principal: Money,
@@ -3383,47 +3424,9 @@ pub(crate) fn unpledged_player_property(state: &AppState) -> Option<&crate::core
     })
 }
 
-/// Ordinary advances scale to the lender's treasury; a restructuring advance
-/// sizes to a tighter recovery range on top of the defaulted balance.
-pub(crate) fn borrow_principal(lender_treasury: Money, restructuring_default: bool) -> Money {
-    if restructuring_default {
-        Money::from_copper((lender_treasury.copper() / 12).clamp(1_000, 6_000))
-    } else {
-        Money::from_copper((lender_treasury.copper() / 8).clamp(1_000, 12_000))
-    }
-}
-
-pub(crate) fn same_pair_credit_blocks_new_loan(
-    state: &AppState,
-    lender_id: DynastyId,
-    borrower_id: DynastyId,
-) -> bool {
-    state.loans.values().any(|loan| {
-        loan.lender_dynasty_id == lender_id
-            && loan.borrower_dynasty_id == borrower_id
-            && (loan.status.is_repayment_active()
-                || (loan.status == LoanStatus::Defaulted
-                    && state.clock.day()
-                        < loan
-                            .next_due_day
-                            .saturating_add(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS)))
-    })
-}
-
-pub(crate) fn latest_defaulted_loan(
-    state: &AppState,
-    lender_id: DynastyId,
-    borrower_id: DynastyId,
-) -> Option<&crate::core::Loan> {
-    state
-        .loans
-        .values()
-        .filter(|loan| {
-            loan.lender_dynasty_id == lender_id
-                && loan.borrower_dynasty_id == borrower_id
-                && loan.status == LoanStatus::Defaulted
-        })
-        .max_by_key(|loan| (loan.next_due_day, loan.id))
+/// Fresh ordinary advances scale to the lender's available treasury.
+pub(crate) fn borrow_principal(lender_treasury: Money) -> Money {
+    Money::from_copper((lender_treasury.copper() / 8).clamp(1_000, 12_000))
 }
 
 pub(crate) fn lending_limits(persona: GameplayPersona) -> (Money, usize) {
@@ -3460,7 +3463,7 @@ pub(crate) fn eligible_lending_borrower<'a>(
         .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
         .filter(|dynasty| borrower_has_productive_financing_need(registry, state, dynasty.id()))
         .filter(|dynasty| {
-            !same_pair_credit_blocks_new_loan(state, state.player_dynasty_id, dynasty.id())
+            !credit_pair_blocks_new_loan(state, state.player_dynasty_id, dynasty.id())
         })
         .collect();
     eligible
@@ -3503,14 +3506,8 @@ pub(crate) fn eligible_lending_restructuring_borrower(
         .values()
         .filter(|dynasty| dynasty.id() != state.player_dynasty_id)
         .filter(|dynasty| {
-            latest_defaulted_loan(state, state.player_dynasty_id, dynasty.id()).is_some_and(
-                |loan| {
-                    state.clock.day()
-                        >= loan
-                            .next_due_day
-                            .saturating_add(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS)
-                },
-            )
+            latest_defaulted_loan_for_pair(state, state.player_dynasty_id, dynasty.id())
+                .is_some_and(|loan| defaulted_loan_restructuring_available(state, loan))
         })
         .min_by_key(|dynasty| dynasty.treasury())
 }
@@ -3520,15 +3517,15 @@ pub(crate) fn has_extend_credit_opportunity(registry: &Registry, state: &AppStat
     // fresh loan to an eligible counterparty, or a restructuring offer to the
     // dynasty's own defaulted borrower. Lending reserves, portfolio limits,
     // and persona risk appetite are agent policy and stay in the generator.
+    if eligible_lending_restructuring_borrower(state).is_some() {
+        return true;
+    }
     let player = state
         .dynasties
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist");
-    if player.treasury() < Money::from_copper(1_000) {
-        return false;
-    }
-    eligible_lending_borrower(registry, state).is_some()
-        || eligible_lending_restructuring_borrower(state).is_some()
+    player.treasury() >= Money::from_copper(1_000)
+        && eligible_lending_borrower(registry, state).is_some()
 }
 
 pub(crate) fn add_lend_candidate(
@@ -3544,9 +3541,6 @@ pub(crate) fn add_lend_candidate(
     let (lending_reserve, lending_limit) = lending_limits(persona);
     let restructuring_borrower = eligible_lending_restructuring_borrower(state);
     let borrower = if let Some(borrower) = restructuring_borrower {
-        if player.treasury() < Money::from_copper(1_000) {
-            return;
-        }
         borrower
     } else {
         if player.treasury() < lending_reserve || active_player_lending(state) >= lending_limit {
@@ -3557,12 +3551,13 @@ pub(crate) fn add_lend_candidate(
         };
         borrower
     };
-    let defaulted_loan = latest_defaulted_loan(state, state.player_dynasty_id, borrower.id());
+    let defaulted_loan =
+        latest_defaulted_loan_for_pair(state, state.player_dynasty_id, borrower.id());
     let opportunistic_new_credit =
         defaulted_loan.is_none() && persona == GameplayPersona::Opportunist;
     let borrower_pressure = lending_pressure(state, borrower.id());
     let principal = if defaulted_loan.is_some() {
-        Money::from_copper((player.treasury().copper() / 14).clamp(1_000, 5_000))
+        Money::ZERO
     } else if opportunistic_new_credit && borrower_pressure >= 2 {
         Money::from_copper((player.treasury().copper() / 6).clamp(5_000, 20_000))
     } else if opportunistic_new_credit {
@@ -3629,8 +3624,7 @@ pub(crate) fn add_lend_candidate(
             },
             |loan| {
                 format!(
-                    "restructure defaulted loan {} with a {principal} recovery advance to {}",
-                    loan.id,
+                    "restructure defaulted loan {} on revised terms for {}", loan.id,
                     dynasty_label(state, borrower.id())
                 )
             },
@@ -6376,7 +6370,7 @@ pub(crate) fn city_credit_power_is_relevant(state: &AppState) -> bool {
     state
         .loans
         .values()
-        .any(|loan| loan.status != LoanStatus::Repaid)
+        .any(|loan| !loan.status.is_settled())
         || state
             .civic_debts
             .values()
@@ -7205,6 +7199,9 @@ pub(crate) const fn command_error_category(error: &CommandError) -> &'static str
         CommandError::MissingBusiness { .. } | CommandError::BusinessNotOwned { .. } => NO_BIZ,
         CommandError::PlayerNotParty => "player not party",
         CommandError::LoanCounterpartyLenderReserve { .. } => "loan counterparty lender reserve",
+        CommandError::LoanCounterpartyBorrowerInDefault { .. } => {
+            "loan counterparty borrower in default"
+        }
         CommandError::LoanCounterpartyInterestTooLow { .. } => "loan counterparty interest low",
         CommandError::LoanCounterpartyInterestTooHigh { .. } => "loan counterparty interest high",
         CommandError::LoanCounterpartyPaymentTooLow { .. } => "loan counterparty payment low",

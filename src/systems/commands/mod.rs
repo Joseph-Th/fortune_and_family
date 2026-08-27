@@ -10,9 +10,10 @@ pub(crate) use super::transactions::{
 };
 pub(crate) use super::{
     LoanTerms, OFFICE_POWER_ESTABLISHMENT_DAYS, StrategicError, SupplyContractTerms,
-    acquire_business, available_supply_contract_capacity, business_recapitalization_target,
+    acquire_business_scratch, available_supply_contract_capacity, business_recapitalization_target,
     buy_unowned_property, capitalize_owned_business, distribute_owned_business_cash,
-    quote_property_liquidation, sell_owned_property, transfer_business_cash, validate_loan,
+    latest_defaulted_loan_for_pair, quote_property_liquidation, sell_owned_property_scratch,
+    transfer_business_cash, unresolved_default_owed_elsewhere, validate_loan,
     validate_supply_contract,
 };
 pub(crate) use crate::core::{

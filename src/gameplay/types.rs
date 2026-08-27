@@ -160,6 +160,11 @@ pub struct GameplayCommandStats {
     /// For `ExtendCredit`, the accepted loan did not immediately reach a
     /// business record and therefore needs separate interpretation.
     pub nonproductive_financing_actions: u32,
+    /// For `ExtendCredit`, an existing default was worked back onto revised
+    /// terms without advancing new principal. Workouts are recovery actions,
+    /// not new financing, so they are measured separately from treasury-only
+    /// advances.
+    pub financing_workout_actions: u32,
     pub changed_domains: BTreeSet<GameplayDomain>,
 }
 
@@ -234,16 +239,19 @@ pub struct GameplaySnapshot {
     pub restructured_loans: u16,
     pub defaulted_loans: u16,
     pub repaid_loans: u16,
+    pub written_off_loans: u16,
     pub player_current_lending: u16,
     pub player_delinquent_lending: u16,
     pub player_restructured_lending: u16,
     pub player_defaulted_lending: u16,
     pub player_repaid_lending: u16,
+    pub player_written_off_lending: u16,
     pub player_current_borrowing: u16,
     pub player_delinquent_borrowing: u16,
     pub player_restructured_borrowing: u16,
     pub player_defaulted_borrowing: u16,
     pub player_repaid_borrowing: u16,
+    pub player_written_off_borrowing: u16,
     pub total_loan_balance: Money,
     pub loan_state_checksum: u64,
     pub current_civic_debts: u16,
@@ -461,16 +469,19 @@ pub(crate) struct StrategicSnapshotPart {
     pub restructured_loans: u16,
     pub defaulted_loans: u16,
     pub repaid_loans: u16,
+    pub written_off_loans: u16,
     pub player_current_lending: u16,
     pub player_delinquent_lending: u16,
     pub player_restructured_lending: u16,
     pub player_defaulted_lending: u16,
     pub player_repaid_lending: u16,
+    pub player_written_off_lending: u16,
     pub player_current_borrowing: u16,
     pub player_delinquent_borrowing: u16,
     pub player_restructured_borrowing: u16,
     pub player_defaulted_borrowing: u16,
     pub player_repaid_borrowing: u16,
+    pub player_written_off_borrowing: u16,
     pub total_loan_balance: Money,
     pub civic_debt: CivicDebtSnapshotPart,
     pub player_properties: u16,
@@ -499,16 +510,19 @@ pub(crate) struct LoanSnapshotPart {
     pub restructured: u16,
     pub defaulted: u16,
     pub repaid: u16,
+    pub written_off: u16,
     pub player_current: u16,
     pub player_delinquent: u16,
     pub player_restructured: u16,
     pub player_defaulted: u16,
     pub player_repaid: u16,
+    pub player_written_off: u16,
     pub player_borrowing_current: u16,
     pub player_borrowing_delinquent: u16,
     pub player_borrowing_restructured: u16,
     pub player_borrowing_defaulted: u16,
     pub player_borrowing_repaid: u16,
+    pub player_borrowing_written_off: u16,
     pub total_balance: Money,
 }
 
@@ -520,6 +534,7 @@ impl LoanSnapshotPart {
             restructured: count_loan_status(state, LoanStatus::Restructured),
             defaulted: count_loan_status(state, LoanStatus::Defaulted),
             repaid: count_loan_status(state, LoanStatus::Repaid),
+            written_off: count_loan_status(state, LoanStatus::WrittenOff),
             player_current: count_player_lending_status(state, player_id, LoanStatus::Current),
             player_delinquent: count_player_lending_status(
                 state,
@@ -533,6 +548,11 @@ impl LoanSnapshotPart {
             ),
             player_defaulted: count_player_lending_status(state, player_id, LoanStatus::Defaulted),
             player_repaid: count_player_lending_status(state, player_id, LoanStatus::Repaid),
+            player_written_off: count_player_lending_status(
+                state,
+                player_id,
+                LoanStatus::WrittenOff,
+            ),
             player_borrowing_current: count_player_borrowing_status(
                 state,
                 player_id,
@@ -557,6 +577,11 @@ impl LoanSnapshotPart {
                 state,
                 player_id,
                 LoanStatus::Repaid,
+            ),
+            player_borrowing_written_off: count_player_borrowing_status(
+                state,
+                player_id,
+                LoanStatus::WrittenOff,
             ),
             total_balance: state.loans.values().fold(Money::ZERO, |total, loan| {
                 total.saturating_add(loan.balance)
@@ -764,16 +789,19 @@ impl StrategicSnapshotPart {
             restructured_loans: loans.restructured,
             defaulted_loans: loans.defaulted,
             repaid_loans: loans.repaid,
+            written_off_loans: loans.written_off,
             player_current_lending: loans.player_current,
             player_delinquent_lending: loans.player_delinquent,
             player_restructured_lending: loans.player_restructured,
             player_defaulted_lending: loans.player_defaulted,
             player_repaid_lending: loans.player_repaid,
+            player_written_off_lending: loans.player_written_off,
             player_current_borrowing: loans.player_borrowing_current,
             player_delinquent_borrowing: loans.player_borrowing_delinquent,
             player_restructured_borrowing: loans.player_borrowing_restructured,
             player_defaulted_borrowing: loans.player_borrowing_defaulted,
             player_repaid_borrowing: loans.player_borrowing_repaid,
+            player_written_off_borrowing: loans.player_borrowing_written_off,
             total_loan_balance: loans.total_balance,
             civic_debt: CivicDebtSnapshotPart::capture(state),
             player_properties: properties.player_properties,
@@ -1258,16 +1286,19 @@ macro_rules! assemble_gameplay_snapshot {
             restructured_loans: $strategic.restructured_loans,
             defaulted_loans: $strategic.defaulted_loans,
             repaid_loans: $strategic.repaid_loans,
+            written_off_loans: $strategic.written_off_loans,
             player_current_lending: $strategic.player_current_lending,
             player_delinquent_lending: $strategic.player_delinquent_lending,
             player_restructured_lending: $strategic.player_restructured_lending,
             player_defaulted_lending: $strategic.player_defaulted_lending,
             player_repaid_lending: $strategic.player_repaid_lending,
+            player_written_off_lending: $strategic.player_written_off_lending,
             player_current_borrowing: $strategic.player_current_borrowing,
             player_delinquent_borrowing: $strategic.player_delinquent_borrowing,
             player_restructured_borrowing: $strategic.player_restructured_borrowing,
             player_defaulted_borrowing: $strategic.player_defaulted_borrowing,
             player_repaid_borrowing: $strategic.player_repaid_borrowing,
+            player_written_off_borrowing: $strategic.player_written_off_borrowing,
             total_loan_balance: $strategic.total_loan_balance,
             loan_state_checksum: stable_serialized_checksum(&$state.loans),
             current_civic_debts: $strategic.civic_debt.current,
@@ -1530,6 +1561,9 @@ pub enum GameplayMeasure {
     DefaultedLoans,
     PlayerDelinquentBorrowing,
     PlayerDefaultedBorrowing,
+    WrittenOffLoans,
+    PlayerWrittenOffLending,
+    PlayerWrittenOffBorrowing,
     UnmetOfficeDuties,
     PlayerOpenLegalCasesAsDefendant,
     InformationReports,
@@ -1623,6 +1657,9 @@ impl GameplayConsequenceProfile {
         record!(DefaultedLoans, defaulted_loans);
         record!(PlayerDelinquentBorrowing, player_delinquent_borrowing);
         record!(PlayerDefaultedBorrowing, player_defaulted_borrowing);
+        record!(WrittenOffLoans, written_off_loans);
+        record!(PlayerWrittenOffLending, player_written_off_lending);
+        record!(PlayerWrittenOffBorrowing, player_written_off_borrowing);
         record!(UnmetOfficeDuties, player_unmet_office_duties);
         record!(
             PlayerOpenLegalCasesAsDefendant,
@@ -1661,6 +1698,9 @@ pub(crate) fn impact_outcome_fingerprint(snapshot: &GameplaySnapshot) -> u64 {
         u64::from(snapshot.defaulted_loans),
         u64::from(snapshot.player_delinquent_borrowing),
         u64::from(snapshot.player_defaulted_borrowing),
+        u64::from(snapshot.written_off_loans),
+        u64::from(snapshot.player_written_off_lending),
+        u64::from(snapshot.player_written_off_borrowing),
         u64::from(snapshot.player_unmet_office_duties),
         u64::from(snapshot.player_open_legal_cases_as_defendant),
         u64::from(snapshot.information_reports),

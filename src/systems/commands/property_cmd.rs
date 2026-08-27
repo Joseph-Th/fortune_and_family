@@ -52,7 +52,7 @@ pub(crate) fn apply_property_sale(
             required_reserve: PROPERTY_COUNTERPARTY_BUYER_RESERVE,
         });
     }
-    sell_owned_property(
+    sell_owned_property_scratch(
         registry,
         state,
         state.player_dynasty_id,

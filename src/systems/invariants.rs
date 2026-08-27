@@ -848,7 +848,10 @@ fn validate_property_collateral(
                 "Ownership Exclusivity: pledged property is not owned by its borrower"
             );
             debug_assert!(
-                !matches!(loan.status, LoanStatus::Defaulted | LoanStatus::Repaid),
+                !matches!(
+                    loan.status,
+                    LoanStatus::Defaulted | LoanStatus::Repaid | LoanStatus::WrittenOff
+                ),
                 "Lifecycle Validity: settled loan retains an active collateral pledge"
             );
         }
@@ -939,10 +942,10 @@ fn validate_loans(state: &AppState) {
                 loan.balance > crate::money::Money::ZERO,
                 "Lifecycle Validity: unsettled loan has no remaining balance"
             ),
-            LoanStatus::Repaid => debug_assert_eq!(
+            LoanStatus::Repaid | LoanStatus::WrittenOff => debug_assert_eq!(
                 loan.balance,
                 crate::money::Money::ZERO,
-                "Lifecycle Validity: repaid loan retains a balance"
+                "Lifecycle Validity: settled loan retains a balance"
             ),
         }
         if let Some(property_id) = loan.collateral_property_id {
@@ -964,7 +967,7 @@ fn validate_loans(state: &AppState) {
                         "Ownership Exclusivity: active collateral is not owned by the borrower"
                     );
                 }
-                LoanStatus::Defaulted | LoanStatus::Repaid => {
+                LoanStatus::Defaulted | LoanStatus::Repaid | LoanStatus::WrittenOff => {
                     debug_assert!(
                         property.is_some_and(|property| {
                             property.collateral_loan_id != Some(*loan_id)
@@ -1557,6 +1560,12 @@ fn validate_legal_cases(state: &AppState) {
                         }),
                         "Record Reference Validity: debt-case claim source does not match its loan and parties"
                     );
+                    if case.status == LegalCaseStatus::DecidedForDefendant {
+                        debug_assert!(
+                            loan.is_some_and(|loan| loan.status.is_settled()),
+                            "Lifecycle Validity: defendant-won debt case retains an enforceable loan"
+                        );
+                    }
                 }
                 LegalClaimSource::Contract { contract_id } => {
                     let contract = state.contracts.get(&contract_id);
@@ -1572,6 +1581,14 @@ fn validate_legal_cases(state: &AppState) {
                         }),
                         "Record Reference Validity: contract-breach claim source does not match its contract and parties"
                     );
+                    if case.status == LegalCaseStatus::DecidedForDefendant {
+                        debug_assert!(
+                            contract.is_some_and(|contract| {
+                                contract.unpaid_breach_penalty == crate::money::Money::ZERO
+                            }),
+                            "Lifecycle Validity: defendant-won contract case retains an enforceable breach penalty"
+                        );
+                    }
                 }
             }
         }

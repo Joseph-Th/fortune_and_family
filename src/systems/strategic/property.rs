@@ -356,37 +356,25 @@ fn settle_property_sale_finances(
         .expect("validated property sale must fit seller treasury");
 }
 
-/// Sells an owned property to another dynasty at the canonical liquidation price.
+/// Sells an owned property on an exclusively owned transactional scratch state.
 ///
-/// Occupied premises remain occupied and become a tenancy when the buyer differs from the business
-/// owner.
-///
-/// # Errors
-///
-/// Returns the same errors as [`quote_property_liquidation`], plus allocation or timeline exhaustion
-/// while recording repayment information or durable sale feedback.
-///
-/// # Panics
-///
-/// Panics only if synchronized dynasty, property, loan, or business records violate internal
-/// invariants after successful validation.
-pub fn sell_owned_property(
+/// Callers must discard `state` if this function returns an error. Player
+/// commands already execute inside a whole-command scratch state and should
+/// not clone it again.
+pub(crate) fn sell_owned_property_scratch(
     registry: &Registry,
     state: &mut AppState,
     seller_dynasty_id: DynastyId,
     buyer_dynasty_id: DynastyId,
     property_id: PropertyId,
 ) -> Result<PropertyLiquidationQuote, StrategicError> {
-    let mut next_state = state.clone();
-    let quote = commit_owned_property_sale(
+    commit_owned_property_sale(
         registry,
-        &mut next_state,
+        state,
         seller_dynasty_id,
         buyer_dynasty_id,
         property_id,
-    )?;
-    *state = next_state;
-    Ok(quote)
+    )
 }
 
 pub(crate) fn commit_owned_property_sale(

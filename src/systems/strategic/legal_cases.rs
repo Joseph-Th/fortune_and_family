@@ -75,6 +75,52 @@ pub(crate) fn resolve_legal_cases(state: &mut AppState) -> Result<(), Simulation
             damages,
         )?;
     }
+    execute_decided_debt_judgments(state)?;
+    Ok(())
+}
+
+/// Continues execution of already-won debt judgments as the borrower's asset
+/// position changes after the hearing.
+///
+/// A legal claim is intentionally one-shot, but its judgment is durable. If a
+/// borrower still had collectible assets at judgment and only later becomes
+/// truly judgment-proof, the existing decision must be able to finish the
+/// credit lifecycle without filing the same claim a second time.
+fn execute_decided_debt_judgments(state: &mut AppState) -> Result<(), SimulationError> {
+    let mut judgments: Vec<_> = state
+        .legal_cases
+        .values()
+        .filter(|legal_case| legal_case.status == LegalCaseStatus::DecidedForPlaintiff)
+        .filter_map(|legal_case| match legal_case.claim_source {
+            Some(LegalClaimSource::Loan { loan_id }) => Some((
+                loan_id,
+                legal_case.plaintiff_dynasty_id,
+                legal_case.defendant_dynasty_id,
+            )),
+            Some(LegalClaimSource::Contract { .. }) | None => None,
+        })
+        .collect();
+    judgments.sort_unstable_by_key(|(loan_id, plaintiff_id, defendant_id)| {
+        (*loan_id, *plaintiff_id, *defendant_id)
+    });
+    judgments.dedup_by_key(|(loan_id, _, _)| *loan_id);
+
+    for (loan_id, plaintiff_id, defendant_id) in judgments {
+        let written_off = write_off_judgment_proof_loan_deficiency(state, loan_id);
+        if written_off <= Money::ZERO
+            || (plaintiff_id != state.player_dynasty_id && defendant_id != state.player_dynasty_id)
+        {
+            continue;
+        }
+        try_push_outbox(
+            state,
+            OutboxKind::Legal,
+            format!("Loan {loan_id} judgment completed"),
+            format!(
+                "Final execution found no remaining collectible assets. The unpaid deficiency of {written_off} was written off as the lender's loss."
+            ),
+        )?;
+    }
     Ok(())
 }
 
@@ -114,10 +160,10 @@ fn decide_legal_case(
         .saturating_mul(2)
         .saturating_add(u32::from(defendant_legitimacy));
     let plaintiff_wins = plaintiff_score >= defendant_score;
-    let (awarded, paid) = if plaintiff_wins {
+    let (awarded, paid, written_off, rejected_claim) = if plaintiff_wins {
         let awarded = recoverable_legal_damages(state, claim_source, damages);
         let paid = settle_legal_damages(state, plaintiff_id, defendant_id, awarded)?;
-        settle_legal_claim_source(
+        let written_off = settle_legal_claim_source(
             state,
             claim_source,
             plaintiff_id,
@@ -126,9 +172,20 @@ fn decide_legal_case(
             false,
             true,
         );
-        (awarded, paid)
+        (awarded, paid, written_off, Money::ZERO)
     } else {
-        (Money::ZERO, Money::ZERO)
+        // Grounded claim sources are deliberately one-shot. A final judgment
+        // for the defendant therefore has to resolve the source's legal
+        // enforceability as well: leaving the obligation live after consuming
+        // its only court route would create permanent zombie debt or breach
+        // penalties that can never be adjudicated again.
+        let rejected_claim = dismiss_grounded_claim_after_defendant_judgment(
+            state,
+            claim_source,
+            plaintiff_id,
+            defendant_id,
+        );
+        (Money::ZERO, Money::ZERO, Money::ZERO, rejected_claim)
     };
     // Winning a grounded claim over an obligation that no longer exists is
     // a hollow victory: the court rules on the paperwork, but a dispute
@@ -160,18 +217,35 @@ fn decide_legal_case(
             OutboxKind::Legal,
             format!("Legal case {id} decided"),
             if !plaintiff_wins {
-                format!(
-                    "The court decided the {kind:?} claim for dynasty {defendant_id}; no damages were awarded."
-                )
+                match claim_source {
+                    Some(LegalClaimSource::Loan { .. }) if rejected_claim > Money::ZERO => format!(
+                        "The court decided the {kind:?} claim for dynasty {defendant_id}; no damages were awarded. The rejected loan claim of {rejected_claim} is written off as the creditor's loss and is no longer enforceable."
+                    ),
+                    Some(LegalClaimSource::Contract { .. }) if rejected_claim > Money::ZERO => {
+                        format!(
+                            "The court decided the {kind:?} claim for dynasty {defendant_id}; no damages were awarded. The rejected breach claim of {rejected_claim} is no longer enforceable."
+                        )
+                    }
+                    _ => format!(
+                        "The court decided the {kind:?} claim for dynasty {defendant_id}; no damages were awarded."
+                    ),
+                }
             } else if hollow_victory {
                 format!(
                     "The court decided the {kind:?} claim for dynasty {plaintiff_id}, but the underlying obligation had already been cured, so no damages were due."
                 )
             } else {
-                let settlement_note = if claim_source.is_some() {
-                    " The grounded source obligation is settled by the judgment."
+                let outstanding = outstanding_legal_claim_obligation(state, claim_source);
+                let settlement_note = if written_off > Money::ZERO {
+                    format!(
+                        " Final enforcement found no remaining collectible assets, so {written_off} was written off as the lender's loss."
+                    )
+                } else if claim_source.is_some() && outstanding == Money::ZERO {
+                    " The grounded source obligation is satisfied.".to_owned()
+                } else if claim_source.is_some() {
+                    format!(" The grounded source obligation still has {outstanding} outstanding.")
                 } else {
-                    ""
+                    String::new()
                 };
                 format!(
                     "The court decided the {kind:?} claim for dynasty {plaintiff_id}, awarded {awarded}, and recovered {paid} immediately.{settlement_note}"
@@ -180,6 +254,88 @@ fn decide_legal_case(
         )?;
     }
     Ok(())
+}
+
+/// Applies the economic consequence of a final defendant judgment to its
+/// one-shot grounded claim source.
+///
+/// No payment occurs. A rejected debt claim becomes a lender write-off and a
+/// rejected contract claim loses its remaining recoverable breach penalty.
+/// This keeps legal finality synchronized with the underlying obligation
+/// instead of permanently consuming the only litigation route while leaving
+/// an enforceable-looking balance behind.
+fn dismiss_grounded_claim_after_defendant_judgment(
+    state: &mut AppState,
+    claim_source: Option<LegalClaimSource>,
+    plaintiff_id: DynastyId,
+    defendant_id: DynastyId,
+) -> Money {
+    match claim_source {
+        Some(LegalClaimSource::Loan { loan_id }) => {
+            let (balance, collateral_property_id) = {
+                let Some(loan) = state.loans.get_mut(&loan_id) else {
+                    return Money::ZERO;
+                };
+                if loan.lender_dynasty_id != plaintiff_id
+                    || loan.borrower_dynasty_id != defendant_id
+                {
+                    return Money::ZERO;
+                }
+                let balance = loan.balance;
+                let collateral_property_id = loan.collateral_property_id;
+                loan.balance = Money::ZERO;
+                loan.missed_payments = 0;
+                loan.collateral_property_id = None;
+                loan.status = if balance > Money::ZERO {
+                    LoanStatus::WrittenOff
+                } else {
+                    LoanStatus::Repaid
+                };
+                (balance, collateral_property_id)
+            };
+            if let Some(property_id) = collateral_property_id
+                && let Some(property) = state.properties.get_mut(&property_id)
+                && property.collateral_loan_id == Some(loan_id)
+            {
+                property.collateral_loan_id = None;
+            }
+            if balance > Money::ZERO {
+                remember_dynasty_interaction(
+                    state,
+                    plaintiff_id,
+                    defendant_id,
+                    &format!(
+                        "The court rejected the creditor's claim on loan {loan_id}; the remaining {balance} was written off without payment."
+                    ),
+                );
+            }
+            balance
+        }
+        Some(LegalClaimSource::Contract { contract_id }) => {
+            let Some(contract) = state.contracts.get_mut(&contract_id) else {
+                return Money::ZERO;
+            };
+            if contract.breaching_dynasty_id != Some(defendant_id)
+                || contract.breach_victim_dynasty_id != Some(plaintiff_id)
+            {
+                return Money::ZERO;
+            }
+            let rejected = contract.unpaid_breach_penalty;
+            contract.unpaid_breach_penalty = Money::ZERO;
+            if rejected > Money::ZERO {
+                remember_dynasty_interaction(
+                    state,
+                    plaintiff_id,
+                    defendant_id,
+                    &format!(
+                        "The court rejected the breach claim on contract {contract_id}; {rejected} of claimed penalty is no longer enforceable."
+                    ),
+                );
+            }
+            rejected
+        }
+        None => Money::ZERO,
+    }
 }
 
 pub(crate) fn settle_legal_damages(
@@ -276,22 +432,23 @@ pub(crate) fn settle_legal_claim_source(
     discharged: Money,
     full_satisfaction: bool,
     enforce_against_collateral: bool,
-) {
+) -> Money {
     match claim_source {
         Some(LegalClaimSource::Loan { loan_id }) => {
             let collateral_property_id = {
                 let Some(loan) = state.loans.get_mut(&loan_id) else {
-                    return;
+                    return Money::ZERO;
                 };
                 if loan.lender_dynasty_id != plaintiff_id
                     || loan.borrower_dynasty_id != defendant_id
                 {
-                    return;
+                    return Money::ZERO;
                 }
-                // A negotiated settlement extinguishes the whole claim; a
-                // court judgment discharges only what it actually recovered,
-                // never more: a judgment-proof defendant cannot have the debt
-                // erased cleaner than a bankruptcy.
+                // A negotiated settlement may extinguish the whole claim. A
+                // court judgment first discharges only what it actually
+                // recovered; any deficiency is handled separately below as an
+                // explicit lender write-off only after final enforcement finds
+                // the borrower judgment-proof.
                 if full_satisfaction {
                     loan.balance = Money::ZERO;
                 } else {
@@ -313,6 +470,7 @@ pub(crate) fn settle_legal_claim_source(
                     // only when that still leaves a deficiency does the
                     // lender retain a live claim against the borrower.
                     execute_judgment_against_collateral(state, loan_id);
+                    return write_off_judgment_proof_loan_deficiency(state, loan_id);
                 }
                 // Without enforcement the remainder simply stands: a
                 // negotiated settlement is amicable, so the pledged property
@@ -324,15 +482,16 @@ pub(crate) fn settle_legal_claim_source(
             {
                 property.collateral_loan_id = None;
             }
+            Money::ZERO
         }
         Some(LegalClaimSource::Contract { contract_id }) => {
             let Some(contract) = state.contracts.get_mut(&contract_id) else {
-                return;
+                return Money::ZERO;
             };
             if contract.breaching_dynasty_id != Some(defendant_id)
                 || contract.breach_victim_dynasty_id != Some(plaintiff_id)
             {
-                return;
+                return Money::ZERO;
             }
             // Only the discharged part of the penalty leaves the recoverable
             // breach debt unless the parties agreed to a full settlement.
@@ -342,9 +501,82 @@ pub(crate) fn settle_legal_claim_source(
                 contract.unpaid_breach_penalty =
                     contract.unpaid_breach_penalty.saturating_sub(discharged);
             }
+            Money::ZERO
         }
-        None => {}
+        None => Money::ZERO,
     }
+}
+
+/// Converts an uncollectible post-judgment deficiency into an explicit lender
+/// loss once the borrower has no treasury, property, or operating business
+/// left for the model to treat as a credible source of recovery.
+///
+/// The loan balance is not paid. It is extinguished as a write-off, preserving
+/// the economic loss while removing a permanently unresolvable default from
+/// the borrower's future credit lifecycle. The borrower pays through a severe
+/// reliability and legitimacy penalty instead of receiving a cost-free reset.
+fn write_off_judgment_proof_loan_deficiency(
+    state: &mut AppState,
+    loan_id: crate::ids::LoanId,
+) -> Money {
+    let Some(loan) = state.loans.get(&loan_id) else {
+        return Money::ZERO;
+    };
+    if loan.status != LoanStatus::Defaulted || loan.balance <= Money::ZERO {
+        return Money::ZERO;
+    }
+    let borrower_id = loan.borrower_dynasty_id;
+    let lender_id = loan.lender_dynasty_id;
+    let balance = loan.balance;
+    let borrower_treasury = state
+        .dynasties
+        .get(&borrower_id)
+        .expect("judgment borrower must exist")
+        .treasury();
+    let owns_property = state
+        .properties
+        .values()
+        .any(|property| property.owner_dynasty_id == Some(borrower_id));
+    let has_operating_business = state.businesses.iter().any(|business| {
+        business.owner_dynasty_id() == borrower_id && business.status() == BusinessStatus::Active
+    });
+    if borrower_treasury > Money::ZERO || owns_property || has_operating_business {
+        return Money::ZERO;
+    }
+
+    let loan = state
+        .loans
+        .get_mut(&loan_id)
+        .expect("judgment loan must remain present");
+    loan.balance = Money::ZERO;
+    loan.missed_payments = 0;
+    loan.collateral_property_id = None;
+    loan.status = LoanStatus::WrittenOff;
+
+    adjust_reliability_reputation(state, borrower_id, -1_200);
+    let borrower = state
+        .dynasties
+        .get_mut(&borrower_id)
+        .expect("judgment borrower must exist");
+    borrower.resources.legitimacy_basis_points = borrower
+        .resources
+        .legitimacy_basis_points
+        .saturating_sub(600);
+    adjust_dynasty_relationship(
+        state,
+        lender_id,
+        borrower_id,
+        RelationshipDelta::new(-250, -120, 40, 350, -1),
+    );
+    remember_dynasty_interaction(
+        state,
+        lender_id,
+        borrower_id,
+        &format!(
+            "Loan {loan_id} ended with an uncollectible deficiency of {balance}; the lender wrote it off after final judgment."
+        ),
+    );
+    balance
 }
 
 /// Executes a won debt judgment against the loan's pledged collateral when

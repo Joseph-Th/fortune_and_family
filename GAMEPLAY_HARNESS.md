@@ -199,6 +199,7 @@ Diagnosis counts are recorded per campaign and summed in the aggregates. Each qu
 - Command generation, viability, selection, and consequence statistics
 - Immediate, persistent, delayed, and ambient domain attribution
 - Economic, civic, family, institutional, legal, crisis, and information snapshots
+- Private-credit lifecycle counts including delinquent, defaulted, restructured, repaid, and written-off loans, with player lending and borrowing attribution
 - Per-campaign commercial ledger: lifetime revenue, lifetime costs, implied margin, business cash
 - Per-campaign affordability observations: `peak_player_treasury` and `minimum_unowned_property_value`, so an unexercised purchase route reads as an affordability ceiling rather than a declined choice
 - Per-campaign rival context: every house's wealth, legitimacy, offices, and operating firms; the player's treasury and legitimacy ranks; a leaderboard of strongest houses
@@ -223,7 +224,7 @@ Decision-log context lines carry the dynasty's power position: treasury, busines
 
 ### Operational routes and pacing
 
-Portfolio cash transfers and business-cash withdrawals are observable report routes excluded from substantive-action and strategic-streak metrics; a finding reports when they dominate agent activity. `ExtendCredit` statistics separately count accepted loans that changed business state immediately from loans that stayed treasury-only.
+Portfolio cash transfers and business-cash withdrawals are observable report routes excluded from substantive-action and strategic-streak metrics; a finding reports when they dominate agent activity. `ExtendCredit` statistics separately count new advances that changed business state immediately, new advances that stayed treasury-only, and zero-principal workouts of existing defaults. Workouts are recovery actions rather than fresh financing and are excluded from the productive-financing ratio.
 
 The normal observation cadence is 30 days, shortened to seven days while an uncontained crisis or player labor dispute is active, and narrowed toward an underfunded legal case's hearing — urgent player-facing problems get recognized before the next ordinary decision.
 

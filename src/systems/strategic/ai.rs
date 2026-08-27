@@ -175,10 +175,15 @@ pub(crate) fn advance_ai_credit_participation(
     // book is updated at every commit inside this pass, so subsequent
     // candidates observe exactly what a fresh rescan would.
     let mut active_book = ActiveAiLoanBook::collect(state);
+    advance_ai_default_restructuring(state, &mut active_book)?;
     advance_ai_credit_lending(registry, state, &mut active_book);
     advance_ai_credit_borrowing(registry, state, &mut active_book)?;
     Ok(())
 }
+
+const AI_DEFAULT_RESTRUCTURING_WEEKS: i64 = 208;
+const AI_DEFAULT_RESTRUCTURING_INTEREST_BASIS_POINTS: u16 = 900;
+const AI_DEFAULT_RESTRUCTURING_MIN_INTEREST_BASIS_POINTS: u16 = 400;
 
 /// Which houses sit on either side of a repayment-active loan, folded once
 /// from the loan ledger and kept current as this pass commits new loans.
@@ -193,24 +198,85 @@ impl ActiveAiLoanBook {
         let mut book = Self::default();
         for loan in state.loans.values() {
             if loan.status.is_repayment_active() {
-                book.record(loan.borrower_dynasty_id, loan.lender_dynasty_id);
+                book.record(loan.lender_dynasty_id, loan.borrower_dynasty_id);
             }
         }
         book
     }
 
-    fn record(&mut self, borrower_id: DynastyId, lender_id: DynastyId) {
-        self.borrowers.insert(borrower_id);
+    pub(crate) fn record(&mut self, lender_id: DynastyId, borrower_id: DynastyId) {
         self.lenders.insert(lender_id);
+        self.borrowers.insert(borrower_id);
     }
 
-    fn has_active_borrowing(&self, dynasty_id: DynastyId) -> bool {
+    pub(crate) fn has_active_borrowing(&self, dynasty_id: DynastyId) -> bool {
         self.borrowers.contains(&dynasty_id)
     }
 
-    fn holds_active_loan(&self, dynasty_id: DynastyId) -> bool {
+    pub(crate) fn holds_active_loan(&self, dynasty_id: DynastyId) -> bool {
         self.lenders.contains(&dynasty_id)
     }
+}
+
+/// Works one aged default per borrower back into an amortizing repayment plan
+/// before the city considers fresh credit.
+///
+/// The workout advances no new cash. It converts the existing claim to a long
+/// repayment schedule, caps punitive rates at a recovery rate, and leaves any
+/// additional defaults untouched until this workout is resolved. That makes
+/// default a persistent creditor relationship instead of a reset button that
+/// sends a failed borrower shopping for a new lender each month.
+pub(crate) fn advance_ai_default_restructuring(
+    state: &mut AppState,
+    active_book: &mut ActiveAiLoanBook,
+) -> Result<(), SimulationError> {
+    let player_id = state.player_dynasty_id;
+    let mut eligible: Vec<_> = state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.lender_dynasty_id != player_id
+                && loan.borrower_dynasty_id != player_id
+                && defaulted_loan_restructuring_available(state, loan)
+        })
+        .map(|loan| (loan.next_due_day, loan.id))
+        .collect();
+    eligible.sort_unstable();
+
+    for (_, loan_id) in eligible {
+        let (lender_dynasty_id, borrower_dynasty_id, balance, prior_interest) = {
+            let loan = state
+                .loans
+                .get(&loan_id)
+                .expect("collected defaulted loan must exist");
+            (
+                loan.lender_dynasty_id,
+                loan.borrower_dynasty_id,
+                loan.balance,
+                loan.interest_basis_points,
+            )
+        };
+        if active_book.has_active_borrowing(borrower_dynasty_id) {
+            continue;
+        }
+        let terms = LoanTerms {
+            lender_dynasty_id,
+            borrower_dynasty_id,
+            principal: Money::ZERO,
+            weekly_payment: ai_loan_weekly_payment(balance, AI_DEFAULT_RESTRUCTURING_WEEKS),
+            interest_basis_points: prior_interest
+                .min(AI_DEFAULT_RESTRUCTURING_INTEREST_BASIS_POINTS)
+                .max(AI_DEFAULT_RESTRUCTURING_MIN_INTEREST_BASIS_POINTS),
+            collateral_property_id: None,
+        };
+        let committed = ai_strategic_attempt(
+            &validate_loan(state, terms.clone()).and_then(|token| token.commit(state)),
+        )?;
+        if committed {
+            active_book.record(lender_dynasty_id, borrower_dynasty_id);
+        }
+    }
+    Ok(())
 }
 
 /// A business is worth external working capital only when its own operating
@@ -335,7 +401,9 @@ pub(crate) fn ai_credit_lending_offer(
         .copied()
         .filter(|id| *id != lender_id && *id != player_id)
         .filter_map(|candidate_id| {
-            if active_book.has_active_borrowing(candidate_id) {
+            if active_book.has_active_borrowing(candidate_id)
+                || borrower_has_unresolved_default(state, candidate_id)
+            {
                 return None;
             }
             best_creditworthy_business(registry, state, candidate_id).map(
@@ -408,7 +476,9 @@ pub(crate) fn speculative_lending_offer(
         .copied()
         .filter(|id| *id != lender_id && *id != player_id)
         .filter_map(|candidate_id| {
-            if active_book.has_active_borrowing(candidate_id) {
+            if active_book.has_active_borrowing(candidate_id)
+                || borrower_has_unresolved_default(state, candidate_id)
+            {
                 return None;
             }
             let candidate = best_speculative_business(registry, state, candidate_id)?;
@@ -587,7 +657,9 @@ pub(crate) fn advance_ai_credit_borrowing(
         if borrower.treasury() >= Money::from_copper(20_000) {
             continue;
         }
-        if active_book.has_active_borrowing(borrower_id) {
+        if active_book.has_active_borrowing(borrower_id)
+            || borrower_has_unresolved_default(state, borrower_id)
+        {
             continue;
         }
         let Some((lender_id, available)) = state
@@ -816,7 +888,7 @@ pub(crate) fn ai_net_liquid_position(state: &AppState, dynasty_id: DynastyId) ->
     let outstanding_debt = state
         .loans
         .values()
-        .filter(|loan| loan.borrower_dynasty_id == dynasty_id && loan.status != LoanStatus::Repaid)
+        .filter(|loan| loan.borrower_dynasty_id == dynasty_id && !loan.status.is_settled())
         .map(|loan| i128::from(loan.balance.copper()))
         .sum::<i128>();
     treasury - outstanding_debt

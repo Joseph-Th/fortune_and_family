@@ -62,7 +62,7 @@ The strategic directory keeps one submodule per domain behind a single facade:
 | `strategic/labor.rs` | Weekly employment settlement, market wage fairness, workforce disputes. |
 | `strategic/offices.rs` | Political-office lifecycle: duties, stipends, powers, directives, elections. |
 | `strategic/ai.rs` | Autonomous houses: objectives, upkeep, credit participation, recovery. |
-| `strategic/legal_cases.rs` | Legal-case hearings, judgments, settlements, claim discharge. |
+| `strategic/legal_cases.rs` | Legal-case hearings, judgments, continuing judgment execution, settlements, claim discharge, terminal private-credit write-offs. |
 | `strategic/crises.rs` | Crisis detection, escalation, response effects, route risk. |
 | `strategic/initialization.rs` | Deterministic bootstrap initialization of strategic state. |
 

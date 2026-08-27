@@ -3832,7 +3832,7 @@ mod candidates {
     }
 
     #[test]
-    fn defaulted_credit_redirects_borrowing_to_another_lender() {
+    fn defaulted_credit_waits_for_its_creditor_then_restructures_without_new_debt() {
         let mut state = make_test_campaign();
         state
             .dynasties
@@ -3857,11 +3857,14 @@ mod candidates {
             .get(&loan_id)
             .expect("issued loan must exist")
             .collateral_property_id;
-        state
-            .loans
-            .get_mut(&loan_id)
-            .expect("issued loan must exist")
-            .status = LoanStatus::Defaulted;
+        {
+            let loan = state
+                .loans
+                .get_mut(&loan_id)
+                .expect("issued loan must exist");
+            loan.status = LoanStatus::Defaulted;
+            loan.missed_payments = 3;
+        }
         if let Some(property_id) = collateral_id {
             let property = state
                 .properties
@@ -3870,22 +3873,33 @@ mod candidates {
             property.owner_dynasty_id = Some(first_lender_id);
             property.collateral_loan_id = None;
         }
-        state
-            .dynasties
-            .get_mut(&state.player_dynasty_id)
-            .expect("player dynasty must exist")
-            .resources
-            .treasury = Money::ZERO;
         candidates.clear();
 
         add_borrow_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+        assert!(
+            candidates.is_empty(),
+            "a recent default must close fresh borrowing instead of redirecting the house to another creditor"
+        );
 
-        let candidate = single_candidate(&candidates, "redirected borrowing after default");
+        state
+            .loans
+            .get_mut(&loan_id)
+            .expect("defaulted loan must remain present")
+            .next_due_day = state
+            .clock
+            .day()
+            .saturating_sub(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS);
+        add_borrow_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+
+        let candidate = single_candidate(&candidates, "aged default workout");
         assert!(matches!(
             candidate.command,
             PlayerCommand::IssueLoan { ref terms }
-                if terms.lender_dynasty_id != first_lender_id
+                if terms.lender_dynasty_id == first_lender_id
+                    && terms.principal == Money::ZERO
+                    && terms.collateral_property_id.is_none()
         ));
+        assert!(candidate.description.contains("restructure defaulted loan"));
     }
 
     #[test]
@@ -5282,7 +5296,7 @@ mod candidates {
             .copied()
             .find(|dynasty_id| {
                 *dynasty_id != player_id
-                    && !same_pair_credit_blocks_new_loan(&state, player_id, *dynasty_id)
+                    && !credit_pair_blocks_new_loan(&state, player_id, *dynasty_id)
             })
             .expect("campaign must contain a rival available for new player credit");
         state
@@ -5849,6 +5863,59 @@ mod metrics {
                 .get(&GameplayCommandKind::SellProperty),
             None
         );
+    }
+
+    #[test]
+    fn quiet_diagnostic_classifies_policy_configuration_and_support_targeting_as_restraint() {
+        let mut accumulator = CampaignAccumulator::new();
+        let activation_delta = BTreeMap::from([
+            (GameplayCommandKind::SetBusinessPolicy, 1_u32),
+            (GameplayCommandKind::CultivateInstitutionSupport, 1_u32),
+        ]);
+        let probe = ProbeResult {
+            selected: None,
+            viable_count: 0,
+            substantive_viable_count: 0,
+            viable_command_kinds: BTreeSet::new(),
+            viable_options: Vec::new(),
+            close_choice_score_gap: None,
+            distinct_immediate_choice_profiles: 0,
+            distinct_projected_choice_profiles: 0,
+            family_close_choice_score_gap: None,
+            distinct_immediate_family_profiles: 0,
+            distinct_projected_family_profiles: 0,
+            rejections: Vec::new(),
+        };
+
+        let reason = record_quiet_diagnostic(
+            &mut accumulator,
+            &probe,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &activation_delta,
+        )
+        .expect("a restrained quiet cycle must report a reason");
+
+        assert!(reason.contains("reserved by agent policy"));
+        assert!(reason.contains(GameplayCommandKind::SetBusinessPolicy.label()));
+        assert!(reason.contains(GameplayCommandKind::CultivateInstitutionSupport.label()));
+        assert_eq!(
+            accumulator
+                .quiet_diagnostic
+                .restrained_routes
+                .get(&GameplayCommandKind::SetBusinessPolicy),
+            Some(&1)
+        );
+        assert_eq!(
+            accumulator
+                .quiet_diagnostic
+                .restrained_routes
+                .get(&GameplayCommandKind::CultivateInstitutionSupport),
+            Some(&1)
+        );
+        assert!(accumulator.quiet_diagnostic.generator_gaps.is_empty());
     }
 
     #[test]
@@ -6508,7 +6575,7 @@ mod metrics {
             .copied()
             .find(|dynasty_id| {
                 *dynasty_id != player_id
-                    && !same_pair_credit_blocks_new_loan(&state, player_id, *dynasty_id)
+                    && !credit_pair_blocks_new_loan(&state, player_id, *dynasty_id)
             })
             .expect("campaign must contain an unused player-lending counterparty");
         let loan_id = issue_loan(
@@ -6558,7 +6625,7 @@ mod metrics {
             .copied()
             .find(|dynasty_id| {
                 *dynasty_id != player_id
-                    && !same_pair_credit_blocks_new_loan(&state, *dynasty_id, player_id)
+                    && !credit_pair_blocks_new_loan(&state, *dynasty_id, player_id)
             })
             .expect("campaign must contain an unused player-borrowing counterparty");
         let loan_id = issue_loan(
@@ -8017,16 +8084,17 @@ mod findings {
     }
 
     #[test]
-    fn mature_lending_without_borrower_business_effects_is_reported() {
+    fn mature_new_lending_without_borrower_business_effects_is_reported_but_workouts_are_excluded() {
         let mut report = cached_focused_report(30);
         report.aggregate.campaigns = 1;
         report.aggregate.simulated_days = 3_600;
-        report
+        let credit_stats = report
             .aggregate
             .commands
             .get_mut(&GameplayCommandKind::ExtendCredit)
-            .expect("credit statistics must exist")
-            .executed = 20;
+            .expect("credit statistics must exist");
+        credit_stats.executed = 20;
+        credit_stats.nonproductive_financing_actions = 20;
         report
             .campaigns
             .first_mut()
@@ -8040,12 +8108,26 @@ mod findings {
             "Player lending is detached from productive financing",
         );
 
-        report
+        let credit_stats = report
             .aggregate
             .commands
             .get_mut(&GameplayCommandKind::ExtendCredit)
-            .expect("credit statistics must exist")
-            .productive_financing_actions = 20;
+            .expect("credit statistics must exist");
+        credit_stats.productive_financing_actions = 20;
+        credit_stats.nonproductive_financing_actions = 0;
+        let findings = derive_findings(&report.aggregate, &report.campaigns);
+        assert_finding_absent(
+            &findings,
+            "Player lending is detached from productive financing",
+        );
+
+        let credit_stats = report
+            .aggregate
+            .commands
+            .get_mut(&GameplayCommandKind::ExtendCredit)
+            .expect("credit statistics must exist");
+        credit_stats.productive_financing_actions = 0;
+        credit_stats.financing_workout_actions = 20;
         let findings = derive_findings(&report.aggregate, &report.campaigns);
         assert_finding_absent(
             &findings,
@@ -10671,7 +10753,7 @@ fn make_external_credit_need_available_for_test(state: &mut AppState) {
         .copied()
         .find(|dynasty_id| {
             *dynasty_id != player_id
-                && !same_pair_credit_blocks_new_loan(state, player_id, *dynasty_id)
+                && !credit_pair_blocks_new_loan(state, player_id, *dynasty_id)
         })
         .expect("campaign must contain an unused external-credit counterparty");
     state

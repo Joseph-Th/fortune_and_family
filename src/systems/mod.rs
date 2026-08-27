@@ -373,9 +373,9 @@ pub(crate) fn synchronize_employment_for_business_status(
                 agreement.status = crate::core::EmploymentStatus::Suspended;
             }
         }
-        // A closed business never reopens: ending its agreements releases the
-        // suspended crews to other employers instead of stranding them as
-        // permanently withheld household labor.
+        // Closure ends the current agreements so crews are immediately
+        // released to other employers. A later explicit acquisition may
+        // reopen the firm and rebuild staffing through that acquisition path.
         crate::core::BusinessStatus::Closed => {
             for agreement in state.employment.values_mut().filter(|agreement| {
                 agreement.business_id == business_id
@@ -477,18 +477,24 @@ pub use strategic::{
     SupplyContractTerms, quote_business_acquisition, quote_property_liquidation,
 };
 pub(crate) use strategic::{
-    CRISIS_RESPONSE_WINDOW_DAYS, DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, acquire_business, available_supply_contract_capacity,
+    CRISIS_RESPONSE_WINDOW_DAYS,
+    STANDARD_CONTRACT_BATCHES_PER_WEEK, acquire_business_scratch,
+    available_supply_contract_capacity, borrower_has_unresolved_default,
     business_owner_distribution_reserve, business_recapitalization_target, buy_unowned_property,
-    capitalize_owned_business, crisis_response_contains_crisis, distribute_owned_business_cash,
+    capitalize_owned_business, credit_pair_blocks_new_loan, crisis_response_contains_crisis,
+    defaulted_loan_restructuring_available, distribute_owned_business_cash,
     district_unrest_pressures, dynasty_office_administrative_load, effective_property_weekly_rent,
-    expire_time_limited_state, institution_capability_score, market_reference_weekly_wage,
+    expire_time_limited_state, institution_capability_score, latest_defaulted_loan_for_pair,
+    market_reference_weekly_wage,
     projected_dynasty_monthly_office_duty,
-    projected_dynasty_monthly_office_duty_with_additional_offices, sell_owned_property,
-    validate_loan, validate_supply_contract,
+    projected_dynasty_monthly_office_duty_with_additional_offices, sell_owned_property_scratch,
+    unresolved_default_owed_elsewhere, validate_loan, validate_supply_contract,
 };
 pub(crate) use transactions::transfer_business_cash;
 pub use transactions::{SimulationError, TimelineError};
+
+#[cfg(test)]
+pub(crate) use strategic::DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS;
 
 #[cfg(test)]
 mod tests {

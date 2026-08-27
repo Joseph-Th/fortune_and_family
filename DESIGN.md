@@ -112,7 +112,7 @@ Wealth and office create administrative burden, scrutiny, coalition resistance, 
 
 ### Recovery has a cost
 
-Failure should be recoverable through restructuring, asset sale, recapitalization, coalition change, office change, family intervention, or retreat. Recovery must consume time, wealth, position, or future obligation.
+Failure should be recoverable through restructuring, asset sale, recapitalization, coalition change, office change, family intervention, retreat, or a final legal write-off after collectible assets are exhausted. A write-off is a lender loss, never repayment, and carries severe standing damage for the borrower. Recovery must consume time, wealth, position, status, or future obligation; no failed claim should trap a dynasty forever solely because the underlying procedure cannot run again.
 
 ## System expectations
 
@@ -122,7 +122,7 @@ Failure should be recoverable through restructuring, asset sale, recapitalizatio
 | Households and labor | Households consume, work, pay rent, experience welfare changes, and respond politically. Wage posture is a standing commitment: fairness is judged against the cost of living, stingy pay erodes loyalty toward dispute, and generous pay buys resilience. Labor connects business outcomes to people. |
 | Businesses | Businesses have distinct cash, inventory, policy, management, capacity, quality, condition, and lifecycle. Growth and recovery require capital and administration. |
 | Markets and contracts | Prices respond to supply, demand, scarcity, policy, and disruption. Contracts create durable counterparties and obligations. |
-| Credit and debt | Credit creates leverage, dependency, collateral risk, restructuring, and enforceable consequences. |
+| Credit and debt | Credit creates leverage, dependency, collateral risk, restructuring, enforceable consequences, creditor continuity after default, and explicit lender losses when a final judgment proves uncollectible. |
 | Property | Property links wealth to districts, rent, occupancy, collateral, public works, and political interests. It is useful but not perfectly liquid. |
 | Institutions and office | Access is earned. Office controls concrete civic outcomes while imposing duties, administrative load, coalition response, and loss risk. |
 | Law and courts | Claims arise from concrete obligations or events. Procedure and judgment must resolve the underlying dispute rather than create duplicate economic paths. |

@@ -1574,7 +1574,9 @@ fn validate_strategic_records(
             if loan.collateral_property_id != Some(*property_id)
                 || matches!(
                     loan.status,
-                    crate::core::LoanStatus::Defaulted | crate::core::LoanStatus::Repaid
+                    crate::core::LoanStatus::Defaulted
+                        | crate::core::LoanStatus::Repaid
+                        | crate::core::LoanStatus::WrittenOff
                 )
                 || property.owner_dynasty_id != Some(loan.borrower_dynasty_id)
             {
@@ -1780,6 +1782,11 @@ fn validate_loan_records(state: &AppState) -> Result<(), String> {
                     return Err(format!("repaid loan {loan_id} retains a balance"));
                 }
             }
+            crate::core::LoanStatus::WrittenOff => {
+                if loan.balance != Money::ZERO {
+                    return Err(format!("written-off loan {loan_id} retains a balance"));
+                }
+            }
         }
         if let Some(property_id) = loan.collateral_property_id {
             let property = state.properties.get(&property_id).ok_or_else(|| {
@@ -1804,10 +1811,10 @@ fn validate_loan_records(state: &AppState) -> Result<(), String> {
                         ));
                     }
                 }
-                crate::core::LoanStatus::Repaid => {
+                crate::core::LoanStatus::Repaid | crate::core::LoanStatus::WrittenOff => {
                     if property.collateral_loan_id == Some(*loan_id) {
                         return Err(format!(
-                            "repaid loan {loan_id} has an invalid collateral release"
+                            "settled loan {loan_id} has an invalid collateral release"
                         ));
                     }
                 }
@@ -2408,6 +2415,13 @@ fn validate_legal_claim_source(
                     "legal case {case_id} has a debt claim source that does not match its loan and parties"
                 ));
             }
+            if legal_case.status == crate::core::LegalCaseStatus::DecidedForDefendant
+                && !loan.status.is_settled()
+            {
+                return Err(format!(
+                    "legal case {case_id} was decided for the defendant but retains an enforceable loan"
+                ));
+            }
         }
         LegalClaimSource::Contract { contract_id } => {
             let contract = state.contracts.get(&contract_id).ok_or_else(|| {
@@ -2424,6 +2438,13 @@ fn validate_legal_claim_source(
             {
                 return Err(format!(
                     "legal case {case_id} has a contract-breach claim source that does not match its contract and parties"
+                ));
+            }
+            if legal_case.status == crate::core::LegalCaseStatus::DecidedForDefendant
+                && contract.unpaid_breach_penalty != Money::ZERO
+            {
+                return Err(format!(
+                    "legal case {case_id} was decided for the defendant but retains an enforceable breach penalty"
                 ));
             }
         }
@@ -2644,9 +2665,8 @@ fn require_current_schema(bytes: &[u8], path: &Path) -> Result<(), PersistenceEr
             Ok(())
         }
         // A well-formed document without a usable `schema_version` member
-        // (missing, wrong type, non-object root) is reported exactly as the
-        // previous value-tree lookup reported it; only genuine syntax
-        // failures surface as parse errors.
+        // (missing, wrong type, non-object root) is a missing-schema error;
+        // only genuine syntax failures surface as parse errors.
         Err(error) if error.is_data() => Err(PersistenceError::MissingSchemaVersion {
             path: path.to_path_buf(),
         }),
