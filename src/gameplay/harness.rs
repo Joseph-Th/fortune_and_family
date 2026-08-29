@@ -2784,8 +2784,7 @@ pub(crate) fn has_borrow_opportunity(state: &AppState) -> bool {
     // An aged default creates a canonical workout opportunity with its
     // existing creditor even when no new cash can be advanced.
     if state.loans.values().any(|loan| {
-        loan.borrower_dynasty_id == player_id
-            && defaulted_loan_restructuring_available(state, loan)
+        loan.borrower_dynasty_id == player_id && defaulted_loan_restructuring_available(state, loan)
     }) {
         return true;
     }

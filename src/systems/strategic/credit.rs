@@ -479,11 +479,8 @@ pub(crate) fn validate_defaulted_loan_restructuring(
     state: &AppState,
     terms: &LoanTerms,
 ) -> Result<Option<crate::ids::LoanId>, StrategicError> {
-    let defaulted_loan = latest_defaulted_loan_for_pair(
-        state,
-        terms.lender_dynasty_id,
-        terms.borrower_dynasty_id,
-    );
+    let defaulted_loan =
+        latest_defaulted_loan_for_pair(state, terms.lender_dynasty_id, terms.borrower_dynasty_id);
     let Some(defaulted_loan) = defaulted_loan else {
         return Ok(None);
     };

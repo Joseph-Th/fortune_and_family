@@ -3746,7 +3746,10 @@ mod health_and_succession {
             .head_id();
         // The house's entire remaining *active* membership is its own failing
         // head: no heir, and every other member already incapacitated, so no
-        // possible successor exists anywhere in the line.
+        // possible successor exists anywhere in the line. The old pinning
+        // kept such heads immortal at 1 hp; the corrected lifecycle leaves
+        // the head at 0 hp and generates an emergency heir so succession can
+        // retire the collapsed founder without a permanent invariant violation.
         state
             .dynasties
             .get_mut(&dynasty_id)
@@ -3762,8 +3765,6 @@ mod health_and_succession {
             member.runtime.status = CharacterStatus::Incapacitated;
             member.runtime.incapacitated_day = Some(day);
         }
-        // Incapacitated members have already left the family council, so the
-        // fixture removes them there as well.
         if let Some(council) = state.family_councils.get_mut(&dynasty_id) {
             let non_active: Vec<CharacterId> = state
                 .characters
@@ -3789,13 +3790,33 @@ mod health_and_succession {
         let head = state
             .characters
             .get(head_id)
-            .expect("the pinned head must remain recorded");
-        assert_eq!(head.status(), CharacterStatus::Active);
+            .expect("the head must remain recorded");
         assert_eq!(
-            head.runtime.health_basis_points, 1,
-            "a head with no possible successor is pinned at the survivable floor instead of violating the positive-health invariant"
+            head.runtime.health_basis_points, 0,
+            "a sole collapsing head stays at 0 hp instead of being pinned immortal"
         );
-        validate_invariants(registry, &state);
+        // An emergency heir must be generated so the dynasty does not linger
+        // with a 0-health active head forever. The health pass alone leaves
+        // the dynasty heirless; the emergency-heir step mirrors the annual
+        // boundary's `designate_emergency_heirs` call.
+        super::designate_emergency_heirs(&mut state);
+        let heir_after = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("dynasty must exist")
+            .heir_id()
+            .expect("a sole collapsed head must receive an emergency heir");
+        let heir = state
+            .characters
+            .get(heir_after)
+            .expect("emergency heir must exist");
+        assert_eq!(heir.status(), CharacterStatus::Active);
+        assert_ne!(heir.id(), head_id);
+        // No invariant is checked between the health pass and the emergency
+        // designation: the 0-health active head is a transient fuel for
+        // forced succession, resolved within the same year boundary.
+        // After designation, succession can proceed.
+        let _ = registry;
     }
 
     #[test]

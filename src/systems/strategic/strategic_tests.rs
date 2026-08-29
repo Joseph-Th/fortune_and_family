@@ -1103,6 +1103,78 @@ mod public_works {
         }));
     }
 
+    struct TestLegalCase {
+        plaintiff_dynasty_id: DynastyId,
+        defendant_dynasty_id: DynastyId,
+        kind: crate::core::LegalCaseKind,
+        claim_source: Option<LegalClaimSource>,
+        evidence_basis_points: u16,
+        public_attention_basis_points: u16,
+        damages: Money,
+        hearing_day: i64,
+        status: LegalCaseStatus,
+    }
+
+    fn insert_test_case(state: &mut AppState, case: &TestLegalCase) -> crate::ids::LegalCaseId {
+        let id = state.next_ids.legal_case();
+        state.legal_cases.insert(
+            id,
+            crate::core::LegalCase {
+                id,
+                plaintiff_dynasty_id: case.plaintiff_dynasty_id,
+                defendant_dynasty_id: case.defendant_dynasty_id,
+                kind: case.kind,
+                claim_source: case.claim_source,
+                evidence_basis_points: case.evidence_basis_points,
+                public_attention_basis_points: case.public_attention_basis_points,
+                filed_day: state.clock.day(),
+                hearing_day: case.hearing_day,
+                damages: case.damages,
+                status: case.status,
+            },
+        );
+        id
+    }
+
+    fn make_defaulted_loan(
+        state: &mut AppState,
+        lender_id: DynastyId,
+        borrower_id: DynastyId,
+    ) -> crate::ids::LoanId {
+        let existing_loan_id = state
+            .loans
+            .values()
+            .find(|loan| {
+                loan.lender_dynasty_id == lender_id
+                    && loan.borrower_dynasty_id == borrower_id
+                    && !loan.status.is_settled()
+            })
+            .map(|loan| loan.id);
+        let loan_id = if let Some(loan_id) = existing_loan_id {
+            loan_id
+        } else {
+            issue_loan(
+                state,
+                LoanTerms {
+                    lender_dynasty_id: lender_id,
+                    borrower_dynasty_id: borrower_id,
+                    principal: Money::from_copper(5_000),
+                    weekly_payment: Money::from_copper(300),
+                    interest_basis_points: 1_000,
+                    collateral_property_id: None,
+                },
+            )
+            .expect("fixture loan must be issuable")
+        };
+        let loan = state
+            .loans
+            .get_mut(&loan_id)
+            .expect("fixture loan must exist");
+        loan.status = LoanStatus::Defaulted;
+        loan.missed_payments = 3;
+        loan_id
+    }
+
     #[test]
     fn defendant_won_debt_judgment_writes_off_rejected_claim_without_payment() {
         let mut state = make_test_campaign();
@@ -1158,7 +1230,10 @@ mod public_works {
 
         resolve_legal_cases(&mut state).expect("final debt judgment must resolve");
 
-        let loan = state.loans.get(&loan_id).expect("source loan must remain auditable");
+        let loan = state
+            .loans
+            .get(&loan_id)
+            .expect("source loan must remain auditable");
         assert_eq!(loan.status, LoanStatus::WrittenOff);
         assert_eq!(loan.balance, Money::ZERO);
         assert_eq!(loan.missed_payments, 0);
@@ -7075,7 +7150,10 @@ mod legal_cases {
 
         resolve_legal_cases(&mut state).expect("final debt judgment must resolve");
 
-        let loan = state.loans.get(&loan_id).expect("written-off loan remains auditable");
+        let loan = state
+            .loans
+            .get(&loan_id)
+            .expect("written-off loan remains auditable");
         assert_eq!(loan.status, LoanStatus::WrittenOff);
         assert_eq!(loan.balance, Money::ZERO);
         assert_eq!(loan.missed_payments, 0);
@@ -9614,7 +9692,10 @@ mod ai {
             .expect("bootstrap must create rival credit")
             .id;
         let (lender_id, borrower_id, principal_before, balance_before) = {
-            let loan = state.loans.get_mut(&loan_id).expect("rival loan must exist");
+            let loan = state
+                .loans
+                .get_mut(&loan_id)
+                .expect("rival loan must exist");
             let values = (
                 loan.lender_dynasty_id,
                 loan.borrower_dynasty_id,
@@ -9711,7 +9792,10 @@ mod ai {
             business.operations.status = BusinessStatus::Active;
         }
         {
-            let loan = state.loans.get_mut(&loan_id).expect("rival loan must exist");
+            let loan = state
+                .loans
+                .get_mut(&loan_id)
+                .expect("rival loan must exist");
             loan.status = LoanStatus::Defaulted;
             loan.missed_payments = 3;
             loan.next_due_day = state.clock.day();

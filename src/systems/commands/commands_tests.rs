@@ -1252,7 +1252,10 @@ mod validation {
         )
         .expect("fixture loan must issue");
         {
-            let loan = state.loans.get_mut(&loan_id).expect("fixture loan must exist");
+            let loan = state
+                .loans
+                .get_mut(&loan_id)
+                .expect("fixture loan must exist");
             loan.status = LoanStatus::Defaulted;
             loan.missed_payments = 3;
         }
@@ -1323,7 +1326,10 @@ mod validation {
         )
         .expect("fixture loan must issue");
         let balance = {
-            let loan = state.loans.get_mut(&loan_id).expect("fixture loan must exist");
+            let loan = state
+                .loans
+                .get_mut(&loan_id)
+                .expect("fixture loan must exist");
             loan.status = LoanStatus::Defaulted;
             loan.missed_payments = 3;
             loan.next_due_day = state

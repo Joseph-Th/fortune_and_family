@@ -3380,7 +3380,8 @@ pub(crate) fn add_borrow_candidate(
             },
             |loan| {
                 format!(
-                    "restructure defaulted loan {} on revised terms with {}", loan.id,
+                    "restructure defaulted loan {} on revised terms with {}",
+                    loan.id,
                     dynasty_label(state, lender.id())
                 )
             },
@@ -3624,7 +3625,8 @@ pub(crate) fn add_lend_candidate(
             },
             |loan| {
                 format!(
-                    "restructure defaulted loan {} on revised terms for {}", loan.id,
+                    "restructure defaulted loan {} on revised terms for {}",
+                    loan.id,
                     dynasty_label(state, borrower.id())
                 )
             },
@@ -6367,10 +6369,7 @@ pub(crate) fn office_power_ascent_bonus(
 }
 
 pub(crate) fn city_credit_power_is_relevant(state: &AppState) -> bool {
-    state
-        .loans
-        .values()
-        .any(|loan| !loan.status.is_settled())
+    state.loans.values().any(|loan| !loan.status.is_settled())
         || state
             .civic_debts
             .values()

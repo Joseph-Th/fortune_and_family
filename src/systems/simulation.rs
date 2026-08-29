@@ -2513,17 +2513,6 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
         .values()
         .filter_map(crate::core::Dynasty::heir_id)
         .collect();
-    // Heads whose entire house has collapsed alongside them have no possible
-    // emergency successor; count active members per dynasty up front so the
-    // mutation pass below stays within one borrow.
-    let mut active_members_per_dynasty: BTreeMap<DynastyId, u32> = BTreeMap::new();
-    for character in state.characters.iter() {
-        if character.status() == CharacterStatus::Active {
-            *active_members_per_dynasty
-                .entry(character.dynasty_id())
-                .or_default() += 1;
-        }
-    }
     let mut newly_incapacitated = Vec::new();
     for character in state.characters.iter_mut() {
         if character.status() != CharacterStatus::Active {
@@ -2538,20 +2527,11 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
         // A designated heir whose resolved health collapses is pinned at a
         // survivable floor for this year instead of becoming incapacitated:
         // succession needs a live designated heir, and the floor is lifted on
-        // accession (SUCCESSION_ACCESSION_HEALTH_FLOOR).
-        //
-        // A head with no possible successor is pinned the same way: heads are
-        // exempt from incapacitation, succession needs a live head to retire,
-        // and a house whose entire membership is its own failing head has no
-        // one left to designate. Without the pin the house would keep an
-        // active zero-health head forever, violating the positive-health
-        // lifecycle invariant and producing an unloadable save.
-        let is_sole_active_member = active_members_per_dynasty
-            .get(&character.dynasty_id())
-            .is_some_and(|count| *count == 1);
-        let pinned_at_survivable_floor = resolved_health == 0
-            && (heir_ids.contains(&character.id())
-                || (head_ids.contains(&character.id()) && is_sole_active_member));
+        // accession (SUCCESSION_ACCESSION_HEALTH_FLOOR). Heads are not
+        // pinned: a sole head with collapsed health proceeds to forced
+        // succession via the emergency-heir path, so no dynasty becomes
+        // immortal at 1 hp while its house has no other members.
+        let pinned_at_survivable_floor = resolved_health == 0 && heir_ids.contains(&character.id());
         character.runtime.health_basis_points = if pinned_at_survivable_floor {
             COLLAPSED_HEALTH_SURVIVABLE_FLOOR
         } else {
@@ -2610,8 +2590,12 @@ fn update_character_health(state: &mut AppState) -> Result<(), SimulationError> 
 /// A head whose health has collapsed with no designated heir must not keep
 /// running the house indefinitely: designate the most capable adult member
 /// as emergency heir so this year's succession pass can execute normally.
+/// When a house has no other active members at all, an emergency heir is
+/// generated instead of pinning the head forever at 1 hp — the dynasty
+/// remains mortal and succession tests the rebuilt house rather than an
+/// immortal founder.
 fn designate_emergency_heirs(state: &mut AppState) {
-    let emergency_candidates: Vec<(DynastyId, CharacterId)> = state
+    let needing: Vec<DynastyId> = state
         .dynasties
         .values()
         .filter(|dynasty| {
@@ -2621,16 +2605,97 @@ fn designate_emergency_heirs(state: &mut AppState) {
                     .get(dynasty.head_id())
                     .is_some_and(|head| head.runtime.health_basis_points == 0)
         })
-        .filter_map(|dynasty| {
-            emergency_successor(state, dynasty.head_id()).map(|id| (dynasty.id(), id))
-        })
+        .map(|dynasty| dynasty.id())
         .collect();
-    for (dynasty_id, successor_id) in emergency_candidates {
-        let dynasty = state
+    for dynasty_id in needing {
+        if let Some(successor_id) = emergency_successor(
+            state,
+            state
+                .dynasties
+                .get(&dynasty_id)
+                .expect("dynasty must exist")
+                .head_id(),
+        ) {
+            state
+                .dynasties
+                .get_mut(&dynasty_id)
+                .expect("emergency succession dynasty must exist")
+                .relationships
+                .heir_id = Some(successor_id);
+            continue;
+        }
+        // No other active member exists: generate a successor so the
+        // collapsed sole head can retire without leaving an immortal
+        // Active 0-health head or a headless dynasty. The new heir is a
+        // young adult ward-like successor tied to the dynasty by history.
+        let head_id = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("dynasty must exist")
+            .head_id();
+        let (birth_day, link_kind, capabilities) = generate_next_heir(state, head_id);
+        let dynasty_name = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("dynasty must exist")
+            .name()
+            .to_owned();
+        let generation = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("dynasty must exist")
+            .runtime
+            .generation;
+        let new_heir_name = format!("{dynasty_name} Heir {generation}*");
+        let new_heir_id = {
+            let mut next_ids = state.next_ids.clone();
+            let id = next_ids
+                .try_character()
+                .expect("emergency heir character space must be available");
+            let link_id = next_ids
+                .try_family_link()
+                .expect("emergency heir link space must be available");
+            state.next_ids = next_ids;
+            state.characters.insert(Character {
+                identity: CharacterIdentity {
+                    id,
+                    dynasty_id,
+                    name: new_heir_name,
+                    birth_day,
+                },
+                capabilities,
+                runtime: CharacterRuntime {
+                    status: CharacterStatus::Active,
+                    health_basis_points: 9_500,
+                    loyalty_basis_points: 8_000,
+                    role: CharacterRole::Heir,
+                    incapacitated_day: None,
+                },
+            });
+            state.family_links.insert(
+                link_id,
+                FamilyLink {
+                    id: link_id,
+                    first_character_id: head_id,
+                    second_character_id: id,
+                    kind: link_kind,
+                    active: true,
+                },
+            );
+            state
+                .family_councils
+                .get_mut(&dynasty_id)
+                .expect("council must exist")
+                .members
+                .insert(id);
+            id
+        };
+        state
             .dynasties
             .get_mut(&dynasty_id)
-            .expect("emergency succession dynasty must exist");
-        dynasty.relationships.heir_id = Some(successor_id);
+            .expect("dynasty must exist")
+            .relationships
+            .heir_id = Some(new_heir_id);
     }
 }
 

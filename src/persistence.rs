@@ -1005,8 +1005,15 @@ fn validate_core_numeric_ranges(state: &AppState) -> Result<(), String> {
             ));
         }
     }
-    if state.market.clearing_account < Money::ZERO {
-        return Err("market clearing account has an invalid value".to_owned());
+    // Business sales settle against the pooled market sector before households resupply it,
+    // so a short-term deficit represents outstanding consumer credit rather than a broken
+    // invariant. Only an unbounded deficit indicates corrupted accounting.
+    const MAX_MARKET_CLEARING_DEFICIT_COPPER: i64 = -10_000_000;
+    if state.market.clearing_account < Money::from_copper(MAX_MARKET_CLEARING_DEFICIT_COPPER) {
+        return Err(format!(
+            "market clearing account {} exceeds the supported deficit of {}",
+            state.market.clearing_account, MAX_MARKET_CLEARING_DEFICIT_COPPER
+        ));
     }
     for quote in state.market.quotes.values() {
         if quote.price <= Money::ZERO

@@ -477,16 +477,14 @@ pub use strategic::{
     SupplyContractTerms, quote_business_acquisition, quote_property_liquidation,
 };
 pub(crate) use strategic::{
-    CRISIS_RESPONSE_WINDOW_DAYS,
-    STANDARD_CONTRACT_BATCHES_PER_WEEK, acquire_business_scratch,
+    CRISIS_RESPONSE_WINDOW_DAYS, STANDARD_CONTRACT_BATCHES_PER_WEEK, acquire_business_scratch,
     available_supply_contract_capacity, borrower_has_unresolved_default,
     business_owner_distribution_reserve, business_recapitalization_target, buy_unowned_property,
     capitalize_owned_business, credit_pair_blocks_new_loan, crisis_response_contains_crisis,
     defaulted_loan_restructuring_available, distribute_owned_business_cash,
     district_unrest_pressures, dynasty_office_administrative_load, effective_property_weekly_rent,
     expire_time_limited_state, institution_capability_score, latest_defaulted_loan_for_pair,
-    market_reference_weekly_wage,
-    projected_dynasty_monthly_office_duty,
+    market_reference_weekly_wage, projected_dynasty_monthly_office_duty,
     projected_dynasty_monthly_office_duty_with_additional_offices, sell_owned_property_scratch,
     unresolved_default_owed_elsewhere, validate_loan, validate_supply_contract,
 };

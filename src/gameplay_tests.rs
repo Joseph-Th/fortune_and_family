@@ -8084,7 +8084,8 @@ mod findings {
     }
 
     #[test]
-    fn mature_new_lending_without_borrower_business_effects_is_reported_but_workouts_are_excluded() {
+    fn mature_new_lending_without_borrower_business_effects_is_reported_but_workouts_are_excluded()
+    {
         let mut report = cached_focused_report(30);
         report.aggregate.campaigns = 1;
         report.aggregate.simulated_days = 3_600;
@@ -10752,8 +10753,7 @@ fn make_external_credit_need_available_for_test(state: &mut AppState) {
         .keys()
         .copied()
         .find(|dynasty_id| {
-            *dynasty_id != player_id
-                && !credit_pair_blocks_new_loan(state, player_id, *dynasty_id)
+            *dynasty_id != player_id && !credit_pair_blocks_new_loan(state, player_id, *dynasty_id)
         })
         .expect("campaign must contain an unused external-credit counterparty");
     state

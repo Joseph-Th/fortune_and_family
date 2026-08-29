@@ -2726,12 +2726,31 @@ mod validation {
     #[test]
     fn rejects_relitigation_of_the_same_grounded_claim_source() {
         let mut state = make_test_campaign();
-        let loan = state
+        let mut loan = state
             .loans
             .values()
             .next()
             .expect("campaign must contain a loan")
             .clone();
+        // A decided-for-defendant debt claim is only valid when the loan
+        // is already settled (written off) and its collateral lien is
+        // released. Mark the fixture loan as settled and clear any pledged
+        // property so the first case itself is valid and the duplicate source
+        // check is the reason the save is rejected, not the
+        // unsettled-loan or collateral check.
+        let collateral_property_id = loan.collateral_property_id;
+        loan.status = crate::core::LoanStatus::WrittenOff;
+        loan.balance = crate::money::Money::ZERO;
+        loan.missed_payments = 0;
+        loan.collateral_property_id = None;
+        state.loans.insert(loan.id, loan.clone());
+        if let Some(property_id) = collateral_property_id {
+            if let Some(property) = state.properties.get_mut(&property_id) {
+                if property.collateral_loan_id == Some(loan.id) {
+                    property.collateral_loan_id = None;
+                }
+            }
+        }
         let first_id = state.next_ids.legal_case();
         let first = LegalCase {
             id: first_id,
@@ -2743,7 +2762,7 @@ mod validation {
             public_attention_basis_points: 1_500,
             filed_day: state.clock.day(),
             hearing_day: state.clock.day(),
-            damages: loan.balance,
+            damages: crate::money::Money::ZERO,
             status: LegalCaseStatus::DecidedForDefendant,
         };
         state.legal_cases.insert(first_id, first.clone());
@@ -2787,7 +2806,12 @@ mod validation {
                 .owner_dynasty_id();
             (plaintiff_dynasty_id, defendant_dynasty_id)
         };
+        // A decided-for-defendant breach claim is only valid when the
+        // contract carries no enforceable penalty. Keep the contract
+        // breached but settled so the first case is valid and the duplicate
+        // source check is the failure, not the enforceable-penalty check.
         let unpaid_penalty = Money::from_copper(100);
+        let settled_penalty = Money::ZERO;
         {
             let contract = state
                 .contracts
@@ -2796,7 +2820,7 @@ mod validation {
             contract.status = crate::core::ContractStatus::Breached;
             contract.breaching_dynasty_id = Some(defendant_dynasty_id);
             contract.breach_victim_dynasty_id = Some(plaintiff_dynasty_id);
-            contract.unpaid_breach_penalty = unpaid_penalty;
+            contract.unpaid_breach_penalty = settled_penalty;
         }
         let first_id = state.next_ids.legal_case();
         let first = LegalCase {
@@ -2809,7 +2833,7 @@ mod validation {
             public_attention_basis_points: 1_500,
             filed_day: state.clock.day(),
             hearing_day: state.clock.day(),
-            damages: unpaid_penalty,
+            damages: settled_penalty,
             status: LegalCaseStatus::DecidedForDefendant,
         };
         state.legal_cases.insert(first_id, first.clone());
@@ -3139,10 +3163,22 @@ mod validation {
 
     #[test]
     fn rejects_negative_market_clearing_account() {
+        // Modest deficits represent outstanding consumer credit while
+        // households resupply the pool, so only an unbounded deficit is
+        // treated as corrupted accounting.
         let state = make_test_campaign();
-        let mut value = serde_json::to_value(state).expect("state must serialize");
-        value["market"]["clearing_account"] = Value::from(-1);
-        let (_directory, path) = write_test_json_fixture("negative-clearing-account.json", &value);
+        let mut modest = serde_json::to_value(state.clone()).expect("state must serialize");
+        modest["market"]["clearing_account"] = Value::from(-1);
+        let (_dir, modest_path) = write_test_json_fixture("modest-clearing-deficit.json", &modest);
+        assert!(
+            load_state(&modest_path).is_ok(),
+            "a modest clearing deficit must remain loadable as consumer credit"
+        );
+
+        let mut excessive = serde_json::to_value(state).expect("state must serialize");
+        excessive["market"]["clearing_account"] = Value::from(-10_000_001);
+        let (_directory, path) =
+            write_test_json_fixture("excessive-clearing-deficit.json", &excessive);
 
         assert_invalid_state(
             load_state(&path),

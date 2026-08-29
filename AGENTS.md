@@ -1,5 +1,7 @@
 # Agent Guide
 
+**BCA policy:** advisory
+
 This file is the execution card for repository work. [ARCHITECTURE.md](ARCHITECTURE.md) owns implementation structure and mutation contracts, [STATUS.md](STATUS.md) owns current capability, [TESTING.md](TESTING.md) owns test policy and completion gates, and [DESIGN.md](DESIGN.md) owns product intent.
 
 ## Procedure

@@ -847,6 +847,23 @@ pub(crate) fn progress_public_works(
                 .get(&id)
                 .is_some_and(|work| work.status == PublicWorkStatus::Suspended)
         {
+            // A suspended civic project is not free limbo: stalled works
+            // erode public trust and local order while they sit unfinished.
+            if let Some(treasury_id) = treasury_id {
+                if let Some(treasury) = state.institutions.get_mut(&treasury_id) {
+                    treasury.legitimacy_basis_points =
+                        treasury.legitimacy_basis_points.saturating_sub(15);
+                }
+            }
+            let district_id = state
+                .public_works
+                .get(&id)
+                .expect("suspended work must exist")
+                .district_id;
+            if let Some(district) = state.districts.get_mut(&district_id) {
+                district.unrest_basis_points =
+                    district.unrest_basis_points.saturating_add(10).min(10_000);
+            }
             try_push_outbox(
                 state,
                 OutboxKind::Politics,
