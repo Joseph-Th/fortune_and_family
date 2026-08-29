@@ -58,6 +58,7 @@ The strategic directory keeps one submodule per domain behind a single facade:
 | `strategic/contracts.rs` | Supply contracts: terms, validated commits, capacity, weekly settlement. |
 | `strategic/credit.rs` | Private and municipal credit: loans, civic debts, interest, collateral seizure. |
 | `strategic/property.rs` | Real estate, tenancy, rents (district-indexed and condition-discounted when fire damage is material), district conditions, property-value drift, public works. |
+| `strategic/households.rs` | Household living costs and monthly family pressure. |
 | `strategic/businesses.rs` | Business ownership: capitalization, distributions, acquisitions, dividends. |
 | `strategic/labor.rs` | Weekly employment settlement, market wage fairness, workforce disputes. |
 | `strategic/offices.rs` | Political-office lifecycle: duties, stipends, powers, directives, elections. |
