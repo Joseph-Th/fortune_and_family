@@ -645,7 +645,10 @@ pub(crate) fn settle_property_rents(state: &mut AppState) -> Result<(), Simulati
 pub(crate) fn effective_property_weekly_rent(state: &AppState, property: &Property) -> Money {
     // District desirability reprices every lease, occupied or vacant: the
     // same premises cannot sit at a flat rent while everything around them
-    // moves with the district's fortunes.
+    // moves with the district's fortunes. Building condition then discounts
+    // that indexed rent — a fire-scarred workshop cannot command the price
+    // of a pristine one, but routine upkeep restores the discount as the
+    // structure heals.
     let rent_index = state
         .districts
         .get(&property.district_id)
@@ -654,6 +657,19 @@ pub(crate) fn effective_property_weekly_rent(state: &AppState, property: &Proper
     let indexed_rent = property
         .weekly_rent
         .saturating_mul_ratio(i64::from(rent_index), 10_000);
+    // Condition gates rent only when the building is materially damaged:
+    // above 7000 bp (≈70% condition) the premises rent at full indexed
+    // price; below that, rent scales linearly from 25% at total ruin to
+    // full at the 7000 threshold, mirroring the monthly 180 bp repair
+    // step that needs ~2 years to heal a fire-gutted property.
+    let condition_basis_points = property.condition_basis_points;
+    let condition_adjusted = if condition_basis_points >= 7_000 {
+        indexed_rent
+    } else {
+        let factor = 2_500_i64 + 7_500_i64 * i64::from(condition_basis_points) / 7_000;
+        indexed_rent.saturating_mul_ratio(factor, 10_000)
+    };
+    let indexed_rent = condition_adjusted;
     active_law_value(state, LawKind::RentRestriction).map_or(indexed_rent, |limit| {
         let annual_cap = property
             .value
@@ -849,11 +865,11 @@ pub(crate) fn progress_public_works(
         {
             // A suspended civic project is not free limbo: stalled works
             // erode public trust and local order while they sit unfinished.
-            if let Some(treasury_id) = treasury_id {
-                if let Some(treasury) = state.institutions.get_mut(&treasury_id) {
-                    treasury.legitimacy_basis_points =
-                        treasury.legitimacy_basis_points.saturating_sub(15);
-                }
+            if let Some(treasury_id) = treasury_id
+                && let Some(treasury) = state.institutions.get_mut(&treasury_id)
+            {
+                treasury.legitimacy_basis_points =
+                    treasury.legitimacy_basis_points.saturating_sub(15);
             }
             let district_id = state
                 .public_works

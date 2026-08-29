@@ -532,7 +532,9 @@ pub fn fill_polygon(surface: &mut Surface, form: Form, points: &[(i32, i32)], li
             crossings.push(crossing);
         }
         crossings.sort_unstable();
-        for pair in crossings.chunks_exact(2) {
+        let (pairs, remainder) = crossings.as_chunks::<2>();
+        debug_assert!(remainder.is_empty(), "polygon crossings must pair evenly");
+        for pair in pairs {
             let start_x = pair[0].max(0);
             let end_x = pair[1].min(maximum_x);
             if start_x > end_x {

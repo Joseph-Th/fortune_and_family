@@ -96,15 +96,10 @@ impl ChecksumFolder {
     /// variable-length blobs with an explicit length fold, so zero padding of
     /// the final partial word cannot merge two different shapes.
     fn fold_bytes(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for chunk in &mut chunks {
-            #[allow(clippy::expect_used)] // chunks_exact guarantees eight bytes
-            let array: [u8; 8] = chunk
-                .try_into()
-                .expect("chunks_exact yields exactly eight bytes");
-            self.word(u64::from_le_bytes(array));
+        let (chunks, remainder) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            self.word(u64::from_le_bytes(*chunk));
         }
-        let remainder = chunks.remainder();
         if !remainder.is_empty() {
             let mut last = [0_u8; 8];
             last[..remainder.len()].copy_from_slice(remainder);

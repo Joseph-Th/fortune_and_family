@@ -1803,7 +1803,13 @@ mod gameplay_stability {
             .get(&owner_id)
             .expect("owner must exist")
             .treasury();
-        let expected_rent = base_rent.saturating_mul_ratio(12_000, 10_000);
+        let expected_rent = effective_property_weekly_rent(
+            &state,
+            state
+                .properties
+                .get(&property_id)
+                .expect("rent property must exist"),
+        );
 
         settle_property_rents(&mut state).expect("property rent settlement must succeed");
 
@@ -1835,16 +1841,18 @@ mod gameplay_stability {
             .expect("campaign must contain rentable unowned property")
             .id;
         let owner_id = state.player_dynasty_id;
-        let rent = state
-            .properties
-            .get(&property_id)
-            .expect("property must exist")
-            .weekly_rent;
         state
             .properties
             .get_mut(&property_id)
             .expect("property must exist")
             .owner_dynasty_id = Some(owner_id);
+        let expected_rent = effective_property_weekly_rent(
+            &state,
+            state
+                .properties
+                .get(&property_id)
+                .expect("rent property must exist"),
+        );
         state
             .dynasties
             .get_mut(&owner_id)
@@ -1860,7 +1868,7 @@ mod gameplay_stability {
             Err(SimulationError::DynastyTreasuryOverflow {
                 dynasty_id: owner_id,
                 current: Money::from_copper(i64::MAX),
-                incoming: rent,
+                incoming: expected_rent,
             })
         );
         assert_state_unchanged(

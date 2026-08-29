@@ -264,9 +264,10 @@ pub(crate) fn advance_ai_default_restructuring(
             borrower_dynasty_id,
             principal: Money::ZERO,
             weekly_payment: ai_loan_weekly_payment(balance, AI_DEFAULT_RESTRUCTURING_WEEKS),
-            interest_basis_points: prior_interest
-                .min(AI_DEFAULT_RESTRUCTURING_INTEREST_BASIS_POINTS)
-                .max(AI_DEFAULT_RESTRUCTURING_MIN_INTEREST_BASIS_POINTS),
+            interest_basis_points: prior_interest.clamp(
+                AI_DEFAULT_RESTRUCTURING_MIN_INTEREST_BASIS_POINTS,
+                AI_DEFAULT_RESTRUCTURING_INTEREST_BASIS_POINTS,
+            ),
             collateral_property_id: None,
         };
         let committed = ai_strategic_attempt(

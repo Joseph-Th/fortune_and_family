@@ -57,7 +57,7 @@ The strategic directory keeps one submodule per domain behind a single facade:
 | `strategic/mod.rs` | Scheduling entries, shared relationship plumbing, law appliers, information reports, annual family systems. |
 | `strategic/contracts.rs` | Supply contracts: terms, validated commits, capacity, weekly settlement. |
 | `strategic/credit.rs` | Private and municipal credit: loans, civic debts, interest, collateral seizure. |
-| `strategic/property.rs` | Real estate, tenancy, rents, district conditions, public works. |
+| `strategic/property.rs` | Real estate, tenancy, rents (district-indexed and condition-discounted when fire damage is material), district conditions, property-value drift, public works. |
 | `strategic/businesses.rs` | Business ownership: capitalization, distributions, acquisitions, dividends. |
 | `strategic/labor.rs` | Weekly employment settlement, market wage fairness, workforce disputes. |
 | `strategic/offices.rs` | Political-office lifecycle: duties, stipends, powers, directives, elections. |
@@ -187,8 +187,8 @@ Execution order is causal behavior. Change it only with tests that establish the
 Strategic scheduling lives in `src/systems/strategic/` (domain submodules under one facade):
 
 - **Daily**: routes, crisis effects, AI business recovery, external route supply.
-- **Weekly**: household wage settlement, contracts, loans, civic debts, property rents, employment, dividends, public works, relationship and reputation updates.
-- **Monthly**: district conditions (including property value drift), institution selections, office duties and directives, AI objectives, AI dynasty upkeep, AI credit participation, AI legal filings and case resolution, crisis detection.
+- **Weekly**: household wage settlement, contracts, loans, civic debts, property rents (scaled by district rent index and discounted for fire-scarred premises), employment, dividends, public works, relationship and reputation updates. Household weekly external income is outside silver, not a clearing-account draw.
+- **Monthly**: district conditions (including property value drift and 180 bp monthly building repairs), household living costs scaled by district desirability (surpluses flow to the market clearing pool; shortfalls erode food satisfaction), institution selections, office duties and directives, AI objectives, AI dynasty upkeep, AI credit participation, AI legal filings and case resolution, crisis detection.
 - **Annual**: character health, succession, dynastic milestones.
 
 The market clearing account is the market's internal cash pool. Credits into it:

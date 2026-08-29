@@ -348,10 +348,22 @@ mod coverage {
 
         assert_eq!(property.weekly_rent, weekly_rent);
         assert_eq!(property.district_rent_index_basis_points, 12_000);
-        assert_eq!(
-            property.effective_weekly_rent,
-            weekly_rent.saturating_mul_ratio(12_000, 10_000)
-        );
+        // Condition above the material-damage threshold rents at full indexed price.
+        let expected_effective = {
+            let indexed = weekly_rent.saturating_mul_ratio(12_000, 10_000);
+            let property = state
+                .properties
+                .get(&property_id)
+                .expect("property must exist");
+            if property.condition_basis_points >= 7_000 {
+                indexed
+            } else {
+                let factor =
+                    2_500_i64 + 7_500_i64 * i64::from(property.condition_basis_points) / 7_000;
+                indexed.saturating_mul_ratio(factor, 10_000)
+            }
+        };
+        assert_eq!(property.effective_weekly_rent, expected_effective);
     }
 
     #[test]
