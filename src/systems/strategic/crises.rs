@@ -244,12 +244,15 @@ pub(crate) fn detect_and_advance_crises(
         // long before bakers stop producing bread, so detection watches both
         // staples against their own target stock instead of an absolute
         // shelf floor that normal fluctuation can never approach.
+        // At 65% the shortage declares while shelves thin rather than
+        // after they have collapsed to 40%, leaving response routes
+        // something to protect.
         let staple_thinning = ["grain", "bread"].iter().any(|good_key| {
             registry
                 .get_good_id(good_key)
                 .and_then(|id| state.market.get_quote(id))
                 .is_some_and(|quote| {
-                    quote.stock() < quote.target_stock.saturating_mul_ratio(4_000, 10_000)
+                    quote.stock() < quote.target_stock.saturating_mul_ratio(6_500, 10_000)
                 })
         });
         // Detection must precede empty shelves, or response routes have

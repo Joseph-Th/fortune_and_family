@@ -690,7 +690,11 @@ mod starting_economies {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
         reset_market_flows(&mut state);
-        let plan = decide_production(registry, &state);
+        let plan = decide_production(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        );
         let tools_id = plan.tools_id;
         let planned_tool_quantity = plan.lines.iter().fold(Quantity::ZERO, |total, line| {
             total.saturating_add(line.tool_quantity)
@@ -758,7 +762,11 @@ mod starting_economies {
             }),
             "campaign must contain a non-tool business"
         );
-        let baseline_plan = decide_production(registry, &state);
+        let baseline_plan = decide_production(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        );
         assert!(
             baseline_plan
                 .lines
@@ -773,7 +781,11 @@ mod starting_economies {
             .expect("tools quote must exist")
             .stock = Quantity::ZERO;
 
-        let plan = decide_production(registry, &state);
+        let plan = decide_production(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        );
 
         assert!(
             plan.lines
@@ -1006,7 +1018,11 @@ mod labor {
             business.finance.cash = Money::from_copper(100_000);
             business.policy.minimum_cash_reserve = Money::ZERO;
         }
-        let initial_plan = decide_production(registry, &state);
+        let initial_plan = decide_production(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        );
         let initial_line = initial_plan
             .lines
             .iter()
@@ -1022,7 +1038,11 @@ mod labor {
             agreement.status = EmploymentStatus::Disputed;
         }
 
-        let plan = decide_production(registry, &state);
+        let plan = decide_production(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        );
         let disputed_line = plan
             .lines
             .iter()
@@ -1091,8 +1111,12 @@ mod inventory_policy {
         quote.stock = Quantity::from_milliunits(i64::MAX);
         quote.price = Money::from_copper(1);
 
-        let plan = decide_business_purchases(registry, &state)
-            .expect("business purchase plan must resolve");
+        let plan = decide_business_purchases(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        )
+        .expect("business purchase plan must resolve");
         // Reorder targets scale to the batches the business can actually run:
         // administrative/status capacity further limited by its workforce and
         // sellable output headroom. A maximal nameplate capacity with an
@@ -1220,7 +1244,12 @@ mod inventory_policy {
             contract.status = ContractStatus::Cancelled;
         }
 
-        let plan = decide_business_sales(registry, &state).expect("sale plan must build");
+        let plan = decide_business_sales(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        )
+        .expect("sale plan must build");
 
         let placements: std::collections::BTreeMap<BusinessId, Quantity> = plan
             .lines
@@ -1305,7 +1334,11 @@ mod inventory_policy {
         }
         let before = state.clone();
 
-        let result = decide_business_sales(registry, &state);
+        let result = decide_business_sales(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        );
 
         assert!(
             matches!(
@@ -1386,7 +1419,11 @@ mod inventory_policy {
         }
         let before = state.clone();
 
-        let result = decide_business_sales(registry, &state);
+        let result = decide_business_sales(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        );
 
         assert!(
             matches!(
@@ -1513,7 +1550,12 @@ mod inventory_policy {
             .expect("output quote must exist")
             .stock = Quantity::ZERO;
 
-        let plan = decide_business_sales(registry, &state).expect("sales plan must resolve");
+        let plan = decide_business_sales(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        )
+        .expect("sales plan must resolve");
         let sale = plan
             .lines
             .iter()
@@ -1553,7 +1595,12 @@ mod inventory_policy {
             .inventory
             .insert(output_good_id, below_reserve);
 
-        let plan = decide_business_sales(registry, &state).expect("sales plan must resolve");
+        let plan = decide_business_sales(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        )
+        .expect("sales plan must resolve");
 
         assert!(
             plan.lines
@@ -1606,7 +1653,12 @@ mod inventory_policy {
             .expect("contract good quote must exist")
             .stock = Quantity::ZERO;
 
-        let plan = decide_business_sales(registry, &state).expect("sale plan must resolve");
+        let plan = decide_business_sales(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        )
+        .expect("sale plan must resolve");
         apply_business_sales(&mut state, plan).expect("business sales must apply");
 
         assert!(
@@ -1681,7 +1733,12 @@ mod inventory_policy {
             .expect("contract good quote must exist")
             .stock = Quantity::ZERO;
 
-        let plan = decide_business_sales(registry, &state).expect("sale plan must resolve");
+        let plan = decide_business_sales(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        )
+        .expect("sale plan must resolve");
         apply_business_sales(&mut state, plan).expect("business sales must apply");
 
         let seller = state.businesses.get(seller_id).expect("seller must exist");
@@ -2063,11 +2120,15 @@ mod manager_capabilities {
     fn manager_craft_affects_production_output() {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
-        let business_id = decide_production(registry, &state)
-            .lines
-            .first()
-            .expect("campaign must contain a producing business")
-            .business_id;
+        let business_id = decide_production(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        )
+        .lines
+        .first()
+        .expect("campaign must contain a producing business")
+        .business_id;
         let manager_id = state
             .businesses
             .get(business_id)
@@ -2088,18 +2149,26 @@ mod manager_capabilities {
             .capabilities
             .craft = 100;
 
-        let low_output = decide_production(registry, &low_skill)
-            .lines
-            .into_iter()
-            .find(|line| line.business_id == business_id)
-            .expect("low-skill business must produce")
-            .output_quantity;
-        let high_output = decide_production(registry, &high_skill)
-            .lines
-            .into_iter()
-            .find(|line| line.business_id == business_id)
-            .expect("high-skill business must produce")
-            .output_quantity;
+        let low_output = decide_production(
+            registry,
+            &low_skill,
+            &crate::systems::DailyCapacityScratch::collect(&low_skill),
+        )
+        .lines
+        .into_iter()
+        .find(|line| line.business_id == business_id)
+        .expect("low-skill business must produce")
+        .output_quantity;
+        let high_output = decide_production(
+            registry,
+            &high_skill,
+            &crate::systems::DailyCapacityScratch::collect(&high_skill),
+        )
+        .lines
+        .into_iter()
+        .find(|line| line.business_id == business_id)
+        .expect("high-skill business must produce")
+        .output_quantity;
 
         assert!(
             high_output > low_output,
@@ -2160,20 +2229,28 @@ mod manager_capabilities {
             .capabilities
             .commerce = 100;
 
-        let low_quantity = decide_business_sales(registry, &low_skill)
-            .expect("low-skill sales plan must resolve")
-            .lines
-            .into_iter()
-            .find(|line| line.business_id == business_id)
-            .expect("low-skill business must sell")
-            .quantity;
-        let high_quantity = decide_business_sales(registry, &high_skill)
-            .expect("high-skill sales plan must resolve")
-            .lines
-            .into_iter()
-            .find(|line| line.business_id == business_id)
-            .expect("high-skill business must sell")
-            .quantity;
+        let low_quantity = decide_business_sales(
+            registry,
+            &low_skill,
+            &crate::systems::DailyCapacityScratch::collect(&low_skill),
+        )
+        .expect("low-skill sales plan must resolve")
+        .lines
+        .into_iter()
+        .find(|line| line.business_id == business_id)
+        .expect("low-skill business must sell")
+        .quantity;
+        let high_quantity = decide_business_sales(
+            registry,
+            &high_skill,
+            &crate::systems::DailyCapacityScratch::collect(&high_skill),
+        )
+        .expect("high-skill sales plan must resolve")
+        .lines
+        .into_iter()
+        .find(|line| line.business_id == business_id)
+        .expect("high-skill business must sell")
+        .quantity;
 
         assert!(
             high_quantity > low_quantity,
@@ -2189,15 +2266,19 @@ mod cash_reserve_policy {
     fn production_does_not_spend_the_minimum_cash_reserve() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
-        let business_id = decide_production(registry, &state)
-            .lines
-            .iter()
-            .find_map(|line| {
-                let business = state.businesses.get(line.business_id)?;
-                let recipe = registry.get_recipe(business.recipe_id())?;
-                (recipe.daily_operating_cost() > Money::ZERO).then_some(line.business_id)
-            })
-            .expect("campaign must contain a producing business with operating costs");
+        let business_id = decide_production(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        )
+        .lines
+        .iter()
+        .find_map(|line| {
+            let business = state.businesses.get(line.business_id)?;
+            let recipe = registry.get_recipe(business.recipe_id())?;
+            (recipe.daily_operating_cost() > Money::ZERO).then_some(line.business_id)
+        })
+        .expect("campaign must contain a producing business with operating costs");
         let cash = state
             .businesses
             .get(business_id)
@@ -2210,7 +2291,11 @@ mod cash_reserve_policy {
             .policy
             .minimum_cash_reserve = cash;
 
-        let plan = decide_production(registry, &state);
+        let plan = decide_production(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        );
 
         assert!(
             plan.lines
@@ -2838,7 +2923,11 @@ mod money_conservation {
     fn production_credits_the_clearing_account_with_every_operating_cost() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
-        let plan = decide_production(registry, &state);
+        let plan = decide_production(
+            registry,
+            &state,
+            &crate::systems::DailyCapacityScratch::collect(&state),
+        );
         assert!(
             !plan.lines.is_empty(),
             "fixture campaign must plan production"

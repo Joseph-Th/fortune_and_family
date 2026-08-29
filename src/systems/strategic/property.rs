@@ -1009,13 +1009,13 @@ pub(crate) fn update_district_conditions(state: &mut AppState) {
     }
 }
 
-/// Monthly wear reversal: routine upkeep slowly restores condition toward full
-/// repair, so an urban fire's damage heals over the following years instead of
-/// degrading every building in the district permanently. The step is far
-/// smaller than active fire erosion, keeping fires costly while making
-/// condition a two-way statistic.
+/// Monthly wear reversal: routine upkeep restores condition toward full
+/// repair, so an urban fire's damage heals over the following year instead
+/// of degrading every building in the district permanently. The step stays
+/// smaller than active fire erosion (600+/mo at moderate severity) so
+/// fires remain costly while making condition a two-way statistic.
 pub(crate) fn repair_district_properties(state: &mut AppState, district_id: DistrictId) {
-    const MONTHLY_REPAIR_BASIS_POINTS: u16 = 30;
+    const MONTHLY_REPAIR_BASIS_POINTS: u16 = 180;
     for property in state
         .properties
         .values_mut()
@@ -1092,7 +1092,29 @@ pub(crate) fn district_employment_basis_points(state: &AppState, district_id: Di
             })
             .map(|employment| u32::from(employment.workers)),
     );
-    let formal_employment_bonus = active_jobs
+    // Population-weighted formal employment: the same number of formal jobs
+    // covers a smaller share of a populous district, so per-capita pressure
+    // dilutes the bonus. A 6.9k reference keeps the single-district average
+    // near the previous magnitude while making 9.9k Southern Reach and 4.3k
+    // Temple Hill diverge realistically.
+    let total_members: u32 = state
+        .households
+        .ids_for_district(district_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.households.get(*id))
+        .map(|h| u32::from(h.members()))
+        .sum();
+    let reference_members: u32 = 6_900;
+    let population_adjusted_jobs = if total_members == 0 {
+        active_jobs
+    } else {
+        active_jobs
+            .saturating_mul(reference_members)
+            .checked_div(total_members)
+            .unwrap_or(active_jobs)
+    };
+    let formal_employment_bonus = population_adjusted_jobs
         .saturating_mul(DISTRICT_FORMAL_EMPLOYMENT_BASIS_POINTS_PER_WORKER)
         .min(DISTRICT_MAX_FORMAL_EMPLOYMENT_BONUS_BASIS_POINTS);
     let formal_employment_bonus =

@@ -231,14 +231,18 @@ fn validate_market_quotes(registry: &Registry, state: &AppState) -> Result<(), S
 fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     reset_market_flows(state);
     super::strategic::run_daily_strategic_systems(registry, state)?;
+    // Business status cannot change until after production/sales
+    // (lifecycle evaluation runs later), so one capacity snapshot serves
+    // purchases, production, and sales without per-phase rescans.
+    let capacity_scratch = super::DailyCapacityScratch::collect(state);
 
-    let purchase_plan = decide_business_purchases(registry, state)?;
+    let purchase_plan = decide_business_purchases(registry, state, &capacity_scratch)?;
     apply_business_purchases(state, purchase_plan)?;
 
-    let production_plan = decide_production(registry, state);
+    let production_plan = decide_production(registry, state, &capacity_scratch);
     apply_production(state, production_plan)?;
 
-    let sale_plan = decide_business_sales(registry, state)?;
+    let sale_plan = decide_business_sales(registry, state, &capacity_scratch)?;
     apply_business_sales(state, sale_plan)?;
 
     let household_plan = decide_household_consumption(registry, state);
@@ -286,6 +290,7 @@ fn reset_market_flows(state: &mut AppState) {
 fn decide_business_purchases(
     registry: &Registry,
     state: &AppState,
+    capacity_scratch: &super::DailyCapacityScratch,
 ) -> Result<BusinessPurchasePlan, SimulationError> {
     // Registry good identifiers are dense (`GoodId::new(goods.len())` at
     // registration), so the shared-stock scratch pad is a flat vector indexed
@@ -307,7 +312,6 @@ fn decide_business_purchases(
     for business in state.businesses.iter() {
         available_cash[business.id().value() as usize] = business.cash();
     }
-    let capacity_scratch = super::DailyCapacityScratch::collect(state);
     let mut lines = Vec::new();
 
     for business in state.businesses.iter() {
@@ -489,7 +493,11 @@ fn apply_business_purchases(
     Ok(())
 }
 
-fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
+fn decide_production(
+    registry: &Registry,
+    state: &AppState,
+    capacity_scratch: &super::DailyCapacityScratch,
+) -> ProductionPlan {
     let tools_id = registry
         .get_good_id("tools")
         .expect("Rivergate registry must define tools");
@@ -500,14 +508,13 @@ fn decide_production(registry: &Registry, state: &AppState) -> ProductionPlan {
         .expect("Rivergate market must define tools");
     let tools_price = tools_quote.price;
     let mut remaining_tools_stock = tools_quote.stock;
-    let capacity_scratch = super::DailyCapacityScratch::collect(state);
     let mut lines = Vec::new();
     for business in state.businesses.iter() {
         let Some(line) = decide_business_production(
             registry,
             state,
             business,
-            &capacity_scratch,
+            capacity_scratch,
             tools_id,
             remaining_tools_stock,
             tools_price,
@@ -1027,6 +1034,7 @@ struct BusinessSaleCandidate {
 fn decide_business_sales(
     registry: &Registry,
     state: &AppState,
+    capacity_scratch: &super::DailyCapacityScratch,
 ) -> Result<BusinessSalePlan, SimulationError> {
     // Shared per-good absorption headroom in a flat vector indexed by the
     // registry's dense good identifiers (see `decide_business_purchases`).
@@ -1038,7 +1046,6 @@ fn decide_business_sales(
             .max(Quantity::ZERO);
     }
     let mut lines = Vec::new();
-    let capacity_scratch = super::DailyCapacityScratch::collect(state);
 
     for business in state.businesses.iter() {
         if matches!(
@@ -1047,8 +1054,7 @@ fn decide_business_sales(
         ) {
             continue;
         }
-        let Some(mut candidate) =
-            plan_sale_candidate(registry, state, business, &capacity_scratch)?
+        let Some(mut candidate) = plan_sale_candidate(registry, state, business, capacity_scratch)?
         else {
             continue;
         };
