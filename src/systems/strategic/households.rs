@@ -11,31 +11,13 @@ use super::*;
 /// unmodeled services. Households that cannot cover the cost spend down to
 /// zero and see food satisfaction erode, so a household budget that looks
 /// cash-rich on its external-income alone still faces realistic pressure.
+/// Market staples are paid separately through daily household consumption;
+/// living costs therefore track district rents, not bread-price doubling,
+/// so a staple spike does not charge households twice for the same bread.
 pub(crate) fn apply_household_living_costs(
-    registry: &Registry,
+    _registry: &Registry,
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
-    // Living cost is 2 copper per member per month scaled by district
-    // desirability: a household in a district with rent index 14_000 pays
-    // 40% more than one in a 10_000 district. The base is deliberately
-    // modest (a 1k-member household pays 20 cr at neutral desirability,
-    // ~28% of a laboring household's 72 cr monthly external income) so
-    // disruption that shaves regional earning power still tightens budgets
-    // without bankrupting every household outright. Staple-price inflation
-    // then scales the upkeep: a bread-price spike that doubles the staple
-    // cost doubles the household's living-cost burden, so hyperinflation
-    // cannot be absorbed by a fixed copper charge.
-    let bread_price_ratio_basis_points = registry
-        .get_good_id("bread")
-        .and_then(|bread_id| {
-            let base = registry.get_good(bread_id)?.base_price().copper().max(1);
-            let current = state
-                .market
-                .get_quote(bread_id)
-                .map(|quote| quote.price().copper().max(1))?;
-            Some((current.saturating_mul(10_000) / base).clamp(6_000, 20_000))
-        })
-        .unwrap_or(10_000);
     let mut total_living_cost = Money::ZERO;
     let household_ids: Vec<_> = state.households.records().keys().copied().collect();
     for household_id in household_ids {
@@ -56,8 +38,7 @@ pub(crate) fn apply_household_living_costs(
             .expect("household district must exist")
             .rent_index_basis_points;
         let base_copper = i64::from(members).saturating_mul(2);
-        let rent_scaled = base_copper.saturating_mul(i64::from(rent_index)) / 10_000;
-        let scaled_copper = rent_scaled.saturating_mul(bread_price_ratio_basis_points) / 10_000;
+        let scaled_copper = base_copper.saturating_mul(i64::from(rent_index)) / 10_000;
         if scaled_copper <= 0 {
             continue;
         }

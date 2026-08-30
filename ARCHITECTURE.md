@@ -189,7 +189,7 @@ Strategic scheduling lives in `src/systems/strategic/` (domain submodules under 
 
 - **Daily**: routes, crisis effects, AI business recovery, external route supply.
 - **Weekly**: household wage settlement, contracts, loans, civic debts, property rents (scaled by district rent index and discounted for fire-scarred premises), employment, dividends, public works, relationship and reputation updates. Household weekly external income is outside silver, not a clearing-account draw; its rate scales with capacity-weighted external-route health.
-- **Monthly**: district conditions (including property value drift and 180 bp monthly building repairs), household living costs scaled by district desirability and staple-price inflation (surpluses flow to the market clearing pool; shortfalls erode food satisfaction), institution selections, office duties and directives, AI objectives, AI dynasty upkeep, AI credit participation, AI legal filings and case resolution, crisis detection.
+- **Monthly**: district conditions (including property value drift and 180 bp monthly building repairs), household living costs scaled by district desirability (market staples pay separately, so no double bread inflation; surpluses to clearing pool, shortfalls erode satisfaction), institution selections, office duties and directives, AI objectives, AI dynasty upkeep, AI credit participation, AI legal filings and case resolution, crisis detection.
 - **Annual**: character health, succession, dynastic milestones.
 
 The market clearing account is the market's internal cash pool. Credits into it:

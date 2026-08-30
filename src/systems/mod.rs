@@ -19,6 +19,10 @@ pub(crate) const WORKERS_PER_BATCH: u16 = 4;
 pub(crate) const EMPLOYMENT_RECOVERY_BASIS_POINTS: u16 = 3_000;
 pub(crate) const MIN_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 7_000;
 pub(crate) const MAX_DISTRICT_RENT_INDEX_BASIS_POINTS: u16 = 14_000;
+/// Shared tool-share of weekly spend that becomes market tool demand (25%).
+/// Production and civic construction share the same material intensity so
+/// the economy has one canonical industrial tool ratio.
+pub(crate) const TOOL_SHARE_BASIS_POINTS: i64 = 2_500;
 pub(crate) const OFFICE_TERM_DAYS: i64 = 360;
 /// A temporarily officeless institution retries its election on this cadence
 /// instead of locking its office — and its powers and stipend flow — away for

@@ -117,12 +117,10 @@ struct SuccessionShock {
 ///
 /// # Errors
 ///
-/// Returns an error for a zero day count, an exhausted day or schedule range, a registry mismatch,
-/// missing market definitions, identifier-allocation exhaustion, or a business finance ledger that
-/// cannot represent a required mutation. The campaign is unchanged when any requested day fails.
-pub fn advance_days(
+#[allow(clippy::missing_errors_doc)]
+fn validate_advance_preconditions(
     registry: &Registry,
-    state: &mut AppState,
+    state: &AppState,
     days: u32,
 ) -> Result<(), SimulationError> {
     if days == 0 {
@@ -145,7 +143,22 @@ pub fn advance_days(
             registry_scenario: registry.scenario().key().to_owned(),
         });
     }
-    validate_market_quotes(registry, state)?;
+    validate_market_quotes(registry, state)
+}
+
+/// Advances the canonical simulation pipeline by a positive number of days.
+///
+/// # Errors
+///
+/// Returns an error for a zero day count, an exhausted day or schedule range, a registry mismatch,
+/// missing market definitions, identifier-allocation exhaustion, or a business finance ledger that
+/// cannot represent a required mutation. The campaign is unchanged when any requested day fails.
+pub fn advance_days(
+    registry: &Registry,
+    state: &mut AppState,
+    days: u32,
+) -> Result<(), SimulationError> {
+    validate_advance_preconditions(registry, state, days)?;
 
     // Debug builds re-check the full invariant battery after every simulated
     // day; release builds compile those assertions out entirely. The
@@ -178,27 +191,7 @@ pub(crate) fn advance_days_scratch(
     state: &mut AppState,
     days: u32,
 ) -> Result<(), SimulationError> {
-    if days == 0 {
-        return Err(SimulationError::InvalidDayCount { days });
-    }
-    if state
-        .clock
-        .day()
-        .checked_add(i64::from(days))
-        .is_none_or(|final_day| final_day == i64::MAX)
-    {
-        return Err(SimulationError::DayRangeExhausted {
-            current_day: state.clock.day(),
-            requested_days: days,
-        });
-    }
-    if state.scenario_key != registry.scenario().key() {
-        return Err(SimulationError::RegistryMismatch {
-            state_scenario: state.scenario_key.clone(),
-            registry_scenario: registry.scenario().key().to_owned(),
-        });
-    }
-    validate_market_quotes(registry, state)?;
+    validate_advance_preconditions(registry, state, days)?;
     let invariant_ids = super::invariants::prepare_invariant_ids(registry);
     run_day_loop(registry, state, days, invariant_ids.as_ref())
 }
@@ -287,6 +280,7 @@ fn reset_market_flows(state: &mut AppState) {
     }
 }
 
+// ── Business purchases ────────────────────────────────────────────────────
 fn decide_business_purchases(
     registry: &Registry,
     state: &AppState,
@@ -493,6 +487,7 @@ fn apply_business_purchases(
     Ok(())
 }
 
+// ── Production ────────────────────────────────────────────────────────────
 fn decide_production(
     registry: &Registry,
     state: &AppState,
@@ -531,7 +526,7 @@ fn decide_production(
 /// At 25% tools are a meaningful but not dominant industrial input, so a
 /// tool shortage constrains production without making every workshop's daily
 /// viability depend on 80% of its operating budget being tools.
-const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = 2_500;
+const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASIS_POINTS;
 
 /// Heads become eligible for succession at this age. Combined with the
 /// annual chance ramp below, this keeps the first transition within a
@@ -1022,6 +1017,7 @@ fn planned_tool_market_update(
 
 /// A business's sellable stock after policy and contract reserves, plus the
 /// market context that bounds how much of it can be placed today.
+// ── Business sales ────────────────────────────────────────────────────────
 struct BusinessSaleCandidate {
     good_id: GoodId,
     surplus: Quantity,
@@ -1322,6 +1318,7 @@ fn apply_business_sales(
     Ok(())
 }
 
+// ── Household consumption ─────────────────────────────────────────────────
 fn decide_household_consumption(registry: &Registry, state: &AppState) -> HouseholdConsumptionPlan {
     let bread_id = registry
         .get_good_id("bread")
@@ -1607,6 +1604,7 @@ fn apply_household_consumption(
 }
 
 #[derive(Clone, Copy)]
+// ── Maintenance ───────────────────────────────────────────────────────────
 struct MaintenanceSnapshot {
     business_id: BusinessId,
     recipe_id: RecipeId,
@@ -1734,8 +1732,12 @@ fn maintenance_line(
         can_maintain && (recipe.output_good_id() == tools_id || tools_available);
     let random_wear = i16::try_from(state.rng.range_u32(4)).expect("wear fits i16");
     let neglect_penalty = if maintenance_succeeds { 0 } else { 5 };
-    let accident_penalty = if condition_basis_points < 4_000 && state.rng.is_chance_success(40) {
-        120
+    // Low-condition accidents are frequent small setbacks, not rare catastrophes:
+    // the expected daily erosion stays similar but variance is bounded so
+    // routine upkeep can gradually recover a neglected workshop instead of
+    // requiring luck to avoid a single -120 collapse.
+    let accident_penalty = if condition_basis_points < 4_000 && state.rng.is_chance_success(120) {
+        30
     } else {
         0
     };
@@ -1900,6 +1902,7 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
     Ok(())
 }
 
+// ── Market ────────────────────────────────────────────────────────────────
 fn apply_market_spoilage(registry: &Registry, state: &mut AppState) {
     for good in registry.goods() {
         let quote = state
@@ -2290,6 +2293,7 @@ fn decide_market_causes(
     causes
 }
 
+// ── Business lifecycle ──────────────────────────────────────────────────
 fn update_business_lifecycle(
     registry: &Registry,
     state: &mut AppState,
@@ -2380,6 +2384,7 @@ fn update_business_lifecycle(
     Ok(())
 }
 
+// ── External income ─────────────────────────────────────────────────────
 fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationError> {
     // Regional households earn part of their living beyond the modeled market:
     // hauling freight, provisioning caravans, selling crafts and labor to the
@@ -2514,6 +2519,7 @@ pub(crate) fn import_trade_availability_basis_points(state: &AppState) -> u16 {
     average_route_availability_basis_points(state, IMPORT_TRADE_MIN_AVAILABILITY_BASIS_POINTS)
 }
 
+// ── Year boundary & succession ──────────────────────────────────────────
 fn process_year_boundary(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     let year = state.clock.year(registry.scenario().start_year());
     let id = state.next_ids.try_chronicle()?;

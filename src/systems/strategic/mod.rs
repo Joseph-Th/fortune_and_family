@@ -94,7 +94,7 @@ const EPIDEMIC_DAILY_WELFARE_DIVISOR: u16 = 60;
 const DISTRICT_BACKGROUND_EMPLOYMENT_BASIS_POINTS: u16 = 4_500;
 const DISTRICT_FORMAL_EMPLOYMENT_BASIS_POINTS_PER_WORKER: u32 = 100;
 const DISTRICT_MAX_FORMAL_EMPLOYMENT_BONUS_BASIS_POINTS: u32 = 4_500;
-const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = 2_500;
+const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASIS_POINTS;
 
 /// Speculative credit terms: risk capital carries a punishing rate on a short,
 /// heavy book, is capped near the working-capital ceiling, and is secured by
