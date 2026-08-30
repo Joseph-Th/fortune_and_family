@@ -849,7 +849,7 @@ pub(crate) fn run_monthly_strategic_systems(
     state: &mut AppState,
 ) -> Result<(), SimulationError> {
     update_district_conditions(state);
-    apply_household_living_costs(state)?;
+    apply_household_living_costs(registry, state)?;
     resolve_institution_selections(registry, state)?;
     apply_office_duties(state)?;
     apply_office_stipends(state)?;

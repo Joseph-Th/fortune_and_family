@@ -37,7 +37,7 @@ Dependency direction is one way:
 | `src/core/mod.rs` | Core facade: record and state type re-exports. |
 | `src/core/state.rs` | `AppState`, clock, ID allocation, synchronized stores, state access. |
 | `src/ids.rs` | Typed persistent IDs. |
-| `src/money.rs` | Fixed-point `Money`, `Quantity`, affordability, and ratio arithmetic. |
+| `src/money.rs` | Fixed-point `Money`, `Quantity`, affordability, ratio arithmetic, and shared ceil-division helpers. |
 | `src/registry/mod.rs` | Immutable Rivergate definitions and lookup validation. |
 | `src/rng.rs` | Serializable deterministic RNG. |
 | `src/systems/bootstrap.rs` | New campaign construction. |
@@ -188,8 +188,8 @@ Execution order is causal behavior. Change it only with tests that establish the
 Strategic scheduling lives in `src/systems/strategic/` (domain submodules under one facade):
 
 - **Daily**: routes, crisis effects, AI business recovery, external route supply.
-- **Weekly**: household wage settlement, contracts, loans, civic debts, property rents (scaled by district rent index and discounted for fire-scarred premises), employment, dividends, public works, relationship and reputation updates. Household weekly external income is outside silver, not a clearing-account draw.
-- **Monthly**: district conditions (including property value drift and 180 bp monthly building repairs), household living costs scaled by district desirability (surpluses flow to the market clearing pool; shortfalls erode food satisfaction), institution selections, office duties and directives, AI objectives, AI dynasty upkeep, AI credit participation, AI legal filings and case resolution, crisis detection.
+- **Weekly**: household wage settlement, contracts, loans, civic debts, property rents (scaled by district rent index and discounted for fire-scarred premises), employment, dividends, public works, relationship and reputation updates. Household weekly external income is outside silver, not a clearing-account draw; its rate scales with capacity-weighted external-route health.
+- **Monthly**: district conditions (including property value drift and 180 bp monthly building repairs), household living costs scaled by district desirability and staple-price inflation (surpluses flow to the market clearing pool; shortfalls erode food satisfaction), institution selections, office duties and directives, AI objectives, AI dynasty upkeep, AI credit participation, AI legal filings and case resolution, crisis detection.
 - **Annual**: character health, succession, dynastic milestones.
 
 The market clearing account is the market's internal cash pool. Credits into it:
@@ -211,7 +211,7 @@ Debits against it:
 
 - Business sales, vacancy income, crisis profiteering extraction, office toll-revenue draws.
 
-Weekly external regional income is outside silver paid directly to households. Its rate scales with average external-route health, so trade disruption tightens household budgets instead of draining the pool.
+Weekly external regional income is outside silver paid directly to households. Its rate scales with capacity-weighted external-route health, so a high-volume grain blockade tightens household budgets more than a minor ore-road disruption instead of draining the pool.
 
 AI dynasties act on the same cadence through `recover_ai_businesses` (daily), `advance_ai_objectives`, `apply_ai_dynasty_upkeep`, `advance_ai_credit_participation`, `file_grounded_ai_legal_cases`, and `resolve_institution_selections` (monthly).
 

@@ -308,6 +308,13 @@ const fn saturating_mul_ratio_i64(value: i64, numerator: i64, denominator: i64) 
     saturating_i128_to_i64(result)
 }
 
+/// Ceil-divides a wide nonnegative numerator by a positive denominator.
+pub(crate) fn ceil_div_nonnegative_wide(numerator: i128, denominator: i128) -> i128 {
+    debug_assert!(numerator >= 0 && denominator > 0);
+    let quotient = numerator / denominator;
+    quotient + i128::from(numerator % denominator != 0)
+}
+
 /// Ceil-divides a nonnegative numerator by a positive denominator.
 pub(crate) const fn ceil_div_nonnegative(numerator: i64, denominator: i64) -> i64 {
     assert!(

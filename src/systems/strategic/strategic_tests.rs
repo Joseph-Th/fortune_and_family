@@ -1785,7 +1785,7 @@ mod gameplay_stability {
             .expect("campaign must contain rentable unowned property")
             .id;
         let owner_id = state.player_dynasty_id;
-        let (district_id, base_rent) = {
+        let (district_id, _base_rent) = {
             let property = state
                 .properties
                 .get_mut(&property_id)

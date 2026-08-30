@@ -509,8 +509,9 @@ mod transfer_boundaries {
             household.weekly_income = weekly_income;
             household.cash = Money::ZERO;
         }
-        // Four fixture routes with two half-disrupted, so average
-        // availability is 7,500 basis points of normal earning power.
+        // Four fixture routes with two half-disrupted; capacity-weighted
+        // availability reflects the high-volume grain road mattering more
+        // than the small ore road.
         let route_ids: Vec<_> = state.external_routes.keys().copied().collect();
         let [_, _, first_disrupted, second_disrupted] = route_ids.as_slice() else {
             panic!("campaign fixture must define at least four external routes");
@@ -527,7 +528,19 @@ mod transfer_boundaries {
 
         settle_weekly_external_income(&mut state).expect("route-scaled settlement must commit");
 
-        let expected_payment = weekly_income.saturating_mul_ratio(7_500, 10_000);
+        // Capacity-weighted expected availability: grain 20, wool 10, timber
+        // 14, ore 7 at 10000,10000,5000,5000 => 405000/51 = 7941 bp.
+        let mut total_weighted: u64 = 0;
+        let mut total_capacity: u64 = 0;
+        for route in state.external_routes.values().filter(|r| r.active) {
+            let availability = u64::from(10_000_u16.saturating_sub(route.disruption_basis_points));
+            let capacity = u64::try_from(route.daily_capacity.milliunits().max(0)).unwrap_or(0);
+            total_weighted = total_weighted.saturating_add(availability.saturating_mul(capacity));
+            total_capacity = total_capacity.saturating_add(capacity);
+        }
+        let expected_bp = u16::try_from((total_weighted / total_capacity.max(1)).min(10_000))
+            .expect("weighted availability must fit u16");
+        let expected_payment = weekly_income.saturating_mul_ratio(i64::from(expected_bp), 10_000);
         for household in state.households.iter() {
             assert_eq!(
                 household.cash, expected_payment,

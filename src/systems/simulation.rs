@@ -2203,28 +2203,36 @@ fn production_price_floors(registry: &Registry, state: &AppState) -> BTreeMap<Go
             ));
     }
     // The market's sustainable price is what the TYPICAL producer needs to
-    // keep operating, not the single luckiest one. A pure minimum lets one
-    // wage-starved or hyper-efficient firm anchor staple prices below every
-    // other house's cost, bleeding the whole sector toward distress; the
-    // mean keeps thin-but-real margins in the commodity chain.
+    // keep operating, not the single luckiest or unluckiest one. A pure
+    // minimum lets one wage-starved or hyper-efficient firm anchor staple
+    // prices below every other house's cost, bleeding the whole sector toward
+    // distress; the mean is still skewed by a single distressed outlier
+    // paying crisis wages. The median keeps a robust center: half the
+    // producers break even below it, half above, so one outlier cannot drag
+    // the floor toward sector-wide losses or windfalls.
     floors
         .into_iter()
-        .map(|(good_id, producers)| {
-            let total = producers
-                .iter()
-                .fold(0_i128, |sum, price| sum + i128::from(price.copper()));
-            let average =
-                ceil_div_nonnegative_wide(total, i128::try_from(producers.len()).unwrap_or(1));
-            let average = i64::try_from(average).unwrap_or(i64::MAX);
-            (good_id, Money::from_copper(average))
+        .map(|(good_id, mut producers)| {
+            producers.sort_by_key(|price| price.copper());
+            let median_i128: i128 = if producers.is_empty() {
+                0
+            } else if producers.len() % 2 == 1 {
+                i128::from(producers[producers.len() / 2].copper())
+            } else {
+                let upper = i128::from(producers[producers.len() / 2].copper());
+                let lower = i128::from(producers[producers.len() / 2 - 1].copper());
+                // Even count: ceil of the midpoint so the floor never
+                // underestimates the break-even by truncating.
+                ceil_div_nonnegative_wide(lower + upper, 2)
+            };
+            let median = i64::try_from(median_i128).unwrap_or(i64::MAX);
+            (good_id, Money::from_copper(median))
         })
         .collect()
 }
 
 pub(crate) fn ceil_div_nonnegative_wide(numerator: i128, denominator: i128) -> i128 {
-    debug_assert!(numerator >= 0 && denominator > 0);
-    let quotient = numerator / denominator;
-    quotient + i128::from(numerator % denominator != 0)
+    crate::money::ceil_div_nonnegative_wide(numerator, denominator)
 }
 
 fn seasonal_pressure_basis_points(category: GoodCategory, day_of_year: u16) -> i64 {
@@ -2448,24 +2456,47 @@ fn average_route_availability_basis_points(state: &AppState, minimum: u16) -> u1
         // cannot depend on route health that does not exist.
         return 10_000;
     }
-    let routes = state
+    let routes: Vec<_> = state
         .external_routes
         .values()
         .filter(|route| route.active)
-        .collect::<Vec<_>>();
+        .collect();
     if routes.is_empty() {
         // A modeled route network with no active route is a total blockade,
         // not a perfectly healthy one: the caller's floor applies.
         return minimum;
     }
-    let total = routes
-        .iter()
-        .map(|route| 10_000_u16.saturating_sub(route.disruption_basis_points))
-        .fold(0_u32, |sum, availability| {
-            sum.saturating_add(u32::from(availability))
-        });
-    let count = u32::try_from(routes.len()).unwrap_or(u32::MAX);
-    u16::try_from((total / count).max(u32::from(minimum)).min(10_000))
+    // Capacity-weighted average: a high-volume grain road matters more for
+    // household earning power and import-trade output than a small ore road.
+    // Simple averaging would hide a grain-route blockade behind a healthy
+    // timber road, muting both household-budget and staple-supply disruption.
+    let mut total_weighted: u64 = 0;
+    let mut total_capacity_milli: u64 = 0;
+    for route in &routes {
+        let availability = u64::from(10_000_u16.saturating_sub(route.disruption_basis_points));
+        let capacity_milli = u64::try_from(route.daily_capacity.milliunits().max(0)).unwrap_or(0);
+        // Zero-capacity routes cannot contribute weight; they also cannot
+        // divide, so skip them while preserving the floor fallback below.
+        if capacity_milli == 0 {
+            continue;
+        }
+        total_weighted = total_weighted.saturating_add(availability.saturating_mul(capacity_milli));
+        total_capacity_milli = total_capacity_milli.saturating_add(capacity_milli);
+    }
+    if total_capacity_milli == 0 {
+        // All active routes have zero capacity: fall back to unweighted mean.
+        let total = routes
+            .iter()
+            .map(|route| 10_000_u16.saturating_sub(route.disruption_basis_points))
+            .fold(0_u32, |sum, availability| {
+                sum.saturating_add(u32::from(availability))
+            });
+        let count = u32::try_from(routes.len()).unwrap_or(u32::MAX);
+        return u16::try_from((total / count).max(u32::from(minimum)).min(10_000))
+            .expect("availability clamped into basis-point range must fit u16");
+    }
+    let weighted = u32::try_from(total_weighted / total_capacity_milli).unwrap_or(10_000);
+    u16::try_from(u32::from(weighted).max(u32::from(minimum)).min(10_000))
         .expect("availability clamped into basis-point range must fit u16")
 }
 

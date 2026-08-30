@@ -2810,7 +2810,7 @@ mod validation {
         // contract carries no enforceable penalty. Keep the contract
         // breached but settled so the first case is valid and the duplicate
         // source check is the failure, not the enforceable-penalty check.
-        let unpaid_penalty = Money::from_copper(100);
+        let _unpaid_penalty = Money::from_copper(100);
         let settled_penalty = Money::ZERO;
         {
             let contract = state

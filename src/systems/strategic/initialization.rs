@@ -126,7 +126,7 @@ pub(crate) fn initialize_properties(registry: &Registry, state: &mut AppState) {
                 tenant_dynasty_id: None,
                 anchor_value: Money::from_copper(28_000),
                 value: Money::from_copper(28_000),
-                weekly_rent: Money::from_copper(340),
+                weekly_rent: Money::from_copper(120),
                 condition_basis_points: 8_000,
                 collateral_loan_id: None,
             },
