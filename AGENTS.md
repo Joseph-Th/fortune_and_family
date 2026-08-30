@@ -19,7 +19,7 @@ This file is the execution card for repository work. [ARCHITECTURE.md](ARCHITECT
 |---|---|
 | Campaign construction | `src/systems/bootstrap.rs` |
 | Player commands | `src/systems/commands/` |
-| Daily/scheduled simulation | `src/systems/simulation.rs`, `src/systems/strategic/` |
+| Daily/scheduled simulation | `src/systems/simulation/`, `src/systems/strategic/` |
 | Legal/progression | `src/systems/legal.rs`, `src/systems/progression.rs` |
 | Persistence | `src/persistence.rs` |
 | Read models/HTML | `src/projection.rs` |

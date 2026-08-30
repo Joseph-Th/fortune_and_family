@@ -349,6 +349,7 @@ mod coverage {
         assert_eq!(property.weekly_rent, weekly_rent);
         assert_eq!(property.district_rent_index_basis_points, 12_000);
         // Condition above the material-damage threshold rents at full indexed price.
+        // Below 7000 rent scales linearly from 0% at ruin to full at threshold.
         let expected_effective = {
             let indexed = weekly_rent.saturating_mul_ratio(12_000, 10_000);
             let property = state
@@ -358,8 +359,7 @@ mod coverage {
             if property.condition_basis_points >= 7_000 {
                 indexed
             } else {
-                let factor =
-                    2_500_i64 + 7_500_i64 * i64::from(property.condition_basis_points) / 7_000;
+                let factor = 10_000_i64 * i64::from(property.condition_basis_points) / 7_000;
                 indexed.saturating_mul_ratio(factor, 10_000)
             }
         };

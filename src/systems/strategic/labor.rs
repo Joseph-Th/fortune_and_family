@@ -522,7 +522,10 @@ pub(crate) fn business_labor_utilization_basis_points(
     business_id: BusinessId,
     capacity_scratch: &crate::systems::DailyCapacityScratch,
 ) -> u16 {
-    const RETAINER_BASIS_POINTS: i64 = 2_500;
+    // Retainer keeps a skeleton crew paid during idle weeks so a healthy firm
+    // retains workers through short troughs. At 10% it covers a minimal
+    // standby wage without paying quarter-wages to an entirely idle workshop.
+    const RETAINER_BASIS_POINTS: i64 = 1_000;
     let business = state
         .businesses
         .get(business_id)

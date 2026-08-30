@@ -33,13 +33,17 @@ pub(crate) use std::fmt::Write as _;
 pub(crate) use thiserror::Error;
 
 pub(crate) const OFFICE_ADMINISTRATIVE_LOAD_PER_POWER: u16 = 10;
-pub(crate) const OFFICE_DUTY_COST_PER_POWER: Money = Money::from_copper(100);
+/// Monthly civic duty per office power. At 350 copper a three-power council
+/// seat costs ~1050/month and ~12,600/year (≈28% of the 45k starting treasury),
+/// enough that holding multiple offices without a productive portfolio drains
+/// legitimacy and cash rather than being a trivial prestige badge.
+pub(crate) const OFFICE_DUTY_COST_PER_POWER: Money = Money::from_copper(350);
 pub(crate) const OFFICE_DUTY_PORTFOLIO_SURCHARGE_PER_ADDITIONAL_OFFICE: Money =
-    Money::from_copper(50);
+    Money::from_copper(150);
 /// Monthly fees of office paid out of the holding institution's budget to the
 /// officeholder's dynasty. Offices stay a net cost (duties exceed the stipend),
 /// but service should materially compensate the house that performs it.
-const OFFICE_STIPEND_PER_POWER: Money = Money::from_copper(40);
+const OFFICE_STIPEND_PER_POWER: Money = Money::from_copper(120);
 const AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY: Money = Money::from_copper(500);
 const AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER: Money = Money::from_copper(250);
 const AI_DYNASTY_UPKEEP_PER_BUSINESS: Money = Money::from_copper(400);

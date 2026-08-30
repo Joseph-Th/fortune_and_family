@@ -128,6 +128,7 @@ fn execute_decided_debt_judgments(state: &mut AppState) -> Result<(), Simulation
 /// losing party can pay against the grounded claim source, and records the
 /// relational aftermath.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn decide_legal_case(
     state: &mut AppState,
     id: crate::ids::LegalCaseId,

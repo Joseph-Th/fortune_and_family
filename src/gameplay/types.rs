@@ -732,6 +732,7 @@ impl RelationshipSnapshotPart {
 }
 
 impl StrategicSnapshotPart {
+    #[allow(clippy::too_many_lines)]
     pub fn capture(state: &AppState, player_id: DynastyId) -> Self {
         let player_business_ids: BTreeSet<_> = state
             .businesses

@@ -3262,6 +3262,7 @@ pub(crate) fn has_property_liquidation_opportunity(registry: &Registry, state: &
         })
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn add_borrow_candidate(
     state: &AppState,
     persona: GameplayPersona,

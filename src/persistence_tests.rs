@@ -2744,12 +2744,11 @@ mod validation {
         loan.missed_payments = 0;
         loan.collateral_property_id = None;
         state.loans.insert(loan.id, loan.clone());
-        if let Some(property_id) = collateral_property_id {
-            if let Some(property) = state.properties.get_mut(&property_id) {
-                if property.collateral_loan_id == Some(loan.id) {
-                    property.collateral_loan_id = None;
-                }
-            }
+        if let Some(property_id) = collateral_property_id
+            && let Some(property) = state.properties.get_mut(&property_id)
+            && property.collateral_loan_id == Some(loan.id)
+        {
+            property.collateral_loan_id = None;
         }
         let first_id = state.next_ids.legal_case();
         let first = LegalCase {

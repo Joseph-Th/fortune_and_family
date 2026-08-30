@@ -1508,6 +1508,7 @@ fn validate_districts_and_public_works(state: &AppState, ids: &RegistryIds) {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_legal_cases(state: &AppState) {
     let mut active_cases = BTreeSet::new();
     let mut litigated_loans = BTreeSet::new();

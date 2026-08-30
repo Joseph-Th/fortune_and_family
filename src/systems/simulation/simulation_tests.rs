@@ -1179,6 +1179,7 @@ mod inventory_policy {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn business_sales_share_one_market_absorption_ceiling_per_good() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();

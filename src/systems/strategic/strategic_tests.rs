@@ -1547,7 +1547,7 @@ mod gameplay_stability {
 
         settle_employment(registry, &mut state).expect("employment settlement must succeed");
 
-        let retainer = Money::from_copper(weekly_wage.copper() / 4);
+        let retainer = Money::from_copper(weekly_wage.copper() / 10);
         assert_eq!(
             state
                 .businesses
@@ -2176,7 +2176,7 @@ mod gameplay_stability {
 
         apply_office_stipends(&mut state).expect("office stipends must remain representable");
 
-        let expected_stipend = Money::from_copper(40).saturating_mul(power_count);
+        let expected_stipend = Money::from_copper(120).saturating_mul(power_count);
         let paid = expected_stipend.min(budget_after_duties);
         assert!(
             paid > Money::ZERO,
@@ -7087,6 +7087,7 @@ mod legal_cases {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn final_debt_judgment_writes_off_assetless_deficiency_without_fabricating_payment() {
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;
@@ -7381,6 +7382,7 @@ mod legal_cases {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn defendant_won_contract_judgment_extinguishes_rejected_breach_penalty() {
         let mut state = make_test_campaign();
         let contract_id = active_contract_id(&state);

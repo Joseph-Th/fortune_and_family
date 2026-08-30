@@ -659,14 +659,15 @@ pub(crate) fn effective_property_weekly_rent(state: &AppState, property: &Proper
         .saturating_mul_ratio(i64::from(rent_index), 10_000);
     // Condition gates rent only when the building is materially damaged:
     // above 7000 bp (≈70% condition) the premises rent at full indexed
-    // price; below that, rent scales linearly from 25% at total ruin to
-    // full at the 7000 threshold, mirroring the monthly 180 bp repair
-    // step that needs ~2 years to heal a fire-gutted property.
+    // price; below that, rent scales linearly from 0% at total ruin to
+    // full at the 7000 threshold, so a fire-gutted workshop commands no
+    // rent until repaired, mirroring the monthly 180 bp repair step that
+    // needs ~3.2 years to heal a fully destroyed property from 0 to 7000.
     let condition_basis_points = property.condition_basis_points;
     let condition_adjusted = if condition_basis_points >= 7_000 {
         indexed_rent
     } else {
-        let factor = 2_500_i64 + 7_500_i64 * i64::from(condition_basis_points) / 7_000;
+        let factor = 10_000_i64 * i64::from(condition_basis_points) / 7_000;
         indexed_rent.saturating_mul_ratio(factor, 10_000)
     };
     let indexed_rent = condition_adjusted;
@@ -782,6 +783,7 @@ pub(crate) fn completed_public_work_employment_bonus_basis_points(
         .min(8_000)
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn progress_public_works(
     registry: &Registry,
     state: &mut AppState,

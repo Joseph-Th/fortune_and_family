@@ -45,7 +45,7 @@ Dependency direction is one way:
 | `src/systems/mod.rs` | Systems facade: entry-point re-exports and shared scheduling and worker helpers. |
 | `src/systems/legal.rs` | Grounded debt and contract claims. |
 | `src/systems/progression.rs` | Monotonic campaign progression. |
-| `src/systems/simulation.rs` | Daily economic pipeline and time advancement. |
+| `src/systems/simulation/` | Daily economic pipeline and time advancement, split into pipeline orchestration and domain phases (purchases, production, sales, households, maintenance, market, succession). |
 | `src/systems/strategic/` | Scheduled strategic systems, split by domain (see below). |
 | `src/systems/transactions.rs` | Reusable validated transaction primitives. |
 | `src/systems/invariants.rs` | Runtime cross-record invariants. |
@@ -179,7 +179,7 @@ Each simulated day runs in this order:
 17. Append the day audit record.
 18. Validate runtime invariants.
 
-Owners: `src/systems/simulation.rs`, `src/systems/strategic/`, and `src/systems/progression.rs`.
+Owners: `src/systems/simulation/`, `src/systems/strategic/`, and `src/systems/progression.rs`.
 
 `advance_days` clones once up front and replaces the caller's state only after every day succeeds. A separate in-place loop (`advance_days_scratch`) serves exclusively owned disposable branches such as gameplay-harness counterfactuals: identical day loop, no defensive copy, and a caller obligation to discard the state when a day fails.
 
@@ -309,7 +309,7 @@ Important invariant groups include registry references, derived indexes, ownersh
 | Immutable Rivergate content | `src/registry/mod.rs` | Registry tests, bootstrap, projection when visible. |
 | Persistent state | `src/core/*`, `src/core/state.rs` | Bootstrap, validation, invariants, projection, tests. |
 | Player command | `src/systems/commands/` | Command tests, feedback, projection, gameplay integration, CLI smoke when needed. |
-| Daily economic rule | `src/systems/simulation.rs` | Simulation tests, causal ordering, invariants. |
+| Daily economic rule | `src/systems/simulation/` | Simulation tests, causal ordering, invariants. |
 | Scheduled strategic rule | `src/systems/strategic/` domain submodule | Strategic tests, feedback, gameplay snapshots. |
 | Cross-record transaction | Owning system or `src/systems/transactions.rs` | Typed errors, atomicity, stale-token tests. |
 | Read-only output | `src/projection.rs` | Projection/rendering tests. |

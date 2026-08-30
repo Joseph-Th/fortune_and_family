@@ -527,7 +527,11 @@ fn decide_production(
     ProductionPlan { tools_id, lines }
 }
 
-const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = 8_000;
+/// Share of daily operating cost attributable to tool wear and replacement.
+/// At 25% tools are a meaningful but not dominant industrial input, so a
+/// tool shortage constrains production without making every workshop's daily
+/// viability depend on 80% of its operating budget being tools.
+const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = 2_500;
 
 /// Heads become eligible for succession at this age. Combined with the
 /// annual chance ramp below, this keeps the first transition within a
@@ -2496,7 +2500,7 @@ fn average_route_availability_basis_points(state: &AppState, minimum: u16) -> u1
             .expect("availability clamped into basis-point range must fit u16");
     }
     let weighted = u32::try_from(total_weighted / total_capacity_milli).unwrap_or(10_000);
-    u16::try_from(u32::from(weighted).max(u32::from(minimum)).min(10_000))
+    u16::try_from(weighted.max(u32::from(minimum)).min(10_000))
         .expect("availability clamped into basis-point range must fit u16")
 }
 
@@ -2642,7 +2646,7 @@ fn designate_emergency_heirs(state: &mut AppState) {
                     .get(dynasty.head_id())
                     .is_some_and(|head| head.runtime.health_basis_points == 0)
         })
-        .map(|dynasty| dynasty.id())
+        .map(crate::core::Dynasty::id)
         .collect();
     for dynasty_id in needing {
         if let Some(successor_id) = emergency_successor(
