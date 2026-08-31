@@ -834,7 +834,13 @@ pub(crate) fn add_phase_action_mix_findings(
             u64::from(stats.substantive_actions),
             100,
         );
-        if share < 25 {
+        // Foundation and early establishment naturally concentrate around a
+        // small set of high-value setup actions (buy-property, fund-work,
+        // designate-heir). A 25% share in a 30-cycle foundation is expected
+        // variance, not a systemic funnel, so the Info threshold is higher
+        // for foundation.
+        let info_threshold = if phase == GameplayPhase::Foundation { 30 } else { 25 };
+        if share < info_threshold {
             continue;
         }
         let intentional_foundation_setup = phase == GameplayPhase::Foundation
@@ -847,6 +853,8 @@ pub(crate) fn add_phase_action_mix_findings(
                     | GameplayCommandKind::NominateForOffice
             ) {
             65
+        } else if phase == GameplayPhase::Foundation {
+            40
         } else {
             35
         };

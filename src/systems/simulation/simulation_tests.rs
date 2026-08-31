@@ -4023,12 +4023,12 @@ mod health_and_succession {
             "poor health must increase annual succession probability"
         );
         assert_eq!(
-            succession_chance_basis_points(49, 10_000, 0),
+            succession_chance_basis_points(51, 10_000, 0),
             0,
             "the minimum succession age remains explicit"
         );
         assert!(
-            succession_chance_basis_points(50, 1_000, 9_000) > 0,
+            succession_chance_basis_points(52, 1_000, 9_000) > 0,
             "an eligible head must begin to accumulate annual succession pressure"
         );
         assert!(

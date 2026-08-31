@@ -633,9 +633,9 @@ pub(crate) fn execute_judgment_against_collateral(
 pub(crate) const ROUTE_DISRUPTION_SPIKE_MIN_BASIS_POINTS: u16 = 2_600;
 pub(crate) const ROUTE_DISRUPTION_SPIKE_RANGE_BASIS_POINTS: u32 = 2_900;
 /// Routine calm months remove this much accumulated route disruption.
-pub(crate) const ROUTE_DISRUPTION_CALM_RECOVERY_BASIS_POINTS: u16 = 130;
+pub(crate) const ROUTE_DISRUPTION_CALM_RECOVERY_BASIS_POINTS: u16 = 180;
 /// Post-crisis healing removes this much accumulated route disruption.
-pub(crate) const ROUTE_DISRUPTION_HEALING_BASIS_POINTS: u16 = 250;
+pub(crate) const ROUTE_DISRUPTION_HEALING_BASIS_POINTS: u16 = 350;
 
 /// The prince's levy is checked at this cadence, each check passing this
 /// often. A standard three-year session should see roughly one demand in a

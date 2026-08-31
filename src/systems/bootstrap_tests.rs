@@ -143,7 +143,7 @@ mod names {
                 .expect("founder must exist");
             let age_years = state.clock().day().saturating_sub(founder.birth_day()) / 360;
             assert!(
-                (52..=54).contains(&age_years),
+                (50..=52).contains(&age_years),
                 "seed {seed} founder must start old enough for succession pressure to land inside the campaign session, got {age_years}"
             );
         }

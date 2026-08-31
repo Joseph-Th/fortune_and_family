@@ -366,8 +366,10 @@ const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASIS
 /// Heads become eligible for succession at this age. Combined with the
 /// annual chance ramp below, this keeps the first transition within a
 /// playable session rather than pushing the dynasty fantasy past the
-/// horizon most campaigns reach.
-const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 50;
+/// horizon most campaigns reach. At 52 the 50-52 year old founders have
+/// two quiet years to establish institutional standing before succession
+/// pressure begins, so office reliably precedes succession.
+const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 52;
 
 /// Health an heir resumes natural aging from when they accede to the headship.
 /// The annual health pass pins a designated heir's collapsed health at a
@@ -436,12 +438,12 @@ pub(crate) fn business_status_after_capitalization(
 }
 
 /// Annual succession-chance pressure per year of head age past the eligibility
-/// threshold. The rate places the median first transition near 600-800 days
-/// (early third year): late enough that a founder pursuing institutional
-/// standing has offices and memberships worth testing at succession, early
-/// enough that dynastic continuity is part of ordinary play rather than only
-/// generation-length simulations.
-const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 360;
+/// threshold. The rate places the median first transition near 850-1050 days
+/// (late second to early third year): late enough that a founder pursuing
+/// institutional standing reliably reaches office and established memberships
+/// before succession tests continuity, early enough that dynastic continuity
+/// remains ordinary play rather than only generation-length simulations.
+const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 280;
 
 fn decide_business_production(
     registry: &Registry,

@@ -249,6 +249,36 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
         .iter()
         .max_by_key(|(_, s)| s.substantive_actions)
         .map_or("none", |(p, _)| p.label());
+    // Office vs succession ordering: founder should reliably reach office
+    // before succession tests continuity. Median day captures the central
+    // pacing, not just earliest/latest extremes.
+    let mut office_days: Vec<i64> = report
+        .campaigns
+        .iter()
+        .filter_map(|c| c.fantasy_arc.first_office_day)
+        .collect();
+    let mut succession_days: Vec<i64> = report
+        .campaigns
+        .iter()
+        .filter_map(|c| c.fantasy_arc.first_succession_day)
+        .collect();
+    office_days.sort_unstable();
+    succession_days.sort_unstable();
+    let median_office = office_days.get(office_days.len() / 2).copied();
+    let median_succession = succession_days.get(succession_days.len() / 2).copied();
+    let pacing_note = match (median_office, median_succession) {
+        (Some(o), Some(s)) if o < s => "office leads succession (healthy)".to_owned(),
+        (Some(o), Some(s)) => format!("succession leads office by {}d (tight pacing)", s.abs_diff(o)),
+        (Some(_), None) => "succession not yet reached".to_owned(),
+        (None, Some(_)) => "office not yet reached".to_owned(),
+        (None, None) => "neither reached".to_owned(),
+    };
+    let _ = writeln!(
+        output,
+        "  timing: median office {} | median succession {} | {pacing_note}",
+        median_office.map_or("—".to_owned(), |d| format!("day {d}")),
+        median_succession.map_or("—".to_owned(), |d| format!("day {d}")),
+    );
     let _ = writeln!(
         output,
         "  dynamism: dominant phase {} | governance share {:.1}% of decision life | fantasy governance {}",
