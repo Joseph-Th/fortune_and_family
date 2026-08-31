@@ -714,6 +714,11 @@ pub(crate) fn organic_candidate_variation(
     let mut value = variation_rng.next_u64();
     value = value.wrapping_add(state.clock.day().cast_unsigned());
     value = value.wrapping_add(u64::from(accumulator.decision_cycles));
+    value = value.wrapping_add(u64::from(accumulator.total_viable_choices));
+    value = value.wrapping_add(u64::from(accumulator.quiet_cycles));
+    // Mix campaign state that diverges across seeds/backgrounds so nearby
+    // worlds do not replay identical close-call rankings.
+    value ^= (accumulator.peak_player_treasury.copper() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     for byte in persona
         .label()
         .bytes()

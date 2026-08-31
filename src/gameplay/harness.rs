@@ -1055,7 +1055,7 @@ pub(crate) fn run_campaign(
 
 /// Small deterministic jitter for the ordinary decision cadence so the harness
 /// does not sample the same calendar offsets every campaign. The variation is
-/// derived from the campaign RNG and current state, stays within +/-4 days,
+/// derived from the campaign RNG and current state, stays within +/-9 days,
 /// never consumes the game RNG, and is clamped to at least 7 days to keep
 /// urgent sub-week steps meaningful.
 pub(crate) fn jittered_decision_interval(
@@ -1072,8 +1072,10 @@ pub(crate) fn jittered_decision_interval(
     sample = sample.wrapping_add(state.clock.day().cast_unsigned());
     sample = sample.wrapping_add(u64::from(accumulator.decision_cycles));
     sample = sample.wrapping_add(u64::from(config.seed_count));
+    sample = sample.wrapping_add(u64::from(config.start_seed & 0xFFFF_FFFF));
     sample = sample.wrapping_add(u64::from(state.player_dynasty_id.value()));
     sample ^= u64::from(accumulator.total_viable_choices).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    sample ^= u64::from(accumulator.quiet_cycles).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     // Widen to +/-9 days so campaigns sample different calendar offsets. The
     // variation stays inside one decision cycle so the 30-day cadence remains
     // legible while each world and persona samples slightly different
