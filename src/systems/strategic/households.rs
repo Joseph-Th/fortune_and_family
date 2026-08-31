@@ -40,9 +40,9 @@ pub(crate) fn apply_household_living_costs(
             .expect("household district must exist")
             .rent_index_basis_points;
         let per_member_copper = match social_class {
-            crate::core::SocialClass::Laboring => 2,
-            crate::core::SocialClass::Artisan => 3,
-            crate::core::SocialClass::Merchant => 4,
+            crate::core::SocialClass::Laboring => 4,
+            crate::core::SocialClass::Artisan => 8,
+            crate::core::SocialClass::Merchant => 13,
         };
         let base_copper = i64::from(members).saturating_mul(per_member_copper);
         let scaled_copper = base_copper.saturating_mul(i64::from(rent_index)) / 10_000;
@@ -75,7 +75,7 @@ pub(crate) fn apply_household_living_costs(
                 .saturating_sub(satisfaction_loss);
         }
         total_living_cost = total_living_cost.checked_add(paid).ok_or(
-            SimulationError::WeeklyExternalIncomeOverflow {
+            SimulationError::HouseholdLivingCostOverflow {
                 accumulated: total_living_cost,
                 incoming: paid,
             },

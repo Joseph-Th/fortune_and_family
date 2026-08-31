@@ -7451,6 +7451,9 @@ pub(crate) const fn simulation_error_category(error: &SimulationError) -> &'stat
         SimulationError::WeeklyExternalIncomeOverflow { .. } => {
             "simulation: weekly external income overflow"
         }
+        SimulationError::HouseholdLivingCostOverflow { .. } => {
+            "simulation: household living cost overflow"
+        }
         SimulationError::LoanBalanceOverflow { .. } => "simulation: loan balance overflow",
         SimulationError::CivicDebtBalanceOverflow { .. } => {
             "simulation: civic debt balance overflow"

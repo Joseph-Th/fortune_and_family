@@ -1547,7 +1547,7 @@ mod gameplay_stability {
 
         settle_employment(registry, &mut state).expect("employment settlement must succeed");
 
-        let retainer = Money::from_copper(weekly_wage.copper() / 10);
+        let retainer = Money::from_copper(weekly_wage.copper() * 400 / 10_000);
         assert_eq!(
             state
                 .businesses

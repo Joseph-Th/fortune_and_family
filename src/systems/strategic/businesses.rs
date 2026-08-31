@@ -763,8 +763,9 @@ pub(crate) fn distribute_business_dividends(
         {
             continue;
         }
-        let operating_floor = business_owner_distribution_reserve(registry, business);
-        let excess = business.cash().saturating_sub(operating_floor);
+        let dividend_floor = business_owner_distribution_reserve(registry, business)
+            .max(business_recapitalization_target(registry, state, business));
+        let excess = business.cash().saturating_sub(dividend_floor);
         let owner_id = business.owner_dynasty_id();
         let owner_treasury = projected_owner_treasuries
             .entry(owner_id)

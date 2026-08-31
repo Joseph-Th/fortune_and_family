@@ -193,6 +193,10 @@ pub enum SimulationError {
     )]
     WeeklyExternalIncomeOverflow { accumulated: Money, incoming: Money },
     #[error(
+        "household living costs cannot include charge {incoming}; accumulated total {accumulated} would exceed the supported money range"
+    )]
+    HouseholdLivingCostOverflow { accumulated: Money, incoming: Money },
+    #[error(
         "loan {loan_id} cannot accrue interest {incoming}; current balance {current} would exceed the supported money range"
     )]
     LoanBalanceOverflow {
