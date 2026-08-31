@@ -39,6 +39,7 @@ use crate::money::{Money, Quantity, affordable_quantity, checked_cost_for, cost_
 use crate::registry::{GoodCategory, RecipeDef, Registry};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod maintenance;
 pub(crate) mod market;
 mod purchases;
 #[allow(unused_imports)]
@@ -1760,7 +1761,7 @@ fn apply_maintenance(state: &mut AppState, plan: MaintenancePlan) -> Result<(), 
     Ok(())
 }
 
-// ── Business lifecycle// ── Business lifecycle ──────────────────────────────────────────────────
+// ── Business lifecycle ──────────────────────────────────────────────────
 fn update_business_lifecycle(
     registry: &Registry,
     state: &mut AppState,

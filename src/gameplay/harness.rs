@@ -1072,7 +1072,7 @@ pub(crate) fn jittered_decision_interval(
     sample = sample.wrapping_add(state.clock.day().cast_unsigned());
     sample = sample.wrapping_add(u64::from(accumulator.decision_cycles));
     sample = sample.wrapping_add(u64::from(config.seed_count));
-    sample = sample.wrapping_add(u64::from(config.start_seed & 0xFFFF_FFFF));
+    sample = sample.wrapping_add(config.start_seed & 0xFFFF_FFFF);
     sample = sample.wrapping_add(u64::from(state.player_dynasty_id.value()));
     sample ^= u64::from(accumulator.total_viable_choices).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     sample ^= u64::from(accumulator.quiet_cycles).wrapping_mul(0xBF58_476D_1CE4_E5B9);

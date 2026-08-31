@@ -962,7 +962,9 @@ pub(crate) fn plan_public_work_tool_purchase(
     )?;
     // Weekly settlement runs after the day's price update and before the next
     // market-flow reset, so this off-hours purchase records stock and money
-    // movement only; a `demand_today` write here would be dead state.
+    // movement only; demand pressure is already transmitted via the stock gap
+    // that `update_market_prices` reads, so a `demand_today` write would be
+    // dead state.
     Ok(Some(PublicWorkToolPurchase {
         tools_id,
         market_stock_after,

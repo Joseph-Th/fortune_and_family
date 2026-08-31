@@ -270,12 +270,18 @@ pub(crate) fn pay_employment_wage(
         .expect("employment business recipe must exist");
     // Wages settle weekly, so every employer retains one week of operating
     // funds — or its policy reserve, whichever protects more — instead of
-    // letting payroll spend a healthy firm into distress while an already
-    // distressed one would have kept the cushion.
-    let payroll_reserve = business
-        .policy
-        .minimum_cash_reserve
-        .max(recipe.daily_operating_cost().saturating_mul(7));
+    // letting payroll spend a healthy firm into distress. Distressed firms
+    // ignore the policy minimum (matching purchase/maintenance/distress
+    // logic) and keep only the operating week, so recovery payroll can
+    // still be met while the firm stabilizes.
+    let payroll_reserve = if business.status() == BusinessStatus::Distressed {
+        recipe.daily_operating_cost().saturating_mul(7)
+    } else {
+        business
+            .policy
+            .minimum_cash_reserve
+            .max(recipe.daily_operating_cost().saturating_mul(7))
+    };
     let spendable = business_cash.saturating_sub(payroll_reserve);
     if wage_due <= Money::ZERO || spendable <= Money::ZERO {
         return Ok(Money::ZERO);
