@@ -1055,7 +1055,7 @@ pub(crate) fn run_campaign(
 
 /// Small deterministic jitter for the ordinary decision cadence so the harness
 /// does not sample the same calendar offsets every campaign. The variation is
-/// derived from the campaign RNG and current state, stays within +/-9 days,
+/// derived from the campaign RNG and current state, stays within +/-12 days,
 /// never consumes the game RNG, and is clamped to at least 7 days to keep
 /// urgent sub-week steps meaningful.
 pub(crate) fn jittered_decision_interval(
@@ -1076,11 +1076,11 @@ pub(crate) fn jittered_decision_interval(
     sample = sample.wrapping_add(u64::from(state.player_dynasty_id.value()));
     sample ^= u64::from(accumulator.total_viable_choices).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     sample ^= u64::from(accumulator.quiet_cycles).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    // Widen to +/-9 days so campaigns sample different calendar offsets. The
-    // variation stays inside one decision cycle so the 30-day cadence remains
-    // legible while each world and persona samples slightly different
-    // observation windows across campaigns.
-    let delta = i64::try_from(sample % 19).unwrap_or(0) - 9;
+    // Widen to +/-12 days so campaigns sample different calendar offsets even
+    // when personas share a world seed. The variation stays inside one decision
+    // cycle so the 30-day cadence remains legible while each world and persona
+    // samples slightly different observation windows across campaigns.
+    let delta = i64::try_from(sample % 25).unwrap_or(0) - 12;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         i64::from(base).saturating_add(delta).max(7) as u32
@@ -2436,6 +2436,19 @@ pub(crate) fn has_enact_law_opportunity(registry: &Registry, state: &AppState) -
                 .laws
                 .values()
                 .any(|law| law.active && law.kind == *kind && law.value == *value)
+            && (*kind != LawKind::PublicDebtAuthorization
+                || civic_debt_creditor_available(state, *value))
+    })
+}
+
+pub(crate) fn civic_debt_creditor_available(state: &AppState, principal_copper: i64) -> bool {
+    let principal = Money::from_copper(principal_copper);
+    state.dynasties.values().any(|dynasty| {
+        dynasty.id() != state.player_dynasty_id
+            && dynasty
+                .treasury()
+                .saturating_sub(CIVIC_DEBT_CREDITOR_RESERVE)
+                >= principal
     })
 }
 
@@ -2755,16 +2768,18 @@ pub(crate) fn has_office_power_opportunity(state: &AppState) -> bool {
 }
 
 pub(crate) fn has_information_commission_opportunity(
-    registry: &Registry,
+    _registry: &Registry,
     state: &AppState,
-    persona: GameplayPersona,
+    _persona: GameplayPersona,
 ) -> bool {
     let player_id = state.player_dynasty_id;
-    // The canonical commission route (`resolve_information_commission`) gates
-    // on affordability and the fixed `INFORMATION_COMMISSION_INTERVAL_DAYS`
-    // cooldown only; it does not require an agent information thesis or an
-    // early-campaign delay. The activation predicate mirrors the game so an
-    // affordable, off-cooldown commission is never mislabelled dormant.
+    // The canonical commission route gates on affordability and the fixed
+    // `INFORMATION_COMMISSION_INTERVAL_DAYS` cooldown only; it accepts any
+    // syntactically valid focus (market good, district, or counterparty).
+    // The agent's information thesis and persona-specific cadence live in the
+    // generator, so the activation predicate must not require the thesis to be
+    // material — otherwise a calm campaign would be misread as dormant just
+    // because the agent chose not to commission.
     let affordable = state
         .dynasties
         .get(&player_id)
@@ -2789,16 +2804,11 @@ pub(crate) fn has_information_commission_opportunity(
         })
         .map(AuditRecord::day)
         .max();
-    let available = report_commission_day
+    report_commission_day
         .max(audit_commission_day)
         .is_none_or(|day| {
             state.clock.day() >= day.saturating_add(INFORMATION_COMMISSION_INTERVAL_DAYS)
-        });
-    // The candidate generator still applies the agent's materiality thesis and
-    // the persona-specific commission cadence; the activation predicate only
-    // needs a focus the canonical game can resolve so a ready world is never
-    // misread as dormant because the agent declined to build a brief.
-    available && preferred_information_focus(registry, state, persona).is_some()
+        })
 }
 
 pub(crate) fn has_information_leverage_opportunity(registry: &Registry, state: &AppState) -> bool {
@@ -2947,15 +2957,27 @@ pub(crate) fn has_business_acquisition_opportunity(registry: &Registry, state: &
     // Mirror the canonical route (`quote_business_acquisition` plus the
     // purchase validation): any non-player firm is quotable — failing trades
     // at a discount, going concerns at the controlling premium — and the
-    // canonical gate is affordability of price plus minimum recapitalization.
-    // Portfolio caps, readiness screens, and expansion reserves are agent
-    // policy and stay in the candidate generator.
+    // canonical gate is affordability of price plus minimum recapitalization plus
+    // an eligible manager. Portfolio caps, readiness screens, and expansion
+    // reserves are agent policy and stay in the candidate generator.
+    let has_eligible_manager = state.characters.iter().any(|character| {
+        character.dynasty_id() == player_id
+            && character.status() == CharacterStatus::Active
+            && character.id()
+                != state
+                    .dynasties
+                    .get(&player_id)
+                    .map(|d| d.head_id())
+                    .unwrap_or(character.id())
+            && state.clock.day().saturating_sub(character.birth_day()) >= 18 * 360
+    });
+    if !has_eligible_manager {
+        return false;
+    }
     state.businesses.iter().any(|business| {
         business.owner_dynasty_id() != player_id
             && quote_business_acquisition(registry, state, player_id, business.id()).is_ok_and(
                 |quote| {
-                    // Mirror the canonical affordability route; the agent's
-                    // additional expansion reserve stays in the generator.
                     let required = quote
                         .purchase_price
                         .saturating_add(quote.minimum_recapitalization);

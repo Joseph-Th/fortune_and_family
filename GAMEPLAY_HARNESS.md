@@ -122,7 +122,7 @@ Personas expose different viable routes through the same canonical systems. Cand
 
 Standing policies that apply across personas:
 
-- Candidate scores include a small reproducible exploration variation derived from campaign state. It can flip close calls without overriding urgency, reserve protection, or persona priorities.
+- Candidate scores include a small reproducible exploration variation derived from campaign state (range 520, jittered decision interval ±12 days). It can flip close calls without overriding urgency, reserve protection, or persona priorities, so every campaign samples slightly different calendar offsets and close-choice rankings while remaining fully deterministic.
 - Optional standing expenses — family education, ward adoption, institution patronage — respect a shared discretionary floor: an emergency reserve plus two months of committed loan service. A house below the floor defers standing spending.
 - Standing-burning responses (suppression, profiteering) additionally respect a legitimacy reserve, exactly as treasury policy reserves cash against known obligations.
 
@@ -292,6 +292,15 @@ A new or changed player command is harness-integrated when all applicable items 
 8. Findings or score inputs when the command changes a measured design contract
 9. Exhaustive command-family coverage tests
 10. Report schema version if serialized structure or semantics change
+
+## Robustness and staleness contract
+
+The harness is the cold-agent's closest proxy for actually playing the game. Divergence between harness and game is a defect in the harness, not the game.
+
+- Activation predicates are mechanically checked every cycle: a viable probe whose kind did not fire an activation fails the run with `ActivationPredicateDrift`, so predicates cannot quietly stale behind command validation changes.
+- Report schema version bumps whenever harness semantics change (activation, scoring, findings, or trace meaning), so consumers never silently parse stale interpretations.
+- Organic variation (jittered interval ±12 days plus score variation 520) ensures harness does not rigidly replay one path; close decisions flip deterministically per campaign while urgency and persona priorities remain dominant.
+- Performance is bounded work, not wall-clock: probe caps, horizons, and trace limits bound every run in domain terms; parallelism is capped by `CIVIC_DYNASTY_JOBS` and campaign ordering is stable.
 
 ## Interpretation limits
 
