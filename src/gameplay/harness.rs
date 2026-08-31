@@ -1001,7 +1001,8 @@ pub(crate) fn run_campaign(
     accumulator.observe_crisis_kinds(&state);
     let mut remaining = config.days_per_campaign;
     while remaining > 0 {
-        let configured_step = u32::from(config.decision_interval_days).min(remaining);
+        let jittered_interval = jittered_decision_interval(&state, config, &accumulator);
+        let configured_step = jittered_interval.min(remaining);
         let step_days = next_campaign_step_days(&state, configured_step).min(remaining);
         run_decision_cycle(
             registry,
@@ -1032,6 +1033,31 @@ pub(crate) fn run_campaign(
         start,
         accumulator,
     ))
+}
+
+/// Small deterministic jitter for the ordinary decision cadence so the harness
+/// does not sample the same calendar offsets every campaign. The variation is
+/// derived from the campaign RNG and current state, stays within +/-4 days,
+/// never consumes the game RNG, and is clamped to at least 7 days to keep
+/// urgent sub-week steps meaningful.
+pub(crate) fn jittered_decision_interval(
+    state: &AppState,
+    config: &GameplayHarnessConfig,
+    accumulator: &CampaignAccumulator,
+) -> u32 {
+    let base = u32::from(config.decision_interval_days);
+    if base <= 7 {
+        return base;
+    }
+    let mut rng = state.rng;
+    let mut sample = rng.next_u64();
+    sample = sample.wrapping_add(state.clock.day().cast_unsigned());
+    sample = sample.wrapping_add(u64::from(accumulator.decision_cycles));
+    sample = sample.wrapping_add(u64::from(config.seed_count));
+    // +/-4 days keeps organic variation without erasing the 30-day design cadence.
+    let delta = i64::try_from(sample % 9).unwrap_or(0) - 4;
+    let jittered = i64::from(base).saturating_add(delta).max(7) as u32;
+    jittered
 }
 
 pub(crate) fn next_campaign_step_days(state: &AppState, configured_step: u32) -> u32 {
@@ -2788,13 +2814,12 @@ pub(crate) fn has_borrow_opportunity(state: &AppState) -> bool {
     }) {
         return true;
     }
-    // Until the workout window opens, unresolved defaulted debt closes the
-    // fresh NPC-lending market. The agent's borrowing threshold remains
-    // persona policy, but creditor-shopping after default is not a canonical
-    // opportunity anymore.
-    if borrower_has_unresolved_default(state, player_id) {
-        return false;
-    }
+    // Fresh credit is evaluated per counterparty: a default to one house
+    // blocks only that pair until the workout window opens, while
+    // unrelated lenders remain canonically available. The agent's policy
+    // keeps shopping a fresh advance while a default exists, but the
+    // activation predicate must mirror the game's pair-scoped gate instead
+    // of treating any default as a global borrowing ban.
     state.dynasties.values().any(|dynasty| {
         dynasty.id() != player_id
             && !credit_pair_blocks_new_loan(state, dynasty.id(), player_id)
