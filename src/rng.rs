@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 /// Deterministic, serializable RNG owned by `AppState`.
 ///
-/// Wraps a SplitMix64 step over a single `u64` word. The stream is fully
+/// Wraps a `SplitMix64` step over a single `u64` word. The stream is fully
 /// determined by the seed and the ordered call sequence, persists across
 /// saves, and never falls back to OS entropy. Every stochastic simulation
 /// decision reads `AppState.rng` so a replay from the same save produces
@@ -42,7 +42,7 @@ impl DeterministicRng {
         Self { state: seed }
     }
 
-    /// Advances the stream by one SplitMix64 step and returns the next `u64`.
+    /// Advances the stream by one `SplitMix64` step and returns the next `u64`.
     ///
     /// # Panics
     ///

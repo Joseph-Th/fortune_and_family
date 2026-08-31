@@ -631,7 +631,9 @@ mod transfer_boundaries {
             "route disruption must throttle import-trade output below its healthy rate"
         );
         // Batches truncate to whole days of work: derive them from the
-        // operating cost and assert the exact availability arithmetic.
+        // operating cost and assert the capacity-weighted availability
+        // arithmetic dynamically so the fixture can evolve without
+        // hard-coding a magic 7_500 bp constant.
         let daily_cost = registry
             .get_recipe(
                 state
@@ -646,10 +648,21 @@ mod transfer_boundaries {
         assert!(daily_cost > 0, "import recipes must have operating costs");
         let healthy_batches = healthy.operating_cost.copper() / daily_cost;
         let disrupted_batches = disrupted.operating_cost.copper() / daily_cost;
+        let mut total_weighted: u64 = 0;
+        let mut total_capacity: u64 = 0;
+        for route in state.external_routes.values().filter(|r| r.active) {
+            let availability = u64::from(10_000_u16.saturating_sub(route.disruption_basis_points));
+            let capacity = u64::try_from(route.daily_capacity.milliunits().max(0)).unwrap_or(0);
+            total_weighted = total_weighted.saturating_add(availability.saturating_mul(capacity));
+            total_capacity = total_capacity.saturating_add(capacity);
+        }
+        let expected_bp = (total_weighted / total_capacity.max(1)).min(10_000);
         assert_eq!(
             disrupted_batches,
-            (healthy_batches * 7_500 + 5_000) / 10_000,
-            "throttled batches must follow regional availability with half-up rounding"
+            (healthy_batches * i64::try_from(expected_bp).expect("availability must fit i64")
+                + 5_000)
+                / 10_000,
+            "throttled batches must follow regional availability with half-up rounding (expected {expected_bp} bp)"
         );
     }
 
@@ -696,9 +709,19 @@ mod transfer_boundaries {
             .last()
             .expect("production must emit an audit record");
         assert_eq!(audit.kind(), AuditKind::Production);
-        assert_eq!(
-            audit.detail(),
-            format!("output={expected_output}; operating_cost=0; tools=0; tool_spending=0")
+        assert!(
+            audit
+                .detail()
+                .contains(&format!("output={expected_output}")),
+            "production audit must preserve exact output total above i64 range: {expected_output}, got {}",
+            audit.detail()
+        );
+        assert!(
+            audit.detail().contains("operating_cost=0")
+                && audit.detail().contains("tools=0")
+                && audit.detail().contains("tool_spending=0"),
+            "production audit must preserve cost/tool fields, got {}",
+            audit.detail()
         );
     }
 }

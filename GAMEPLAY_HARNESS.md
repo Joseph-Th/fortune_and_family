@@ -32,6 +32,7 @@ Use focused runs during implementation. Use release matrices for cross-domain va
 Focused debug iteration (incremental, <1s warm — no release build):
 
 ```bash
+bash scripts/test.sh playtest  # quick 60-day single-persona smoke, <1s warm (no args)
 bash scripts/test.sh playtest --days 90 --persona entrepreneur --background baker
 cargo run --locked -- playtest --days 90 --persona steward
 # Release-fidelity iteration (same candidates, optimized sim):

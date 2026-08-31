@@ -8,6 +8,7 @@ Defines test tiers, suite organization, assertion standards, and completion gate
 |---|---|---|---|
 | Fastest syntax check | `bash scripts/test.sh check [filter]` | <1s | Editor feedback — no tests run |
 | One domain or behavior | `bash scripts/test.sh fast <filter>` | <1s | Tight edit loop (e.g. `fast simulation`) |
+| Changed domains only | `bash scripts/test.sh changed` | <1s | Auto-detects touched domains from the current diff |
 | Fastest library-only loop | `bash scripts/test.sh quick <filter>` | ~2s | Alias for fast, never triggers docs/CLI |
 | All ordinary library tests | `bash scripts/test.sh fast` | ~2s | Full library sweep (warm) |
 | Normal pre-commit loop | `bash scripts/test.sh standard` | ~6s | Pre-commit: syntax + lib + docs + core CLI |
@@ -20,7 +21,7 @@ Defines test tiers, suite organization, assertion standards, and completion gate
 | Art CLI smoke | `bash scripts/test.sh art-cli` | ~1s warm | Sprite review CLI |
 | Gameplay CLI smoke | `bash scripts/test.sh gameplay-cli` | ~1s warm | Harness CLI (30-day) |
 | All adapter smoke groups | `bash scripts/test.sh adapters` | ~2s warm | All CLI surfaces (one CLI build) |
-| Focused harness run | `bash scripts/test.sh playtest [args...]` | <1s warm (debug) | Single campaign iteration |
+| Focused harness run | `bash scripts/test.sh playtest [args...]` | <1s warm (debug) | Single campaign iteration (no args = 60-day quick check) |
 | Release gameplay gates | `bash scripts/test.sh gameplay` | ~16s warm | 36 + 3 campaigns, 60k days (release) |
 | Deep gameplay design audit | `bash scripts/test.sh gameplay-audit` | ~30s warm | Multi-seed / generation / credit stress (release) |
 | Fast CI verification lane | `bash scripts/test.sh ci-verify` | ~6s warm | Format + clippy + lib + docs + doc warnings |
@@ -164,10 +165,12 @@ Collection helpers should show observed members. Candidate and finding helpers s
 Run the narrowest relevant subset while editing. Once behavior is ready, run one routine lane rather than climbing through broader tiers:
 
 ```bash
-bash scripts/test.sh check          # <1s syntax only, no tests
-bash scripts/test.sh fast simulation # <1s filtered — the one domain you touched
-bash scripts/test.sh fast            # ~2s full library sweep
-bash scripts/test.sh standard        # ~6s normal pre-commit (syntax + lib + docs + core CLI)
+bash scripts/test.sh check            # <1s syntax only, no tests
+bash scripts/test.sh fast simulation  # <1s filtered — the one domain you touched
+bash scripts/test.sh changed          # <1s — auto-detects the touched domain
+bash scripts/test.sh fast             # ~2s full library sweep
+bash scripts/test.sh playtest         # <1s quick 60-day harness smoke (no args)
+bash scripts/test.sh standard         # ~6s normal pre-commit (syntax + lib + docs + core CLI)
 ```
 
 Select specialized lanes by changed contract:
@@ -183,6 +186,8 @@ If `fast <filter>` already covered the changed surface and `standard` is green, 
 
 Persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and report schemas require focused owner coverage plus the relevant specialized lane above. This is a coverage requirement, not automatically two invocations: when the selected lane already executes the necessary owner coverage, do not rerun a focused test beforehand.
 
-Do not run a compile-only or lint build immediately before an executable lane that recompiles the same surface unless the separate diagnostic is required. Prefer one build-producing operation per checkpoint. Filtered `fast <filter>` avoids rebuilding unrelated domains — use it for the inner loop and `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` when iterating lib-only to skip even the debug CLI build.
+Do not run a compile-only or lint build immediately before an executable lane that recompiles the same surface unless the separate diagnostic is required. Prefer one build-producing operation per checkpoint.
+
+Filtered `fast <filter>` and `changed` avoid rebuilding unrelated domains — use either for the inner loop and `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` when iterating lib-only to skip even the debug CLI build. `playtest` without args runs a lightweight 60-day single-persona check so the harness stays in the <1s loop; pass explicit `--days`/`--persona` flags only when probing deeper design questions.
 
 The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier reuses one debug CLI build across adapter smoke groups and remains an explicit broad tier rather than a routine prerequisite.

@@ -22,6 +22,7 @@ usage:
   $0 check [filter]      fastest syntax check (cargo check, no tests)
   $0 fast [filter]       run non-ignored library tests (default loop, incremental)
   $0 quick [filter]      alias for fast that never triggers docs/CLI
+  $0 changed             run fast tests for domains touched by the current diff only
   $0 standard            pre-commit loop: syntax, library, docs, core CLI smoke
   $0 exact <test-name>   run one fully qualified library test
   $0 debug <test-name>   run one exact test with captured output enabled
@@ -34,7 +35,7 @@ usage:
   $0 adapters            run all CLI smoke groups (reuses one CLI build)
   $0 gameplay            run release gameplay + generation-length gates
   $0 gameplay-audit      run mature multi-seed / generation / credit stress audits
-  $0 playtest [args...]  focused harness run; args pass through to CLI verbatim
+  $0 playtest [args...]  focused harness run; no args defaults to quick 60-day debug check
   $0 ci-verify           fast CI lane: format, clippy, library, docs
   $0 ci-gates            deep CI lane: release tests, soaks, adapters, gameplay, audit
   $0 all                 everything: standard + soak + adapters + gameplay
@@ -45,6 +46,7 @@ fast iteration (solo local machine — every lane is incremental, no world rebui
   # Tightest loop — filtered <1s, no CLI rebuild at all
   $0 fast simulation        # only that domain, ~0.4s warm
   $0 fast strategic
+  $0 changed                # only domains touched by current diff, <1s warm
   $0 check                  # sub-second syntax only (cargo check, no tests)
   CIVIC_DYNASTY_SKIP_CLI_BUILD=1 $0 standard  # lib-only iteration, skips debug CLI
 
@@ -52,6 +54,7 @@ fast iteration (solo local machine — every lane is incremental, no world rebui
   $0 debug 'systems::simulation::tests::household_fallback'
 
   # Focused harness — debug CLI for fast iteration (~30ms sim, <1s total warm)
+  $0 playtest               # quick 60-day single-persona check, <1s warm (default)
   $0 playtest --days 90 --persona steward --background baker
   # Release playtest for gate fidelity (release harness, still <1s rebuild warm)
   CIVIC_DYNASTY_PROFILE=release $0 playtest --days 360 --persona entrepreneur
@@ -343,6 +346,71 @@ run_fast() {
   run_test_step "$label" "${filter:+$filter}" "${command[@]}"
 }
 
+run_changed() {
+  # Solo-dev targeted loop: diff the working tree against HEAD and map
+  # changed files to the narrowest `fast <filter>` that still proves the
+  # change. Untracked non-ignored files are included so a new module
+  # without a commit is still detected. If changes span multiple
+  # domains or no mapping exists, fall back to full `fast` so coverage
+  # is never silently narrower than the edit.
+  local changed_files
+  changed_files=$( (
+    git diff --name-only HEAD 2>/dev/null || true
+    git ls-files --others --exclude-standard 2>/dev/null || true
+  ) | sort -u )
+  if [[ -z "$changed_files" ]]; then
+    printf '\n==> Changed domains: no tracked diff — running full library suite\n'
+    run_fast
+    return $?
+  fi
+  local filters=()
+  local seen=() # deduplicate while preserving first-seen order
+  add_filter() {
+    local candidate=$1
+    for existing in "${seen[@]:-}"; do
+      [[ "$existing" == "$candidate" ]] && return 0
+    done
+    seen+=("$candidate")
+    filters+=("$candidate")
+  }
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    case "$file" in
+      src/systems/simulation/*) add_filter simulation ;;
+      src/systems/strategic/*) add_filter strategic ;;
+      src/systems/commands/*) add_filter commands ;;
+      src/systems/bootstrap*|src/systems/invariants*|src/systems/legal*|src/systems/progression*|src/systems/transactions*|src/systems/mod.rs) add_filter bootstrap ;;
+      src/core/*|src/ids.rs|src/money.rs|src/rng.rs) add_filter core ;;
+      src/persistence*|src/projection*|src/registry/*) add_filter persistence ;;
+      src/gameplay/*|src/gameplay_tests.rs) add_filter gameplay ;;
+      src/art/*) add_filter art ;;
+      src/main.rs|src/lib.rs) add_filter "" ;; # top-level touches many domains -> full suite
+      scripts/*|TESTING.md|GAMEPLAY_HARNESS.md|ARCHITECTURE.md) add_filter "" ;;
+      *) : ;;
+    esac
+  done <<< "$changed_files"
+  # Any empty filter means "unknown scope" -> full suite.
+  for f in "${filters[@]:-}"; do
+    if [[ -z "$f" ]]; then
+      printf '\n==> Changed domains span multiple systems (%s) — running full library suite\n' "${changed_files//$'\n'/, }"
+      run_fast
+      return $?
+    fi
+  done
+  if [[ ${#filters[@]} -eq 0 ]]; then
+    printf '\n==> Changed files do not map to a library domain — running full library suite\n'
+    run_fast
+    return $?
+  fi
+  if [[ ${#filters[@]} -eq 1 ]]; then
+    printf '\n==> Changed domain: %s — running filtered suite\n' "${filters[0]}"
+    run_fast "${filters[0]}"
+    return $?
+  fi
+  printf '\n==> Changed domains: %s — running full library suite\n' "${filters[*]}"
+  run_fast
+}
+
 run_exact() {
   local test_name=$1
   local profile_args=()
@@ -541,6 +609,10 @@ case "$mode" in
     [[ $# -le 2 ]] || usage
     run_fast "${2:-}"
     ;;
+  changed)
+    [[ $# -eq 1 ]] || usage
+    run_changed
+    ;;
   standard)
     [[ $# -eq 1 ]] || usage
     run_standard
@@ -593,11 +665,17 @@ case "$mode" in
     run_generation_gameplay
     ;;
   playtest)
-    [[ $# -ge 1 ]] || usage
     shift
-    # Focused harness: use debug CLI by default for <1s warm iteration.
-    # Gate fidelity via CIVIC_DYNASTY_PROFILE=release.
-    run_step 'Gameplay harness run' run_playtest "$@"
+    # Focused harness: debug CLI by default for <1s warm iteration.
+    # With no extra args, run a quick 60-day single-persona check so
+    # `bash scripts/test.sh playtest` is an instant design smoke without
+    # needing to remember flags. Gate fidelity via
+    # `CIVIC_DYNASTY_PROFILE=release`.
+    if [[ $# -eq 0 ]]; then
+      run_step 'Gameplay harness run' run_playtest --days 60 --seeds 1 --persona steward --background baker --trace-limit 8
+    else
+      run_step 'Gameplay harness run' run_playtest "$@"
+    fi
     ;;
   gameplay-audit)
     [[ $# -eq 1 ]] || usage

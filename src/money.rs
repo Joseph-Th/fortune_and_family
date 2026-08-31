@@ -196,7 +196,7 @@ impl fmt::Display for Money {
     }
 }
 
-/// Fixed-point good quantity in milliunits (1 unit = 1_000 milliunits).
+/// Fixed-point good quantity in milliunits (1 unit = `1_000` milliunits).
 ///
 /// Copy, transparent `i64`. Market stock, inventory, and contract quantities
 /// are measured in milliunits so fractional batches (e.g. 0.5 ale) remain
@@ -210,7 +210,7 @@ pub struct Quantity(i64);
 impl Quantity {
     /// Zero milliunits.
     pub const ZERO: Self = Self(0);
-    /// One whole unit (1_000 milliunits).
+    /// One whole unit (`1_000` milliunits).
     pub const ONE: Self = Self(1_000);
 
     #[must_use]

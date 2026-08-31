@@ -32,6 +32,7 @@ usage:
   .\scripts\test.ps1 check [filter]      fastest syntax check (cargo check, no tests)
   .\scripts\test.ps1 fast [filter]       run non-ignored library tests (default loop)
   .\scripts\test.ps1 quick [filter]      fastest loop: same as fast, skips docs/CLI
+  .\scripts\test.ps1 changed             run fast tests for domains touched by current diff only
   .\scripts\test.ps1 standard            pre-commit loop: syntax, library, docs, core CLI smoke
   .\scripts\test.ps1 exact <test-name>   run one fully qualified library test
   .\scripts\test.ps1 debug <test-name>   run one exact test with captured output enabled
@@ -44,7 +45,7 @@ usage:
   .\scripts\test.ps1 adapters            run all CLI smoke groups
   .\scripts\test.ps1 gameplay            run release gameplay and generation-length quality gates
   .\scripts\test.ps1 gameplay-audit      run mature multi-seed, generation, and credit-stress audits
-  .\scripts\test.ps1 playtest [args...]  focused harness run (debug CLI by default; set PROFILE=release for gate)
+  .\scripts\test.ps1 playtest [args...]  focused harness run (no args defaults to quick 60-day debug check)
   .\scripts\test.ps1 ci-verify           fast CI lane: format, clippy, library, docs
   .\scripts\test.ps1 ci-gates            deep CI lane: release tests, soaks, adapters, gameplay, audit
   .\scripts\test.ps1 all                 everything: standard + soak + adapters + gameplay
@@ -53,7 +54,9 @@ usage:
 
 fast iteration (solo local — incremental, no world rebuild):
   .\scripts\test.ps1 fast simulation   filtered <1s
+  .\scripts\test.ps1 changed            only domains touched by current diff, <1s
   .\scripts\test.ps1 check              <1s syntax only
+  .\scripts\test.ps1 playtest            quick 60-day single-persona check, <1s (default)
   .\scripts\test.ps1 playtest --days 90 --persona steward  # debug harness <1s
 
 warm budgets (incremental, after first build — cold once: clippy ~11s, release ~56s):
@@ -249,6 +252,74 @@ function Run-Fast([string]$TestFilter) {
         & cargo @testArgs
         if ($LASTEXITCODE -ne 0) { throw "Library tests failed" }
     }
+}
+
+function Run-Changed {
+    $changedFiles = @()
+    try {
+        $diff = & git diff --name-only HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $diff) { $changedFiles += $diff -split "`n" | Where-Object { $_ -ne "" } }
+    } catch {}
+    try {
+        $others = & git ls-files --others --exclude-standard 2>$null
+        if ($LASTEXITCODE -eq 0 -and $others) { $changedFiles += $others -split "`n" | Where-Object { $_ -ne "" } }
+    } catch {}
+    $changedFiles = $changedFiles | Sort-Object -Unique
+    if (-not $changedFiles -or $changedFiles.Count -eq 0) {
+        Write-Host "`n==> Changed domains: no tracked diff — running full library suite" -ForegroundColor Yellow
+        Run-Fast
+        return
+    }
+    $seen = @{}
+    $filters = @()
+    foreach ($file in $changedFiles) {
+        $candidate = $null
+        switch -Wildcard ($file) {
+            "src/systems/simulation/*" { $candidate = "simulation" }
+            "src/systems/strategic/*" { $candidate = "strategic" }
+            "src/systems/commands/*" { $candidate = "commands" }
+            "src/systems/bootstrap*" { $candidate = "bootstrap" }
+            "src/systems/invariants*" { $candidate = "invariants" }
+            "src/systems/legal*" { $candidate = "legal" }
+            "src/systems/progression*" { $candidate = "progression" }
+            "src/systems/transactions*" { $candidate = "transactions" }
+            "src/core/*" { $candidate = "core" }
+            "src/ids.rs" { $candidate = "core" }
+            "src/money.rs" { $candidate = "core" }
+            "src/rng.rs" { $candidate = "core" }
+            "src/persistence*" { $candidate = "persistence" }
+            "src/projection*" { $candidate = "projection" }
+            "src/registry/*" { $candidate = "persistence" }
+            "src/gameplay/*" { $candidate = "gameplay" }
+            "src/gameplay_tests.rs" { $candidate = "gameplay" }
+            "src/art/*" { $candidate = "art" }
+            "src/main.rs" { $candidate = "" }
+            "src/lib.rs" { $candidate = "" }
+            "scripts/*" { $candidate = "" }
+            default { continue }
+        }
+        if ($candidate -eq "") {
+            Write-Host "`n==> Changed domains span multiple systems ($($changedFiles -join ', ')) — running full library suite" -ForegroundColor Yellow
+            Run-Fast
+            return
+        }
+        if ($candidate -and -not $seen.ContainsKey($candidate)) {
+            $seen[$candidate] = $true
+            $filters += $candidate
+        }
+    }
+    if ($filters.Count -eq 0) {
+        Write-Host "`n==> Changed files do not map to a library domain — running full library suite" -ForegroundColor Yellow
+        Run-Fast
+        return
+    }
+    if ($filters.Count -eq 1) {
+        Write-Host "`n==> Changed domain: $($filters[0]) — running filtered suite" -ForegroundColor Cyan
+        Run-Fast $filters[0]
+        return
+    }
+    Write-Host "`n==> Changed domains: $($filters -join ', ') — running full library suite" -ForegroundColor Yellow
+    Run-Fast
 }
 
 function Run-Exact([string]$TestName) {
@@ -452,6 +523,7 @@ switch ($Mode) {
     "check"          { Run-Check $Filter }
     "fast"           { Run-Fast $Filter }
     "quick"          { Run-Fast $Filter }
+    "changed"        { Run-Changed }
     "standard"       { Run-Standard }
     "exact"          { if (-not $Filter) { Show-Usage }; Run-Exact $Filter }
     "debug"          { if (-not $Filter) { Show-Usage }; Run-Debug $Filter }
@@ -470,12 +542,18 @@ switch ($Mode) {
     "gameplay"       { Run-GameplayGates }
     "gameplay-audit" { Run-GameplayAudit }
     "playtest"       {
-        if (-not $Rest -or $Rest.Count -eq 0) { Show-Usage }
         $profile = if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" }
         Ensure-CliBinary $profile
-        Run-Step "Gameplay harness run" {
-            & $env:CIVIC_DYNASTY_BINARY playtest @Rest
-            if ($LASTEXITCODE -ne 0) { throw "Gameplay harness run failed" }
+        if (-not $Rest -or $Rest.Count -eq 0) {
+            Run-Step "Gameplay harness run" {
+                & $env:CIVIC_DYNASTY_BINARY playtest --days 60 --seeds 1 --persona steward --background baker --trace-limit 8
+                if ($LASTEXITCODE -ne 0) { throw "Gameplay harness run failed" }
+            }
+        } else {
+            Run-Step "Gameplay harness run" {
+                & $env:CIVIC_DYNASTY_BINARY playtest @Rest
+                if ($LASTEXITCODE -ne 0) { throw "Gameplay harness run failed" }
+            }
         }
     }
     "ci-verify"      { Run-CiVerify }
