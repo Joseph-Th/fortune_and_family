@@ -839,7 +839,11 @@ pub(crate) fn add_phase_action_mix_findings(
         // designate-heir). A 25% share in a 30-cycle foundation is expected
         // variance, not a systemic funnel, so the Info threshold is higher
         // for foundation.
-        let info_threshold = if phase == GameplayPhase::Foundation { 30 } else { 25 };
+        let info_threshold = if phase == GameplayPhase::Foundation {
+            30
+        } else {
+            25
+        };
         if share < info_threshold {
             continue;
         }

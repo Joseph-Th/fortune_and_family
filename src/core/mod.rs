@@ -4,7 +4,8 @@
 //! without exposing internal module layout, so callers import `crate::core::*`
 //! rather than reaching into `records`/`state`/`extended` directly.
 //! Owns: module wiring only (`records`, `state`, `extended`, `checksum`).
-//! Reads/Mutates: as its submodules (this file itself holds no state).
+//! Reads: as its submodules (this file itself holds no state).
+//! Mutates: as its submodules (this file itself holds no state).
 //! Does not own: business rules, persistence, or projection — it only
 //! types the state those layers operate on.
 //! Canonical operations: re-export only; callers use `AppState`, store

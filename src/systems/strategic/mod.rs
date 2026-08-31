@@ -9,9 +9,9 @@
 //! `households`, `businesses`, `labor`, `offices`, `ai`, `legal_cases`,
 //! `crises`, `initialization`) behind one facade; shared relationship/law/
 //! information helpers and `DailyCapacityScratch`-derived scheduling.
-//! Reads/Mutates: `AppState` via each subdomain; `DailyCapacityScratch` is
-//! collected once per day-phase for deterministic sharing across purchases,
-//! production, sales, and strategic reads.
+//! Reads: `AppState` via each subdomain (`DailyCapacityScratch` collected once per day-phase
+//! for deterministic sharing across purchases, production, sales, and strategic reads).
+//! Mutates: `AppState` via each subdomain (weekly/monthly/annual hooks and daily crisis/route effects).
 //! Does not own: daily economic pipeline (`simulation/mod.rs`) or player-
 //! command validation (`commands/*`), though strategic helpers quote and
 //! validate those commands.

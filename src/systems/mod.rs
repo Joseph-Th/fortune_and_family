@@ -10,8 +10,8 @@
 //! Owns: subsystem module wiring and the shared scheduling/employment/route
 //! math that multiple domains read (weekly settleability, directive expiry,
 //! rent index bounds, worker-capacity helpers).
-//! Reads/Mutates: as its submodules (this file itself owns no domain state;
-//! re-exports are pass-through).
+//! Reads: as its submodules (this file itself owns no domain state; re-exports are pass-through).
+//! Mutates: as its submodules (this file itself owns no domain state; re-exports are pass-through).
 //! Does not own: any single domain's mutation (each subsystem owns its own
 //! validation → commit path).
 //! Canonical operations: `build_new_game` (bootstrap), `apply_player_command`

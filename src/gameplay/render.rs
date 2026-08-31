@@ -268,7 +268,10 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
     let median_succession = succession_days.get(succession_days.len() / 2).copied();
     let pacing_note = match (median_office, median_succession) {
         (Some(o), Some(s)) if o < s => "office leads succession (healthy)".to_owned(),
-        (Some(o), Some(s)) => format!("succession leads office by {}d (tight pacing)", s.abs_diff(o)),
+        (Some(o), Some(s)) => format!(
+            "succession leads office by {}d (tight pacing)",
+            s.abs_diff(o)
+        ),
         (Some(_), None) => "succession not yet reached".to_owned(),
         (None, Some(_)) => "office not yet reached".to_owned(),
         (None, None) => "neither reached".to_owned(),
