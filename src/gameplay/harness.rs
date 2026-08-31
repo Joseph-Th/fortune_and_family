@@ -1072,8 +1072,13 @@ pub(crate) fn jittered_decision_interval(
     sample = sample.wrapping_add(state.clock.day().cast_unsigned());
     sample = sample.wrapping_add(u64::from(accumulator.decision_cycles));
     sample = sample.wrapping_add(u64::from(config.seed_count));
-    // +/-7 days keeps organic variation without erasing the 30-day design cadence.
-    let delta = i64::try_from(sample % 15).unwrap_or(0) - 7;
+    sample = sample.wrapping_add(u64::from(state.player_dynasty_id.value()));
+    sample ^= u64::from(accumulator.total_viable_choices).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    // Widen to +/-9 days so campaigns sample different calendar offsets. The
+    // variation stays inside one decision cycle so the 30-day cadence remains
+    // legible while each world and persona samples slightly different
+    // observation windows across campaigns.
+    let delta = i64::try_from(sample % 19).unwrap_or(0) - 9;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         i64::from(base).saturating_add(delta).max(7) as u32

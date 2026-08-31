@@ -83,7 +83,7 @@ pub(crate) const AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD: u16 = 2_50
 /// reset the streak on every ordinary cadence step and make the repetitive
 /// command finding unreachable.
 pub(crate) const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 30;
-pub(crate) const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 280;
+pub(crate) const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 360;
 /// Fixed budget used by agent-proposed public-work candidates.
 pub(crate) const CANDIDATE_PUBLIC_WORK_BUDGET: Money = Money::from_copper(12_000);
 
