@@ -435,15 +435,12 @@ pub(crate) fn business_status_after_capitalization(
     }
 }
 
-/// Annual succession-chance pressure per year of head age past the
-/// eligibility threshold. The rate keeps the median first transition near
-/// 600-800 days (early third year), late enough that a founder who pursues
-/// institutional standing has offices and memberships worth testing when
-/// succession arrives, yet early enough that dynastic continuity is part
-/// of ordinary play rather than only generation-length simulations.
-/// At 400 bp/year, a 52-year founder at 10% first-year chance scales to
-/// ~22% by 54, yielding ~45% cumulative succession within three years —
-/// close to the design target of median transition mid third year.
+/// Annual succession-chance pressure per year of head age past the eligibility
+/// threshold. The rate places the median first transition near 600-800 days
+/// (early third year): late enough that a founder pursuing institutional
+/// standing has offices and memberships worth testing at succession, early
+/// enough that dynastic continuity is part of ordinary play rather than only
+/// generation-length simulations.
 const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 280;
 
 fn decide_business_production(

@@ -2603,11 +2603,9 @@ pub(crate) fn generate_contract_candidates(
 }
 
 /// Commitment bases mirror the canonical contract capacity window:
-/// incoming supply commits a fuller week than outgoing sales, because a buyer
-/// wants dependable input while a prudent seller reserves slack.
-/// Raised from 5/3 to 7/5 so contract quantities create material fulfillment
-/// pressure — small token contracts never generate the breach grievances
-/// that ground legal enforcement drama.
+/// incoming supply commits a fuller week than outgoing sales — buyers need
+/// dependable input while sellers reserve slack. The window sizes contracts
+/// so fulfillment pressure and breach grievances surface in ordinary play.
 const AGENT_CONTRACT_COMMITMENT_DAYS: i64 = 7;
 const AGENT_SELL_COMMITMENT_DAYS: i64 = 5;
 

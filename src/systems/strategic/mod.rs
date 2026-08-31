@@ -99,26 +99,21 @@ pub(crate) const DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS: i64 = 90;
 pub(crate) const PROPERTY_LIQUIDATION_BASIS_POINTS: i64 = 5_000;
 const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000);
 
-/// Contract commitments are sized against a six-day operating week even
-/// though the simulation week has seven days: the margin keeps both parties
-/// free to keep trading the good on the open market alongside the contract,
-/// while a tighter reserve makes sustained over-commitment visible
-/// as inventory and cash-flow stress instead of silent buffer.
-/// Raised from 4 to 6 so contracts create material fulfillment pressure
-/// and breach grievances become reachable inside one session.
+/// Contract commitments are sized against a six-day operating week within a
+/// seven-day simulation week. The margin leaves both parties free to trade
+/// on the open market alongside the contract while making sustained
+/// over-commitment visible as inventory and cash-flow stress. The window
+/// creates material fulfillment pressure so breach grievances surface in
+/// ordinary play.
 const CONTRACT_CAPACITY_COMMITMENT_DAYS: i64 = 6;
 
 const UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS: u16 = 240;
 const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
 /// Route disruption at or above this level spawns a trade-disruption crisis;
-/// a tracked disruption also holds at this condition until every route heals.
-/// At 6000 (60% capacity-weighted disruption) a sustained regional blockade
-/// or multiple degraded routes can credibly interrupt Rivergate's import
-/// staples while still requiring real pressure — the prior 4500 threshold
-/// made TradeDisruption fire in 100% of 3-year campaigns (deterministic,
-/// not emergent), while the earlier 7000 threshold demanded a near-total
-/// collapse that weighted averages rarely reached, leaving Trade Disruption
-/// as dead content across harness matrices.
+/// a tracked disruption holds until every route heals. At 6000 (60%
+/// capacity-weighted disruption) a sustained blockade or multiple degraded
+/// routes credibly interrupts import staples while still requiring material
+/// pressure.
 pub(crate) const TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD: u16 = 6_000;
 /// A resolved banking panic raises the default bar for a follow-up panic for
 /// three years; older panics stop counting so confidence can rebuild.
@@ -143,13 +138,11 @@ const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASI
 const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 5_200;
 const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 10;
 const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(18_000);
-/// Monthly risk-appetite draw per liquid house: speculative offers stay a
-/// minority of the lending book while still arriving several times per
-/// campaign instead of roughly once per session. Lifted from 45% → 60% →
-/// 75% and paired with heavier/shorter terms (12w, 46% annual, 16k cap)
-/// so city-wide default counts and banking-panic detection become
-/// reachable without requiring a perfectly unlucky world seed while keeping
-/// most loans repayable for deliberate recovery players.
+/// Monthly risk-appetite draw per liquid house. Speculative offers remain a
+/// minority of the lending book while arriving several times per campaign.
+/// Heavy, short terms make city-wide defaults and banking-panic detection
+/// surface in ordinary worlds while most loans stay repayable for
+/// deliberate recovery.
 const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 8_200;
 
 mod ai;
