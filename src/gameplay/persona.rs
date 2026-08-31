@@ -68,7 +68,7 @@ pub(crate) const AGENT_STRATEGIC_WITHDRAWAL_MAX: Money = Money::from_copper(50_0
 pub(crate) const PROPERTY_PORTFOLIO_REPOSITIONING_YIELD_BASIS_POINTS: u16 = 800;
 pub(crate) const AGENT_INFORMATION_SEVERE_COUNTERPARTY_PRESSURE_BASIS_POINTS: u16 = 1_500;
 pub(crate) const AGENT_INFORMATION_POLITICAL_VULNERABILITY_LEGITIMACY: u16 = 2_500;
-pub(crate) const AGENT_INFORMATION_LEVERAGE_DELAY_DAYS: i64 = 90;
+pub(crate) const AGENT_INFORMATION_LEVERAGE_DELAY_DAYS: i64 = 60;
 pub(crate) const AGENT_ROUTINE_COMMISSION_INTERVAL_DAYS: i64 = 720;
 pub(crate) const INFORMATION_ROUTINE_PAIR_WINDOW_DAYS: i64 = 180;
 pub(crate) const AGENT_INFORMATION_MARKET_PRICE_CHANGE_BASIS_POINTS: u64 = 2_000;
@@ -83,7 +83,7 @@ pub(crate) const AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD: u16 = 2_50
 /// reset the streak on every ordinary cadence step and make the repetitive
 /// command finding unreachable.
 pub(crate) const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 30;
-pub(crate) const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 180;
+pub(crate) const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 280;
 /// Fixed budget used by agent-proposed public-work candidates.
 pub(crate) const CANDIDATE_PUBLIC_WORK_BUDGET: Money = Money::from_copper(12_000);
 

@@ -1072,8 +1072,8 @@ pub(crate) fn jittered_decision_interval(
     sample = sample.wrapping_add(state.clock.day().cast_unsigned());
     sample = sample.wrapping_add(u64::from(accumulator.decision_cycles));
     sample = sample.wrapping_add(u64::from(config.seed_count));
-    // +/-4 days keeps organic variation without erasing the 30-day design cadence.
-    let delta = i64::try_from(sample % 9).unwrap_or(0) - 4;
+    // +/-7 days keeps organic variation without erasing the 30-day design cadence.
+    let delta = i64::try_from(sample % 15).unwrap_or(0) - 7;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         i64::from(base).saturating_add(delta).max(7) as u32

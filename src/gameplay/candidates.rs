@@ -3310,6 +3310,9 @@ pub(crate) fn add_borrow_candidate(
     // Defaults are recovery obligations, not a signal to shop the debt around
     // the city. While any default remains unresolved, borrowing is restricted
     // to an aged workout with the creditor that already owns the claim.
+    // Pair-scoped blocking mirrors `has_borrow_opportunity`: a fresh loan is
+    // still possible with lenders not owed the default, so we only block when
+    // every viable lender is counterparty-blocked.
     let restructuring_default = state
         .loans
         .values()
@@ -3318,11 +3321,18 @@ pub(crate) fn add_borrow_candidate(
                 && defaulted_loan_restructuring_available(state, loan)
         })
         .min_by_key(|loan| (loan.next_due_day, loan.id));
-    if restructuring_default.is_none()
-        && (borrower_has_unresolved_default(state, player_id)
-            || player.treasury() >= borrowing_trigger)
-    {
-        return;
+    if restructuring_default.is_none() {
+        let fresh_lender_exists = state.dynasties.values().any(|dynasty| {
+            dynasty.id() != player_id
+                && !credit_pair_blocks_new_loan(state, dynasty.id(), player_id)
+                && dynasty
+                    .treasury()
+                    .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+                    .is_some_and(|available| available >= Money::from_copper(1_000))
+        });
+        if !fresh_lender_exists || player.treasury() >= borrowing_trigger {
+            return;
+        }
     }
     let (lender, defaulted_loan) = if let Some(defaulted_loan) = restructuring_default {
         (
@@ -3448,9 +3458,9 @@ pub(crate) fn borrow_principal(lender_treasury: Money) -> Money {
 
 pub(crate) fn lending_limits(persona: GameplayPersona) -> (Money, usize) {
     match persona {
-        GameplayPersona::Steward => (Money::from_copper(40_000), 1),
-        GameplayPersona::Entrepreneur => (Money::from_copper(30_000), 2),
-        GameplayPersona::PowerBroker => (Money::from_copper(50_000), 1),
+        GameplayPersona::Steward => (Money::from_copper(20_000), 2),
+        GameplayPersona::Entrepreneur => (Money::from_copper(18_000), 2),
+        GameplayPersona::PowerBroker => (Money::from_copper(25_000), 2),
         // Opportunist lending is the persona's signature route: a smaller
         // reserve keeps high-yield short-term credit reachable at ordinary
         // dynasty treasuries instead of reserving it for rare surpluses, even
@@ -3681,12 +3691,26 @@ pub(crate) fn generate_information_leverage_candidates(
             continue;
         };
         leverage_available = true;
-        let bonus = match persona {
-            GameplayPersona::Steward => 780,
-            GameplayPersona::Entrepreneur => 860,
-            GameplayPersona::PowerBroker => 900,
-            GameplayPersona::Opportunist => 920,
+        // Leverage must compete with crisis response (steward crisis 900) so the
+        // intelligence loop is actually exercised rather than permanently
+        // crowded out by urgent crises. A small recency bonus favours fresh
+        // reports without overriding standing reserves.
+        let recency_bonus = 180_i64
+            .saturating_sub(
+                state
+                    .clock
+                    .day()
+                    .saturating_sub(report.created_day)
+                    .saturating_div(4),
+            )
+            .max(0);
+        let base_bonus: i64 = match persona {
+            GameplayPersona::Steward => 980,
+            GameplayPersona::Entrepreneur => 1_060,
+            GameplayPersona::PowerBroker => 1_100,
+            GameplayPersona::Opportunist => 1_120,
         };
+        let bonus = base_bonus.saturating_add(recency_bonus);
         push_candidate(
             candidates,
             GameplayCommandKind::LeverageInformation,
@@ -6544,10 +6568,13 @@ pub(crate) fn legacy_rebuild_priority(arc: &GameplayFantasyArc, kind: GameplayCo
     match kind {
         GameplayCommandKind::InvestInBusiness
         | GameplayCommandKind::SecureSupply
-        | GameplayCommandKind::BuyProperty => 420,
+        | GameplayCommandKind::BuyProperty
+        | GameplayCommandKind::AcquireBusiness => 620,
         GameplayCommandKind::CultivateInstitutionSupport
         | GameplayCommandKind::EndowInstitution
-        | GameplayCommandKind::NominateForOffice => 260,
+        | GameplayCommandKind::NominateForOffice
+        | GameplayCommandKind::SetBusinessPolicy
+        | GameplayCommandKind::SetBusinessWages => 380,
         _ => 0,
     }
 }

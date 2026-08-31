@@ -534,9 +534,9 @@ pub use strategic::{
 };
 pub(crate) use strategic::{
     CRISIS_RESPONSE_WINDOW_DAYS, STANDARD_CONTRACT_BATCHES_PER_WEEK, acquire_business_scratch,
-    available_supply_contract_capacity, borrower_has_unresolved_default,
-    business_owner_distribution_reserve, business_recapitalization_target, buy_unowned_property,
-    capitalize_owned_business, credit_pair_blocks_new_loan, crisis_response_contains_crisis,
+    available_supply_contract_capacity, business_owner_distribution_reserve,
+    business_recapitalization_target, buy_unowned_property, capitalize_owned_business,
+    credit_pair_blocks_new_loan, crisis_response_contains_crisis,
     defaulted_loan_restructuring_available, distribute_owned_business_cash,
     district_unrest_pressures, dynasty_office_administrative_load, effective_property_weekly_rent,
     expire_time_limited_state, institution_capability_score, latest_defaulted_loan_for_pair,
