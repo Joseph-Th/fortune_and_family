@@ -117,7 +117,15 @@ impl GameplayPersona {
     }
 }
 
+/// Deterministic harness execution parameters — the complete input surface for
+/// [`run_gameplay_harness`](crate::gameplay::run_gameplay_harness).
+///
+/// Strict deserialization: unknown fields are rejected so a persisted or
+/// CLI-supplied config cannot silently carry a mistyped key while the harness
+/// measures a different contract. Every field is bounded and validated by
+/// [`GameplayHarnessConfig::validate`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GameplayHarnessConfig {
     pub start_seed: u64,
     pub seed_count: u16,

@@ -1850,8 +1850,10 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
         .households
         .iter()
         .map(|household| {
-            let available =
-                crate::systems::available_household_workers(state, household.id()) as i64;
+            let available = i64::from(crate::systems::available_household_workers(
+                state,
+                household.id(),
+            ));
             let members = i64::from(household.members());
             let available_ratio = if members > 0 {
                 (available * 10_000 / members).clamp(2_000, 10_000)

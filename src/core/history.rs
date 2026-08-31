@@ -204,6 +204,13 @@ impl<T> HistoryLog<T> {
         }
     }
 
+    /// Returns the total number of entries in this history log.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the combined length of the shared bulk and exclusive tail
+    /// exceeds `usize::MAX`. This is unreachable in practice: it would
+    /// require more entries than addressable memory can hold.
     #[must_use]
     pub fn len(&self) -> usize {
         self.base

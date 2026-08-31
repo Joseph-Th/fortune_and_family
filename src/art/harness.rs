@@ -32,7 +32,11 @@ pub const MIN_REVIEW_SCALE: u32 = 1;
 pub const MAX_REVIEW_SCALE: u32 = 16;
 
 /// Inputs that select which sprites the harness renders.
+///
+/// Strict deserialization: unknown fields are rejected so a mistyped
+/// `art --config` JSON cannot silently produce a truncated review.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtReviewConfig {
     pub roles: Vec<SpriteRole>,
     pub start_seed: u64,

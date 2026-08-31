@@ -21,14 +21,15 @@ Each question is answered by one owned document. Link to the owner instead of re
 | `TESTING.md` | Test tiers, assertion standards, completion gates |
 | `GAMEPLAY_HARNESS.md` | Harness mechanics, report semantics |
 
-Profiles: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation**. Root `../AGENTS.md` owns workspace coordination.
+Profiles: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation**. Root `../AGENTS.md` owns workspace coordination, task leases, and filesystem hygiene. BCA policy is `advisory` (see `AGENTS.md`).
 
 ## Cold start
 
-1. Read this map, then `AGENTS.md` for the change procedure.
-2. Read `STATUS.md` for current capability and `ARCHITECTURE.md` for the owning module.
-3. Trace `src/lib.rs` to the canonical system, then its file header (`Purpose / Owns / Reads / Mutates`).
-4. Run the narrowest `bash scripts/test.sh <lane>` from `TESTING.md`.
+1. Read this map, then `AGENTS.md` for the change procedure and required reading order.
+2. Read `STATUS.md` for current capability (schemas, guarantees, limits) and `ARCHITECTURE.md` for the owning module.
+3. Trace `src/lib.rs` to the canonical system, then its file header (`Purpose / Owns / Reads / Mutates / Does not own / Canonical operations / Relevant invariants / Focused tests`).
+4. Identify the narrowest test that proves the behavior before editing.
+5. Run the narrowest `bash scripts/test.sh <lane>` from `TESTING.md` — `fast <filter>` for iteration, `standard` for completion.
 
 ## Requirements
 
@@ -97,7 +98,14 @@ persistence / CLI / projections / HTML / gameplay analysis / art
 - Systems validate and mutate state.
 - Adapters serialize, render, inspect, or invoke systems; they own no domain rules.
 
-Determinism contract: same registry, state, seed, command sequence, and day count produce identical state. Full contract is in `ARCHITECTURE.md`.
+Determinism contract: same registry (fingerprint-bound), state, seed, command sequence,
+and day count produce bit-identical successor `AppState` via state-owned RNG,
+`BTreeMap`-ordered iteration, typed-ID tie-breakers, and fixed-point
+`Money`/`Quantity`. Full contract is in `ARCHITECTURE.md` § Determinism contract.
+
+Failure semantics: consequential operations validate before mutation, preserve
+state on rejection, and report typed `CommandError`/`SimulationError`/`PersistenceError`
+variants with relevant fields.
 
 ## Repository map
 
@@ -152,3 +160,11 @@ scripts/              Test runner, smoke groups, docs and gameplay checks, git h
 ## Working rule
 
 Find the owner before changing behavior. Trace the public entry point to its canonical system, prove the change with the narrowest tests, and update the one owning document. `AGENTS.md` defines the procedure.
+
+## Verification
+
+All verification is local; no hosted CI. `bash scripts/test.sh <lane>` (or `.\scripts\test.ps1 <lane>` on Windows) is authoritative — see `TESTING.md` for lane selection. Current docs/tests must stay consistent (`bash scripts/test.sh docs`, `python scripts/check_docs.py`). Workspace policy:
+
+```bash
+python ../tools/check_no_github_actions.py   # must pass before completion
+```

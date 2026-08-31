@@ -258,6 +258,19 @@ Owns deterministic rendering specifications, integer geometry/shading, sprite co
 
 Rendering is one-way: `CharacterSpec` → indexed `Canvas` → PNG bytes → embedded data URI. No round-trip or editability is claimed. Generated HTML/PNG are derived; `CharacterSpec`/palette/rig are the source of truth.
 
+Staged publication (per Artifact Generation profile):
+
+- Every generated file — dashboard HTML, gameplay report JSON/HTML,
+  art review HTML/PNG embeds — writes to a synchronized same-directory
+  temporary and atomically replaces the destination via `write_generated_file`
+  (same commit-point separation as saves).
+- A failed or cancelled generation either removes the temporary or leaves the
+  previous valid artifact untouched; no plausible partial file is left at the
+  final path.
+- Fidelity is explicit: HTML is standalone but not editable source, PNG is
+  8-bit indexed without codec variability, and report schemas are versioned and
+  validated before rendering.
+
 ## Determinism contract
 
 Given the same registry, state, seed, command sequence, and day count, execution produces identical state.
@@ -310,6 +323,12 @@ Groups include registry references, derived indexes, ownership and occupancy, li
 | Gameplay evaluation | `src/gameplay/` | Report schema, tests, `GAMEPLAY_HARNESS.md`. |
 | CLI syntax | `src/main.rs` | CLI smoke, README workflow if needed. |
 | Art primitive/subject/check | `src/art/*` | Determinism, review coverage, schema/status for serialized output changes. |
+
+## Verification routing
+
+`TESTING.md` owns lane selection; `ARCHITECTURE.md` extension map points to the narrowest proof per change class. Routine completion is `bash scripts/test.sh standard`; specialized surfaces add `soak` (long horizons), `adapters` (CLI), `gameplay`/`gameplay-audit` (harness matrices), and `docs` (link/doc consistency). Policy checks are `python tools/check_standards.py` and `python tools/check_no_github_actions.py` (no hosted CI; see `TESTING.md` § Completion gate).
+
+BCA policy is `advisory` (see `AGENTS.md`): run BCA selectively on nontrivial orchestrators or refactors; no mandatory gate or baseline. Tooling lives in `scripts/test.sh` and `scripts/check_docs.py`; verification reuses incremental compilation and cached fixtures where isolation permits.
 
 ## Public API
 
