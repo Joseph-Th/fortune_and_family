@@ -25,6 +25,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
+/// Defines one typed persistent identifier newtype (`*Id`).
+///
+/// Each expansion produces a transparent `u32` newtype that is `Copy + Ord +
+/// Hash` so it can serve as a stable deterministic tie-breaker and
+/// `BTreeMap` key. IDs are never reused; exhaustion is signaled via
+/// `IdentifierAllocationError` and `NextIds` reserves the sentinel values
+/// `u32::MAX - 1` and `u32::MAX`.
 macro_rules! define_id {
     ($name:ident) => {
         #[derive(

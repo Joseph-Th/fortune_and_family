@@ -22,6 +22,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Deterministic, serializable RNG owned by `AppState`.
+///
+/// Wraps a SplitMix64 step over a single `u64` word. The stream is fully
+/// determined by the seed and the ordered call sequence, persists across
+/// saves, and never falls back to OS entropy. Every stochastic simulation
+/// decision reads `AppState.rng` so a replay from the same save produces
+/// bit-identical futures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeterministicRng {
     state: u64,
@@ -35,6 +42,11 @@ impl DeterministicRng {
         Self { state: seed }
     }
 
+    /// Advances the stream by one SplitMix64 step and returns the next `u64`.
+    ///
+    /// # Panics
+    ///
+    /// Never panics; the step is wrapping arithmetic.
     #[must_use]
     pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);

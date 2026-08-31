@@ -33,6 +33,10 @@ use crate::money::{Money, Quantity};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Lifecycle of a durable supply contract. `Active` settles weekly;
+/// terminal states (`Fulfilled`/`Breached`/`Cancelled`) retain history
+/// but never resettle; breach records the defendant from the first
+/// attributable miss so victim/penalty remain queryable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContractStatus {
     Active,
@@ -101,6 +105,12 @@ impl SupplyContract {
     }
 }
 
+/// Repayment lifecycle of private credit. `Current`/`Delinquent`
+/// (`missed = 1-2`) / `Defaulted` (`missed ≥ 3`) participate in weekly
+/// settlement; `Repaid`/`WrittenOff` are terminal with zero balance;
+/// `Restructured` is a workout that resets arrears but remains
+/// repayment-active. Missed-payment counts are validated via
+/// `has_consistent_arrears`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoanStatus {
     Current,
@@ -175,6 +185,10 @@ impl Loan {
     }
 }
 
+/// Physical class of a property. Determines rent basis, value drift
+/// under district desirability, and whether a business premises link is
+/// meaningful. `Workshop` premises can be evicted/re-occupied on
+/// insolvency/recovery so a purposeful building does not become a windfall.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PropertyKind {
     Residence,
@@ -215,6 +229,10 @@ impl Property {
     }
 }
 
+/// Workforce agreement state. `Active` crews work at full strength;
+/// `Disputed` at half; `Suspended` (insolvent employer) and `Ended`
+/// (closed firm) contribute zero and are eventually released. Half
+/// strength on odd crews rounds down so disputes are never free.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EmploymentStatus {
     Active,

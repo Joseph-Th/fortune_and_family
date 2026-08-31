@@ -24,6 +24,12 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Fixed-point treasury and market currency. One copper = 1/100 crown (cr).
+///
+/// Copy, transparent `i64` (`serde` stores copper directly). Use checked
+/// arithmetic when overflow must be a typed error and saturating arithmetic
+/// only for bounded aggregation; ratio helpers use `i128` intermediates so
+/// intermediate overflow never silently truncates a transfer.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -31,6 +37,7 @@ use std::fmt;
 pub struct Money(i64);
 
 impl Money {
+    /// Zero copper. Useful as an explicit neutral element for aggregation and reserve checks.
     pub const ZERO: Self = Self(0);
 
     #[must_use]
@@ -189,6 +196,11 @@ impl fmt::Display for Money {
     }
 }
 
+/// Fixed-point good quantity in milliunits (1 unit = 1_000 milliunits).
+///
+/// Copy, transparent `i64`. Market stock, inventory, and contract quantities
+/// are measured in milliunits so fractional batches (e.g. 0.5 ale) remain
+/// exact without floating point.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -196,7 +208,9 @@ impl fmt::Display for Money {
 pub struct Quantity(i64);
 
 impl Quantity {
+    /// Zero milliunits.
     pub const ZERO: Self = Self(0);
+    /// One whole unit (1_000 milliunits).
     pub const ONE: Self = Self(1_000);
 
     #[must_use]

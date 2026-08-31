@@ -41,6 +41,12 @@ use crate::systems::{
 use serde::Serialize;
 use std::fmt::Write as _;
 
+/// Compact, player-facing campaign snapshot used by CLI `summary` and unit overviews.
+///
+/// Derived immutably from a single `Registry` + `AppState` snapshot. Every
+/// numeric field is a copy of authoritative state; no derived field becomes
+/// an alternate source of truth. `average_food_satisfaction_*` uses the
+/// population-weighted helper so large households count proportionally.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StateSummary {
     pub scenario_name: String,
@@ -166,6 +172,12 @@ pub fn build_state_summary(registry: &Registry, state: &AppState) -> StateSummar
 // `build_state_summary` is the single read-model entry point; no convenience
 // wrapper duplicates it.
 
+/// Full read-only campaign model serialized by `inspect` and rendered by `dashboard`.
+///
+/// Built in one pass from `Registry` + `AppState`. Collection order is
+/// deterministic (typed-ID or insertion order) so JSON and HTML are stable
+/// across builds. `attention` is computed once here and reused by both
+/// CLI and dashboard so they never diverge on what needs action.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CampaignProjection {
     pub scenario: ScenarioProjection,

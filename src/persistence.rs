@@ -62,6 +62,11 @@ pub enum StateValidationKind {
     IdentifierAllocation,
 }
 
+/// Typed, operator-actionable persistence failures. Every variant preserves
+/// the path, classification (`StateValidationKind`), or revision that
+/// caused the failure so callers can distinguish user error (missing file,
+/// too large, duplicate member) from corruption (invalid state, fingerprint
+/// mismatch) without parsing prose.
 #[derive(Debug, Error)]
 pub enum PersistenceError {
     #[error("failed to create save directory {path}: {source}")]
@@ -147,7 +152,11 @@ pub enum PersistenceError {
     },
 }
 
-/// The outcome of a save operation after visibility commit.
+/// Visibility vs durability outcome after the atomic `persist` visibility
+/// commit. Both variants mean the save is readable; `CommittedWithDegradedDurability`
+/// additionally warns that parent-directory synchronization (the durability
+/// boundary on Unix) failed or was unavailable, so a power loss could
+/// theoretically lose visibility on that platform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SaveOutcome {
     /// Save was atomically replaced; parent directory durability was
@@ -158,7 +167,10 @@ pub enum SaveOutcome {
     CommittedWithDegradedDurability,
 }
 
-/// A deterministic fingerprint of a save file's committed contents for CAS / optimistic concurrency.
+/// Deterministic fingerprint of the committed save bytes for optimistic
+/// concurrency (CAS). `hash` is the FNV-1a registry-style fold of the file
+/// bytes; `size` guards against hash collisions. `display_token` renders
+/// `hex:bytes` for mismatch diagnostics and is never parsed back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SaveRevision {
     hash: u64,

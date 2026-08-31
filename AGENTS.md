@@ -17,6 +17,11 @@ This repository implements **Universal**, **Stateful Application**, **Determinis
 5. Select the smallest completion lane from [TESTING.md](TESTING.md) that owns the changed surface.
 6. Update the one document that owns any changed architecture, behavior, schema, API, command, harness, or scope contract.
 
+## Routing & impact
+
+- **Task routing:** table below maps a change class to its owning module. Read the owning module's file header (`Purpose / Owns / Reads / Mutates / Does not own / Canonical operations / Relevant invariants / Focused tests`) before editing.
+- **Change impact:** [ARCHITECTURE.md](ARCHITECTURE.md) Extension map lists required companion work per change class (state shape → validation/invariants/projection/tests; commands → feedback/projection/harness; schedule → ordering/tests; persistence → schema/round-trip; adapters → smoke). The same map is the check-list for companion obligations that are easy to miss.
+
 ## Primary owners
 
 | Concern | Owner |

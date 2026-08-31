@@ -47,8 +47,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Current save schema. Bumped whenever persisted `AppState` shape or
+/// validation semantics change; `STATUS.md` and `persistence.rs` both
+/// pin this value so load fails closed on mismatch. Older and future
+/// schemas are rejected categorically.
 pub const CURRENT_SCHEMA_VERSION: u32 = 31;
 
+/// Player-authored inputs that determine the entire deterministic future.
+///
+/// `seed` seeds `DeterministicRng`; `dynasty_name`/`founder_name` are
+/// normalized (collapsed whitespace, no control chars) and validated; `background`
+/// selects the starting recipe and district. Unknown JSON fields are
+/// rejected so stale saves cannot silently carry a mistyped key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewGameConfig {
@@ -69,6 +79,12 @@ impl Default for NewGameConfig {
     }
 }
 
+/// Deterministic campaign clock measured in elapsed whole days from `0`.
+///
+/// Year length is 360 days; `day_of_year` is 1-based. `is_week_boundary`
+/// and `is_year_boundary` are false on day 0 so bootstrap never
+/// double-fires weekly/annual hooks. The exclusive sentinel `i64::MAX`
+/// is never a valid schedulable day (see `is_schedulable_day`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulationClock {
     day: i64,

@@ -34,6 +34,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Founder trade that seeds the player's first business and starting district.
+///
+/// The background determines the recipe (`baking` / `weaving` / `toolmaking`),
+/// the district (`southern_reach` / `riverside` / `northgate`), and the
+/// founder's workshop name. Map `baker` ↔ `baking`, etc. so registry keys
+/// and scenario fiction stay synchronized.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum StartingBackground {
     Baker,
@@ -78,6 +84,10 @@ impl FromStr for StartingBackground {
     }
 }
 
+/// Monotonic campaign phase derived from durable commercial, institutional,
+/// civic, and succession milestones. `refresh_campaign_phases` derives it
+/// from audit evidence and never moves it backwards; persistence validates
+/// that the stored phase agrees with the derived one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CampaignPhase {
     Foundation,
@@ -101,6 +111,10 @@ impl CampaignPhase {
     }
 }
 
+/// Lifecycle of a person. `Active` characters participate in management
+/// and office; `Incapacitated` holds a `collapse_day` and deterministically
+/// proceeds to `Deceased` after the collapse window; deceased records are
+/// retained for history but never reactivated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CharacterStatus {
     Active,
@@ -108,6 +122,9 @@ pub enum CharacterStatus {
     Deceased,
 }
 
+/// Family position within a dynasty. `HeadOfHouse` is the active ruler,
+/// `Heir` is the designated successor, `Clerk` is a managed family member
+/// who can be educated or assigned but not succeed without promotion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CharacterRole {
     HeadOfHouse,
@@ -115,6 +132,11 @@ pub enum CharacterRole {
     Clerk,
 }
 
+/// Operating lifecycle of a firm. Transitions: `Active` ↔ `Distressed`
+/// (cash/ inventory hysteresis), `Distressed/CLOSED` → `Insolvent` (cash
+/// zero + stock empty), `Insolvent` → `Closed` (terminal) or →
+/// `Distressed` via recapitalization (must pass through distress before
+/// returning to `Active`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BusinessStatus {
     Active,
@@ -136,6 +158,9 @@ impl BusinessStatus {
     }
 }
 
+/// Material stratum that drives living costs (28/52/78 copper per member
+/// monthly × rent index), district assignment, and market demand. Fixed
+/// per-household at bootstrap; households do not change class at runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SocialClass {
     Laboring,

@@ -12,7 +12,11 @@
 
 use super::color::TRANSPARENT_INDEX;
 
-/// A rectangular region measured in pixels.
+/// Rectangular region in pixel space, used for clipping and blit bounds.
+///
+/// `x`/`y` may be negative (off-canvas) and `width`/`height` are zero
+/// on empty rects; callers must not assume positive dimensions before
+/// checking `is_empty`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -38,7 +42,11 @@ impl Rect {
     }
 }
 
-/// A palette-indexed image where index zero is transparent.
+/// 8-bit indexed image where palette index `0` is transparent.
+///
+/// Storage is row-major `u8` indices; color interpretation lives in
+/// `Palette`/`Material` via `Surface` resolution. Bounds are checked and
+/// clipped on every primitive so renderers cannot write out of bounds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Canvas {
     width: u32,

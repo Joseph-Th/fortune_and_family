@@ -19,6 +19,12 @@
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace
 use super::*;
 
+/// Exhaustive catalog of player command families as observed by the harness.
+///
+/// `ALL_COMMAND_KINDS` enumerates every variant; tests assert coverage so a new
+/// `PlayerCommand` variant cannot silently bypass harness generation, viability,
+/// and consequence attribution. Operational vs substantive split (`is_substantive`)
+/// keeps liquidity plumbing from inflating agency metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GameplayCommandKind {
     TransferBusinessCash,
@@ -110,6 +116,12 @@ impl GameplayCommandKind {
     }
 }
 
+/// Exhaustive domain attribution set for counterfactual analysis.
+///
+/// Every command-to-state edge maps to one `GameplayDomain`; `ALL_DOMAINS`
+/// catalog and exhaustive match tests guarantee no state component is
+/// silently unobserved. `Feedback` covers outbox/chronicle/ audit observation
+/// so probe-vs-baseline attribution is complete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GameplayDomain {
     Economy,
