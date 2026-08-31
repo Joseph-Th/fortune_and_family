@@ -219,8 +219,8 @@ fn insert_player_foundation(
         state,
         dynasty_name,
         founder_name,
-        Money::from_copper(50_000),
-        78,
+        Money::from_copper(58_000),
+        82,
     );
     let head_id = state
         .dynasties
@@ -244,8 +244,8 @@ fn insert_player_foundation(
             district_id,
             recipe_id,
             name: background.business_name().to_owned(),
-            cash: Money::from_copper(42_000),
-            capacity_batches_per_day: 4,
+            cash: Money::from_copper(48_000),
+            capacity_batches_per_day: 5,
         },
     );
     dynasty_id

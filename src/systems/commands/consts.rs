@@ -25,7 +25,7 @@ pub(crate) const BUSINESS_WAGE_CHANGE_INTERVAL_DAYS: i64 = 90;
 /// Upper bound on the weekly wage per worker the command accepts. It keeps
 /// checked arithmetic unreachable while still allowing generous wages.
 pub(crate) const MAX_WEEKLY_WAGE_PER_WORKER: Money = Money::from_copper(400);
-pub(crate) const LAW_SPONSORSHIP_INTERVAL_DAYS: i64 = 360;
+pub(crate) const LAW_SPONSORSHIP_INTERVAL_DAYS: i64 = 180;
 pub(crate) const LAW_SPONSORSHIP_COST: Money = Money::from_copper(2_000);
 pub(crate) const LAW_LEGITIMACY_REQUIREMENT: u16 = 3_000;
 pub(crate) const LAW_LEGITIMACY_COST: u16 = 250;
@@ -48,9 +48,9 @@ pub(crate) const PUBLIC_WORK_MINIMUM_BUDGET: Money = Money::from_copper(1_000);
 pub(crate) const LABOR_REPLACEMENT_COST: Money = Money::from_copper(750);
 pub(crate) const LABOR_CONDITIONS_IMPROVEMENT_COST: Money = Money::from_copper(1_000);
 pub(crate) const LABOR_NEGOTIATION_COST: Money = Money::from_copper(500);
-pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 1_080;
+pub(crate) const HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS: i64 = 720;
 pub(crate) const HOUSE_GOVERNANCE_UNITY_COST: u16 = 250;
-pub(crate) const FAMILY_COUNCIL_MEETING_INTERVAL_DAYS: i64 = 360;
+pub(crate) const FAMILY_COUNCIL_MEETING_INTERVAL_DAYS: i64 = 240;
 pub(crate) const FAMILY_COUNCIL_MEETING_COST: Money = Money::from_copper(2_500);
 pub(crate) const FAMILY_COUNCIL_MEETING_UNITY_GAIN: u16 = 1_500;
 pub(crate) const FAMILY_COUNCIL_MEETING_LOYALTY_GAIN: u16 = 600;

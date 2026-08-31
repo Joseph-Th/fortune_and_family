@@ -2149,7 +2149,7 @@ pub(crate) fn generate_planned_business_investment(
         i64::from(target_quality.saturating_sub(business.operations.quality_basis_points))
             .saturating_mul(4);
     let desired = Money::from_copper(condition_investment.max(quality_investment));
-    if desired < Money::from_copper(1_000) {
+    if desired < Money::from_copper(600) {
         return;
     }
     let treasury = state
@@ -2157,17 +2157,22 @@ pub(crate) fn generate_planned_business_investment(
         .get(&state.player_dynasty_id)
         .expect("player dynasty must exist")
         .treasury();
-    let reserve = recapitalization_dynasty_reserve(persona, false);
+    let mut reserve = recapitalization_dynasty_reserve(persona, false);
+    if state.dynasties.get(&state.player_dynasty_id).is_some_and(|d| d.resources.legitimacy_basis_points > 6_000)
+        && state.institutions.values().any(|i| i.office_holder_id.is_some_and(|h| state.characters.get(h).is_some_and(|c| c.dynasty_id() == state.player_dynasty_id)))
+    {
+        reserve = Money::from_copper(reserve.copper().saturating_sub(2_000).max(0));
+    }
     let spendable = Money::from_copper(treasury.copper().saturating_sub(reserve.copper()).max(0));
     let amount = desired.min(AGENT_PLANNED_CAPITALIZATION_MAX).min(spendable);
-    if amount < Money::from_copper(1_000) {
+    if amount < Money::from_copper(600) {
         return;
     }
     let bonus = match persona {
         GameplayPersona::Entrepreneur => 900,
-        GameplayPersona::Steward => 650,
-        GameplayPersona::Opportunist => 300,
-        GameplayPersona::PowerBroker => 120,
+        GameplayPersona::Steward => 750,
+        GameplayPersona::Opportunist => 500,
+        GameplayPersona::PowerBroker => 550,
     };
     push_candidate(
         candidates,
@@ -2794,7 +2799,7 @@ pub(crate) fn add_contract_candidate(
     let Some(weekly_payment) = checked_cost_for(quantity_per_week, unit_price) else {
         return;
     };
-    let Some(penalty) = weekly_payment.checked_mul_ratio(2, 1) else {
+    let Some(penalty) = weekly_payment.checked_mul_ratio(4, 1) else {
         return;
     };
     let total_scheduled_value = weekly_payment

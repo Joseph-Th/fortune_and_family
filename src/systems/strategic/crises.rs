@@ -305,10 +305,10 @@ pub(crate) fn detect_and_advance_crises(
             )?;
         }
     }
-    let defaulted_loans = state
+    let distressed_loans = state
         .loans
         .values()
-        .filter(|loan| loan.status == LoanStatus::Defaulted)
+        .filter(|loan| matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted))
         .count()
         .saturating_add(
             state
@@ -317,6 +317,15 @@ pub(crate) fn detect_and_advance_crises(
                 .filter(|debt| debt.status == CivicDebtStatus::Defaulted)
                 .count(),
         );
+    let recent_writeoffs = state
+        .loans
+        .values()
+        .filter(|loan| {
+            loan.status == LoanStatus::WrittenOff
+                && day - loan.next_due_day <= BANKING_PANIC_MEMORY_DAYS
+        })
+        .count();
+    let distressed_loans = distressed_loans.saturating_add(recent_writeoffs);
     let active_panic = state
         .crises
         .values()
@@ -334,13 +343,33 @@ pub(crate) fn detect_and_advance_crises(
         })
         .count();
     let next_panic_threshold = prior_panics.saturating_add(2);
-    if defaulted_loans >= next_panic_threshold && !active_panic {
+    if distressed_loans >= next_panic_threshold && !active_panic {
         insert_crisis(
             state,
             CrisisKind::BankingPanic,
             None,
             3_800,
             "Multiple defaults damaged confidence in city credit.",
+        )?;
+    } else if !active_panic
+        && prior_panics == 0
+        && day > 0
+        && day % 180 == 0
+        && state.loans.len() >= 4
+        && state
+            .businesses
+            .iter()
+            .filter(|b| b.status() == crate::core::BusinessStatus::Distressed)
+            .count()
+            >= 1
+        && state.rng.is_chance_success(1_500)
+    {
+        insert_crisis(
+            state,
+            CrisisKind::BankingPanic,
+            None,
+            3_500,
+            "Sustained business distress and strained credit sparked a banking panic.",
         )?;
     }
     detect_trade_disruption(state)?;

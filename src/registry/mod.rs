@@ -986,11 +986,11 @@ fn register_material_recipes(builder: &mut RegistryBuilder, goods: RivergateGood
         "toolmaking",
         "Toolmaking",
         vec![
-            (goods.iron, Quantity::from_units(3)),
+            (goods.iron, Quantity::from_units(2)),
             (goods.charcoal, Quantity::from_units(2)),
         ],
         (goods.tools, Quantity::from_units(5)),
-        Money::from_copper(85),
+        Money::from_copper(70),
         10,
     );
 }

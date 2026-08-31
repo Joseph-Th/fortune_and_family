@@ -441,7 +441,7 @@ pub(crate) fn business_status_after_capitalization(
 /// standing has offices and memberships worth testing at succession, early
 /// enough that dynastic continuity is part of ordinary play rather than only
 /// generation-length simulations.
-const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 280;
+const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 360;
 
 fn decide_business_production(
     registry: &Registry,
@@ -1313,9 +1313,9 @@ fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, 
     // climb so a shortage cannot ratchet. The household income in bootstrap is
     // calibrated to carry this budget alongside food.
     let (charcoal, cloth, tools) = match social_class {
-        SocialClass::Laboring => (180, 400, 30),
-        SocialClass::Artisan => (240, 800, 120),
-        SocialClass::Merchant => (300, 1_200, 180),
+        SocialClass::Laboring => (180, 400, 60),
+        SocialClass::Artisan => (240, 800, 180),
+        SocialClass::Merchant => (300, 1_200, 260),
     };
     (
         Quantity::from_milliunits(charcoal),

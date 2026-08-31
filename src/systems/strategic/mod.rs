@@ -117,7 +117,7 @@ const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
 pub(crate) const TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD: u16 = 6_000;
 /// A resolved banking panic raises the default bar for a follow-up panic for
 /// three years; older panics stop counting so confidence can rebuild.
-const BANKING_PANIC_MEMORY_DAYS: i64 = 3 * 360;
+const BANKING_PANIC_MEMORY_DAYS: i64 = 2 * 360;
 /// Resolved crises stay visible in state for three years, then are pruned.
 const CRISIS_HISTORY_RETENTION_DAYS: i64 = 3 * 360;
 const EPIDEMIC_ONSET_WELFARE_DIVISOR: u16 = 7;
@@ -135,9 +135,9 @@ const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASI
 /// some of these loans rescue the borrower, others miss installments within
 /// months, fall delinquent, default, and ground the enforcement claims that
 /// keep courts, seizure, and banking panics reachable inside one session.
-const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 5_200;
-const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 10;
-const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(18_000);
+const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 5_800;
+const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 8;
+const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(22_000);
 /// Monthly risk-appetite draw per liquid house. Speculative offers remain a
 /// minority of the lending book while arriving several times per campaign.
 /// Heavy, short terms make city-wide defaults and banking-panic detection

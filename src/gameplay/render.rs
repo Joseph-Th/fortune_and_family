@@ -154,20 +154,32 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
         .iter()
         .flat_map(|c| c.observed_crisis_kinds.iter())
         .count() as u64;
-    let unique_crisis_kinds = report
-        .campaigns
-        .iter()
-        .flat_map(|c| c.observed_crisis_kinds.iter())
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
+    let mut crisis_kind_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for camp in &report.campaigns {
+        for kind in &camp.observed_crisis_kinds {
+            *crisis_kind_counts.entry(format!("{kind:?}")).or_default() += 1;
+        }
+    }
+    let unique_crisis_kinds = crisis_kind_counts.len();
+    let crisis_breakdown = if crisis_kind_counts.is_empty() {
+        "none".to_owned()
+    } else {
+        crisis_kind_counts
+            .iter()
+            .map(|(k, v)| format!("{k}:{v}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let _ = writeln!(
         output,
-        "  emergent systems: breach contracts {} | legal cases {} | causal legal changes {} | crisis observations {} across {} kinds | interconnection {} edges",
+        "  emergent systems: breach contracts {} | legal cases {} | causal legal changes {} | crisis observations {} across {} kinds [{}] | interconnection {} edges",
         breach_total,
         cases_total,
         legal_active,
         crisis_total,
         unique_crisis_kinds,
+        crisis_breakdown,
         aggregate.interactions.len()
     );
     // Background balance at a glance: margin spread surfaces trade profitability
@@ -1011,10 +1023,10 @@ pub(crate) fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mu
             .map(|(kind, count)| format!("{} {count}", kind.label()))
             .collect::<Vec<_>>()
             .join(", ");
-        let _ = writeln!(output, "  reserved by agent policy: {restrained_text}");
+        let _ = writeln!(output, "  no strategic need (agent restraint): {restrained_text}");
         let _ = writeln!(
             output,
-            "    (an activation opportunity fired but the persona's standing policy deliberately narrows the route to strategic-need conditions; not a game gap)"
+            "    (world offered the route but the house had no material need: wages were already fair, investments were healthy, governance cooldowns not yet strategic; this is intentional pacing, not missing content)"
         );
     }
     if !diagnostic.generator_gaps.is_empty() {
@@ -1041,7 +1053,8 @@ pub(crate) fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mu
             .map(|(kind, count)| format!("{} {count}", kind.label()))
             .collect::<Vec<_>>()
             .join(", ");
-        let _ = writeln!(output, "  declined by agent spending policy: {gate_text}");
+        let _ = writeln!(output, "  deferred for treasury/legitimacy (spending policy): {gate_text}");
+        let _ = writeln!(output, "    (house chose to preserve cash or legitimacy for salaries, debts, and office duties before discretionary spending)");
     }
     if !diagnostic.validation_gates.is_empty() {
         let mut gates: Vec<_> = diagnostic.validation_gates.iter().collect();

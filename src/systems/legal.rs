@@ -19,7 +19,7 @@ use crate::ids::DynastyId;
 use crate::money::Money;
 use crate::registry::Registry;
 
-pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 90;
+pub(crate) const LEGAL_CASE_FILING_INTERVAL_DAYS: i64 = 60;
 pub(crate) const LEGAL_CASE_FILING_COST: Money = Money::from_copper(300);
 pub(crate) const LEGAL_CASE_HEARING_DELAY_DAYS: i64 = 60;
 // The evidence floors below sit above the worst-case decision threshold of the
