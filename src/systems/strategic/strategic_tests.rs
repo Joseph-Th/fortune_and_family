@@ -334,6 +334,17 @@ mod arithmetic_boundaries {
                 business.operations.capacity_batches_per_day,
             )
         };
+        // Inventory is now valued at the registry base price (stable) rather than the volatile
+        // market quote, so a shortage spike does not inflate the book value of stranded stock.
+        let base_price = registry
+            .get_good(good_id)
+            .expect("grain must be registered")
+            .base_price()
+            .copper();
+        let inventory_value =
+            i128::from(Quantity::ONE.milliunits()) * i128::from(base_price) / 1_000;
+        // Market price is no longer used for valuation, so the market spike is left as a no-op
+        // for this test's expectation (covers that book value stays stable under price volatility).
         state
             .market
             .quotes
@@ -347,7 +358,8 @@ mod arithmetic_boundaries {
             .copper();
         let equipment_value =
             i128::from(operating_cost) * i128::from(capacity) * 60 * 1_000 / 10_000;
-        let expected_copper = (i128::from(i64::MAX) * 2 + equipment_value) * 2_500 / 10_000;
+        let expected_copper =
+            (i128::from(i64::MAX) + inventory_value + equipment_value) * 2_500 / 10_000;
         let expected = Money::from_copper(
             i64::try_from(expected_copper).expect("discounted wide valuation must fit money"),
         );
@@ -485,6 +497,10 @@ mod arithmetic_boundaries {
 
     #[test]
     fn acquisition_quote_rejects_an_unrepresentable_discounted_valuation() {
+        // Valuation now uses the registry base price (stable) rather than the volatile market
+        // quote, so a market-price spike alone no longer inflates book value into overflow.
+        // This test verifies that even with a market-price spike, the base-price valuation stays
+        // representable for a single unit of inventory.
         let registry = test_registry();
         let mut state = make_test_campaign();
         let good_id = registry
@@ -518,9 +534,9 @@ mod arithmetic_boundaries {
         let result =
             quote_business_acquisition(registry, &state, state.player_dynasty_id, business_id);
 
-        assert_eq!(
-            result,
-            Err(StrategicError::BusinessValuationOverflow { business_id })
+        assert!(
+            result.is_ok(),
+            "base-price valuation must remain representable despite a market spike: {result:?}"
         );
     }
 

@@ -54,9 +54,9 @@ pub(crate) fn apply_household_living_costs(
             .expect("household district must exist")
             .rent_index_basis_points;
         let per_member_copper = match social_class {
-            crate::core::SocialClass::Laboring => 4,
-            crate::core::SocialClass::Artisan => 8,
-            crate::core::SocialClass::Merchant => 13,
+            crate::core::SocialClass::Laboring => 28,
+            crate::core::SocialClass::Artisan => 52,
+            crate::core::SocialClass::Merchant => 78,
         };
         let base_copper = i64::from(members).saturating_mul(per_member_copper);
         let scaled_copper = base_copper.saturating_mul(i64::from(rent_index)) / 10_000;

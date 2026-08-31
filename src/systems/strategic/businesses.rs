@@ -330,7 +330,7 @@ pub fn quote_business_acquisition(
 
 pub(crate) fn resolve_business_purchase_price(
     registry: &Registry,
-    state: &AppState,
+    _state: &AppState,
     business: &crate::core::Business,
     discount_basis_points: i64,
 ) -> Result<Money, StrategicError> {
@@ -342,12 +342,14 @@ pub(crate) fn resolve_business_purchase_price(
     let mut gross_value = i128::from(business.cash().copper());
 
     for (good_id, quantity) in business.inventory() {
-        let unit_price = state
-            .market
-            .quotes
-            .get(good_id)
-            .expect("business inventory good must have a market quote")
-            .price;
+        // Inventory is valued at the good's registry base price, not the volatile market quote:
+        // shortage-inflated quotes would make a distressed seller look richer when its stock is
+        // stranded, inflating acquisition premiums incoherently. Base price gives a stable, goods-
+        // specific anchor while the market price still drives operating economics elsewhere.
+        let unit_price = registry
+            .get_good(*good_id)
+            .expect("business inventory good must be registered")
+            .base_price();
         let inventory_value = rounded_cost_copper_wide(*quantity, unit_price);
         gross_value = gross_value
             .checked_add(inventory_value)

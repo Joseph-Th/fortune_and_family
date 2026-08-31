@@ -320,7 +320,13 @@ fn decide_production(
     let tools_price = tools_quote.price;
     let mut remaining_tools_stock = tools_quote.stock;
     let mut lines = Vec::new();
-    for business in state.businesses.iter() {
+    // Daily rotation of tool-allocation priority: the same low-ID businesses must not win the
+    // scarce tool race every day. Rotating by the clock day keeps the order deterministic and
+    // stable (ID tie-breaker) while spreading shortage pressure fairly across the city over time.
+    let day_hash = state.clock.day() as u32;
+    let mut businesses: Vec<_> = state.businesses.iter().collect();
+    businesses.sort_by_key(|business| business.id().value().wrapping_add(day_hash));
+    for business in businesses {
         let Some(line) = decide_business_production(
             registry,
             state,
@@ -1443,7 +1449,8 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
         .expect("Rivergate market must define tools");
     let tools_price = tools_quote.price;
     let mut remaining_tools_stock = tools_quote.stock;
-    let snapshots: Vec<_> = state
+    let day_hash = state.clock.day() as u32;
+    let mut snapshots: Vec<_> = state
         .businesses
         .iter()
         .filter(|business| {
@@ -1490,6 +1497,9 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
             }
         })
         .collect();
+    // Rotate maintenance tool priority same as production: deterministic daily rotation avoids
+    // systematic starvation of high-ID workshops when tools are scarce.
+    snapshots.sort_by_key(|snapshot| snapshot.business_id.value().wrapping_add(day_hash));
     let lines = snapshots
         .into_iter()
         .map(|snapshot| {
@@ -2085,7 +2095,7 @@ fn designate_emergency_heirs(state: &mut AppState) {
             .expect("dynasty must exist")
             .runtime
             .generation;
-        let new_heir_name = format!("{dynasty_name} Heir {generation}*");
+        let new_heir_name = format!("{dynasty_name} Heir {generation}");
         let new_heir_id = {
             let mut next_ids = state.next_ids.clone();
             let id = next_ids
