@@ -1346,7 +1346,7 @@ pub(crate) fn add_crisis_determinism_finding(
         if share >= 95 {
             findings.push(GameplayFinding {
                 severity: GameplayFindingSeverity::Info,
-                title: format!("{:?} is near-deterministic, not emergent", kind),
+                title: format!("{kind:?} is near-deterministic, not emergent"),
                 evidence: format!(
                     "{count} of {total} campaigns observed {kind:?} ({share}%). When a crisis kind appears in essentially every world seed it is a guaranteed schedule rather than an emergent response to structural weakness. Consider raising its disruption/threshold so route and credit stress must actually accumulate.",
                 ),

@@ -788,7 +788,18 @@ pub(crate) fn recover_ai_businesses(registry: &Registry, state: &mut AppState) {
         if checked_next_business_finance_version(business).is_none() {
             continue;
         }
-        if business.finance.lifetime_costs > business.finance.lifetime_revenue {
+        // A business that has lost modestly can still be worth rescuing: a 30%
+        // lifetime loss margin keeps a temporarily unprofitable but viable
+        // workshop from being abandoned forever, while a deeply losing firm
+        // (>30% over revenue) remains a bad rescue that would churn through
+        // treasury without recovering.
+        if business.finance.lifetime_revenue > Money::ZERO
+            && business.finance.lifetime_costs
+                > business
+                    .finance
+                    .lifetime_revenue
+                    .saturating_mul_ratio(130, 100)
+        {
             continue;
         }
         let owner_dynasty_id = business.owner_dynasty_id();

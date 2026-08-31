@@ -1570,14 +1570,14 @@ fn maintenance_line(
     let tools_available = tool_quantity >= required_tool_quantity;
     let maintenance_succeeds =
         can_maintain && (recipe.output_good_id() == tools_id || tools_available);
-    let random_wear = i16::try_from(state.rng.range_u32(4)).expect("wear fits i16");
-    let neglect_penalty = if maintenance_succeeds { 0 } else { 5 };
+    let random_wear = i16::try_from(state.rng.range_u32(3)).expect("wear fits i16");
+    let neglect_penalty = if maintenance_succeeds { 0 } else { 2 };
     // Low-condition accidents are frequent small setbacks, not rare catastrophes:
     // the expected daily erosion stays similar but variance is bounded so
     // routine upkeep can gradually recover a neglected workshop instead of
     // requiring luck to avoid a single -120 collapse.
-    let accident_penalty = if condition_basis_points < 4_000 && state.rng.is_chance_success(120) {
-        30
+    let accident_penalty = if condition_basis_points < 3_500 && state.rng.is_chance_success(200) {
+        15
     } else {
         0
     };
@@ -1642,9 +1642,9 @@ pub(crate) fn maintenance_cost(
 
 fn maintenance_effect(maintenance_basis_points: u16, condition_basis_points: u16) -> i16 {
     let scaled = u32::from(maintenance_basis_points)
-        .saturating_mul(32)
+        .saturating_mul(36)
         .div_ceil(10_000);
-    let catch_up = u32::from(9_500_u16.saturating_sub(condition_basis_points)).div_ceil(400);
+    let catch_up = u32::from(9_500_u16.saturating_sub(condition_basis_points)).div_ceil(300);
     i16::try_from(scaled.saturating_add(catch_up)).expect("bounded maintenance effect must fit i16")
 }
 

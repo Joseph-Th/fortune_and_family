@@ -723,12 +723,12 @@ pub(crate) fn organic_candidate_variation(
                 .get(&state.player_dynasty_id)
                 .map_or(0, |d| d.runtime.generation),
         )
-        .wrapping_mul(0x94D049BB_133111EB),
+        .wrapping_mul(0x94D0_49BB_1331_11EB),
     );
     value = value.wrapping_add(
         u64::try_from(state.businesses.iter().count())
             .unwrap_or(u64::MAX)
-            .wrapping_mul(0xDA942042_E4DD58B5),
+            .wrapping_mul(0xDA94_2042_E4DD_58B5),
     );
     value ^= u64::try_from(
         state
@@ -738,8 +738,8 @@ pub(crate) fn organic_candidate_variation(
             .count(),
     )
     .unwrap_or(u64::MAX)
-    .wrapping_mul(0xA4093822_299F31D0);
-    value ^= u64::from(accumulator.total_viable_command_kinds).wrapping_mul(0xBE5466CF_34E90C6C);
+    .wrapping_mul(0xA409_3822_299F_31D0);
+    value ^= u64::from(accumulator.total_viable_command_kinds).wrapping_mul(0xBE54_66CF_34E9_0C6C);
     for byte in persona
         .label()
         .bytes()

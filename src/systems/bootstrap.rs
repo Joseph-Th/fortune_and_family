@@ -593,9 +593,9 @@ fn insert_household_groups(state: &mut AppState, registry: &Registry) {
             // large groups stay solvent while still facing pressure when districts
             // degrade or food spikes.
             let per_member_weekly_copper: i64 = match social_class {
-                SocialClass::Laboring => 10,
-                SocialClass::Artisan => 16,
-                SocialClass::Merchant => 22,
+                SocialClass::Laboring => 9,
+                SocialClass::Artisan => 14,
+                SocialClass::Merchant => 19,
             };
             let weekly_income =
                 Money::from_copper(i64::from(members).saturating_mul(per_member_weekly_copper));
@@ -611,14 +611,14 @@ fn insert_household_groups(state: &mut AppState, registry: &Registry) {
                     .saturating_mul(3)
                     .max(Money::from_copper(3_000)),
                 weekly_income,
-                bread_need_daily: Quantity::from_milliunits(350 * income_multiplier.min(2)),
+                bread_need_daily: Quantity::from_milliunits(500 * income_multiplier.min(2)),
                 // Ale need saturates with income like bread: the city's single
                 // brewery covers roughly the capped demand, mirroring how
                 // cloth demand is calibrated just under weaving capacity. An
                 // uncapped ×4 merchant thirst would structurally exceed
                 // supply and permanently bid ale past every household's food
                 // budget.
-                ale_need_daily: Quantity::from_milliunits(350 * income_multiplier.min(2)),
+                ale_need_daily: Quantity::from_milliunits(500 * income_multiplier.min(2)),
                 food_satisfaction_basis_points: 8_000,
             });
         }
