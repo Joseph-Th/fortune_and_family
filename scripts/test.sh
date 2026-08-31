@@ -44,11 +44,12 @@ usage:
 
 fast iteration (solo local machine — every lane is incremental, no world rebuild):
   # Tightest loop — filtered <1s, no CLI rebuild at all
-  $0 fast simulation        # only that domain, ~0.4s warm
-  $0 fast strategic
-  $0 changed                # only domains touched by current diff, <1s warm
-  $0 check                  # sub-second syntax only (cargo check, no tests)
+  $0 fast simulation        # only that domain, ~0.4s warm (82 tests, 0.12s exec)
+  $0 fast strategic         # 197 tests, 0.30s exec
+  $0 changed                # only domains touched by current diff, <1s warm (auto)
+  $0 check                  # sub-second syntax only (cargo check, ~0.3s warm)
   CIVIC_DYNASTY_SKIP_CLI_BUILD=1 $0 standard  # lib-only iteration, skips debug CLI
+  CIVIC_DYNASTY_SKIP_DOCS=1 $0 standard       # skip docs when iterating lib-only (~3s)
 
   # One exact test with failure output
   $0 debug 'systems::simulation::tests::household_fallback'
@@ -62,15 +63,16 @@ fast iteration (solo local machine — every lane is incremental, no world rebui
   $0 gameplay               # ~16s warm: 36 + 3 campaigns, 60k simulated days
 
 warm budgets (incremental, after first build of each profile — cold once: clippy ~11s, release ~56s):
-  check      <1s    fast-filter <1s  fast    ~2s    standard ~6s
-  docs       ~2s    adapters     ~2s  playtest <1s (debug)
-  ci-verify  ~5s    gameplay   ~16s  all      ~25s
+  check      <1s    fast-filter <1s  fast    ~2s    standard ~4s
+  docs       ~1s    adapters     ~2s  playtest <1s (debug)
+  ci-verify  ~5s    gameplay   ~16s  all      ~25s  deep ~1.2m
 
 knobs:
   CIVIC_DYNASTY_JOBS=4           cap cargo + harness parallelism (also caps gameplay campaign fan-out)
   CIVIC_DYNASTY_PROFILE=release  force release CLI for adapters/playtest
   CIVIC_DYNASTY_BINARY=/path/to/civic-dynasty  reuse a prebuilt CLI
   CIVIC_DYNASTY_SKIP_CLI_BUILD=1 skip CLI rebuild (lib-only iteration)
+  CIVIC_DYNASTY_SKIP_DOCS=1      skip docs in standard (lib-only iteration)
   CIVIC_DYNASTY_NEXTEST=1        run lib tests under cargo-nextest (isolated, slower warm)
   CIVIC_DYNASTY_PYTHON=python3   select Python interpreter
 EOF
@@ -204,7 +206,11 @@ run_release_playtest() {
 run_standard() {
   run_shell_syntax
   run_fast
-  run_docs
+  if [[ -z "${CIVIC_DYNASTY_SKIP_DOCS:-}" ]]; then
+    run_docs
+  else
+    printf '\n==> Documentation checks (skipped via CIVIC_DYNASTY_SKIP_DOCS)\n'
+  fi
   if [[ -z "${CIVIC_DYNASTY_SKIP_CLI_BUILD:-}" ]]; then
     ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
     run_cli_core
@@ -350,9 +356,12 @@ run_changed() {
   # Solo-dev targeted loop: diff the working tree against HEAD and map
   # changed files to the narrowest `fast <filter>` that still proves the
   # change. Untracked non-ignored files are included so a new module
-  # without a commit is still detected. If changes span multiple
-  # domains or no mapping exists, fall back to full `fast` so coverage
-  # is never silently narrower than the edit.
+  # without a commit is still detected. When 2-3 domains are touched we
+  # run one cargo invocation with OR filters via the test binary (`--`)
+  # so the build stays incremental and we avoid paying for the full 980-
+  # test suite when only two domains changed. Larger cross-cutting edits
+  # fall back to the full suite so coverage is never silently narrower
+  # than the edit.
   local changed_files
   changed_files=$( (
     git diff --name-only HEAD 2>/dev/null || true
@@ -405,6 +414,28 @@ run_changed() {
   if [[ ${#filters[@]} -eq 1 ]]; then
     printf '\n==> Changed domain: %s — running filtered suite\n' "${filters[0]}"
     run_fast "${filters[0]}"
+    return $?
+  fi
+  if [[ ${#filters[@]} -ge 2 && ${#filters[@]} -le 3 ]]; then
+    # Multi-domain but still targeted: pass filters to the test binary
+    # as OR (`cargo test -- -- filter1 filter2`). One compilation, only
+    # matching tests execute — faster than the full suite for 2-3 domains.
+    printf '\n==> Changed domains: %s — running targeted multi-filter suite\n' "${filters[*]}"
+    local label="Library tests matching '${filters[*]}'"
+    # Prefer nextest OR expression when available for clearer diagnostics.
+    if has_nextest && [[ -n "${CIVIC_DYNASTY_NEXTEST:-}" ]]; then
+      local expr=""
+      for f in "${filters[@]}"; do
+        if [[ -z "$expr" ]]; then
+          expr="test($f)"
+        else
+          expr="$expr | test($f)"
+        fi
+      done
+      run_step "$label (nextest)" cargo nextest run --locked --lib "${job_args[@]}" --no-fail-fast -E "$expr"
+      return $?
+    fi
+    run_test_step "$label" "${filters[*]}" cargo test --quiet --locked --lib "${job_args[@]}" -- "${filters[@]}"
     return $?
   fi
   printf '\n==> Changed domains: %s — running full library suite\n' "${filters[*]}"

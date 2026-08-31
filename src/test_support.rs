@@ -108,6 +108,28 @@ pub(crate) fn assert_quantity_eq(actual: Quantity, expected: Quantity, context: 
 }
 
 #[track_caller]
+pub(crate) fn assert_in_range<T>(actual: T, low: T, high: T, context: &str)
+where
+    T: Debug + PartialOrd + Copy,
+{
+    if actual >= low && actual <= high {
+        return;
+    }
+    panic!("{context}; value {actual:?} not in range [{low:?}, {high:?}]");
+}
+
+#[track_caller]
+pub(crate) fn assert_money_in_range(actual: Money, low: Money, high: Money, context: &str) {
+    if actual.copper() >= low.copper() && actual.copper() <= high.copper() {
+        return;
+    }
+    panic!(
+        "{context}; money {} not in range [{}, {}]",
+        actual, low, high
+    );
+}
+
+#[track_caller]
 pub(crate) fn assert_command_rejected_with(
     registry: &Registry,
     state: &mut AppState,
@@ -285,6 +307,17 @@ mod tests {
             Quantity::from_milliunits(500),
             Quantity::from_milliunits(500),
             "identical quantity must pass",
+        );
+    }
+
+    #[test]
+    fn range_helpers_accept_bounds_and_reject_outliers() {
+        assert_in_range(5, 1, 10, "in-range integer must pass");
+        assert_money_in_range(
+            Money::from_copper(500),
+            Money::from_copper(100),
+            Money::from_copper(1000),
+            "in-range money must pass",
         );
     }
 

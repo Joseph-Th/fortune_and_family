@@ -53,20 +53,21 @@ usage:
   .\scripts\test.ps1 deep                deepest design gates (slow + gameplay-audit)
 
 fast iteration (solo local — incremental, no world rebuild):
-  .\scripts\test.ps1 fast simulation   filtered <1s
-  .\scripts\test.ps1 changed            only domains touched by current diff, <1s
-  .\scripts\test.ps1 check              <1s syntax only
+  .\scripts\test.ps1 fast simulation   filtered <1s (82 tests, 0.12s exec)
+  .\scripts\test.ps1 changed            only domains touched by current diff, <1s (auto)
+  .\scripts\test.ps1 check              <1s syntax only (~0.3s warm)
   .\scripts\test.ps1 playtest            quick 60-day single-persona check, <1s (default)
   .\scripts\test.ps1 playtest --days 90 --persona steward  # debug harness <1s
 
 warm budgets (incremental, after first build — cold once: clippy ~11s, release ~56s):
-  check <1s  fast-filter <1s  fast ~2s  standard ~6s  ci-verify ~5s  gameplay ~16s
+  check <1s  fast-filter <1s  fast ~2s  standard ~4s  ci-verify ~5s  gameplay ~16s  all ~25s  deep ~1.2m
 
 environment:
   CIVIC_DYNASTY_JOBS           pass --jobs N to cargo test/build commands (also caps harness parallelism)
   CIVIC_DYNASTY_PROFILE        debug (default) or release for adapter smoke builds
   CIVIC_DYNASTY_BINARY         reuse a prebuilt CLI binary for adapter smoke groups
   CIVIC_DYNASTY_SKIP_CLI_BUILD skip CLI rebuild when set (fast lib-only iteration)
+  CIVIC_DYNASTY_SKIP_DOCS      skip docs in standard (lib-only iteration)
   CIVIC_DYNASTY_PYTHON         select an explicit Python interpreter
 "@ | Write-Host
     exit 2
@@ -318,6 +319,23 @@ function Run-Changed {
         Run-Fast $filters[0]
         return
     }
+    if ($filters.Count -ge 2 -and $filters.Count -le 3) {
+        Write-Host "`n==> Changed domains: $($filters -join ', ') — running targeted multi-filter suite" -ForegroundColor Cyan
+        $label = "Library tests matching '$($filters -join ' ')'"
+        if ((Has-Nextest) -and ($env:CIVIC_DYNASTY_NEXTEST -eq "1")) {
+            $expr = ($filters | ForEach-Object { "test($_)" }) -join " | "
+            Run-Step "$label (nextest)" {
+                & cargo nextest run --locked --lib @JobArgs --no-fail-fast -E $expr
+                if ($LASTEXITCODE -ne 0) { throw "Library tests failed" }
+            }
+            return
+        }
+        Run-Step $label {
+            & cargo test --quiet --locked --lib @JobArgs -- @filters
+            if ($LASTEXITCODE -ne 0) { throw "Library tests failed" }
+        }
+        return
+    }
     Write-Host "`n==> Changed domains: $($filters -join ', ') — running full library suite" -ForegroundColor Yellow
     Run-Fast
 }
@@ -430,7 +448,11 @@ function Run-GameplayAudit {
 function Run-Standard {
     Run-ShellSyntaxCheck
     Run-Fast
-    Run-Docs
+    if (-not $env:CIVIC_DYNASTY_SKIP_DOCS) {
+        Run-Docs
+    } else {
+        Write-Host "`n==> Documentation checks (skipped via CIVIC_DYNASTY_SKIP_DOCS)" -ForegroundColor Yellow
+    }
     if (-not $env:CIVIC_DYNASTY_SKIP_CLI_BUILD) {
         Ensure-CliBinary $(if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" })
         Run-CliGroup "core"

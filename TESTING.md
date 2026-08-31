@@ -10,8 +10,8 @@ Defines test tiers, suite organization, assertion standards, and completion gate
 | One domain or behavior | `bash scripts/test.sh fast <filter>` | <1s | Tight edit loop (e.g. `fast simulation`) |
 | Changed domains only | `bash scripts/test.sh changed` | <1s | Auto-detects touched domains from the current diff |
 | Fastest library-only loop | `bash scripts/test.sh quick <filter>` | ~2s | Alias for fast, never triggers docs/CLI |
-| All ordinary library tests | `bash scripts/test.sh fast` | ~2s | Full library sweep (warm) |
-| Normal pre-commit loop | `bash scripts/test.sh standard` | ~6s | Pre-commit: syntax + lib + docs + core CLI |
+| All ordinary library tests | `bash scripts/test.sh fast` | ~2s | Full library sweep (warm, 980 tests, 1.2s exec) |
+| Normal pre-commit loop | `bash scripts/test.sh standard` | ~4s | Pre-commit: syntax + lib + docs + core CLI |
 | List matching tests | `bash scripts/test.sh list <filter>` | <1s | Discover filter names |
 | One exact test | `bash scripts/test.sh exact <fully-qualified-name>` | ~1s | Pinpoint a single test |
 | One exact test with output | `bash scripts/test.sh debug <fully-qualified-name>` | ~1s | Pinpoint with --nocapture |
@@ -41,6 +41,7 @@ On Windows without bash on PATH, use `.\scripts\test.ps1 <mode> [filter]` (mirro
 | `CIVIC_DYNASTY_JOBS=<n>` | Forwards `--jobs <n>` to cargo and caps harness campaign parallelism. |
 | `CIVIC_DYNASTY_NEXTEST=1` | Runs library tests under `cargo-nextest` (per-test isolation). |
 | `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` | Skips CLI rebuilds when iterating on library code. |
+| `CIVIC_DYNASTY_SKIP_DOCS=1` | Skips docs in `standard` for lib-only iteration (~3s). |
 | `CIVIC_DYNASTY_PROFILE=release` | Forces `adapters`/`playtest` to use a release binary. Gate lanes always use release. |
 | `CIVIC_DYNASTY_BINARY=<path>` | Reuses an existing binary for smoke groups. |
 | `CIVIC_DYNASTY_BINARY_OVERRIDE=<path>` | Pins an exact binary over every profile choice. |
@@ -56,7 +57,7 @@ On Windows without bash on PATH, use `.\scripts\test.ps1 <mode> [filter]` (mirro
 
 Shared tuning: `.cargo/config.toml` (`incremental = true`, `pipelining = true`, `jobs = 0`) and `Cargo.toml` (16 codegen units per profile, split-debuginfo off for dev/test). No remote cache required. First build of a new profile is one-time (clippy ~11s cold, release ~56s cold); warm thereafter is <1s incremental.
 
-Warm budgets (incremental, after first build): `check` <1s, `fast` filtered <1s / full ~2s, `standard` ~6s, `ci-verify` ~5s, debug `playtest` <1s, `gameplay` ~16s (one release build + 39 campaigns, 60k days). Each lane reuses the incremental cache.
+Warm budgets (incremental, after first build): `check` <1s (~0.3s), `fast` filtered <1s (82–197 tests, 0.1–0.3s exec) / full ~2s (980 tests, 1.2s exec), `standard` ~4s (lib 2s + docs 1s + one debug CLI <1s), `ci-verify` ~5s, debug `playtest` <1s (60 days, 433 days/s), `gameplay` ~16s (one release build + 39 campaigns, 60k days). Each lane reuses the incremental cache; `check` (`profile.check` inherits `dev`) and `test` share dependency artifacts warm.
 
 Long gameplay JSON assertions live in `scripts/check_gameplay.py`. `adapters`/`gameplay` lanes build their CLI once and reuse it.
 
@@ -78,7 +79,7 @@ when a stronger push gate (docs + CLI smoke) is warranted.
 |---|---|---|
 | Check | Syntax/type only | ~1s |
 | Fast library | Deterministic unit and focused behavioral coverage | ~2s |
-| Standard | Check + fast library + docs + core CLI | ~6s |
+| Standard | Check + fast library + docs + core CLI | ~4s |
 | Adapter smoke | CLI contracts grouped by core, art, gameplay | ~2s |
 | Soak | Long deterministic invariant and multi-generation behavior | ~1s warm |
 | Gameplay | Release-mode systemic quality and succession gates | ~16s |
@@ -165,12 +166,12 @@ Collection helpers should show observed members. Candidate and finding helpers s
 Run the narrowest relevant subset while editing. Once behavior is ready, run one routine lane rather than climbing through broader tiers:
 
 ```bash
-bash scripts/test.sh check            # <1s syntax only, no tests
-bash scripts/test.sh fast simulation  # <1s filtered — the one domain you touched
-bash scripts/test.sh changed          # <1s — auto-detects the touched domain
-bash scripts/test.sh fast             # ~2s full library sweep
-bash scripts/test.sh playtest         # <1s quick 60-day harness smoke (no args)
-bash scripts/test.sh standard         # ~6s normal pre-commit (syntax + lib + docs + core CLI)
+bash scripts/test.sh check            # <1s syntax only, no tests (~0.3s warm)
+bash scripts/test.sh fast simulation  # <1s filtered — the one domain you touched (82 tests, 0.12s exec)
+bash scripts/test.sh changed          # <1s — auto-detects the touched domain (1 filter, or 2-3 OR filters in one build)
+bash scripts/test.sh fast             # ~2s full library sweep (980 tests, 1.2s exec)
+bash scripts/test.sh playtest         # <1s quick 60-day single-persona harness smoke (debug, no args)
+bash scripts/test.sh standard         # ~4s normal pre-commit (syntax + lib + docs + core CLI)
 ```
 
 Select specialized lanes by changed contract:
@@ -188,6 +189,15 @@ Persistence, public APIs, command schemas, simulation order, arithmetic, invaria
 
 Do not run a compile-only or lint build immediately before an executable lane that recompiles the same surface unless the separate diagnostic is required. Prefer one build-producing operation per checkpoint.
 
-Filtered `fast <filter>` and `changed` avoid rebuilding unrelated domains — use either for the inner loop and `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` when iterating lib-only to skip even the debug CLI build. `playtest` without args runs a lightweight 60-day single-persona check so the harness stays in the <1s loop; pass explicit `--days`/`--persona` flags only when probing deeper design questions.
+Filtered `fast <filter>` and `changed` avoid rebuilding unrelated domains —
+`changed` maps `git diff HEAD` to the narrowest filter (one domain, or 2-3
+OR filters in one cargo build via `--`); multi-domain fallback is still one
+compilation. Use either for the inner loop and
+`CIVIC_DYNASTY_SKIP_CLI_BUILD=1` / `CIVIC_DYNASTY_SKIP_DOCS=1` when iterating
+lib-only to skip even the debug CLI/docs build. `playtest` without args runs a
+lightweight 60-day single-persona check (debug, trace-limit 8) so the harness
+stays in the <1s loop; pass explicit `--days`/`--persona` flags only when
+probing deeper design questions, or `CIVIC_DYNASTY_PROFILE=release` for gate
+fidelity.
 
 The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier reuses one debug CLI build across adapter smoke groups and remains an explicit broad tier rather than a routine prerequisite.

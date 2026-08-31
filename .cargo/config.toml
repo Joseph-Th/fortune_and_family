@@ -2,9 +2,12 @@
 # No remote cache, no wrappers, no custom linker required on this machine.
 # Every profile keeps `incremental = true` + 16 codegen units + pipelining,
 # so an edited file rebuilds in ~1s warm without rebuilding the world:
-# check ~0.2s, fast <1s filtered / ~2s full, standard ~6s, debug playtest <1s,
+# check <1s (often 0.3s warm), fast <1s filtered / ~2s full (980 tests),
+# standard ~4s warm (lib + docs + one debug CLI), debug playtest <1s,
 # gameplay release ~16s warm for 60k simulated days. First build of a profile
-# is one-time (clippy 11s, release 56s cold) — warm thereafter is <1s.
+# is one-time (clippy ~11s cold, release ~56s cold) — warm thereafter is <1s.
+# `profile.check` inherits `dev` so `cargo check` and `cargo test` share the
+# same incremental shape warm.
 [build]
 # Pipelining lets Cargo start compiling dependents before dependencies finish,
 # shaving wall time on warm incremental builds without extra configuration.
