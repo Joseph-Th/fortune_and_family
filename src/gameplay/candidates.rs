@@ -6550,10 +6550,10 @@ pub(crate) fn institutional_conversion_priority(
         return 0;
     }
     let bonus = match persona {
-        GameplayPersona::Steward => 900,
-        GameplayPersona::Entrepreneur => 700,
-        GameplayPersona::PowerBroker => 1_000,
-        GameplayPersona::Opportunist => 500,
+        GameplayPersona::Steward => 1_600,
+        GameplayPersona::Entrepreneur => 1_200,
+        GameplayPersona::PowerBroker => 1_800,
+        GameplayPersona::Opportunist => 1_000,
     };
     match kind {
         GameplayCommandKind::EnactLaw

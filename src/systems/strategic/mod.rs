@@ -88,16 +88,23 @@ pub(crate) const DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS: i64 = 180;
 pub(crate) const PROPERTY_LIQUIDATION_BASIS_POINTS: i64 = 5_000;
 const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000);
 
-/// Contract commitments are sized against a five-day operating week even
+/// Contract commitments are sized against a four-day operating week even
 /// though the simulation week has seven days: the margin keeps both parties
-/// free to keep trading the good on the open market alongside the contract.
-const CONTRACT_CAPACITY_COMMITMENT_DAYS: i64 = 5;
+/// free to keep trading the good on the open market alongside the contract,
+/// while a slightly tighter reserve makes sustained over-commitment visible
+/// as inventory and cash-flow stress instead of silent buffer.
+const CONTRACT_CAPACITY_COMMITMENT_DAYS: i64 = 4;
 
 const UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS: u16 = 240;
 const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
 /// Route disruption at or above this level spawns a trade-disruption crisis;
 /// a tracked disruption also holds at this condition until every route heals.
-pub(crate) const TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD: u16 = 7_000;
+/// At 4500 (45% capacity-weighted disruption) a sustained regional blockade
+/// or multiple degraded routes can credibly interrupt Rivergate's import
+/// staples while still requiring real pressure — the prior 7000 threshold
+/// demanded a near-total collapse that weighted averages rarely reached,
+/// leaving Trade Disruption as dead content across harness matrices.
+pub(crate) const TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD: u16 = 4_500;
 /// A resolved banking panic raises the default bar for a follow-up panic for
 /// three years; older panics stop counting so confidence can rebuild.
 const BANKING_PANIC_MEMORY_DAYS: i64 = 3 * 360;
@@ -118,13 +125,15 @@ const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASI
 /// some of these loans rescue the borrower, others miss installments within
 /// months, fall delinquent, default, and ground the enforcement claims that
 /// keep courts, seizure, and banking panics reachable inside one session.
-const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 2_500;
-const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 22;
+const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 3_500;
+const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 18;
 const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(10_000);
 /// Monthly risk-appetite draw per liquid house: speculative offers stay a
 /// minority of the lending book while still arriving several times per
-/// campaign instead of roughly once per session.
-const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 4_500;
+/// campaign instead of roughly once per session. Lifted from 45% to 60%
+/// so city-wide default counts and banking-panic detection become
+/// reachable without requiring a perfectly unlucky world seed.
+const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 6_000;
 
 mod ai;
 mod businesses;

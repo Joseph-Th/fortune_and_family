@@ -187,6 +187,37 @@ pub(crate) fn render_limitations(report: &GameplayHarnessReport, output: &mut St
 }
 
 pub(crate) fn render_fantasy_arcs(report: &GameplayHarnessReport, output: &mut String) {
+    let total = report.campaigns.len().max(1) as f64;
+    let reached = |f: fn(&GameplayFantasyArc) -> Option<i64>| {
+        report
+            .campaigns
+            .iter()
+            .filter(|c| f(&c.fantasy_arc).is_some())
+            .count()
+    };
+    let rep = reached(|a| a.first_reputation_standing_day);
+    let com = reached(|a| a.first_commercial_standing_day);
+    let sup = reached(|a| a.first_institution_support_day);
+    let camp = reached(|a| a.first_office_campaign_day);
+    let office = reached(|a| a.first_office_day);
+    let shaping = reached(|a| a.first_city_shaping_action_day);
+    let labor = reached(|a| a.first_player_labor_dispute_day);
+    let heir = reached(|a| a.first_heir_designation_day);
+    let succ = reached(|a| a.first_succession_day);
+    let _ = writeln!(
+        output,
+        "Fantasy arc reach ({} campaigns): reputation {:.0}% | commercial {:.0}% | support {:.0}% | campaign {:.0}% | office {:.0}% | city-shaping {:.0}% | labor conflict {:.0}% | heir {:.0}% | succession {:.0}%",
+        report.campaigns.len(),
+        rep as f64 / total * 100.0,
+        com as f64 / total * 100.0,
+        sup as f64 / total * 100.0,
+        camp as f64 / total * 100.0,
+        office as f64 / total * 100.0,
+        shaping as f64 / total * 100.0,
+        labor as f64 / total * 100.0,
+        heir as f64 / total * 100.0,
+        succ as f64 / total * 100.0,
+    );
     let _ = writeln!(output, "Core fantasy milestones");
     for campaign in &report.campaigns {
         let arc = campaign.fantasy_arc;

@@ -312,7 +312,7 @@ pub(crate) fn detect_and_advance_crises(
                 && day - crisis.started_day <= BANKING_PANIC_MEMORY_DAYS
         })
         .count();
-    let next_panic_threshold = prior_panics.saturating_add(1).saturating_mul(2);
+    let next_panic_threshold = prior_panics.saturating_add(2);
     if defaulted_loans >= next_panic_threshold && !active_panic {
         insert_crisis(
             state,
