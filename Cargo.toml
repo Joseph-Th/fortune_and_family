@@ -26,6 +26,12 @@ serde_json = "1.0"
 tempfile = "3.20"
 thiserror = "2.0"
 
+# Solo-dev fast-iteration tuning: every profile keeps incremental compilation and
+# parallel codegen units so an edited file rebuilds in seconds, not minutes.
+# `dev`/`test` use opt-level 1 (dependencies at 2) so simulation-heavy tests
+# finish in seconds with identical assertions. `release` is the everyday harness
+# profile — full optimization without LTO, so gameplay gates stay fast on warm
+# rebuilds. Use `release-max` only when peak throughput itself is measured.
 [profile.dev]
 opt-level = 1
 debug = 1
@@ -41,14 +47,23 @@ debug = 1
 incremental = true
 codegen-units = 16
 
+[profile.test.package."*"]
+opt-level = 2
+
 # Release is the everyday optimized profile for gates and harnesses: full
 # optimization with parallel codegen units, incremental reuse, and no
 # cross-crate LTO, so an edited source file rebuilds in seconds instead of
 # minutes. Simulation throughput stays within roughly ten percent of the
 # release-max profile, and all gameplay output is identical.
 [profile.release]
+opt-level = 3
 codegen-units = 16
 incremental = true
+debug = 0
+lto = false
+
+[profile.release.package."*"]
+opt-level = 3
 
 # Deliberate throughput-evidence profile: serialized single-unit codegen plus
 # thin-LTO for the smallest, fastest binaries. Build it explicitly

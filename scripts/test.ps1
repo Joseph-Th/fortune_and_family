@@ -29,6 +29,7 @@ if ($env:CIVIC_DYNASTY_JOBS) {
 function Show-Usage {
     @"
 usage:
+  .\scripts\test.ps1 check [filter]      fastest syntax check (cargo check, no tests)
   .\scripts\test.ps1 fast [filter]       run non-ignored library tests (default loop)
   .\scripts\test.ps1 quick [filter]      fastest loop: same as fast, skips docs/CLI
   .\scripts\test.ps1 standard            pre-commit loop: syntax, library, docs, core CLI smoke
@@ -43,7 +44,7 @@ usage:
   .\scripts\test.ps1 adapters            run all CLI smoke groups
   .\scripts\test.ps1 gameplay            run release gameplay and generation-length quality gates
   .\scripts\test.ps1 gameplay-audit      run mature multi-seed, generation, and credit-stress audits
-  .\scripts\test.ps1 playtest [args...]  run one focused release harness campaign; args pass through
+  .\scripts\test.ps1 playtest [args...]  focused harness run (debug CLI by default; set PROFILE=release for gate)
   .\scripts\test.ps1 ci-verify           fast CI lane: format, clippy, library, docs
   .\scripts\test.ps1 ci-gates            deep CI lane: release tests, soaks, adapters, gameplay, audit
   .\scripts\test.ps1 all                 everything: standard + soak + adapters + gameplay
@@ -198,6 +199,22 @@ function Has-Nextest {
         & cargo nextest --version 2>$null | Out-Null
         return $true
     } catch { return $false }
+}
+
+function Run-Check([string]$TestFilter) {
+    $label = if ($TestFilter) { "Syntax check matching '$TestFilter'" } else { "Syntax check (cargo check)" }
+    if ($TestFilter) {
+        $matches = & cargo test --quiet --locked @JobArgs --lib $TestFilter -- --list 2>$null | Where-Object { $_ -match ': test$' }
+        if (-not $matches) {
+            Write-Host "`n==> $label" -ForegroundColor Cyan
+            Write-Error "no library tests matched '$TestFilter'"
+            exit 2
+        }
+    }
+    Run-Step $label {
+        & cargo check --quiet --locked @JobArgs --all-targets
+        if ($LASTEXITCODE -ne 0) { throw "Syntax check failed" }
+    }
 }
 
 function Run-Fast([string]$TestFilter) {
@@ -423,6 +440,7 @@ if ($ReceiptLane) {
 }
 
 switch ($Mode) {
+    "check"          { Run-Check $Filter }
     "fast"           { Run-Fast $Filter }
     "quick"          { Run-Fast $Filter }
     "standard"       { Run-Standard }
@@ -444,7 +462,8 @@ switch ($Mode) {
     "gameplay-audit" { Run-GameplayAudit }
     "playtest"       {
         if (-not $Rest -or $Rest.Count -eq 0) { Show-Usage }
-        Ensure-CliBinary "release"
+        $profile = if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" }
+        Ensure-CliBinary $profile
         Run-Step "Gameplay harness run" {
             & $env:CIVIC_DYNASTY_BINARY playtest @Rest
             if ($LASTEXITCODE -ne 0) { throw "Gameplay harness run failed" }

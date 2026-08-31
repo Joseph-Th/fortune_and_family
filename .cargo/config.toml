@@ -1,0 +1,11 @@
+# Local build tuning for solo iterative work: keep incremental compilation hot and
+# let Cargo use all cores without manual CIVIC_DYNASTY_JOBS overrides. This
+# file is intentionally minimal — it does not add wrappers or remote caching
+# that would complicate a local machine.
+[build]
+# incremental is already true in Cargo.toml profiles; this ensures `cargo check`
+# and `cargo clippy` also keep it warm for sub-second editor feedback.
+incremental = true
+# jobs is intentionally unset here so Cargo defaults to all logical cores.
+# Use CIVIC_DYNASTY_JOBS=4 to cap parallelism on a busy machine without
+# editing this file.

@@ -29,20 +29,15 @@ Use focused runs while implementing. Use release matrices for cross-domain valid
 
 ## Commands
 
-Focused campaign:
+Focused campaign — debug CLI for <1s warm iteration (solo default):
 
 ```bash
-cargo run --release --locked -- playtest \
-  --days 360 \
-  --persona entrepreneur \
-  --background baker \
-  --trace-limit 20
-```
-
-The repository runner exposes the same run with one shared optimized CLI build:
-
-```bash
-bash scripts/test.sh playtest --days 360 --persona entrepreneur
+bash scripts/test.sh playtest --days 90 --persona entrepreneur --background baker
+# release-faithful when you need gate throughput:
+CIVIC_DYNASTY_PROFILE=release bash scripts/test.sh playtest --days 360 --persona entrepreneur
+# or directly via cargo
+cargo run --locked -- playtest --days 90 --persona steward
+cargo run --release --locked -- playtest --days 360 --persona entrepreneur --trace-limit 20
 ```
 
 Default matrix (all personas, backgrounds, and seeds) and structured output:
@@ -57,9 +52,16 @@ cargo run --release --locked -- playtest \
   --output gameplay-report.json
 ```
 
-Repository gates: `bash scripts/test.sh gameplay` runs the release quality and generation-length gates; `bash scripts/test.sh gameplay-audit` runs larger mature, generation, and credit-stress matrices for design review.
+Repository gates (always release, ~8s–20s warm):
+
+```bash
+bash scripts/test.sh gameplay        # 36 + 3 campaigns, 60k simulated days, release gates
+bash scripts/test.sh gameplay-audit  # larger multi-seed / generation / credit-stress matrices
+```
 
 Every run prints a concise progress line to stderr: elapsed time, campaign count, simulated days, actions, overall score, finding count, and simulated days per second. A quality-gate failure reports the exact score reason in the error output.
+
+Solo-dev rule: `playtest` defaults to the debug CLI so `edit → playtest --days 90` stays <1s warm. Set `CIVIC_DYNASTY_PROFILE=release` or use `gameplay`/`gameplay-audit` when you need release-faithful simulation throughput and gate scores.
 
 ## Configuration
 

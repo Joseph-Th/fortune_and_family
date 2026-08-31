@@ -19,42 +19,51 @@ fi
 usage() {
   cat >&2 <<EOF
 usage:
+  $0 check [filter]      fastest syntax check (cargo check, no tests)
   $0 fast [filter]       run non-ignored library tests (default loop, incremental)
-  $0 quick [filter]      fastest loop: same as fast, skips docs/CLI (alias for rapid iteration)
+  $0 quick [filter]      alias for fast that never triggers docs/CLI
   $0 standard            pre-commit loop: syntax, library, docs, core CLI smoke
   $0 exact <test-name>   run one fully qualified library test
   $0 debug <test-name>   run one exact test with captured output enabled
   $0 list [filter]       list matching library tests
   $0 soak                run soak tests in release mode
   $0 docs                run documentation consistency and doctests
-  $0 cli                 run core campaign/projection/dashboard CLI smoke tests
-  $0 art-cli             run procedural-art CLI smoke tests
-  $0 gameplay-cli        run gameplay-harness CLI smoke tests
-  $0 adapters            run all CLI smoke groups
-  $0 gameplay            run release gameplay and generation-length quality gates
-  $0 gameplay-audit      run mature multi-seed, generation, and credit-stress audits
-  $0 playtest [args...]  run one focused release harness campaign; args pass through
+  $0 cli                 run core campaign/projection/dashboard CLI smoke
+  $0 art-cli             run procedural-art CLI smoke
+  $0 gameplay-cli        run gameplay-harness CLI smoke
+  $0 adapters            run all CLI smoke groups (reuses one CLI build)
+  $0 gameplay            run release gameplay + generation-length gates
+  $0 gameplay-audit      run mature multi-seed / generation / credit stress audits
+  $0 playtest [args...]  focused harness run; args pass through to CLI verbatim
   $0 ci-verify           fast CI lane: format, clippy, library, docs
   $0 ci-gates            deep CI lane: release tests, soaks, adapters, gameplay, audit
   $0 all                 everything: standard + soak + adapters + gameplay
   $0 slow                heavy release gates (ci-gates minus audit)
   $0 deep                deepest design gates (slow + gameplay-audit)
 
-fast iteration:
-  Use 'fast <filter>' for the tightest loop (e.g. 'fast simulation', 'fast strategic').
-  'quick' is an alias for 'fast' that never triggers docs or CLI builds.
-  Set CIVIC_DYNASTY_JOBS=4 to cap parallelism on a busy machine.
-  Set CIVIC_DYNASTY_SKIP_CLI_BUILD=1 to skip CLI rebuild when iterating on lib only.
-  Set CIVIC_DYNASTY_NEXTEST=1 to run tests under cargo-nextest (per-test isolation
-  and failure capture; measured slower than plain cargo test on this suite).
+fast iteration (solo local machine):
+  # Tightest loop — ~2s warm, no CLI rebuild
+  $0 fast simulation
+  $0 fast strategic
+  $0 check               # sub-second syntax only (no test run)
 
-environment:
-  CIVIC_DYNASTY_JOBS           pass --jobs N to cargo test/build commands
-  CIVIC_DYNASTY_PROFILE        debug (default) or release for adapter smoke builds
-  CIVIC_DYNASTY_BINARY         reuse a prebuilt CLI binary for adapter smoke groups
-  CIVIC_DYNASTY_SKIP_CLI_BUILD skip CLI rebuild when set (fast lib-only iteration)
-  CIVIC_DYNASTY_NEXTEST        run library tests under cargo-nextest when set to 1
-  CIVIC_DYNASTY_PYTHON         select an explicit Python interpreter
+  # One exact test with failure output
+  $0 debug 'systems::simulation::tests::household_fallback'
+
+  # Focused harness — debug CLI for fast iteration (~30ms sim, <1s total warm)
+  $0 playtest --days 90 --persona steward --background baker
+  # Release playtest for gate fidelity
+  CIVIC_DYNASTY_PROFILE=release $0 playtest --days 360 --persona entrepreneur
+  # Full release gates (only when needed)
+  $0 gameplay            # ~8s warm (36 + 3 campaigns, 60k simulated days)
+
+knobs:
+  CIVIC_DYNASTY_JOBS=4           cap parallelism on a busy machine
+  CIVIC_DYNASTY_PROFILE=release  force release CLI for adapters/playtest
+  CIVIC_DYNASTY_BINARY=/path/to/civic-dynasty  reuse a prebuilt CLI
+  CIVIC_DYNASTY_SKIP_CLI_BUILD=1 skip CLI rebuild (lib-only iteration)
+  CIVIC_DYNASTY_NEXTEST=1        run lib tests under cargo-nextest (isolated, slower warm)
+  CIVIC_DYNASTY_PYTHON=python3   select Python interpreter
 EOF
   exit 2
 }
@@ -86,8 +95,6 @@ ensure_cli_binary() {
   fi
   local requested_profile=${1:-debug}
   if [[ -n "${CIVIC_DYNASTY_BINARY_OVERRIDE:-}" ]]; then
-    # An explicit CIVIC_DYNASTY_BINARY_OVERRIDE wins over every profile choice,
-    # including the release contract that gameplay gates rely on.
     export CIVIC_DYNASTY_BINARY="$CIVIC_DYNASTY_BINARY_OVERRIDE"
     if [[ ! -x "$CIVIC_DYNASTY_BINARY" && -x "${CIVIC_DYNASTY_BINARY}.exe" ]]; then
       export CIVIC_DYNASTY_BINARY="${CIVIC_DYNASTY_BINARY}.exe"
@@ -100,9 +107,6 @@ ensure_cli_binary() {
   fi
 
   if [[ -n "${CIVIC_DYNASTY_BINARY:-}" ]]; then
-    # A caller-provided CIVIC_DYNASTY_BINARY is honored, but the gameplay gates
-    # must never inherit a debug binary: simulation throughput drops an order of
-    # magnitude, so they rebuild the optimized CLI instead.
     if [[ "$requested_profile" != release || "$CIVIC_DYNASTY_BINARY" == *"/release/civic-dynasty"* || "$CIVIC_DYNASTY_BINARY" == *"/release/civic-dynasty.exe"* ]]; then
       if [[ ! -x "$CIVIC_DYNASTY_BINARY" && -x "${CIVIC_DYNASTY_BINARY}.exe" ]]; then
         export CIVIC_DYNASTY_BINARY="${CIVIC_DYNASTY_BINARY}.exe"
@@ -160,7 +164,20 @@ run_cli_gameplay() {
   run_step 'Gameplay CLI smoke tests' bash scripts/verify_cli.sh gameplay
 }
 
+# playtest is the focused harness entry for iteration. By default it uses the
+# debug CLI so a warm edit→playtest roundtrip is <1s. Release is enforced only
+# by explicit profile selection or by gate lanes (gameplay, ci-gates, etc.)
 run_playtest() {
+  local profile=${CIVIC_DYNASTY_PROFILE:-debug}
+  # Allow explicit override: CIVIC_DYNASTY_PROFILE=release makes playtest
+  # gate-faithful. Callers who set CIVIC_DYNASTY_BINARY directly already
+  # control the binary via ensure_cli_binary's release guard.
+  ensure_cli_binary "$profile"
+  "$CIVIC_DYNASTY_BINARY" playtest "$@"
+}
+
+# release_playtest is used by gate lanes that must not inherit a debug CLI.
+run_release_playtest() {
   ensure_cli_binary release
   "$CIVIC_DYNASTY_BINARY" playtest "$@"
 }
@@ -263,15 +280,36 @@ has_nextest() {
   command -v cargo-nextest >/dev/null 2>&1 || cargo nextest --version >/dev/null 2>&1
 }
 
+run_check() {
+  local filter=${1:-}
+  local label='Syntax check (cargo check)'
+  if [[ -n "$filter" ]]; then
+    label="Syntax check matching '$filter'"
+  fi
+  # cargo check is sub-second warm and proves syntax/type correctness without
+  # running any tests. Use it for the absolute fastest editor feedback.
+  local command=(cargo check --quiet --locked "${job_args[@]}" --all-targets)
+  if [[ -n "$filter" ]]; then
+    # cargo check does not filter by test name, but we can still validate that
+    # the filter would match at least one test to give precise feedback.
+    local matches
+    matches=$(matching_tests "$filter") || true
+    if [[ -z "$matches" ]]; then
+      printf '\n==> %s\n' "$label"
+      printf 'no library tests matched %q\n' "$filter" >&2
+      printf '<== %s FAILED in <1s\n' "$label" >&2
+      return 2
+    fi
+  fi
+  run_step "$label" "${command[@]}"
+}
+
 run_fast() {
   local filter=${1:-}
   local label='Library tests'
   if [[ -n "$filter" ]]; then
     label="Library tests matching '$filter'"
   fi
-  # Measured on this suite: one warm `cargo test` process is the fastest option
-  # because tests share campaign-fixture setup. Opt into cargo-nextest with
-  # CIVIC_DYNASTY_NEXTEST=1 when per-test isolation or failure capture helps.
   if has_nextest && [[ -n "${CIVIC_DYNASTY_NEXTEST:-}" ]]; then
     local command=(cargo nextest run --locked --lib "${job_args[@]}" --no-fail-fast)
     if [[ -n "$filter" ]]; then
@@ -328,7 +366,8 @@ list_tests() {
 
 run_soak() {
   # Soak tests simulate thousands of days; release mode runs them ~100x faster
-  # than the debug test profile with the same deterministic assertions.
+  # than the debug test profile with the same deterministic assertions. Warm
+  # incremental rebuild is ~1s; cold is ~50s (one-time).
   run_step 'Deterministic soak tests (release)' \
     cargo test --release --quiet --locked "${job_args[@]}" --lib '::soak::' -- --ignored
 }
@@ -342,7 +381,7 @@ run_docs() {
 
 run_gameplay() {
   run_step 'Gameplay quality gate' \
-    run_playtest \
+    run_release_playtest \
       --minimum-overall 75 \
       --fail-on-critical \
       --json \
@@ -353,7 +392,7 @@ run_generation_gameplay() {
   local python_command
   python_command=$(resolve_python) || return
   run_step 'Generation-length gameplay gate' \
-    run_playtest \
+    run_release_playtest \
       --days 7200 \
       --persona steward \
       --background baker \
@@ -370,7 +409,7 @@ run_gameplay_audit() {
   local python_command
   python_command=$(resolve_python) || return
   run_step 'Mature multi-seed gameplay audit' \
-    run_playtest \
+    run_release_playtest \
       --days 3600 \
       --start-seed 1 \
       --seeds 2 \
@@ -380,7 +419,7 @@ run_gameplay_audit() {
       --json \
       --output target/gameplay-deep-audit.json
   run_step 'Generation-length persona audit' \
-    run_playtest \
+    run_release_playtest \
       --days 7200 \
       --persona steward \
       --persona entrepreneur \
@@ -393,7 +432,7 @@ run_gameplay_audit() {
       --json \
       --output target/gameplay-generation-matrix.json
   run_step 'Opportunist credit stress audit' \
-    run_playtest \
+    run_release_playtest \
       --days 7200 \
       --start-seed 1 \
       --seeds 2 \
@@ -451,9 +490,7 @@ run_all() {
   run_generation_gameplay
 }
 
-# Full unfiltered routine lanes may produce a validation receipt. Capture the
-# repository bytes before work starts so a concurrent edit cannot be blessed by
-# a gate that actually ran against an earlier tree.
+# Full unfiltered routine lanes may produce a validation receipt.
 receipt_lane=
 case "$mode" in
   fast|quick)
@@ -471,6 +508,10 @@ if [[ -n "$receipt_lane" ]]; then
 fi
 
 case "$mode" in
+  check)
+    [[ $# -le 2 ]] || usage
+    run_check "${2:-}"
+    ;;
   fast)
     [[ $# -le 2 ]] || usage
     run_fast "${2:-}"
@@ -505,14 +546,17 @@ case "$mode" in
     ;;
   cli)
     [[ $# -eq 1 ]] || usage
+    ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
     run_cli_core
     ;;
   art-cli)
     [[ $# -eq 1 ]] || usage
+    ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
     run_cli_art
     ;;
   gameplay-cli)
     [[ $# -eq 1 ]] || usage
+    ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
     run_cli_gameplay
     ;;
   adapters)
@@ -530,8 +574,9 @@ case "$mode" in
   playtest)
     [[ $# -ge 1 ]] || usage
     shift
-    ensure_cli_binary release
-    run_step 'Gameplay harness run' "$CIVIC_DYNASTY_BINARY" playtest "$@"
+    # Focused harness: use debug CLI by default for <1s warm iteration.
+    # Gate fidelity via CIVIC_DYNASTY_PROFILE=release.
+    run_step 'Gameplay harness run' run_playtest "$@"
     ;;
   gameplay-audit)
     [[ $# -eq 1 ]] || usage
@@ -557,6 +602,9 @@ case "$mode" in
   all)
     [[ $# -eq 1 ]] || usage
     run_all
+    ;;
+  help|--help|-h)
+    usage
     ;;
   *)
     usage
