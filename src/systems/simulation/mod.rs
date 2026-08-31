@@ -1838,17 +1838,30 @@ fn settle_weekly_external_income(state: &mut AppState) -> Result<(), SimulationE
     // Regional households earn part of their living beyond the modeled market:
     // hauling freight, provisioning caravans, selling crafts and labor to the
     // outside world. That earning power is outside silver flowing into the
-    // city, not a draw on the pooled market sector, so it is paid in full at
-    // its route-adjusted rate: a disrupted road is lost work, and a healthy
-    // one keeps every household's bread within reach.
+    // city, not a draw on the pooled market sector. Only available
+    // (unemployed) members can do outside work: employed members' labor is
+    // already captured in weekly wage settlement, so double-counting would
+    // make every employed household richer than a subsistence one and hide
+    // the real trade-off between workshop employment and caravan work. The
+    // available share is floored at 20% so a fully employed household still
+    // retains minimal outside opportunity instead of zeroing out.
     let availability = regional_demand_availability_basis_points(state);
     let payments: Vec<_> = state
         .households
         .iter()
         .map(|household| {
-            let paid = household
+            let available =
+                crate::systems::available_household_workers(state, household.id()) as i64;
+            let members = i64::from(household.members());
+            let available_ratio = if members > 0 {
+                (available * 10_000 / members).clamp(2_000, 10_000)
+            } else {
+                10_000
+            };
+            let scaled_income = household
                 .weekly_income
-                .saturating_mul_ratio(i64::from(availability), 10_000);
+                .saturating_mul_ratio(available_ratio, 10_000);
+            let paid = scaled_income.saturating_mul_ratio(i64::from(availability), 10_000);
             household
                 .cash
                 .checked_add(paid)

@@ -176,11 +176,17 @@ pub(crate) fn respond_to_market_wage_pressure(
     employment_id: EmploymentId,
     business_id: BusinessId,
 ) -> Result<(), SimulationError> {
-    if state
-        .businesses
-        .get(business_id)
-        .is_some_and(|business| business.owner_dynasty_id() == state.player_dynasty_id)
-    {
+    if state.businesses.get(business_id).is_some_and(|business| {
+        business.owner_dynasty_id() == state.player_dynasty_id
+            || business.status() == BusinessStatus::Distressed
+            || business.status() == BusinessStatus::Insolvent
+    }) {
+        // Distressed or insolvent firms must not bid up wages while they
+        // are cash-constrained and trying to recover: raising pay in that
+        // state turns a liquidity squeeze into an insolvency guarantee and
+        // makes every market-driven price tick punish the firms that can
+        // least afford it.
+
         // The player sets wage posture deliberately through
         // `SetBusinessWages`; the simulation never renegotiates for them.
         return Ok(());

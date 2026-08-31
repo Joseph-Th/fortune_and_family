@@ -543,6 +543,7 @@ mod soak {
 mod history_log {
     use super::*;
     use crate::core::checksum::ChecksumFolder;
+    use crate::core::history::{HISTORY_CHECKSUM_UNSYNCED, HISTORY_TAIL_FOLD_THRESHOLD};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
     fn log_with(values: &[u32]) -> HistoryLog<u32> {

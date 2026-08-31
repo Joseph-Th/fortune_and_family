@@ -16,6 +16,7 @@
 
 mod checksum;
 mod extended;
+mod history;
 mod records;
 mod state;
 
@@ -32,6 +33,7 @@ pub use extended::{
 };
 
 pub(crate) use extended::MIN_PARENT_CHILD_AGE_GAP_DAYS;
+pub use history::{HistoryLog, HistoryLogIter, HistoryLogIterMut};
 pub use records::{
     AuditKind, AuditRecord, AuditSubject, Business, BusinessPolicy, BusinessStatus, CampaignPhase,
     Character, CharacterRole, CharacterStatus, ChronicleEntry, ChronicleKind, Dynasty, Household,
@@ -44,7 +46,7 @@ pub(crate) use records::{
     DynastyRuntime,
 };
 pub use state::{
-    AppState, BusinessStore, CURRENT_SCHEMA_VERSION, CharacterStore, HistoryLog, HouseholdStore,
+    AppState, BusinessStore, CURRENT_SCHEMA_VERSION, CharacterStore, HouseholdStore,
     NEUTRAL_FOOD_SATISFACTION_BASIS_POINTS, NewGameConfig, SimulationClock,
 };
 pub(crate) use state::{

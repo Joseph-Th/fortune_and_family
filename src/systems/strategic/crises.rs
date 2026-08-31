@@ -293,9 +293,23 @@ pub(crate) fn detect_and_advance_crises(
         // Detection must precede empty shelves, or response routes have
         // nothing left to protect. A shortage is declared while the squeeze is
         // still building: regional access is failing or daily resupply has
-        // fallen visibly behind consumption.
-        let supply_stressed =
+        // fallen visibly behind consumption. Weighted-average availability
+        // can hide a single critical grain-route collapse behind healthy
+        // wool/timber routes, so the grain route's own disruption is checked
+        // independently — a blocked Western Grain Road starves the city even
+        // when upland trade is fine.
+        let weighted_stressed =
             crate::systems::simulation::import_trade_availability_basis_points(state) < 5_000;
+        let grain_route_stressed = registry
+            .get_good_id("grain")
+            .and_then(|grain_id| {
+                state
+                    .external_routes
+                    .values()
+                    .find(|route| route.good_id == grain_id)
+            })
+            .is_some_and(|route| route.disruption_basis_points > 5_000);
+        let supply_stressed = weighted_stressed || grain_route_stressed;
         if staple_thinning && supply_stressed {
             insert_crisis(
                 state,

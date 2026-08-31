@@ -283,6 +283,20 @@ mod transfer_boundaries {
         }
         let before = state.clone();
 
+        // Weekly income is scaled by available (unemployed) share; compute expected scaled incoming.
+        let members = before
+            .households
+            .get(household_id)
+            .expect("household must exist")
+            .members();
+        let available = crate::systems::available_household_workers(&before, household_id) as i64;
+        let available_ratio = if members > 0 {
+            (available * 10_000 / i64::from(members)).clamp(2_000, 10_000)
+        } else {
+            10_000
+        };
+        let expected_incoming =
+            Money::from_copper(100).saturating_mul_ratio(available_ratio, 10_000);
         let result = settle_weekly_external_income(&mut state);
 
         assert_eq!(
@@ -290,7 +304,7 @@ mod transfer_boundaries {
             Err(SimulationError::HouseholdCashOverflow {
                 household_id,
                 current: Money::from_copper(i64::MAX),
-                incoming: Money::from_copper(100),
+                incoming: expected_incoming,
             })
         );
         assert_state_unchanged(
@@ -436,7 +450,8 @@ mod transfer_boundaries {
         let [first_id, second_id] = household_ids.as_slice() else {
             panic!("campaign must contain at least two households");
         };
-        let payment = Money::from_copper(i64::MAX / 2 + 1);
+        // Use MAX to guarantee overflow even after 98% employment scaling.
+        let payment = Money::from_copper(i64::MAX);
         state
             .households
             .get_mut(*first_id)
@@ -449,14 +464,29 @@ mod transfer_boundaries {
             .weekly_income = payment;
         state.market.clearing_account = Money::from_copper(i64::MAX);
         let before = state.clone();
-
+        let first = before.households.get(*first_id).expect("first");
+        let second = before.households.get(*second_id).expect("second");
+        let avail1 = crate::systems::available_household_workers(&before, *first_id) as i64;
+        let avail2 = crate::systems::available_household_workers(&before, *second_id) as i64;
+        let ratio1 = if first.members() > 0 {
+            (avail1 * 10_000 / i64::from(first.members())).clamp(2_000, 10_000)
+        } else {
+            10_000
+        };
+        let ratio2 = if second.members() > 0 {
+            (avail2 * 10_000 / i64::from(second.members())).clamp(2_000, 10_000)
+        } else {
+            10_000
+        };
+        let scaled1 = payment.saturating_mul_ratio(ratio1, 10_000);
+        let scaled2 = payment.saturating_mul_ratio(ratio2, 10_000);
         let result = settle_weekly_external_income(&mut state);
 
         assert_eq!(
             result,
             Err(SimulationError::WeeklyExternalIncomeOverflow {
-                accumulated: payment,
-                incoming: payment,
+                accumulated: scaled1,
+                incoming: scaled2,
             })
         );
         assert_state_unchanged(
@@ -477,13 +507,28 @@ mod transfer_boundaries {
             household.weekly_income = Money::from_copper(income);
             income += 7;
         }
-        let promised: i64 = state
+        // With healthy routes availability is 10_000, but each household's
+        // payment is scaled by its available (unemployed) share. Compute
+        // expected total with the same available-ratio logic the settlement
+        // uses so the test stays coherent after the double-count fix.
+        let expected_total: i64 = state
             .households
             .iter()
-            .map(|household| household.weekly_income.copper())
+            .map(|household| {
+                let available =
+                    crate::systems::available_household_workers(&state, household.id()) as i64;
+                let members = i64::from(household.members());
+                let available_ratio = if members > 0 {
+                    (available * 10_000 / members).clamp(2_000, 10_000)
+                } else {
+                    10_000
+                };
+                household
+                    .weekly_income
+                    .saturating_mul_ratio(available_ratio, 10_000)
+                    .copper()
+            })
             .sum();
-        // A drained market sector must not starve households: regional
-        // earning power is outside silver, not a claim on the city's pool.
         state.market.clearing_account = Money::ZERO;
 
         settle_weekly_external_income(&mut state).expect("regional settlement must commit");
@@ -495,8 +540,8 @@ mod transfer_boundaries {
             .sum();
         assert_eq!(
             i128::from(total_credited),
-            i128::from(promised),
-            "healthy routes must pay every household its full regional income"
+            i128::from(expected_total),
+            "healthy routes must pay every household its route-adjusted, employment-scaled income"
         );
         assert_eq!(
             state.market.clearing_account,
@@ -548,11 +593,21 @@ mod transfer_boundaries {
         }
         let expected_bp = u16::try_from((total_weighted / total_capacity.max(1)).min(10_000))
             .expect("weighted availability must fit u16");
-        let expected_payment = weekly_income.saturating_mul_ratio(i64::from(expected_bp), 10_000);
         for household in state.households.iter() {
+            let available =
+                crate::systems::available_household_workers(&state, household.id()) as i64;
+            let members = i64::from(household.members());
+            let available_ratio = if members > 0 {
+                (available * 10_000 / members).clamp(2_000, 10_000)
+            } else {
+                10_000
+            };
+            let expected_payment = weekly_income
+                .saturating_mul_ratio(available_ratio, 10_000)
+                .saturating_mul_ratio(i64::from(expected_bp), 10_000);
             assert_eq!(
                 household.cash, expected_payment,
-                "every household must be paid the route-adjusted share of its regional income"
+                "every household must be paid the route-adjusted, employment-scaled share"
             );
         }
         assert_eq!(
