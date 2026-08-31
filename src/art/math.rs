@@ -1,8 +1,16 @@
 //! Fixed-point angles, trigonometry, and vector helpers.
 //!
-//! Rendering avoids floating point so that every frame is bit-identical across platforms and
-//! build profiles. Angles are stored as binary radians (`65_536` per turn) and trigonometric
-//! results use a fixed-point scale of [`ONE`].
+//! Purpose: supply integer `Angle` (binary radians, `65_536` per turn),
+//! fixed-point `sin`/`cos` (`ONE = 4096`), `scale`, `ease_in_out`, and
+//! `perpendicular_component` so rig/animation/surface stay bit-identical without floats.
+//! Owns: `Angle` wrapping/distance, Bhaskara sine, scaled multiply, cubic ease,
+//! and isqrt-derived perpendicular.
+//! Reads: nothing.
+//! Mutates: nothing (pure value math).
+//! Does not own: canvas, palette, or skeleton data.
+//! Invariants: every wrap stays in `0..65_536`; `sin`/`cos` bounded by `±ONE`;
+//! determinism integer-only; `ONE` is the fixed-point unit.
+//! Focused tests: `src/art/math.rs::tests` sine, wrapping, monotonic ease.
 
 use serde::{Deserialize, Serialize};
 

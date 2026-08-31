@@ -1,4 +1,12 @@
 //! Strategic economy, civic-system, crisis, and long-horizon behavior tests.
+//!
+//! Purpose: prove weekly/monthly/annual orchestration: contracts, credit
+//! (delinquency/default/restructuring), rents, employment, public works,
+//! districts, institutions, crises, succession, and long-horizon invariants.
+//! Owns: `strategic_tests` suite behind `src/systems/strategic/`.
+//! Reads: `Registry`, `AppState` via fixtures + `advance_days`.
+//! Mutates: local clones; soak horizons run in release.
+//! Focused lane: `bash scripts/test.sh fast strategic` (and `soak`).
 
 use super::*;
 use crate::systems::{advance_days, validate_invariants};

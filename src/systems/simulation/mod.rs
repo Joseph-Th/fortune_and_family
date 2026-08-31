@@ -244,36 +244,63 @@ fn validate_market_quotes(registry: &Registry, state: &AppState) -> Result<(), S
     Ok(())
 }
 
+/// Executes one deterministic simulation day in the canonical 18-step order.
+///
+/// The order is the product contract (see `ARCHITECTURE.md`): 1 reset
+/// flows, 2 routes/laws/crisis/AI-recovery/route-supply, 3-4 business
+/// purchases, 5-6 production, 7-8 sales, 9-10 household consumption,
+/// 11-12 maintenance, 13-14 spoilage + pricing + price controls, 15
+/// lifecycle, 16 clock + expiry, 17 weekly/monthly/annual hooks +
+/// phase refresh, 18 audit + invariant validation (outer loop).
 fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
+    // 1. Reset per-good daily flow counters so the day's demand/supply is
+    // isolated.
     reset_market_flows(state);
+    // 2. Daily strategic pre-phase: routes, laws, crisis effects, AI
+    // recovery, external route supply.
     super::strategic::run_daily_strategic_systems(registry, state)?;
     // Business status cannot change until after production/sales
     // (lifecycle evaluation runs later), so one capacity snapshot serves
     // purchases, production, and sales without per-phase rescans.
+    // 3-4. One shared capacity snapshot for the business pipeline (status
+    // cannot change until after sales, so it stays valid across purchases→
+    // production→sales without per-phase rescans).
     let capacity_scratch = super::DailyCapacityScratch::collect(state);
 
+    // 5. Input procurement — decide against shared stock/cash, then apply.
     let purchase_plan = purchases::decide_business_purchases(registry, state, &capacity_scratch)?;
     purchases::apply_business_purchases(state, purchase_plan)?;
 
+    // 6-7. Production — worker/ input/ cash/ tool-constrained batch choice.
     let production_plan = decide_production(registry, state, &capacity_scratch);
     apply_production(state, production_plan)?;
 
+    // 8-9. Sales — skill/renown/guild-gated placement against shared
+    // absorption ceiling.
     let sale_plan = decide_business_sales(registry, state, &capacity_scratch)?;
     apply_business_sales(state, sale_plan)?;
 
+    // 10-11. Household consumption — staple preference + secondary needs.
     let household_plan = decide_household_consumption(registry, state);
     apply_household_consumption(state, household_plan)?;
 
+    // 12. Workshop maintenance — condition/quality drift and tool demand.
     let maintenance_plan = decide_maintenance(registry, state);
     apply_maintenance(state, maintenance_plan)?;
 
+    // 13-15. Spoilage, pricing (pressure + floors), and business lifecycle.
     apply_market_spoilage(registry, state);
     update_market_prices(registry, state)?;
     super::strategic::apply_law_price_controls(registry, state);
     update_business_lifecycle(registry, state)?;
 
+    // 16. Clock and expiry — advance day, then expire reports/directives.
     state.clock.advance_one_day();
     super::strategic::expire_time_limited_state(state);
+    // 17. Scheduled hooks: weekly (wages, contracts, loans, rents,
+    // employment, dividends, works, reputation), monthly (districts,
+    // living costs, selections, duties, AI, crises), annual
+    // (health, succession), then phase refresh.
     if state.clock.is_week_boundary() {
         settle_weekly_external_income(state)?;
         super::strategic::run_weekly_strategic_systems(registry, state)?;
@@ -323,6 +350,9 @@ fn decide_production(
     // Daily rotation of tool-allocation priority: the same low-ID businesses must not win the
     // scarce tool race every day. Rotating by the clock day keeps the order deterministic and
     // stable (ID tie-breaker) while spreading shortage pressure fairly across the city over time.
+    // `clock.day()` starts at 0 and advances monotonically, so the low 32 bits are a
+    // deterministic hash of campaign age; wrapping is intentional for the `wrapping_add`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let day_hash = state.clock.day() as u32;
     let mut businesses: Vec<_> = state.businesses.iter().collect();
     businesses.sort_by_key(|business| business.id().value().wrapping_add(day_hash));
@@ -1449,6 +1479,8 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
         .expect("Rivergate market must define tools");
     let tools_price = tools_quote.price;
     let mut remaining_tools_stock = tools_quote.stock;
+    // Low-word hash of campaign day — wrapping is intentional for the rotation below.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let day_hash = state.clock.day() as u32;
     let mut snapshots: Vec<_> = state
         .businesses

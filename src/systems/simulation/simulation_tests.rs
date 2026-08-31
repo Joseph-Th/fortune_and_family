@@ -1,4 +1,12 @@
 //! Behavioral tests for daily simulation planning, ordering, and preflight validation.
+//!
+//! Purpose: prove purchase/production/sales/household/maintenance pipeline
+//! ordering, tool-constrained capacity, input/output limits, price spoilage,
+//! and `advance_days` preflight + atomicity.
+//! Owns: `simulation_tests` suite behind `src/systems/simulation/`.
+//! Reads: `Registry`, `AppState` via deterministic fixtures.
+//! Mutates: local campaign clones only.
+//! Focused lane: `bash scripts/test.sh fast simulation`.
 
 use super::*;
 use crate::core::{

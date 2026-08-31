@@ -1,4 +1,11 @@
 //! Projection completeness and HTML escaping tests for presentation adapters.
+//!
+//! Purpose: prove `build_campaign_projection` completeness, `attention` single-owner
+//! classification, and `render_campaign_html` escaping / data-URI determinism.
+//! Owns: `projection_tests` suite behind `src/projection.rs`.
+//! Reads: `Registry`, `AppState` via fixtures.
+//! Mutates: nothing persistent (pure projections).
+//! Focused lane: `bash scripts/test.sh standard` (and `adapters` for HTML smoke).
 
 use super::*;
 use crate::core::{

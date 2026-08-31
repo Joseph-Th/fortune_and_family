@@ -1,4 +1,12 @@
 //! Determinism and long-running invariant tests for application state.
+//!
+//! Purpose: prove ID allocation exhaustion/recovery, `HistoryLog`
+//! copy-on-write + checksum memo, clock bounds, `NextIds` monotonicity,
+//! and persistence-invariant parity via deterministic long horizons.
+//! Owns: `state_tests` suite behind `src/core/state.rs`.
+//! Reads: `AppState`, `CharacterStore`/`BusinessStore` via fixtures.
+//! Mutates: local clones only.
+//! Focused lane: `bash scripts/test.sh soak` (release) and `fast state`.
 
 use super::*;
 use crate::money::Money;

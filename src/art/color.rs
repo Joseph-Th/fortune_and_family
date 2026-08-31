@@ -1,8 +1,16 @@
 //! Deterministic integer color model, hue-shifted shading ramps, and indexed palettes.
 //!
-//! All conversions use integer arithmetic so that identical inputs produce identical
-//! output on every platform. Hue is expressed in tenth-degrees (`0..3600`); saturation,
-//! lightness, and blend weights are expressed in per-mille units (`0..=1000`).
+//! Purpose: provide the integer `Rgb8` ↔ `Hsl` conversion, `Ramp` hue-shifted shading,
+//! and `Palette` indexed indirection that `surface`/`shape`/`sprite` share without floats.
+//! Owns: `Rgb8`/`Hsl` arithmetic, `ShadeProfile` → `Ramp` construction, `Palette`
+//! insertion, and clamp/wrap helpers.
+//! Reads: nothing.
+//! Mutates: `Palette` storage via insertion; ramp construction is pure.
+//! Does not own: canvas geometry, rig math, or PNG encoding.
+//! Invariants: hue in `0..3600` tenth-degrees, s/l in `0..=1000` per-mille; palette
+//! index 0 stays transparent; ramp steps monotonic in luminance; determinism via
+//! integer arithmetic only.
+//! Focused tests: `src/art/color.rs::tests` round-trip, ramp luminance, clamping.
 
 use serde::{Deserialize, Serialize};
 
@@ -485,8 +493,12 @@ mod tests {
         let ramp = Ramp::build(Rgb8::new(150, 96, 72), ShadeProfile::material());
 
         for step in 1..ramp.len() {
-            let previous = ramp.color(i32::try_from(step).unwrap() - 1).luminance();
-            let current = ramp.color(i32::try_from(step).unwrap()).luminance();
+            let previous = ramp
+                .color(i32::try_from(step).expect("ramp length is bounded") - 1)
+                .luminance();
+            let current = ramp
+                .color(i32::try_from(step).expect("ramp length is bounded"))
+                .luminance();
             assert!(
                 current > previous,
                 "step {step} luminance {current} did not exceed {previous}"

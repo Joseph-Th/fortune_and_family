@@ -1,4 +1,12 @@
 //! Behavioral coverage for the deterministic gameplay harness.
+//!
+//! Purpose: prove candidate discoverability, persona variety, quiet-cause
+//! diagnosis, counterfactual attribution, scoring/finding rules, and
+//! report-schema/ trace semantics without requiring long-horizon matrices.
+//! Owns: `gameplay_tests` suite behind `src/gameplay/`.
+//! Reads: `GameplayHarnessReport` aggregates via synthetic report fixtures.
+//! Mutates: nothing persistent.
+//! Focused lane: `bash scripts/test.sh fast` (and `gameplay` for matrices).
 
 use super::*;
 use crate::core::{

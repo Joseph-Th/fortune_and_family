@@ -1,4 +1,12 @@
 //! Bootstrap validation and deterministic campaign-construction tests.
+//!
+//! Purpose: prove `build_new_game` name normalization, background/district
+//! mapping, founder age/ succession window, treasury/capacity seeding, and
+//! final `validate_invariants` on fresh campaigns.
+//! Owns: `bootstrap_tests` suite behind `src/systems/bootstrap.rs`.
+//! Reads: `Registry` via `test_registry`.
+//! Mutates: nothing persistent (returns owned `AppState`).
+//! Focused lane: `bash scripts/test.sh fast bootstrap`.
 
 use super::*;
 use crate::test_support::rivergate_registry_for_test as test_registry;

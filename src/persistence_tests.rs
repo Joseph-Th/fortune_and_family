@@ -1,4 +1,12 @@
 //! Persistence round-trip, current-schema enforcement, and release-mode validation tests.
+//!
+//! Purpose: prove the current-schema round trip, rejection of non-current/missing
+//! schemas, registry-fingerprint binding, bounded-file and duplicate-member checks,
+//! atomic staging, CAS semantics, and release validation at load/save boundaries.
+//! Owns: `persistence_tests` suite behind `src/persistence.rs`.
+//! Reads: `Registry`, `AppState` via `build_new_game` / `save_state` / `load_state`.
+//! Mutates: temporary files under `tempfile::tempdir` only.
+//! Focused lane: `bash scripts/test.sh standard` (and `deep` for release boundary).
 
 use super::*;
 use crate::core::{

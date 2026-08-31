@@ -1,4 +1,12 @@
 //! Behavioral tests for canonical player-command validation and mutation.
+//!
+//! Purpose: prove every `PlayerCommand` variant's validation → commit →
+//! typed `CommandError` + `assert_state_unchanged` rejection, stale-token
+//! coherence, reservation vs mutation fences, and treasury/clearing accounting.
+//! Owns: `commands_tests` suite behind `src/systems/commands/`.
+//! Reads: `Registry`, `AppState` via fixtures.
+//! Mutates: local clones via `apply_player_command*`.
+//! Focused lane: `bash scripts/test.sh fast commands`.
 
 use super::*;
 use crate::ids::GoodId;

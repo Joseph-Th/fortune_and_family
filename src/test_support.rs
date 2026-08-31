@@ -1,4 +1,13 @@
 //! Shared deterministic fixtures and state-difference diagnostics for unit tests.
+//!
+//! Purpose: provide one `rivergate_registry_for_test` / `make_test_campaign` per suite so
+//! every behavioral test starts from the same deterministic baseline without rebuilding.
+//! Owns: `rivergate_registry_for_test`, `make_test_campaign*`, `assert_state_unchanged` /
+//! `assert_state_eq` diagnostics, and JSON fixture helpers.
+//! Reads: `Registry`, `AppState` via lib entry points.
+//! Mutates: nothing persistent (returns owned clones).
+//! Does not own: domain rules or persistence IO.
+//! Focused tests: as consumers (`*_tests.rs`) — this is test infrastructure.
 
 use crate::core::{AppState, NewGameConfig};
 use crate::money::{Money, Quantity};

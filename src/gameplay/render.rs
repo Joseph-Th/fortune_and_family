@@ -191,14 +191,17 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
         }
         let mut bg_line = String::new();
         for (bg, (total_margin, count, total_treas)) in by_bg {
+            // `count` is bounded by harness config (≤ campaigns per background, <100),
+            // so `usize → i64 → i128` is lossless and the `i128→i64` clamp handles only
+            // theoretical margin overflow, not ordinary campaign totals.
             let avg_margin = Money::from_copper(
-                i64::try_from(total_margin / i128::from(count as i64)).unwrap_or(0),
+                i64::try_from(total_margin / i128::from(i64::try_from(count).unwrap_or(0)))
+                    .unwrap_or(0),
             );
             let avg_treas = Money::from_copper(total_treas / i64::try_from(count).unwrap_or(1));
             let _ = write!(
                 bg_line,
-                "{:?} margin {} treasury {} | ",
-                bg, avg_margin, avg_treas
+                "{bg:?} margin {avg_margin} treasury {avg_treas} | "
             );
         }
         if !bg_line.is_empty() {
@@ -222,8 +225,7 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
         let dynasty_cnt = report
             .campaigns
             .first()
-            .map(|c| c.rival_context.dynasty_count)
-            .unwrap_or(0);
+            .map_or(0, |c| c.rival_context.dynasty_count);
         let _ = writeln!(
             output,
             "  wealth mobility: {poorest}/{} bottom-ranked | best rank {best_rank}/{dynasty_cnt}",
