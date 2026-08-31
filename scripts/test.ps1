@@ -51,8 +51,16 @@ usage:
   .\scripts\test.ps1 slow                heavy release gates (ci-gates minus audit)
   .\scripts\test.ps1 deep                deepest design gates (slow + gameplay-audit)
 
+fast iteration (solo local — incremental, no world rebuild):
+  .\scripts\test.ps1 fast simulation   filtered <1s
+  .\scripts\test.ps1 check              <1s syntax only
+  .\scripts\test.ps1 playtest --days 90 --persona steward  # debug harness <1s
+
+warm budgets (incremental, after first build — cold once: clippy ~11s, release ~56s):
+  check <1s  fast-filter <1s  fast ~2s  standard ~6s  ci-verify ~5s  gameplay ~16s
+
 environment:
-  CIVIC_DYNASTY_JOBS           pass --jobs N to cargo test/build commands
+  CIVIC_DYNASTY_JOBS           pass --jobs N to cargo test/build commands (also caps harness parallelism)
   CIVIC_DYNASTY_PROFILE        debug (default) or release for adapter smoke builds
   CIVIC_DYNASTY_BINARY         reuse a prebuilt CLI binary for adapter smoke groups
   CIVIC_DYNASTY_SKIP_CLI_BUILD skip CLI rebuild when set (fast lib-only iteration)

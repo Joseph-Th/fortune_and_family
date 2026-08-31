@@ -6,11 +6,11 @@ Defines test tiers, suite organization, assertion standards, and completion gate
 
 | Goal | Command | Warm cost | When to use |
 |---|---|---|---|
-| Fastest syntax check | `bash scripts/test.sh check [filter]` | ~1s | Editor feedback — no tests run |
-| One domain or behavior | `bash scripts/test.sh fast <filter>` | ~2s | Tight edit loop (e.g. `fast simulation`) |
+| Fastest syntax check | `bash scripts/test.sh check [filter]` | <1s | Editor feedback — no tests run |
+| One domain or behavior | `bash scripts/test.sh fast <filter>` | <1s | Tight edit loop (e.g. `fast simulation`) |
 | Fastest library-only loop | `bash scripts/test.sh quick <filter>` | ~2s | Alias for fast, never triggers docs/CLI |
-| All ordinary library tests | `bash scripts/test.sh fast` | ~2s | Full library sweep |
-| Normal pre-commit loop | `bash scripts/test.sh standard` | ~4s | Pre-commit: syntax + lib + docs + core CLI |
+| All ordinary library tests | `bash scripts/test.sh fast` | ~2s | Full library sweep (warm) |
+| Normal pre-commit loop | `bash scripts/test.sh standard` | ~6s | Pre-commit: syntax + lib + docs + core CLI |
 | List matching tests | `bash scripts/test.sh list <filter>` | <1s | Discover filter names |
 | One exact test | `bash scripts/test.sh exact <fully-qualified-name>` | ~1s | Pinpoint a single test |
 | One exact test with output | `bash scripts/test.sh debug <fully-qualified-name>` | ~1s | Pinpoint with --nocapture |
@@ -48,14 +48,14 @@ On Windows without bash on PATH, use `.\scripts\test.ps1 <mode> [filter]` (mirro
 
 ## Build profiles
 
-- `dev` / `test`: crate `opt-level = 1`, dependencies `2`. Simulation-heavy tests finish in seconds. 16 codegen units, incremental compilation.
+- `dev` / `test`: crate `opt-level = 1`, dependencies `2`, `split-debuginfo = off`. Simulation-heavy tests finish in seconds. 16 codegen units, incremental compilation, pipelining.
 - `check`: inherits `dev`, never executed; used by `cargo check` for sub-second feedback.
 - `release`: soaks and gameplay gates — `opt-level = 3`, 16 codegen units, incremental, no LTO. Warm rebuild stays ~1s; throughput within ~10% of peak.
 - `release-max`: single codegen unit + thin-LTO. Use only when measuring peak throughput.
 
-Shared tuning: `.cargo/config.toml` (`incremental = true`, `pipelining = true`, `jobs = 0`) and `Cargo.toml` (16 codegen units per profile). No remote cache required.
+Shared tuning: `.cargo/config.toml` (`incremental = true`, `pipelining = true`, `jobs = 0`) and `Cargo.toml` (16 codegen units per profile, split-debuginfo off for dev/test). No remote cache required. First build of a new profile is one-time (clippy ~11s cold, release ~56s cold); warm thereafter is <1s incremental.
 
-Warm budgets: `fast` ~2s, `standard` ~4s, `ci-verify` ~6s, debug `playtest` <1s, `gameplay` ~16s (one release build + 39 campaigns, 60k days). Each lane reuses the incremental cache.
+Warm budgets (incremental, after first build): `check` <1s, `fast` filtered <1s / full ~2s, `standard` ~6s, `ci-verify` ~5s, debug `playtest` <1s, `gameplay` ~16s (one release build + 39 campaigns, 60k days). Each lane reuses the incremental cache.
 
 Long gameplay JSON assertions live in `scripts/check_gameplay.py`. `adapters`/`gameplay` lanes build their CLI once and reuse it.
 
@@ -63,7 +63,13 @@ Long gameplay JSON assertions live in `scripts/check_gameplay.py`. `adapters`/`g
 
 Successful unfiltered `quick`/`fast`, `standard`, and `all` runs record a content-addressed receipt under local Git metadata. The pre-push hook reuses a current receipt of equal or broader strength instead of recompiling identical bytes. Any tracked or non-ignored change invalidates it; receipt-eligible lanes refuse to issue evidence if bytes change mid-run.
 
-Install optional hooks with `bash scripts/install_hooks.sh`: pre-commit runs format, shell syntax, and whitespace checks; pre-push defaults to `quick` (2s warm). Use `git commit --no-verify` during focused iteration and `CIVIC_DYNASTY_PRE_PUSH=standard` when a fuller gate is needed on push.
+Install local hooks once with `bash scripts/install_hooks.sh`
+(sets `core.hooksPath` to `scripts/hooks`). `pre-commit` is the cheapest useful gate
+(~1s: format + shell syntax + cached whitespace) so you don't wait on builds per commit.
+`pre-push` defaults to `quick` (~2s warm, lib only) and reuses a content-addressed
+receipt — if these bytes already passed `quick`/`standard`, the push skips the duplicate
+build. Use `git commit --no-verify` mid-edit and `CIVIC_DYNASTY_PRE_PUSH=standard`
+when a stronger push gate (docs + CLI smoke) is warranted.
 
 ## Test tiers
 
@@ -71,12 +77,12 @@ Install optional hooks with `bash scripts/install_hooks.sh`: pre-commit runs for
 |---|---|---|
 | Check | Syntax/type only | ~1s |
 | Fast library | Deterministic unit and focused behavioral coverage | ~2s |
-| Standard | Check + fast library + docs + core CLI | ~4s |
+| Standard | Check + fast library + docs + core CLI | ~6s |
 | Adapter smoke | CLI contracts grouped by core, art, gameplay | ~2s |
 | Soak | Long deterministic invariant and multi-generation behavior | ~1s warm |
 | Gameplay | Release-mode systemic quality and succession gates | ~16s |
 | Gameplay audit | Larger matrices for rare and mature behavior | ~30s |
-| CI verify | Fast CI lane | ~6s warm |
+| CI verify | Fast CI lane | ~5s warm |
 | CI gates | Deep CI lane; requires `cargo-audit` | ~1 min |
 | Slow | Release gates without audit | ~45s |
 | Deep | Complete design gate: slow + gameplay audit | ~1.2 min |
@@ -158,9 +164,10 @@ Collection helpers should show observed members. Candidate and finding helpers s
 Run the narrowest relevant subset while editing. Once behavior is ready, run one routine lane rather than climbing through broader tiers:
 
 ```bash
-bash scripts/test.sh check          # ~1s syntax only
-bash scripts/test.sh fast simulation # ~2s for the one domain you touched
-bash scripts/test.sh standard        # ~4-5s normal pre-commit
+bash scripts/test.sh check          # <1s syntax only, no tests
+bash scripts/test.sh fast simulation # <1s filtered — the one domain you touched
+bash scripts/test.sh fast            # ~2s full library sweep
+bash scripts/test.sh standard        # ~6s normal pre-commit (syntax + lib + docs + core CLI)
 ```
 
 Select specialized lanes by changed contract:
@@ -176,6 +183,6 @@ If `fast <filter>` already covered the changed surface and `standard` is green, 
 
 Persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and report schemas require focused owner coverage plus the relevant specialized lane above. This is a coverage requirement, not automatically two invocations: when the selected lane already executes the necessary owner coverage, do not rerun a focused test beforehand.
 
-Do not run a compile-only or lint build immediately before an executable lane that recompiles the same surface unless the separate diagnostic is required. Prefer one build-producing operation per checkpoint.
+Do not run a compile-only or lint build immediately before an executable lane that recompiles the same surface unless the separate diagnostic is required. Prefer one build-producing operation per checkpoint. Filtered `fast <filter>` avoids rebuilding unrelated domains — use it for the inner loop and `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` when iterating lib-only to skip even the debug CLI build.
 
 The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier reuses one debug CLI build across adapter smoke groups and remains an explicit broad tier rather than a routine prerequisite.

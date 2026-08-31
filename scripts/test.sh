@@ -41,26 +41,27 @@ usage:
   $0 slow                heavy release gates (ci-gates minus audit)
   $0 deep                deepest design gates (slow + gameplay-audit)
 
-fast iteration (solo local machine):
-  # Tightest loop — ~2s warm, no CLI rebuild
-  $0 fast simulation
+fast iteration (solo local machine — every lane is incremental, no world rebuild):
+  # Tightest loop — filtered <1s, no CLI rebuild at all
+  $0 fast simulation        # only that domain, ~0.4s warm
   $0 fast strategic
-  $0 check               # sub-second syntax only (no test run)
+  $0 check                  # sub-second syntax only (cargo check, no tests)
+  CIVIC_DYNASTY_SKIP_CLI_BUILD=1 $0 standard  # lib-only iteration, skips debug CLI
 
   # One exact test with failure output
   $0 debug 'systems::simulation::tests::household_fallback'
 
   # Focused harness — debug CLI for fast iteration (~30ms sim, <1s total warm)
   $0 playtest --days 90 --persona steward --background baker
-  # Release playtest for gate fidelity
+  # Release playtest for gate fidelity (release harness, still <1s rebuild warm)
   CIVIC_DYNASTY_PROFILE=release $0 playtest --days 360 --persona entrepreneur
-  # Full release gates (only when needed)
-  $0 gameplay            # ~16s warm: 36 + 3 campaigns, 60k simulated days, one release build
+  # Full release gates (only when needed — one release build reused)
+  $0 gameplay               # ~16s warm: 36 + 3 campaigns, 60k simulated days
 
-warm budgets (incremental, after first build):
-  check      ~1s    fast       ~2s    standard  ~4s
-  docs       ~1s    adapters   ~2s    playtest  <1s (debug)
-  ci-verify  ~6s    gameplay  ~16s    all      ~25s
+warm budgets (incremental, after first build of each profile — cold once: clippy ~11s, release ~56s):
+  check      <1s    fast-filter <1s  fast    ~2s    standard ~6s
+  docs       ~2s    adapters     ~2s  playtest <1s (debug)
+  ci-verify  ~5s    gameplay   ~16s  all      ~25s
 
 knobs:
   CIVIC_DYNASTY_JOBS=4           cap cargo + harness parallelism (also caps gameplay campaign fan-out)

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Local pre-push gate: fast verification for solo local work.
-# Keeps pushes snappy — runs the quick library gate only. Use
-# `bash scripts/test.sh standard` manually before a risky push,
-# or set CIVIC_DYNASTY_PRE_PUSH=standard to enforce the fuller gate.
+# Solo-dev pre-push: minimal gate, maximal signal.
+# Default is `quick` (~2s warm, lib only) so pushes stay snappy and you
+# don't re-verify identical bytes. The receipt cache (git-wizard) skips
+# duplicate work when `quick`/`standard` already passed on these bytes.
+# Tight loop: `bash scripts/test.sh fast <filter>` (<1s). Pre-commit gate:
+# `bash scripts/test.sh standard` (~6s). Stronger push: set
+# `CIVIC_DYNASTY_PRE_PUSH=standard` to enforce docs + CLI smoke on push.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
