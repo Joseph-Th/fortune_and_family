@@ -272,9 +272,18 @@ Projection code may aggregate and format. It must not mutate state or recreate c
 
 ### Gameplay harness
 
-The harness generates state-derived command candidates, validates them through `apply_player_command` on cloned state, commits through the same API, advances through `advance_days`, and compares action and no-action branches.
+The harness generates state-derived command candidates, validates them through
+ `apply_player_command` on cloned state, commits through the same API, advances
+ through `advance_days`, and compares action and no-action branches.
 
-Independent matrix campaigns run in parallel; each campaign owns its state and the shared registry is immutable, so campaign ordering and determinism are preserved. The harness does not directly mutate domain records during play. See `GAMEPLAY_HARNESS.md`.
+Independent matrix campaigns run in parallel; each campaign owns its state and
+ the shared registry is immutable, so campaign ordering and determinism are
+ preserved. The harness does not directly mutate domain records during play.
+
+Bounded work: candidate probes (`max_candidate_probes`), decision intervals,
+ consequence horizons, and trace retention (`trace_limit`) bound every harness
+ run in domain terms (Section 38) rather than wall-clock time; wall-clock
+ diagnostics (`simulated_days/s`) remain advisory. See `GAMEPLAY_HARNESS.md`.
 
 ### Art
 
