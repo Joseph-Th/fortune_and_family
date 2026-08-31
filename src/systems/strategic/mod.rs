@@ -67,7 +67,7 @@ const AI_DYNASTY_UPKEEP_PER_BUSINESS: Money = Money::from_copper(400);
 /// compounding without limit, keeping rivals reachably mortal and the city's
 /// wealth circulating through the same economy everyone else uses.
 const AI_DYNASTY_WEALTH_UPKEEP_THRESHOLD: Money = Money::from_copper(40_000);
-const AI_DYNASTY_WEALTH_UPKEEP_BASIS_POINTS: i64 = 150;
+const AI_DYNASTY_WEALTH_UPKEEP_BASIS_POINTS: i64 = 200;
 const AI_DYNASTY_UPKEEP_SHORTFALL_LEGITIMACY_PENALTY: u16 = 60;
 const AI_DYNASTY_UPKEEP_SHORTFALL_RELIABILITY_PENALTY: u16 = 120;
 const OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS: i64 = 90;
@@ -125,15 +125,15 @@ const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASI
 /// some of these loans rescue the borrower, others miss installments within
 /// months, fall delinquent, default, and ground the enforcement claims that
 /// keep courts, seizure, and banking panics reachable inside one session.
-const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 3_500;
-const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 18;
-const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(10_000);
+const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 4_200;
+const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 14;
+const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(13_000);
 /// Monthly risk-appetite draw per liquid house: speculative offers stay a
 /// minority of the lending book while still arriving several times per
 /// campaign instead of roughly once per session. Lifted from 45% to 60%
 /// so city-wide default counts and banking-panic detection become
 /// reachable without requiring a perfectly unlucky world seed.
-const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 6_000;
+const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 6_500;
 
 mod ai;
 mod businesses;

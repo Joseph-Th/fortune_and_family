@@ -459,7 +459,7 @@ pub(crate) fn business_status_after_capitalization(
 /// organization worth testing when succession arrives, yet early enough that
 /// dynastic continuity is part of ordinary play rather than only
 /// generation-length simulations.
-const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 380;
+const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 240;
 
 fn decide_business_production(
     registry: &Registry,

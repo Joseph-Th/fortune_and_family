@@ -61,6 +61,9 @@ pub(crate) fn derive_findings(
     add_individual_action_concentration_finding(campaigns, &mut findings);
     add_persona_variety_findings(campaigns, &mut findings);
     add_core_fantasy_findings(aggregate, campaigns, &mut findings);
+    add_succession_before_office_finding(campaigns, &mut findings);
+    add_short_horizon_background_imbalance_finding(campaigns, &mut findings);
+    add_governance_phase_gap_finding(aggregate, campaigns, &mut findings);
     add_variance_finding(campaigns, &mut findings);
     if findings.is_empty() {
         findings.push(GameplayFinding {
@@ -4189,4 +4192,141 @@ pub(crate) fn add_variance_finding(
             ),
         });
     }
+}
+
+pub(crate) fn add_succession_before_office_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let with_both = campaigns
+        .iter()
+        .filter(|c| {
+            c.fantasy_arc.first_succession_day.is_some() && c.fantasy_arc.first_office_day.is_some()
+        })
+        .collect::<Vec<_>>();
+    if with_both.len() < 4 {
+        return;
+    }
+    let inverted = with_both
+        .iter()
+        .filter(|c| {
+            c.fantasy_arc.first_succession_day.unwrap() < c.fantasy_arc.first_office_day.unwrap()
+        })
+        .count();
+    if scaled_ratio_usize(inverted, with_both.len(), 100) < 50 {
+        return;
+    }
+    let earliest_office = with_both
+        .iter()
+        .filter_map(|c| c.fantasy_arc.first_office_day)
+        .min()
+        .unwrap_or(0);
+    let latest_succ = with_both
+        .iter()
+        .filter_map(|c| c.fantasy_arc.first_succession_day)
+        .max()
+        .unwrap_or(0);
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Succession precedes office in most successions".to_owned(),
+        evidence: format!(
+            "{inverted} of {} campaigns that reached both succession and office saw succession first (succession day precedes office day). Earliest office {earliest_office}, latest succession {latest_succ}. The dynasty fantasy expects the founder to hold office and memberships worth testing at succession; when the Founder dies before first office, governance and succession phases invert and the legacy phase never exercises Dynastic Governance. Consider founder age or succession pressure tuning.",
+            with_both.len()
+        ),
+    });
+}
+
+pub(crate) fn add_short_horizon_background_imbalance_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    // Early-game balance matters as much as mature balance: a 1-year horizon
+    // reveals whether a starting trade is a hidden difficulty mode before
+    // compound growth hides it. The existing mature checks trigger at 1080
+    // and 3600 days; this short-horizon check surfaces the same signal at
+    // 360 days when sample is sufficient.
+    let eligible: Vec<_> = campaigns
+        .iter()
+        .filter(|c| c.simulated_days >= 360 && c.simulated_days < 1080)
+        .collect();
+    if eligible.len() < 12 {
+        return;
+    }
+    let backgrounds: BTreeSet<StartingBackground> = eligible.iter().map(|c| c.background).collect();
+    if backgrounds.len() < 2 {
+        return;
+    }
+    let mut averages = Vec::new();
+    for bg in backgrounds {
+        let sampled: Vec<_> = eligible.iter().filter(|c| c.background == bg).collect();
+        if sampled.len() < 4 {
+            continue;
+        }
+        let total_margin: i128 = sampled.iter().fold(0, |s, c| {
+            s + i128::from(
+                c.end
+                    .player_business_lifetime_revenue
+                    .copper()
+                    .saturating_sub(c.end.player_business_lifetime_costs.copper()),
+            )
+        });
+        let avg = total_margin / i128::try_from(sampled.len()).unwrap_or(1);
+        averages.push((bg, avg));
+    }
+    if averages.len() < 2 {
+        return;
+    }
+    let (strongest, s_avg) = *averages.iter().max_by_key(|(_, a)| *a).unwrap();
+    let (weakest, w_avg) = *averages.iter().min_by_key(|(_, a)| *a).unwrap();
+    let spread = s_avg.saturating_sub(w_avg);
+    if spread < 12_000 {
+        return;
+    }
+    if weakest == StartingBackground::Blacksmith && s_avg > w_avg.saturating_mul(2) {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Early background economics already diverge sharply by trade".to_owned(),
+            evidence: format!(
+                "At 360-day horizon, {strongest:?} averaged margin {} vs {weakest:?} at {} (spread {}). A trade that is already 2x behind after one year creates a hidden difficulty mode before compound growth and should be balanced at the recipe/operating-cost level."
+                , Money::from_copper(i64::try_from(s_avg).unwrap_or(0)), Money::from_copper(i64::try_from(w_avg).unwrap_or(0)), Money::from_copper(i64::try_from(spread).unwrap_or(0))
+            ),
+        });
+    }
+}
+
+pub(crate) fn add_governance_phase_gap_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let governance = aggregate
+        .phase_stats
+        .get(&GameplayPhase::DynasticGovernance)
+        .cloned()
+        .unwrap_or_default();
+    if governance.decision_cycles > 0 {
+        return;
+    }
+    let city_shapers = campaigns
+        .iter()
+        .filter(|c| c.fantasy_arc.first_city_shaping_action_day.is_some())
+        .count();
+    let successions = campaigns
+        .iter()
+        .filter(|c| c.fantasy_arc.first_succession_day.is_some())
+        .count();
+    if city_shapers == 0 || successions == 0 {
+        return;
+    }
+    let avg_days = average_campaign_days(aggregate);
+    if avg_days < 1_000 {
+        return;
+    }
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Info,
+        title: "Dynastic governance phase remains unentered despite city-shaping".to_owned(),
+        evidence: format!(
+            "{city_shapers} campaigns reached city-shaping and {successions} reached succession, but DynasticGovernance recorded 0 decision cycles. Successions precede city-shaping in this world sample, so post-succession legacy absorbs governance. If average_days={avg_days}, check that succession median sits after typical city-shaping day (~600-800) rather than before.",
+        ),
+    });
 }

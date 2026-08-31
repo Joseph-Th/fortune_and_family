@@ -889,8 +889,8 @@ fn register_rivergate_goods(builder: &mut RegistryBuilder) -> RivergateGoods {
             "tools",
             "Tools",
             GoodCategory::Tool,
-            Money::from_copper(150),
-            Quantity::from_units(180),
+            Money::from_copper(165),
+            Quantity::from_units(260),
             0,
         ),
     }
@@ -971,8 +971,8 @@ fn register_material_recipes(builder: &mut RegistryBuilder, goods: RivergateGood
         "iron_import",
         "Valley Iron Trade",
         Vec::new(),
-        (goods.iron, Quantity::from_units(8)),
-        Money::from_copper(135),
+        (goods.iron, Quantity::from_units(10)),
+        Money::from_copper(105),
         10,
     );
     builder.register_recipe(
@@ -983,7 +983,7 @@ fn register_material_recipes(builder: &mut RegistryBuilder, goods: RivergateGood
             (goods.charcoal, Quantity::from_units(2)),
         ],
         (goods.tools, Quantity::from_units(5)),
-        Money::from_copper(115),
+        Money::from_copper(85),
         10,
     );
 }

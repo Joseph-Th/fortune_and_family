@@ -405,7 +405,14 @@ fn insert_dynasty(
             // Founders begin near the age at which succession pressure becomes
             // material, so the first generational transition lands inside the
             // campaign session that builds the dynasty rather than beyond it.
-            birth_day: -20_160 - i64::from(state.rng.range_u32(720)),
+            // At 52-54 years the median first succession sits near 700-900
+            // days: late enough that a founder who pursues institutional
+            // standing has offices and memberships worth testing when
+            // succession arrives, early enough that continuity remains
+            // ordinary play. Starting four years younger than the prior
+            // 56-58 median delays the early 360-day succession cluster while
+            // keeping succession inside the standard multi-year session.
+            birth_day: -18_720 - i64::from(state.rng.range_u32(720)),
         },
         capabilities: CharacterCapabilities {
             administration: head_administration,
