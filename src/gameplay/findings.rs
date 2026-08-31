@@ -4213,8 +4213,7 @@ pub(crate) fn add_succession_before_office_finding(
             c.fantasy_arc
                 .first_succession_day
                 .expect("filtered to some succession")
-                < c
-                    .fantasy_arc
+                < c.fantasy_arc
                     .first_office_day
                     .expect("filtered to some office")
         })

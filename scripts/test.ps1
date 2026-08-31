@@ -366,12 +366,13 @@ function Run-CiVerify {
         & cargo fmt --all -- --check
         if ($LASTEXITCODE -ne 0) { throw "Formatting check failed" }
     }
+    # Primary gate first so a failing lib test reports in ~2s warm before clippy/doc.
+    Run-Fast
+    Run-Docs
     Run-Step "Compile and lint" {
         & cargo clippy --all-targets --all-features --locked -- -D warnings
         if ($LASTEXITCODE -ne 0) { throw "Clippy lint failed" }
     }
-    Run-Fast
-    Run-Docs
     Run-Step "Documentation warnings" {
         $env:RUSTDOCFLAGS = "-D warnings"
         & cargo doc --no-deps --locked

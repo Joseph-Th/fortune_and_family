@@ -469,9 +469,11 @@ run_gameplay_audit() {
 run_ci_verify() {
   run_shell_syntax
   run_step 'Format' cargo fmt --all -- --check
-  run_step 'Compile and lint' cargo clippy --all-targets --all-features --locked -- -D warnings
+  # Run the primary gate first so a failing lib test is reported in ~2s warm
+  # before paying for clippy/doc rebuilds; warm clippy/doc are <1s each.
   run_fast
   run_docs
+  run_step 'Compile and lint' cargo clippy --all-targets --all-features --locked -- -D warnings
   run_step 'Documentation warnings' env RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
   run_step 'Whitespace errors' git diff-tree --check --no-commit-id --root -r -m HEAD
 }
