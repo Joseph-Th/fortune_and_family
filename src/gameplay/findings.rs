@@ -1455,7 +1455,7 @@ pub(crate) fn add_long_horizon_risk_findings(
             severity: GameplayFindingSeverity::Warning,
             title: "Long-horizon player lending never encounters credit distress".to_owned(),
             evidence: format!(
-                "Agents extended player credit {credit_actions} times, but no campaign ever recorded a delinquent or defaulted loan issued by the player dynasty. Distress on unrelated private loans no longer counts as coverage of the player's lending risk."
+                "Agents extended player credit {credit_actions} times, but no campaign recorded a delinquent or defaulted loan issued by the player dynasty. Distress on unrelated private loans does not count as coverage of the player's lending risk."
             ),
         });
     }
@@ -4135,7 +4135,7 @@ pub(crate) fn add_power_exposure_finding(
         severity: GameplayFindingSeverity::Warning,
         title: "Established dynasties often avoid measured power exposure".to_owned(),
         evidence: format!(
-            "{sheltered} of {} officeholding campaigns reached the endpoint without a player labor dispute, contract failure, distressed business, insolvent business, major treasury drawdown, at least 1,500 basis points of relationship-driven contract pressure, or unmet office duty. Routine civic payments no longer count as meaningful exposure by themselves; political backlash does count once it materially worsens commercial bargaining. The design calls for greater power to create consequential obligations and vulnerability, not only additional tools.",
+            "{sheltered} of {} officeholding campaigns reached the endpoint without a player labor dispute, contract failure, distressed business, insolvent business, major treasury drawdown, at least 1,500 basis points of relationship-driven contract pressure, or unmet office duty. Routine civic payments are not meaningful exposure by themselves; political backlash counts once it materially worsens commercial bargaining. The design calls for greater power to create consequential obligations and vulnerability, not only additional tools.",
             established.len()
         ),
     });

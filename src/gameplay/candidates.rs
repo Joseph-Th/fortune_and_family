@@ -2158,8 +2158,18 @@ pub(crate) fn generate_planned_business_investment(
         .expect("player dynasty must exist")
         .treasury();
     let mut reserve = recapitalization_dynasty_reserve(persona, false);
-    if state.dynasties.get(&state.player_dynasty_id).is_some_and(|d| d.resources.legitimacy_basis_points > 6_000)
-        && state.institutions.values().any(|i| i.office_holder_id.is_some_and(|h| state.characters.get(h).is_some_and(|c| c.dynasty_id() == state.player_dynasty_id)))
+    if state
+        .dynasties
+        .get(&state.player_dynasty_id)
+        .is_some_and(|d| d.resources.legitimacy_basis_points > 6_000)
+        && state.institutions.values().any(|i| {
+            i.office_holder_id.is_some_and(|h| {
+                state
+                    .characters
+                    .get(h)
+                    .is_some_and(|c| c.dynasty_id() == state.player_dynasty_id)
+            })
+        })
     {
         reserve = Money::from_copper(reserve.copper().saturating_sub(2_000).max(0));
     }

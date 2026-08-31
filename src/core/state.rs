@@ -696,7 +696,7 @@ pub struct HistoryLog<T> {
     checksum_state: AtomicU64,
 }
 
-/// Memo sentinel meaning "the running checksum no longer matches the log".
+/// Memo sentinel meaning the running checksum does not match the log and must be rebuilt.
 const HISTORY_CHECKSUM_UNSYNCED: u64 = u64::MAX;
 
 impl<T: Clone> Clone for HistoryLog<T> {

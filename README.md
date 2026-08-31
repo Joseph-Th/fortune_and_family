@@ -23,6 +23,13 @@ Each question is answered by one owned document. Link to the owner instead of re
 
 Profiles: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation**. Root `../AGENTS.md` owns workspace coordination.
 
+## Cold start
+
+1. Read this map, then `AGENTS.md` for the change procedure.
+2. Read `STATUS.md` for current capability and `ARCHITECTURE.md` for the owning module.
+3. Trace `src/lib.rs` to the canonical system, then its file header (`Purpose / Owns / Reads / Mutates`).
+4. Run the narrowest `bash scripts/test.sh <lane>` from `TESTING.md`.
+
 ## Requirements
 
 - Rust — minimum version in `Cargo.toml` (`rust-version`), pinned by `rust-toolchain.toml`. Edition 2024.
@@ -144,4 +151,4 @@ scripts/              Test runner, smoke groups, docs and gameplay checks, git h
 
 ## Working rule
 
-Find the owner before changing behavior. Trace the public entry point to the canonical system, identify the state and invariants it owns, prove the change with the narrowest relevant tests, and update the one document that owns any changed contract. `AGENTS.md` defines the procedure.
+Find the owner before changing behavior. Trace the public entry point to its canonical system, prove the change with the narrowest tests, and update the one owning document. `AGENTS.md` defines the procedure.

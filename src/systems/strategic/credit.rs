@@ -144,7 +144,7 @@ impl ValidatedLoan {
     /// # Errors
     ///
     /// Returns the current validation error if state changed after the token was created, or an
-    /// allocation or timeline error if durable loan feedback can no longer be recorded.
+    /// allocation or timeline error if durable loan feedback cannot be recorded.
     pub fn commit(self, state: &mut AppState) -> Result<crate::ids::LoanId, StrategicError> {
         let defaulted_loan_id = validate_loan_terms(state, &self.terms)?;
         // Every durable identifier and schedule this commit consumes is

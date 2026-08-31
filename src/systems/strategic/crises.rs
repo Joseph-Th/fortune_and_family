@@ -263,6 +263,7 @@ pub(crate) fn update_external_route_risk(state: &mut AppState) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn detect_and_advance_crises(
     registry: &Registry,
     state: &mut AppState,
@@ -724,7 +725,7 @@ pub(crate) fn detect_guild_revolt(
 }
 
 /// Average legitimacy shortfall of the chartered guild institutions, in basis
-/// points. Guilds whose members no longer trust or fund them cannot keep their
+/// points. Guilds whose members do not trust or fund them cannot keep their
 /// trades calm, so a legitimacy deficit feeds the revolt chance just like
 /// labor disputes and entry restrictions do; endowments and office stewardship
 /// that restore guild standing therefore suppress future revolts.

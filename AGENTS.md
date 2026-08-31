@@ -51,8 +51,8 @@ This repository implements **Universal**, **Stateful Application**, **Determinis
 
 ## Completion
 
-Use `bash scripts/test.sh fast <filter>` for focused iteration when it shortens feedback or isolates a failure. When ordinary work is ready for completion, go directly to `standard`; running `fast` immediately beforehand adds nothing.
+For iteration use `bash scripts/test.sh fast <filter>` only when it isolates a failure or shortens feedback. For completion go directly to `standard`; an extra `fast` beforehand adds nothing.
 
-For specialized surfaces, run the smallest lane from [TESTING.md](TESTING.md) that owns the changed contract, plus only genuinely distinct evidence that lane does not already contain. Deeper lanes are required only when their distinct contract changed.
+For specialized surfaces run the smallest lane in [TESTING.md](TESTING.md) that owns the changed contract plus only genuinely distinct evidence that lane does not already contain. Deeper lanes are required only when their distinct contract changed.
 
-Before handing off, confirm canonical ownership, deterministic/persistence/invariant behavior, current documentation, clean diff hygiene, and that no `target/agent-output` or workspace-root transient remains.
+Before handoff confirm canonical ownership, deterministic/persistence/invariant behavior, current documentation, clean diff hygiene, and that no `target/agent-output` or workspace-root transient remains.

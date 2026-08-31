@@ -205,10 +205,9 @@ fn decide_legal_case(
         );
         (Money::ZERO, Money::ZERO, Money::ZERO, rejected_claim)
     };
-    // Winning a grounded claim over an obligation that no longer exists is
-    // a hollow victory: the court rules on the paperwork, but a dispute
-    // over a cured debt must not poison the relationship as if real
-    // damages had been suffered.
+    // A grounded claim whose underlying obligation is already cured is a
+    // hollow victory: the court rules on the paperwork, but the relationship
+    // cost stays minimal when no damages are due.
     let hollow_victory = plaintiff_wins && claim_source.is_some() && awarded == Money::ZERO;
     state
         .legal_cases

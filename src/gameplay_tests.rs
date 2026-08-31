@@ -1887,7 +1887,7 @@ mod candidates {
         assert_eq!(
             player_monthly_committed_duty_cost(&state),
             player_current_office_duty_cost(&state),
-            "defaulted loans no longer participate in scheduled repayment and must not inflate the office-retreat reserve"
+            "defaulted loans do not participate in scheduled repayment and must not inflate the office-retreat reserve"
         );
     }
 
@@ -2402,7 +2402,7 @@ mod candidates {
 
         assert!(
             !player_needs_property_liquidation(&state),
-            "defaulted debt must not cause asset sales solely to reserve cash for payments that are no longer scheduled"
+            "defaulted debt must not cause asset sales solely to reserve cash for unscheduled payments"
         );
     }
 

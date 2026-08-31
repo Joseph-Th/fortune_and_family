@@ -119,18 +119,18 @@ Records hold identity, references, local values, and lifecycle state. Mutation b
 
 Character, household, and business stores own records plus derived indexes. Use store methods for insertion, removal, and ownership changes; do not update records and indexes independently.
 
-Histories (audit log, chronicle, outbox) use `HistoryLog`: entries append to an exclusive tail over shared immutable storage, so clones remain cheap as campaigns lengthen. Iteration order and serialized shape match a plain vector. Use `push`, iteration, `retain`, `partition_point` — not contiguous-buffer assumptions.
+Histories (audit log, chronicle, outbox) use `HistoryLog`: an append-only vector with cheap clones via shared immutable bulk plus an exclusive tail. Iteration order and serialized shape match a plain vector. Use `push`, iteration, `retain`, `partition_point`.
 
 History rules:
 
-- History text is append-only and immutable after construction.
+- Text is append-only and immutable after construction.
 - Audit days are nondecreasing (enforced invariant). Cooldown and recency scans stop at the day boundary via `latest_cooldown_audit_day`, `audit_records_from`/`audit_records_within_cooldown`, and `partition_point`.
 - Unbounded reverse scans apply only to predicates that need arbitrary age ("has this ever happened").
 - Fingerprint stores with `stable_serialized_checksum`; fingerprint histories with `HistoryLog::structural_checksum`. Do not reserialize a history for its checksum.
 
-Non-persisted derivation memos are pure functions of persisted state. They are excluded from serialization and `AppState` equality (extend the hand-written `PartialEq` when adding fields), rebuilt lazily, and never observable in results.
+Non-persisted derivation memos are pure functions of persisted state. They are excluded from serialization and `AppState` equality (extend the hand-written `PartialEq` when adding fields), rebuilt lazily, and never observable.
 
-Two memos exist: `CampaignEvidenceMemo` (`src/core/state.rs`) folds campaign-phase audit evidence for `refresh_campaign_phases`; `HistoryLog` checksum memo (`src/core/checksum.rs`) extends a running structural fold in constant time. Non-append mutations (`retain`, `iter_mut`, reordering) mark the checksum stale so the next read rebuilds once. The value remains a pure function of entries.
+Two memos exist: `CampaignEvidenceMemo` (`src/core/state.rs`) folds campaign-phase audit evidence for `refresh_campaign_phases`; `HistoryLog` checksum memo (`src/core/checksum.rs`) extends a running structural fold in constant time. Non-append mutations (`retain`, `iter_mut`, reordering) mark the checksum stale so the next read rebuilds once.
 
 ## Canonical flows
 

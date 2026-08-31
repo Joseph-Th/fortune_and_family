@@ -160,10 +160,9 @@ pub(crate) fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), Simula
         }
     }
     if total_upkeep > Money::ZERO {
-        // Household upkeep buys goods, staff, and services from the city's
-        // market sector rather than deleting copper: the pooled clearing
-        // account is the credited counterparty, so AI maintenance no longer
-        // deflates private money supplies month after month.
+        // Household upkeep buys goods, staff, and services from the city
+        // market sector: the pooled clearing account is the credited
+        // counterparty, preserving the private money supply.
         credit_market_clearing_account(state, total_upkeep)?;
     }
     if total_upkeep > Money::ZERO || total_shortfall > Money::ZERO {

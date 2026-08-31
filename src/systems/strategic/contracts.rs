@@ -106,7 +106,7 @@ impl ValidatedSupplyContract {
     /// # Errors
     ///
     /// Returns the current validation error if state changed after the token was created, or an
-    /// allocation or timeline error if durable contract feedback can no longer be recorded.
+    /// allocation or timeline error if durable contract feedback cannot be recorded.
     pub fn commit(
         self,
         registry: &Registry,

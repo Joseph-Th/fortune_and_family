@@ -588,9 +588,9 @@ pub(crate) fn settle_property_rents(state: &mut AppState) -> Result<(), Simulati
             })
         });
         if occupant_is_closed {
-            // A closed or insolvent business no longer occupies its premises:
-            // evict it so the unit genuinely returns to the market instead of
-            // a dead firm blocking vacancy income indefinitely.
+            // A closed or insolvent business does not occupy its premises:
+            // evict it so the unit returns to the market instead of a dead
+            // firm blocking vacancy income indefinitely.
             if let Some(property) = state.properties.get_mut(&property_id) {
                 property.occupant_business_id = None;
             }

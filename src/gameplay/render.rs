@@ -1023,7 +1023,10 @@ pub(crate) fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mu
             .map(|(kind, count)| format!("{} {count}", kind.label()))
             .collect::<Vec<_>>()
             .join(", ");
-        let _ = writeln!(output, "  no strategic need (agent restraint): {restrained_text}");
+        let _ = writeln!(
+            output,
+            "  no strategic need (agent restraint): {restrained_text}"
+        );
         let _ = writeln!(
             output,
             "    (world offered the route but the house had no material need: wages were already fair, investments were healthy, governance cooldowns not yet strategic; this is intentional pacing, not missing content)"
@@ -1053,8 +1056,14 @@ pub(crate) fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mu
             .map(|(kind, count)| format!("{} {count}", kind.label()))
             .collect::<Vec<_>>()
             .join(", ");
-        let _ = writeln!(output, "  deferred for treasury/legitimacy (spending policy): {gate_text}");
-        let _ = writeln!(output, "    (house chose to preserve cash or legitimacy for salaries, debts, and office duties before discretionary spending)");
+        let _ = writeln!(
+            output,
+            "  deferred for treasury/legitimacy (spending policy): {gate_text}"
+        );
+        let _ = writeln!(
+            output,
+            "    (house chose to preserve cash or legitimacy for salaries, debts, and office duties before discretionary spending)"
+        );
     }
     if !diagnostic.validation_gates.is_empty() {
         let mut gates: Vec<_> = diagnostic.validation_gates.iter().collect();

@@ -319,7 +319,7 @@ pub(crate) fn apply_office_duties(state: &mut AppState) -> Result<(), Simulation
 
 /// Sitting officeholders in stable institution order as
 /// `(institution_id, holder dynasty, power count)`. Institutions whose holder
-/// no longer resolves to a character are skipped.
+/// does not resolve to a character are skipped.
 pub(crate) fn active_officeholders(state: &AppState) -> Vec<(InstitutionId, DynastyId, usize)> {
     state
         .institutions

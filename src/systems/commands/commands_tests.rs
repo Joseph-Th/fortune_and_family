@@ -6190,9 +6190,9 @@ mod crises {
         )
         .expect("relief response must succeed");
 
-        // Relief sends a bounded aid budget (2 500 bp) down the disrupted
-        // routes, deepest disruption first: the total healing equals the
-        // crisis reduction and no longer scales with how many routes exist.
+        // Relief distributes a bounded aid budget (2 500 bp) down the disrupted
+        // routes, deepest disruption first: total healing equals the crisis
+        // reduction, independent of route count.
         let healed_total: u16 = state
             .external_routes
             .values()

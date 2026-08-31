@@ -861,9 +861,9 @@ mod tests {
         assert_memoized_evidence_matches_full_rescan(&state);
         refresh_campaign_phases(&mut state);
         assert_memoized_evidence_matches_full_rescan(&state);
-        // The rebuilt evidence no longer contains the patronage record, but
+        // The rebuilt evidence does not contain the patronage record, but
         // the runtime phase is deliberately monotonic: an already-earned rank
-        // survives evidence that later disappears.
+        // survives evidence that is absent after clearing.
         let mut memo = std::mem::take(&mut state.campaign_evidence_memo);
         let rebuilt = CampaignPhaseEvidence::synchronize(&mut memo, &state);
         state.campaign_evidence_memo = memo;
