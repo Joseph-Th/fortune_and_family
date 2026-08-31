@@ -1,4 +1,16 @@
-//! Read-only causal projections and a self-contained HTML campaign dashboard.
+//! Read-only projections and self-contained HTML dashboard — no domain mutation.
+//!
+//! Purpose: derive immutable read models (`StateSummary`, `CampaignProjection`)
+//! and a standalone HTML dashboard from `Registry` + `AppState` for CLI,
+//! dashboard, and gameplay observation.
+//! Owns: projection structs, `build_*_projection` assemblers, `CampaignProjection::attention`
+//! as the single canonical attention classification, and `render_campaign_html`.
+//! Reads: `Registry`, `AppState` (immutable).
+//! Mutates: nothing (adapters perform IO after projection).
+//! Does not own: command validation, simulation, or persistence.
+//! Invariants: every projection derives from the same immutable snapshot;
+//! `attention` is produced once and formatted everywhere so CLI and dashboard agree.
+//! Focused tests: `src/projection_tests.rs`, CLI smoke `summary` / `dashboard`.
 
 use crate::core::{
     AppState, BusinessStatus, CampaignPhase, CivicDebtStatus, ContractStatus, CrisisKind,

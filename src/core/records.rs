@@ -1,4 +1,15 @@
-//! Concrete runtime records; sibling systems own validation and business logic.
+//! Core population, economic, and chronicle records owned by `AppState`.
+//!
+//! Purpose: define the durable shape of characters, dynasties, households,
+//! businesses, market quotes, chronicle, and audit events.
+//! Owns: record structs (`Character`, `Dynasty`, `Household`, `Business`,
+//! `MarketState` …), lifecycle/status enums, `AuditSubject` semantics.
+//! Reads: nothing.
+//! Mutates: only through store methods on `AppState`; systems validate first.
+//! Does not own: state container, indexes, persistence, or business rules.
+//! Invariants: private fields, explicit `Option` relations, lifecycle-
+//! membership coherence validated by `src/systems/invariants.rs`.
+//! Focused tests: `src/core/state_tests.rs`, persistence and invariant batteries.
 
 use crate::ids::{
     BusinessId, CharacterId, ChronicleEntryId, DistrictId, DynastyId, GoodId, InstitutionId,

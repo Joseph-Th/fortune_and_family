@@ -1,4 +1,16 @@
-//! Business ownership transactions: capitalization, distributions, acquisitions, and dividends.
+//! Business ownership transactions: capital, distributions, acquisitions, dividends.
+//!
+//! Purpose: own the validated business-finance primitives that both player
+//! commands (`commands/holdings.rs`) and AI monthly policy use.
+//! Owns: `BusinessAcquisitionQuote`, `capitalize_owned_business`,
+//! `distribute_owned_business_cash`, `acquire_business_scratch` (hot-path
+//! validated then committed without re-cloning), and recapitalization floors.
+//! Reads: `Registry` for administrative load, `AppState` for ownership/cash.
+//! Mutates: `Business` finance/ownership and dynasty treasury/administrative
+//! load through checked arithmetic and version reservation.
+//! Does not own: daily production/sales pipeline or CLI.
+//! Focused tests: `strategic_tests` acquisition/dividend, `commands_tests`
+//! business capital.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

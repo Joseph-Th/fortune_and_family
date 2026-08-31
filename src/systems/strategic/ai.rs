@@ -1,4 +1,18 @@
-//! Autonomous rival houses: objectives, upkeep, credit participation, and business recovery.
+//! Autonomous rival houses: objectives, monthly upkeep, credit participation, recovery.
+//!
+//! Purpose: give every non-player house deterministic objectives and monthly
+//! stewardship (wealth upkeep, legitimacy ceiling, credit workout preference,
+//! supply ordering at penalty-scaled value) without a second ruleset.
+//! Owns: `AI_OBJECTIVE_REVIEW_DAYS`, `AI_BUSINESS_RECOVERY_TREASURY_RESERVE`,
+//! monthly AI entry points (`advance_ai_objectives`, `apply_ai_dynasty_upkeep`,
+//! `advance_ai_credit_participation`, `recover_ai_businesses`) and selection
+//! helpers.
+//! Reads: `Registry` + `AppState` (immutable for planning).
+//! Mutates: AI dynasties, objectives, and businesses through canonical
+//! strategic primitives (same validation as player paths).
+//! Does not own: simulation daily loop or persistence.
+//! Focused tests: `strategic_tests` AI objectives/upkeep, gameplay harness
+//! persona diversity.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

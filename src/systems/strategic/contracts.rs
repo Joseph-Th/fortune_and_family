@@ -8,6 +8,7 @@ use super::*;
 pub(crate) const STANDARD_CONTRACT_BATCHES_PER_WEEK: i64 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SupplyContractTerms {
     pub buyer_business_id: BusinessId,
     pub seller_business_id: BusinessId,

@@ -1,4 +1,20 @@
-//! Strategic runtime records spanning contracts, finance, property, institutions, law, and civic life.
+//! Strategic, civic, family, and crisis records — the cross-domain state
+//! that scheduled strategic systems mutate and invariants validate.
+//!
+//! Purpose: define durable record shapes for contracts, credit, property,
+//! employment, family, institutions, law, routes, crises, and outbox.
+//! Owns: every `*Status` / `*Kind` enum, `SupplyContract` / `Loan` /
+//! `Property` / `EmploymentAgreement` / `FamilyLink` / `InstitutionRuntime` /
+//! `CivicDebt` / `LegalCase` / `Crisis` / `OutboxMessage` etc. as pure
+//! data; helpers like `has_consistent_arrears` or labels.
+//! Reads: nothing.
+//! Mutates: nothing directly (systems in `src/systems/strategic/` mutate).
+//! Does not own: state container, indexes, persistence, or business rules.
+//! Invariants: every field is validated at persistence boundaries and by
+//! `src/systems/invariants.rs`; `Option` is explicit for optional
+//! relationships, no sentinel IDs.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs`, persistence
+//! and invariant batteries.
 
 use crate::ids::{
     BusinessId, CharacterId, CivicDebtId, ContractId, CrisisId, DistrictId, DynastyId,

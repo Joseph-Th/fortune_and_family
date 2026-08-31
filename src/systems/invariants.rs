@@ -1,4 +1,18 @@
-//! Debug-only assertions for registry, reference, index, lifecycle, and value invariants.
+//! Runtime invariant battery: debug-only assertions over registry, references, indexes,
+//! lifecycle, and numeric ranges.
+//!
+//! Purpose: give simulation (`advance_days`) and commands (`apply_player_command_scratch`)
+//! a single `validate_invariants(registry, state)` that fails fast in debug builds and
+//! collapses to zero cost in release (`prepare_invariant_ids` short-circuits).
+//! Owns: every `validate_{market,characters,dynasties,businesses,…}` check; titles encode
+//! the invariant family (`Lifecycle Validity`, `Record Reference Validity`, `Ownership
+//! Exclusivity`, `Derived Data Consistency`, etc.).
+//! Reads: `Registry` + `AppState` (immutable); `validate_invariants_with_ids` reuses
+//! one `RegistryIds` across many consecutive checks.
+//! Mutates: nothing.
+//! Does not own: authoritative persistence validation (`src/persistence.rs`) or recovery.
+//! Focused tests: exercised indirectly by every behavioral test that builds or advances
+//! a campaign in debug mode; persistence tests cover release validation.
 
 use super::is_schedulable_day;
 use crate::core::{

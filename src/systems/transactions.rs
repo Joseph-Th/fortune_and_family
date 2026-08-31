@@ -1,4 +1,16 @@
-//! Validated multi-record transactions and shared simulation errors.
+//! Reusable validated transaction primitives and timeline/ simulation error types.
+//!
+//! Purpose: give commands and simulation phases a shared validated-commit
+//! language (`transfer_business_cash`, `checked_future_day`, version bumps)
+//! with checked arithmetic and timeline bounds, without duplicating policy.
+//! Owns: `SimulationError` / `TimelineError`, `checked_future_day`,
+//! `next_business_finance_version` / `next_family_charter_version`, and the
+//! business-cash transfer helper.
+//! Reads/Mutates: narrowly scoped to the `AppState` fields each helper owns.
+//! Does not own: domain decision or policy (callers validate first).
+//! Invariants: every future-day stays ≤ `i64::MAX` sentinel; version bumps
+//! reserve before mutating so the commit phase is infallible.
+//! Focused tests: exercised indirectly via `commands_tests` and `simulation_tests`.
 
 use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};
 use crate::ids::{

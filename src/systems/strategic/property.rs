@@ -1,4 +1,16 @@
-//! Real estate, tenancy, rents, district conditions, and public works.
+//! Real estate, tenancy, rents (district-indexed, fire-discounted), district
+//! conditions, and public-work construction.
+//!
+//! Purpose: own the validated property-market primitives (purchase, tenancy,
+//! eviction/re-occupancy, liquidation with lien settlement, rent scaling by
+//! district index and fire damage) and public-work spending/progress.
+//! Owns: `PropertyLiquidationQuote`, rent helpers, public-work budget flow
+//! into the clearing pool, and weekly/monthly property/district updates.
+//! Reads: `Registry` districts, `AppState` properties/districts/businesses.
+//! Mutates: properties, business premises links, district conditions.
+//! Does not own: command dispatch (calls into here via `property_cmd.rs`).
+//! Focused tests: `strategic_tests` tenancy/rent, `commands_tests` property
+//! acquisition.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

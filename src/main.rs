@@ -1,4 +1,17 @@
-//! Command-line adapter for creating, advancing, inspecting, and validating campaigns.
+//! Thin CLI adapter: parse → call canonical kernel → report structured outcome.
+//!
+//! Purpose: expose `new` / `simulate` / `summary` / `inspect` / `dashboard` /
+//! `execute` / `validate` / `playtest` / `art` without owning domain rules.
+//! Owns: `clap` argument shapes, `CliError` mapping, path-aliasing checks,
+//! parent-dir creation, `write_generated_file` delegation, and human summary
+//! formatting; `playtest`/`art` rotation is adapter-layer policy.
+//! Reads: `Registry`, `AppState` (via lib entry points).
+//! Mutates: only through `build_new_game`, `advance_days`,
+//! `apply_player_command`, `save_state*` / `write_generated_file`.
+//! Does not own: validation, simulation, pricing, legal, progression, or
+//! projection rules; every concrete step reuses the library's canonical path.
+//! Focused tests: `bash scripts/test.sh cli` / `art-cli` / `gameplay-cli`, plus
+//! `src/main.rs::tests` path-aliasing and generated-output isolation.
 
 use civic_dynasty::core::StartingBackground;
 use civic_dynasty::{

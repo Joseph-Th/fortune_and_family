@@ -1,4 +1,20 @@
-//! Canonical campaign progression derived from durable dynasty milestones.
+//! Campaign-phase progression derived from durable milestones — never backward.
+//!
+//! Purpose: own the single monotonic `CampaignPhase` ladder (Foundation →
+//! Legacy) so `ARCHITECTURE.md`'s promised phase growth and
+//! `GAMEPLAY_HARNESS.md`'s phase grouping both derive from the same audit/
+//! collection evidence.
+//! Owns: `refresh_campaign_phases` (with `CampaignEvidenceMemo` incremental
+//! fold), `campaign_phase_is_consistent` / `are_consistent`, and
+//! `CampaignPhaseEvidence::collect` (one sweep for all dynasties).
+//! Reads: `AppState` (audit log, dynasties, institutions, laws, etc.).
+//! Mutates: `dynasty.runtime.phase` and the caller-owned memo.
+//! Does not own: mission definitions or narrative prose (labels live on
+//! `CampaignPhase::label`).
+//! Invariants: phases never regress; evidence is memo-consistency checked
+//! (audit shrinking or day regression forces rebuild); phase derived only
+//! from durable milestones, not volatile cache.
+//! Focused tests: `src/systems/strategic/*` succession, harness phase diagnostics.
 
 use super::{OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT};
 use crate::core::{AppState, AuditKind, CampaignEvidenceMemo, CampaignPhase};

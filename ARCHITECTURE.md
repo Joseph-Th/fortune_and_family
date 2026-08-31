@@ -2,6 +2,17 @@
 
 This document defines code ownership, dependency direction, canonical mutation flows, simulation order, and extension points.
 
+Profiles: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation**.
+
+Related authorities:
+
+- [AGENTS.md](AGENTS.md) — execution card
+- [STATUS.md](STATUS.md) — current scope
+- [TESTING.md](TESTING.md) — verification
+- [DESIGN.md](DESIGN.md) — product intent
+- [GAMEPLAY_HARNESS.md](GAMEPLAY_HARNESS.md) — harness semantics
+- Root `../AGENTS.md` — workspace coordination
+
 ## System model
 
 Civic Dynasty is a deterministic simulation kernel with explicit definitions, state, and mutation paths.

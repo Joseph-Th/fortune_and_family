@@ -1,4 +1,16 @@
-//! Typed identifiers for registry definitions and persistent runtime records.
+//! Typed persistent identifiers for registry definitions and runtime records.
+//!
+//! Purpose: give every cross-subsystem reference a distinct type so a
+//! `DistrictId` cannot be confused with a `DynastyId` at compile time.
+//! Owns: all `*Id` newtypes, their ordering/hashing/display, and the
+//! `IdentifierAllocationError` variants used when a state-owned allocator
+//! exhausts its `u32` space.
+//! Reads: nothing.
+//! Mutates: nothing (allocation mutates `NextIds` in `src/core/state.rs`).
+//! Does not own: state storage, registry definitions, or business rules.
+//! Invariants: every `*Id` is `Copy + Ord + Hash` so it can serve as a
+//! stable deterministic tie-breaker; serialized shape is transparent `u32`.
+//! Focused tests: `src/core/state_tests.rs` allocation and staleness.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

@@ -1,5 +1,19 @@
-//! Strategic scheduling entries, shared relationship plumbing, law appliers,
-//! information reports, and annual family systems.
+//! Strategic scheduled systems: daily/weekly/monthly/annual orchestration.
+//!
+//! Purpose: own the cross-domain scheduled layer that `advance_days` calls at
+//! fixed cadences (routes/crises daily, contracts/loans/employment weekly,
+//! district conditions/AI/selections monthly, succession annually).
+//! Owns: per-domain submodules (`contracts`, `credit`, `property`,
+//! `households`, `businesses`, `labor`, `offices`, `ai`, `legal_cases`,
+//! `crises`, `initialization`) behind one facade; shared relationship/law/
+//! information helpers used by several submodules.
+//! Reads/Mutates: `AppState` via each subdomain; `DailyCapacityScratch` is
+//! collected once per phase for deterministic sharing.
+//! Does not own: daily economic pipeline (`simulation/mod.rs`) or command
+//! validation (`commands/*`).
+//! Invariants: weekly due dates stay settleable within the coming fortnight;
+//! monthly district/rent/public-work drifts validate against shared helpers.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs`, soak gates.
 
 pub(crate) use super::SimulationError;
 pub(crate) use super::commands::CrisisResponse;

@@ -1,5 +1,19 @@
-//! Canonical player-command schema, dispatch, shared spending plumbing,
-//! and cooldown-history lookups.
+//! Canonical `PlayerCommand` schema, dispatch, and shared command plumbing.
+//!
+//! Purpose: own the single semantic mutation path every caller (CLI,
+//! gameplay harness, tests, AI) must use, with typed `CommandError` rejection
+//! and atomic commit via `apply_player_command*`.
+//! Owns: `PlayerCommand` enum, `CommandOutcome`/`CommandError`, dispatch
+//! table, treasury/market spending helpers, audit-cooldown lookups, and
+//! re-exports of constants needed by `simulation`/`strategic`.
+//! Reads: `Registry` + `AppState` for validation.
+//! Mutates: `AppState` only after complete validation; `apply_player_command`
+//! clones-then-replaces for failure atomicity, `apply_player_command_scratch`
+//! mutates an exclusively owned branch.
+//! Does not own: domain policy (each `commands/*.rs` submodule + the
+//! `strategic/*.rs` helpers it calls own their own policy).
+//! Focused tests: `src/systems/commands/commands_tests.rs`, gameplay candidate
+//! coverage, CLI `execute` smoke.
 
 pub(crate) use super::legal::{
     LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LEGAL_CASE_HEARING_DELAY_DAYS,
@@ -94,6 +108,7 @@ pub enum InformationFocus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum PlayerCommand {
     TransferBusinessCash {
         from_business_id: BusinessId,

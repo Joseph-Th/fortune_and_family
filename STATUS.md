@@ -1,6 +1,6 @@
 # Project Status
 
-This document defines the current implementation surface, schemas, runtime guarantees, and deliberate limits. Product intent belongs in `DESIGN.md`; implementation ownership belongs in `ARCHITECTURE.md`.
+This document defines the current implementation surface, schemas, runtime guarantees, and deliberate limits. Product intent belongs in `DESIGN.md`; implementation ownership belongs in `ARCHITECTURE.md`. Profiles: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation** — see [AGENTS.md](AGENTS.md) and [ARCHITECTURE.md](ARCHITECTURE.md) for routing.
 
 ## Platform contracts
 
@@ -84,7 +84,8 @@ All callers use the same command validation and mutation paths.
 - Save loads require paths that resolve to regular files and reject inputs larger than 256 MiB before parsing
 - Release-mode validation of references, indexes, ownership, lifecycle, numeric ranges, accounting, histories, schedules, and ID allocation. Active weekly obligations must be settleable within the coming fortnight: schedules signed mid-week keep their nominal one-week due date anchored to their signing rather than snapping onto the global weekly boundary.
 - Preservation of RNG state and generated records required for deterministic continuation
-- Same-directory synchronized temporary writes followed by atomic replacement
+- Same-directory synchronized temporary writes followed by atomic replacement (`SaveOutcome` distinguishes committed vs `CommittedWithDegradedDurability`)
+- Boundary input strictness: `PlayerCommand`/`LoanTerms`/`SupplyContractTerms`/`NewGameConfig` use `#[serde(deny_unknown_fields)]` so unsupported fields fail closed; save JSON duplicate members are rejected before parsing and top-level schema probe rejects non-current `schema_version`
 
 A serialized contract change requires a schema increment. Existing saves from earlier schemas are intentionally unsupported.
 

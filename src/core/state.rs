@@ -1,4 +1,19 @@
-//! Application-state root, ID allocation, synchronized stores, and read-only access.
+//! Application-state root, ID allocation, synchronized stores, and history logs.
+//!
+//! Purpose: own the single serializable `AppState` that determines every
+//! future simulation step, plus the synchronized `CharacterStore` /
+//! `BusinessStore` / `HouseholdStore` indexes and the cheap-clone
+//! `HistoryLog<T>` / `CampaignEvidenceMemo` derivations.
+//! Owns: `AppState`, `SimulationClock`, `NextIds` allocation, store
+//! insert/transfer/lookup, `HistoryLog` copy-on-write + incremental
+//! checksum, and `validate_next_ids`.
+//! Reads: registry fingerprint (validated at bootstrap/load).
+//! Mutates: its own stores and logs through validated system calls.
+//! Does not own: domain rules, projection, or persistence IO.
+//! Invariants: every consequential fact has one owner; indexes mirror
+//! records; RNG and generated records required for continuation are persisted;
+//! `PartialEq` excludes derivation memos.
+//! Focused tests: `src/core/state_tests.rs`, invariant and persistence batteries.
 
 use super::{
     AiObjective, AuditRecord, Business, Character, ChronicleEntry, CivicDebt, Crisis,
@@ -24,6 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const CURRENT_SCHEMA_VERSION: u32 = 31;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NewGameConfig {
     pub seed: u64,
     pub dynasty_name: String,

@@ -1,4 +1,20 @@
-//! Current-schema JSON persistence with release validation and atomic writes.
+//! Current-schema JSON persistence with release validation and atomic staging.
+//!
+//! Purpose: own the only durable write path (`save_state*`) and read path
+//! (`load_state*`), with schema/current-only policy, registry-fingerprint
+//! binding, 256 MiB bound, duplicate-member rejection, and parent-dir
+//! durability distinction (`SaveOutcome`).
+//! Owns: `MAX_SAVE_FILE_BYTES`, `SaveRevision` CAS tokens, atomic
+//! same-directory temp+`persist` + `sync_all`, and `validate_state` layering
+//! (schema, scenario, refs, indexes, ranges, phases, allocators).
+//! Reads: `AppState`, `Registry` fingerprint.
+//! Mutates: filesystem at the supplied path (staging then visibility commit).
+//! Does not own: domain rules (validates via invariants/core validators) or
+//! UI formatting.
+//! Invariants: exact current-schema round trip; older/future/missing schemas
+//! rejected; non-regular or oversized inputs rejected before parsing;
+//! history order preserved by `HistoryLog` serialization.
+//! Focused tests: `src/persistence_tests.rs`, CLI `validate` smoke.
 
 use crate::core::{
     AppState, AuditKind, CURRENT_SCHEMA_VERSION, FamilyLinkKind, InformationTarget, LegalCaseKind,

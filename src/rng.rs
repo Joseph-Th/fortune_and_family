@@ -1,4 +1,16 @@
-//! Serializable deterministic random number generator owned by application state.
+//! Serializable deterministic randomness owned by `AppState`.
+//!
+//! Purpose: supply reproducible entropy for simulation, bootstrap, and
+//! gameplay-harness variation without touching OS or thread-local RNG.
+//! Owns: `DeterministicRng` state, its SplitMix-derived `next_u64`, and
+//! bounded helpers `range_u32` / `is_chance_success`.
+//! Reads: nothing.
+//! Mutates: its own `state` (owned by `AppState.rng`).
+//! Does not own: clocks, registries, or domain decisions.
+//! Determinism: given the same seed, sequence of calls, and persisted
+//! state, every campaign reproduces bit-identically; `AppState` persists
+//! the RNG so continuation is exact.
+//! Focused tests: `src/rng.rs::tests` distinct streams, `src/simulation/*` determinism.
 
 use serde::{Deserialize, Serialize};
 

@@ -1,4 +1,19 @@
-//! Immutable scenario definitions and validated lookup tables for Rivergate.
+//! Immutable Rivergate scenario definitions and validated lookup tables.
+//!
+//! Purpose: define the single shared `Registry` that all simulation,
+//! bootstrap, command, and projection paths read, plus its deterministic
+//! `fingerprint` used for save compatibility.
+//! Owns: `ScenarioDef` / `DistrictDef` / `GoodDef` / `RecipeDef` /
+//! `InstitutionDef`, dense typed-ID indexing, `guild_for_recipe`, and
+//! `build_rivergate_registry` assembly.
+//! Reads: nothing.
+//! Mutates: nothing (immutable after construction).
+//! Does not own: mutable campaign state or business rules.
+//! Invariants: dense 0..N indexing validated by `debug_assert!`; every
+//! recipe and institution reference checked at build; `fingerprint` covers
+//! all behavior-relevant defs in stable order.
+//! Focused tests: `src/registry/mod.rs::tests` duplicate-key, reference,
+//! chartered-guild coverage.
 
 use crate::ids::{DistrictId, GoodId, InstitutionId, RecipeId};
 use crate::money::{Money, Quantity};

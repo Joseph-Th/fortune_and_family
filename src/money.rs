@@ -1,4 +1,18 @@
-//! Fixed-point economic value types used by every simulation subsystem.
+//! Fixed-point economic arithmetic for every simulation and command path.
+//!
+//! Purpose: represent money (`Money`, copper = 1/100 cr) and quantities
+//! (`Quantity`, milliunits) without floating-point nondeterminism or
+//! truncation that silently makes transfers free.
+//! Owns: `Money` / `Quantity`, ratio helpers (`saturating_mul_ratio`,
+//! `saturating_mul_ratio_ceil_nonnegative`, `ceil_div_*`), `cost_for`,
+//! `affordable_quantity`, and wide-intermediate overflow discipline.
+//! Reads: nothing.
+//! Mutates: nothing (value types).
+//! Does not own: market pricing, budgets, or persistence.
+//! Invariants: `cost_for` never undercharges positive fractional copper;
+//! `affordable_quantity` stays affordable under `cost_for`; ratios use
+//! `i128` intermediates then saturate only the final `i64`.
+//! Focused tests: `src/money.rs::tests`, persistence numeric-range checks.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

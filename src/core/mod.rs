@@ -1,4 +1,11 @@
-//! Persistent runtime records and application-state ownership.
+//! Core facade: persistent records, state container, and checksum folding.
+//!
+//! Purpose: re-export the durable types that systems and adapters need
+//! without exposing internal module layout.
+//! Owns: module wiring only (`records`, `state`, `extended`, `checksum`).
+//! Reads/Mutates: as its submodules.
+//! Does not own: business rules, persistence, or projection.
+//! Focused tests: as submodules (`state_tests.rs`, persistence, invariants).
 
 mod checksum;
 mod extended;

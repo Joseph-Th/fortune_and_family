@@ -4,6 +4,7 @@
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoanTerms {
     pub lender_dynasty_id: DynastyId,
     pub borrower_dynasty_id: DynastyId,

@@ -1,4 +1,18 @@
-//! Grounded legal claims shared by player commands and autonomous rival behavior.
+//! Grounded legal-claim quoting and court-filing economics shared by player and AI.
+//!
+//! Purpose: ensure every legal case starts from a concrete delinquent/defaulted
+//! loan or attributed contract breach, with deterministic evidence floors and
+//! filing-fee headroom that both `commands/legal_cmd.rs` and `strategic/ai.rs`
+//! must respect.
+//! Owns: `LegalClaimQuote`, `LegalClaimSource`, the three evidence-floor
+//! constants (7_500/9_000/8_500), `quote_grounded_legal_claim`, and
+//! `collect_court_filing_fee` / `court_filing_fee_headroom` (market-conserving
+//! court budget flow).
+//! Reads: `AppState` loans/contracts/legal_cases.
+//! Mutates: only the Civic Court budget when collecting the fee after
+//! validated debit.
+//! Does not own: hearing/judgment/settlement lifecycle (`strategic/legal_cases.rs`).
+//! Focused tests: `strategic_tests` grounded-claim and settlement coverage.
 
 use crate::core::{AppState, LegalCaseKind, LegalClaimSource, LoanStatus};
 use crate::ids::DynastyId;

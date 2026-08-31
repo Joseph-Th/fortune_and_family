@@ -1,4 +1,18 @@
-//! Canonical validation, decision, commit, and simulation pipelines.
+//! Systems facade: canonical validation → decision → commit pipelines.
+//!
+//! Purpose: wire the eight subsystem families (`bootstrap | commands |
+//! invariants | legal | progression | simulation | strategic | transactions`)
+//! behind one import surface, expose shared constants/helpers
+//! (`capacity_weighted_route_disruption`, `DailyCapacityScratch`,
+//! `OfficePower::*` derivation), and re-export the handful of symbols the
+//! CLI, gameplay harness, and projection need.
+//! Owns: subsystem module wiring and the shared scheduling/employment/route
+//! math that multiple domains read.
+//! Reads/Mutates: as its submodules (this file itself owns no domain state).
+//! Does not own: any single domain's mutation (each subsystem owns its own).
+//! Invariants: `OFFICE_TERM_DAYS` / `OFFICE_VACANCY_RETRY_DAYS` and weekly
+//! settleability are canonical; callers reuse them rather than re-deriving.
+//! Focused tests: as submodules (`simulation_tests`, `strategic_tests`, `commands_tests`).
 
 use crate::ids::{CharacterId, RecipeId};
 use crate::registry::Registry;

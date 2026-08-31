@@ -1,4 +1,17 @@
-//! Crisis detection, escalation, response effects, route risk, and guild standing.
+//! Crisis detection, escalation, response effects, route risk, guild standing.
+//!
+//! Purpose: own the monthly crisis detector and the daily crisis-effect
+//! applier so route disruption, fiscal pressure, and district distress remain
+//! causally coherent.
+//! Owns: `CRISIS_RESPONSE_WINDOW_DAYS`, `apply_crisis_daily_effects`,
+//! monthly detection/escalation, `capacity_weighted_route_disruption` reuse,
+//! and response containment logic (paid responses never inflate severity).
+//! Reads: `Registry` routes, `AppState` market/route/district state.
+//! Mutates: `AppState.crises` severity/status, route disruption, audit.
+//! Does not own: crisis-response command validation (`commands/response.rs`)
+//! or household income scaling (reads the shared `capacity_weighted_...`).
+//! Focused tests: `strategic_tests` crisis lifecycle, gameplay world-stress
+//! aggregates.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

@@ -1,4 +1,23 @@
-//! Deterministic gameplay harness that drives the public player-command and simulation pipelines.
+//! Deterministic gameplay harness — the automated behavior-evaluation layer.
+//!
+//! Purpose: drive exhaustive `build_new_game` → `apply_player_command` →
+//! `advance_days` loops through the canonical public pipelines (no direct
+//! record patching) to produce a `GameplayHarnessReport` that is the
+//! machine contract for reachability/variety/interconnection/feedback/
+//! resilience scores and findings.
+//! Owns: `GameplayHarnessConfig`/`Report`, `GameplayCommandKind` (32 kinds)
+//! / `GameplayDomain` (17 domains), the `ALL_COMMAND_KINDS`/`ALL_DOMAINS`
+//! exhaustive catalogs, report schema version, and re-exports of the seven
+//! internal submodules.
+//! Reads: `Registry`, `AppState` via lib entry points; gameplay tests use
+//! `advance_days` through this facade.
+//! Mutates: nothing directly; harness mutates cloned working states.
+//! Does not own: simulation or command policy (it validates through them)
+//! or UI prose (render is a presentation layer over structured facts).
+//! Invariants: every report lists both observed and intentionally unobserved
+//! state components; findings are derived facts, not prose; persona variation
+//! stays behind `apply_player_command` boundaries.
+//! Focused tests: `src/gameplay_tests.rs`, `bash scripts/test.sh gameplay`.
 
 use crate::core::{
     AppState, AuditKind, AuditRecord, AuditSubject, BusinessStatus, CharacterStatus,

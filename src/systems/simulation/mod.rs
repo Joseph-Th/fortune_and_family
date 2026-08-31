@@ -1,4 +1,20 @@
-//! Deterministic daily simulation pipeline; each phase decides before it applies.
+//! Deterministic daily economic pipeline and 30-day/360-day coordinated cadence.
+//!
+//! Purpose: advance one campaign day at a time through a fixed causal order
+//! (routes/laws/crises → purchases → production → sales → household
+//! consumption → maintenance → spoilage/pricing → weekly/monthly/annual
+//! strategic hooks → chronicle/audit → invariants).
+//! Owns: `advance_days` (clone-then-replace atomicity), `advance_days_scratch`
+//! (exclusive-branch optimization), and the per-day decision/apply phases;
+//! `purchases.rs` extracts input procurement.
+//! Reads: `Registry`, `AppState` (mutable working copy).
+//! Mutates: the working `AppState` (market, businesses, households, strategic
+//! state); callers see all-or-nothing replacement.
+//! Does not own: strategic weekly/monthly rules (each `strategic/*.rs` owns
+//! its own), or persistence.
+//! Determinism: ordered `BTreeMap` iteration, typed-ID tie-breakers, and
+//! state-owned RNG only; parallel `DailyCapacityScratch` preserves order.
+//! Focused tests: `src/systems/simulation/simulation_tests.rs`, soak gates.
 
 use super::SimulationError;
 use super::transactions::{

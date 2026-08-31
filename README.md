@@ -21,6 +21,8 @@ Each question is answered by exactly one owned document. Link to an owner instea
 | `TESTING.md` | Test tiers, assertion standards, completion gates |
 | `GAMEPLAY_HARNESS.md` | Harness mechanics, gameplay-report semantics |
 
+Profiles implemented: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation**. Root `../AGENTS.md` owns workspace task leases and hygiene.
+
 ## Requirements
 
 - Rust — the authoritative minimum version is `Cargo.toml` (`rust-version`), pinned for local development by `rust-toolchain.toml`. Edition 2024.

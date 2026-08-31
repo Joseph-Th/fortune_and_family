@@ -1,4 +1,17 @@
-//! New-campaign assembly through one deterministic, validated bootstrap path.
+//! New-campaign assembly: the single deterministic validated path from `NewGameConfig` to `AppState`.
+//!
+//! Purpose: own the only way to build a Rivergate campaign so every
+//! simulation, command, and persistence test shares one bootstrap contract.
+//! Owns: `build_new_game`, name normalization, player/NPC foundation
+//! insertion, household groups, strategic-state initialization, and final
+//! `validate_invariants`.
+//! Reads: `Registry` (immutable definitions).
+//! Mutates: the freshly constructed `AppState` (no prior state).
+//! Does not own: persistence IO, projection, or gameplay policy.
+//! Invariants: validated treasury / capacity / inventory; founder ages
+//! place first succession inside the playable horizon; RNG draws stay
+//! state-owned for replay.
+//! Focused tests: `src/systems/bootstrap_tests.rs`, persistence round-trip.
 
 use crate::core::{
     AppState, AuditKind, AuditRecord, Business, BusinessFinance, BusinessIdentity,
