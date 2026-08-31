@@ -1055,7 +1055,7 @@ pub(crate) fn run_campaign(
 
 /// Small deterministic jitter for the ordinary decision cadence so the harness
 /// does not sample the same calendar offsets every campaign. The variation is
-/// derived from the campaign RNG and current state, stays within +/-12 days,
+/// derived from the campaign RNG and current state, stays within +/-15 days,
 /// never consumes the game RNG, and is clamped to at least 7 days to keep
 /// urgent sub-week steps meaningful.
 pub(crate) fn jittered_decision_interval(
@@ -1085,11 +1085,23 @@ pub(crate) fn jittered_decision_interval(
     }
     sample ^= u64::from(accumulator.total_viable_choices).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     sample ^= u64::from(accumulator.quiet_cycles).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    // Widen to +/-12 days so campaigns sample different calendar offsets even
+    sample ^= u64::try_from(state.businesses.iter().count())
+        .unwrap_or(u64::MAX)
+        .wrapping_mul(0x94D0_49BB_1331_11EB);
+    sample ^= u64::try_from(
+        state
+            .properties
+            .values()
+            .filter(|p| p.owner_dynasty_id.is_some())
+            .count(),
+    )
+    .unwrap_or(u64::MAX)
+    .wrapping_mul(0xDA94_2042_E4DD_58B5);
+    // Widen to +/-15 days so campaigns sample different calendar offsets even
     // when personas share a world seed. The variation stays inside one decision
     // cycle so the 30-day cadence remains legible while each world and persona
     // samples slightly different observation windows across campaigns.
-    let delta = i64::try_from(sample % 25).unwrap_or(0) - 12;
+    let delta = i64::try_from(sample % 31).unwrap_or(0) - 15;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         i64::from(base).saturating_add(delta).max(7) as u32
@@ -2505,7 +2517,7 @@ pub(crate) fn has_start_public_work_opportunity(registry: &Registry, state: &App
             .is_none();
     sponsorship_available
         && state.dynasties.get(&player_id).is_some_and(|dynasty| {
-            dynasty.treasury() >= public_work_initial_contribution(CANDIDATE_PUBLIC_WORK_BUDGET)
+            dynasty.treasury() >= public_work_initial_contribution(Money::from_copper(1_000))
         })
 }
 
@@ -2869,6 +2881,7 @@ pub(crate) fn has_borrow_opportunity(state: &AppState) -> bool {
     state.dynasties.values().any(|dynasty| {
         dynasty.id() != player_id
             && !credit_pair_blocks_new_loan(state, dynasty.id(), player_id)
+            && unresolved_default_owed_elsewhere(state, player_id, dynasty.id()).is_none()
             && dynasty
                 .treasury()
                 .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
@@ -2931,29 +2944,16 @@ pub(crate) fn has_business_policy_opportunity(state: &AppState) -> bool {
             // Windowed scan: a record outside the cooldown interval can never
             // change whether a change is available, so the newest-to-oldest
             // walk stops at the window boundary instead of the whole log.
-            let policy_change_available =
-                audit_records_within_cooldown(state, BUSINESS_POLICY_CHANGE_INTERVAL_DAYS).all(
-                    |record| {
-                        !(record.kind() == AuditKind::BusinessPolicyChange
-                            && record.subject() == policy_subject)
-                    },
-                );
-            // Mirror the canonical route (`apply_business_policy`): any policy
-            // tuple distinct from the current one is accepted off cooldown.
-            // Which tuple the agent prefers is generator policy, so the
-            // predicate scans the template space without persona narrowing.
-            policy_change_available
-                && policy_templates(GameplayPersona::Steward)
-                    .into_iter()
-                    .any(|template| {
-                        business.policy.target_input_days != template.target_input_days
-                            || business.policy.target_output_days != template.target_output_days
-                            || business.policy.minimum_cash_reserve != template.minimum_cash_reserve
-                            || business.policy.maintenance_basis_points
-                                != template.maintenance_basis_points
-                            || business.policy.quality_target_basis_points
-                                != template.quality_target_basis_points
-                    })
+            // Canonical validation accepts any tuple distinct from the current one
+            // (bounds-checked, not template-locked), so the predicate is purely
+            // cooldown-gated — the template choice is generator policy and would
+            // make the predicate artificially narrow if it checked concrete values.
+            audit_records_within_cooldown(state, BUSINESS_POLICY_CHANGE_INTERVAL_DAYS).all(
+                |record| {
+                    !(record.kind() == AuditKind::BusinessPolicyChange
+                        && record.subject() == policy_subject)
+                },
+            )
         })
 }
 

@@ -740,6 +740,29 @@ pub(crate) fn organic_candidate_variation(
     .unwrap_or(u64::MAX)
     .wrapping_mul(0xA409_3822_299F_31D0);
     value ^= u64::from(accumulator.total_viable_command_kinds).wrapping_mul(0xBE54_66CF_34E9_0C6C);
+    value ^= u64::try_from(
+        state
+            .properties
+            .values()
+            .filter(|p| p.owner_dynasty_id == Some(state.player_dynasty_id))
+            .count(),
+    )
+    .unwrap_or(u64::MAX)
+    .wrapping_mul(0x94D0_49BB_1331_11EB ^ 0x1234_5678);
+    value ^= u64::try_from(
+        state
+            .legal_cases
+            .values()
+            .filter(|c| {
+                matches!(
+                    c.status,
+                    crate::core::LegalCaseStatus::Filed | crate::core::LegalCaseStatus::Hearing
+                )
+            })
+            .count(),
+    )
+    .unwrap_or(u64::MAX)
+    .wrapping_mul(0xBF58_476D_1CE4_E5B9 ^ 0x9ABC_DEF0);
     for byte in persona
         .label()
         .bytes()
