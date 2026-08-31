@@ -2967,8 +2967,7 @@ pub(crate) fn has_business_acquisition_opportunity(registry: &Registry, state: &
                 != state
                     .dynasties
                     .get(&player_id)
-                    .map(|d| d.head_id())
-                    .unwrap_or(character.id())
+                    .map_or(character.id(), crate::core::Dynasty::head_id)
             && state.clock.day().saturating_sub(character.birth_day()) >= 18 * 360
     });
     if !has_eligible_manager {

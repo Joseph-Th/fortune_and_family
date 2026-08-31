@@ -585,14 +585,32 @@ fn insert_household_groups(state: &mut AppState, registry: &Registry) {
                 SocialClass::Artisan => 2,
                 SocialClass::Merchant => 3,
             };
+            // Weekly income scales with household size so living costs (28/52/78 per
+            // member monthly) remain coverable: a 1_200-member neighborhood group
+            // earning a flat 1_800/week could never pay 33_600/month rent-equivalent
+            // pressure. Per-member weekly income mirrors the per-member monthly
+            // cost (7/13/19 copper weekly) plus a small margin for food, so
+            // large groups stay solvent while still facing pressure when districts
+            // degrade or food spikes.
+            let per_member_weekly_copper: i64 = match social_class {
+                SocialClass::Laboring => 10,
+                SocialClass::Artisan => 16,
+                SocialClass::Merchant => 22,
+            };
+            let weekly_income =
+                Money::from_copper(i64::from(members).saturating_mul(per_member_weekly_copper));
             let household_id = state.next_ids.household();
             state.households.insert(Household {
                 id: household_id,
                 district_id: district.id(),
                 members,
                 social_class: *social_class,
-                cash: Money::from_copper(4_800 * income_multiplier),
-                weekly_income: Money::from_copper(1_800 * income_multiplier),
+                // Three weeks buffer so a brief income shock does not instantly
+                // zero the household; district unrest still captures sustained pressure.
+                cash: weekly_income
+                    .saturating_mul(3)
+                    .max(Money::from_copper(3_000)),
+                weekly_income,
                 bread_need_daily: Quantity::from_milliunits(350 * income_multiplier.min(2)),
                 // Ale need saturates with income like bread: the city's single
                 // brewery covers roughly the capped demand, mirroring how
