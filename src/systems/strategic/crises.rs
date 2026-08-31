@@ -179,7 +179,7 @@ pub(crate) fn apply_banking_panic_losses(
         let loss = business
             .finance
             .cash
-            .saturating_mul_ratio(i64::from(severity), 1_000_000);
+            .saturating_mul_ratio(i64::from(severity), 400_000);
         if loss > Money::ZERO {
             let resulting_cash = business
                 .finance
@@ -203,7 +203,7 @@ pub(crate) fn apply_banking_panic_losses(
     for household in state.households.iter_mut() {
         let loss = household
             .cash
-            .saturating_mul_ratio(i64::from(severity), 2_000_000);
+            .saturating_mul_ratio(i64::from(severity), 800_000);
         if loss > Money::ZERO {
             household.cash = household
                 .cash

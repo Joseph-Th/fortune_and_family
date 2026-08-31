@@ -670,16 +670,17 @@ pub(crate) fn effective_property_weekly_rent(state: &AppState, property: &Proper
         .weekly_rent
         .saturating_mul_ratio(i64::from(rent_index), 10_000);
     // Condition gates rent only when the building is materially damaged:
-    // above 7000 bp (≈70% condition) the premises rent at full indexed
+    // above 5_500 bp (≈55% condition) the premises rent at full indexed
     // price; below that, rent scales linearly from 0% at total ruin to
-    // full at the 7000 threshold, so a fire-gutted workshop commands no
-    // rent until repaired, mirroring the monthly 180 bp repair step that
-    // needs ~3.2 years to heal a fully destroyed property from 0 to 7000.
+    // full at the 5_500 threshold, so a fire-gutted workshop recovers
+    // meaningful rent after ~2.5 years of routine 180 bp monthly repair
+    // instead of 3.2 years, making post-crisis recovery economically
+    // viable without removing fire cost.
     let condition_basis_points = property.condition_basis_points;
-    let condition_adjusted = if condition_basis_points >= 7_000 {
+    let condition_adjusted = if condition_basis_points >= 5_500 {
         indexed_rent
     } else {
-        let factor = 10_000_i64 * i64::from(condition_basis_points) / 7_000;
+        let factor = 10_000_i64 * i64::from(condition_basis_points) / 5_500;
         indexed_rent.saturating_mul_ratio(factor, 10_000)
     };
     let indexed_rent = condition_adjusted;
