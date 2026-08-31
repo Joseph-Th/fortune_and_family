@@ -1,4 +1,16 @@
-//! Part of the gameplay harness module tree.
+//! Persona policies — deterministic steward/entrepreneur/power-broker/opportunist rankings.
+//!
+//! Purpose: bias `Candidate` scoring by role without creating new domain
+//! state or bypassing production validation.
+//! Owns: `CLOSE_CHOICE_SCORE_GAP`, standing-floor and legitimacy-reserve
+//! policy, commercial-standing thresholds, and per-persona ranking weights.
+//! Reads: `AppState` via candidate scores and campaign accumulator.
+//! Mutates: nothing durable (scores are transient; probes still canonical).
+//! Does not own: candidate construction or findings thresholds.
+//! Invariants: every persona uses the same discretionary floor (emergency
+//! reserve + 2 months loan service); standing-burning actions add a
+//! legitimacy reserve; ranking is deterministic and reproducible.
+//! Focused tests: `src/gameplay_tests.rs` persona diversity.
 
 use super::*;
 

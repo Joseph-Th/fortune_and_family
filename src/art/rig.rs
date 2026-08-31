@@ -1,7 +1,15 @@
 //! Hierarchical skeletons, poses, and the humanoid rig used by character sprites.
 //!
-//! Joint positions are resolved in sixteenth-pixel units so that small rotations still move a
-//! limb predictably before the result is snapped to the pixel grid.
+//! Purpose: own the integer `Skeleton` / `Joint` / `Pose` / `BodyProportions`
+//! hierarchy so animation drives exact subpixel geometry.
+//! Owns: joint hierarchy, rest pose resolution, `Pose::blended` rotation,
+//! and `humanoid_skeleton` proportions; subpixel = 1/16 px.
+//! Reads: `math::Angle` and `math::scale` only.
+//! Mutates: nothing persistent (pure construction); callers clone poses.
+//! Does not own: clip timing, surface shading, or canvas output.
+//! Invariants: joint positions in sixteenth-pixel units; small rotations
+//! still move limbs predictably before pixel snap; determinism integer-only.
+//! Focused tests: `src/art/rig.rs` proportion and pose blending.
 
 use super::math::{Angle, ONE, scale};
 use serde::{Deserialize, Serialize};

@@ -1,4 +1,16 @@
-//! Part of the gameplay harness module tree.
+//! Human-readable gameplay report rendering — the presentation layer.
+//!
+//! Purpose: render `GameplayHarnessReport` into concise CI-readable text
+//! (`render_gameplay_report`) without duplicating the structured JSON facts.
+//! Owns: header/persona/phase/health/command/domain/interaction/rejection
+//! /quiet/finding/limitation/fantasy-arc/decision-log sections, ratio and
+//! share formatting, and campaign summary ordering.
+//! Reads: `GameplayHarnessReport` aggregates/snapshots/traces (immutable).
+//! Mutates: output `String` only.
+//! Does not own: report generation, scoring, or finding derivation.
+//! Invariants: every section mirrors the structured report's aggregation;
+//! rendered alternatives deduplicate identical projected outcomes.
+//! Focused tests: `src/gameplay_tests.rs` report snapshot.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace
 use super::*;
@@ -186,6 +198,7 @@ pub(crate) fn render_limitations(report: &GameplayHarnessReport, output: &mut St
     let _ = writeln!(output);
 }
 
+#[allow(clippy::cast_precision_loss)]
 pub(crate) fn render_fantasy_arcs(report: &GameplayHarnessReport, output: &mut String) {
     let total = report.campaigns.len().max(1) as f64;
     let reached = |f: fn(&GameplayFantasyArc) -> Option<i64>| {

@@ -1,4 +1,18 @@
 //! Law sponsorship and municipal debt issuance.
+//!
+//! Purpose: own the validated player path for `EnactLaw`, including civic
+//! debt authorization that credits the treasury institution.
+//! Owns: `apply_law`, civic-debt `principal`/`weekly_payment` derivation,
+//! `OfficePower`-gated law power mapping, and audit/outbox.
+//! Reads: `Registry` institutions, `AppState` laws + dynasties + market.
+//! Mutates: `EnactedLaw` active set, `CivicDebt` issuance, dynasty
+//! treasury/legitimacy, market clearing pool via `credit_*`.
+//! Does not own: law price-control effects (simulation) or debt
+//! delinquency (credit strategic).
+//! Invariants: `PublicDebtAuthorization` value is issuance principal;
+//! other law values validate via `LawKind::is_value_valid`; office +
+//! power + establishment-day gates before sponsorship; cooldown audited.
+//! Focused tests: `src/systems/commands/commands_tests.rs` law paths.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

@@ -1,4 +1,15 @@
 //! Procedural character sprites: material assembly, posed drawing, and sheet composition.
+//!
+//! Purpose: assemble `CharacterSpec` → rig → `Surface` → `Canvas` →
+//! `SpriteSheet` deterministically for every role/seed/frame.
+//! Owns: role palettes, material tables, body/face/hair drawing, sheet
+//! tiling, and height/scale validation (`MIN_SPRITE_HEIGHT`..`MAX_SPRITE_HEIGHT`).
+//! Reads: `rig::Skeleton` / `anim::Clip`, `color::Ramp`.
+//! Mutates: nothing persistent (returns owned `SpriteSheet`).
+//! Does not own: animation clip authoring or harness orchestration.
+//! Invariants: integer geometry/shading; every valid config emits frames
+//! with stable ordering and palette indices; determinism across profiles.
+//! Focused tests: `src/art/sprite.rs` composition and determinism.
 
 use super::anim::Clip;
 use super::canvas::Canvas;

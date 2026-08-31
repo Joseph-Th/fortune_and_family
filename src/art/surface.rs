@@ -1,10 +1,15 @@
 //! Material, light, and depth buffers that resolve into an indexed canvas.
 //!
-//! Procedural drawing never writes palette indices directly. Shapes write a material
-//! identifier, a per-mille light value, and a depth value. Resolution then maps light onto
-//! each material's ramp, applies ordered dithering between ramp steps, and darkens silhouette
-//! edges. Separating form from color is what allows a pose to be relit, recolored, or
-//! restyled without redrawing it.
+//! Purpose: own the 3-channel `Surface` (material × light × depth) that
+//! decouples form from palette so relighting/recoloring never redraws form.
+//! Owns: `MaterialId` / `MaterialTable`, `Surface` allocation, ramp-mapped
+//! resolution with ordered dithering, and silhouette darkening.
+//! Reads: `color::RampHandle` via `MaterialTable`.
+//! Mutates: `Surface` buffers during `fill_*`; produces `Canvas` on resolve.
+//! Does not own: rig or shape primitives beyond what they write into it.
+//! Invariants: primitives write material/light/depth, not palette indices;
+//! resolution maps light via hue-shifted ramps deterministically.
+//! Focused tests: `src/art/surface.rs` dither and edge shading.
 
 use super::canvas::Canvas;
 use super::color::RampHandle;

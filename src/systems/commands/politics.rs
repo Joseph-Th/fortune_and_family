@@ -1,4 +1,20 @@
 //! Institutions, patronage, endowments, offices, nominations, and directives.
+//!
+//! Purpose: own the validated player path for every institutional lever:
+//! support cultivation, endowment, office nomination, directive exercise,
+//! and membership withdrawal with term/legitimacy pacing.
+//! Owns: `apply_institution_support` / `apply_institution_endowment` /
+//! `apply_office_nomination` / `apply_office_power_directive` /
+//! `apply_institution_withdrawal`, capability-score derivation, and
+//! `InstitutionRuntime` membership/office updates.
+//! Reads: `Registry` institutions, `AppState` institutions/characters.
+//! Mutates: institution `members`/`office_holder_id`/`budget`/
+//! `active_directive`, dynasty legitimacy/treasury, market clearing pool.
+//! Does not own: monthly selection (strategic/offices) or crisis response.
+//! Invariants: every nomination needs established support + capability
+//! threshold; directives respect `OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS` and
+//! `next_directive_day`; withdrawals carry recovery audit detail.
+//! Focused tests: `src/systems/commands/commands_tests.rs` politics paths.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

@@ -1,4 +1,20 @@
 //! Intelligence commissioning, leverage, and notification acknowledgement.
+//!
+//! Purpose: own the validated player path for paid intelligence
+//! (`CommissionInformation`, `LeverageInformation`) and housekeeping
+//! (`AcknowledgeNotification`) without leaking diagnostic oracles.
+//! Owns: `commission_information` / `leverage_information` / `acknowledge`,
+//! report `created_day` / `expires_day` windows, and audit/outbox.
+//! Reads: `AppState` information_reports + outbox (immutable for quote).
+//! Mutates: `InformationReport` lifecycle on commission/leverage, outbox
+//! `acknowledged` flag, treasury via clearing-pool credit.
+//! Does not own: strategic information-report expiry (strategic owns) or
+//! projection read-models.
+//! Invariants: every report carries `source`/`confidence`/`expiry`;
+//! leverage requires confirmed commissioned intelligence; expiry is
+//! `created ≤ today ≤ expires ≤ created + LIFETIME`; notifications are
+//! acknowledged in order without mutation of history.
+//! Focused tests: `src/systems/commands/commands_tests.rs` info paths.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

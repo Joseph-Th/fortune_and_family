@@ -1,4 +1,18 @@
-//! Part of the gameplay harness module tree.
+//! Gameplay harness orchestration — the evaluation runtime.
+//!
+//! Purpose: run the deterministic `GameplayHarnessConfig` ×
+//! `Registry` → `GameplayHarnessReport` loop (campaign construction,
+//! jittered decision cycles, counterfactual branches, attribution).
+//! Owns: `run_gameplay_harness`, campaign parallelism (immutable registry),
+//! `CampaignAccumulator`, jittered-interval derivation, and horizon
+//! calculation (`max_consequence_horizon_days`).
+//! Reads: `Registry`, `AppState` via `build_new_game` / `advance_days`.
+//! Mutates: per-campaign `AppState` clones; harness owns its accumulator
+//! but not the authoritative dynasty stores.
+//! Does not own: candidate generation (candidates) or findings (findings).
+//! Invariants: every campaign owns its `AppState`; registry immutable,
+//! ordering stable, random-state owned; daily rotation is adapter policy.
+//! Focused tests: `src/gameplay_tests.rs` harness integration.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace
 use super::*;
@@ -1056,8 +1070,10 @@ pub(crate) fn jittered_decision_interval(
     sample = sample.wrapping_add(u64::from(config.seed_count));
     // +/-4 days keeps organic variation without erasing the 30-day design cadence.
     let delta = i64::try_from(sample % 9).unwrap_or(0) - 4;
-    let jittered = i64::from(base).saturating_add(delta).max(7) as u32;
-    jittered
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        i64::from(base).saturating_add(delta).max(7) as u32
+    }
 }
 
 pub(crate) fn next_campaign_step_days(state: &AppState, configured_step: u32) -> u32 {

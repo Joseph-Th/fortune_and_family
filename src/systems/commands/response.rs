@@ -1,4 +1,19 @@
 //! Crisis-response and labor-dispute resolution commands.
+//!
+//! Purpose: own the validated player path for `RespondToCrisis` (relief /
+//! reform / suppression / exploit) and `ResolveLaborDispute` (improve /
+//! negotiate / replace) with standing-cost and cooldown discipline.
+//! Owns: `apply_crisis_response` / `apply_labor_response`, crisis-kind
+//! `relief`/`reform`/`suppress` cost helpers, labor replacement-household
+//! lookup, and audit/outbox.
+//! Reads: `AppState` crises / employment / districts / dynasties.
+//! Mutates: crisis `severity`/`status`, employment `status`/`loyalty`,
+//! dynasty treasury/legitimacy, market clearing pool for mobilizations.
+//! Does not own: crisis detection/escalation (strategic/crises) or weekly
+//! employment settlement (strategic/labor).
+//! Invariants: every crisis response respects one-commit discipline;
+//! suppression/exploit spend legitimacy outright; replacement costs reserve.
+//! Focused tests: `src/systems/commands/commands_tests.rs` response paths.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

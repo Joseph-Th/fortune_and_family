@@ -1,4 +1,19 @@
 //! Grounded legal-case filing and negotiated settlement commands.
+//!
+//! Purpose: own the validated player path for `FileLegalCase` (grounded
+//! claim required) and `SettleLegalCase` (negotiated quote, treasury
+//! atomicity) so the justice layer never duplicates contract/loan economics.
+//! Owns: `apply_legal_case` / `apply_legal_settlement`, filing-cost via
+//! civic court, settlement quote (`quote_player_legal_settlement`), and
+//! audit/outbox.
+//! Reads: `AppState` legal cases / loans / contracts / dynasties.
+//! Mutates: `LegalCase` filing + status, dynasty treasuries for damages /
+//! filing fees, market clearing pool for fees.
+//! Does not own: hearing/judgment/execution (strategic/legal_cases).
+//! Invariants: every case grounds to a real delinquent loan or breached
+//! contract; filing respects interval + reputation; settlement is the only
+//! path that fabricates no money.
+//! Focused tests: `src/systems/commands/commands_tests.rs` legal paths.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

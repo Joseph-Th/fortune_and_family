@@ -70,6 +70,7 @@ impl ObjectiveProgress {
 /// free pass. This makes credit demand, loan defaults, and grounded legal claims reachable
 /// in normal play. The player is exempt because the player's own discretionary spending
 /// already taxes the dynasty treasury.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), SimulationError> {
     let player_id = state.player_dynasty_id;
     let dynasties: Vec<_> = state

@@ -1,4 +1,16 @@
-//! Part of the gameplay harness module tree.
+//! Gameplay scoring — the weighted quality gate.
+//!
+//! Purpose: fold campaign evidence into 0-100 component scores
+//! (actionability, variety, interconnection, feedback, resilience) and a
+//! weighted `overall` so `playtest --minimum-overall` can gate reproducibly.
+//! Owns: `score_campaign` / `score_aggregate`, per-component formulas and
+//! weights, and normalization.
+//! Reads: `CampaignAccumulator` + `GameplaySnapshot` pairs (start/end).
+//! Mutates: nothing (pure folds).
+//! Does not own: findings or advisory thresholds.
+//! Invariants: every score is 0..=100; `overall` is explicit weighted sum;
+//! command acceptance never improves utility; aggregation is deterministic.
+//! Focused tests: `src/gameplay_tests.rs` scoring gates.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace
 use super::*;

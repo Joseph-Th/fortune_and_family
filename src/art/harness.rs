@@ -1,10 +1,16 @@
 //! The visual review harness: batch sprite generation, automated findings, and a
 //! self-contained HTML contact sheet.
 //!
-//! One command renders a matrix of characters and clips, runs every automated check, and
-//! produces a single file that plays the animations, magnifies each frame, shows the silhouette,
-//! and lists what the checks found. Reviewing art then becomes reading one page instead of
-//! opening many files.
+//! Purpose: drive one `ArtReviewConfig` → `ArtReview` → `ArtReviewReport`
+//! → HTML/JSON pipeline that is deterministic and self-contained.
+//! Owns: `ArtReviewConfig` validation, sheet generation, lint invocation,
+//! PNG data-URI embedding, and standalone report rendering.
+//! Reads: `sprite::CharacterSpec` / `SpriteSheet`, `lint` findings.
+//! Mutates: nothing persistent (returns owned `ArtReview` value).
+//! Does not own: campaign state, simulation, or persistence.
+//! Invariants: every configured seed×role renders; output is one HTML file
+//! with no external assets; determinism via integer math only.
+//! Focused tests: `src/art/harness.rs` batch and encoding checks.
 
 use super::lint::{ArtFinding, ArtSeverity, count_at_least, review_sheet, split_frames};
 use super::png::encode_png_data_uri;

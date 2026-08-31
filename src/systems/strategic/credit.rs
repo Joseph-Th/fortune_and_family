@@ -1,4 +1,21 @@
 //! Private and municipal credit: loans, civic debts, weekly interest, and collateral seizure.
+//!
+//! Purpose: own the validated credit primitives (issuance, weekly interest
+//! as one 7-day share of 360-day annual charge, repayment, delinquency,
+//! default, restructuring, write-off, collateral seizure) via a single
+//! weekly settlement path.
+//! Owns: `LoanTerms` / `CivicDebt` validation, `validate_loan`,
+//! `latest_defaulted_loan_for_pair`, weekly `LoanStatus` / `CivicDebtStatus`
+//! transitions, and collateral lifecycle.
+//! Reads: `Registry` (cost of living for underwriting), `AppState`
+//! dynasties/properties/loans as needed for affordability.
+//! Mutates: `AppState.loans` / `civic_debts` / `properties` collateral
+//! links through weekly systems; treasury cash via market clearing pool.
+//! Does not own: command dispatch (trade.rs) or market pricing.
+//! Invariants: every balance is `Money`; missed-payment counters track
+//! arrears per `LoanStatus::has_consistent_arrears`; collateral pledged at
+//! most once; unresolved defaults block fresh credit per pair.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs` credit, `src/systems/commands/commands_tests.rs` issuance.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

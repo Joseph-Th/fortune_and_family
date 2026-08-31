@@ -1,8 +1,15 @@
 //! A dependency-free encoder for 8-bit indexed PNG images.
 //!
-//! The encoder emits uncompressed deflate blocks. Sprite frames are small, review sheets are
-//! transient, and avoiding a compression dependency keeps the renderer auditable and
-//! deterministic.
+//! Purpose: encode 8-bit indexed `Canvas` + `Palette` frames without a codec
+//! crate so sprite output is auditable and deterministic across platforms.
+//! Owns: PNG signature, IHDR/PLTE/tEXt/IDAT/IEND chunk layout, uncompressed
+//! deflate blocks, CRC/trailer, and `encode_png_data_uri`.
+//! Reads: `Canvas` pixels and `Palette` RGB bytes.
+//! Mutates: nothing persistent (returns owned bytes / data URI).
+//! Does not own: canvas construction or art review orchestration.
+//! Invariants: every emitted PNG round-trips through spec decoders; stored
+//! blocks stay ≤ 65 535 bytes; determinism via integer math only.
+//! Focused tests: `src/art/png.rs` header and pixel fidelity.
 
 use super::canvas::Canvas;
 use super::color::Palette;

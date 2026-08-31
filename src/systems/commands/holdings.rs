@@ -1,4 +1,19 @@
 //! Player commands over owned businesses: transfers, capital, policy, wages.
+//!
+//! Purpose: own the validated player path for `TransferBusinessCash`,
+//! `WithdrawBusinessCash`, `AcquireBusiness`, `InvestInBusiness`,
+//! `SetBusinessPolicy`, `SetBusinessWages` with atomic commit.
+//! Owns: `apply_cash_transfer` / `apply_business_cash_withdrawal` /
+//! `apply_business_acquisition` / `apply_business_investment` /
+//! `apply_business_policy` / `apply_business_wages`, operating-reserve
+//! spendability checks, finance-version fencing.
+//! Reads: `AppState` businesses, dynasties, market quotes.
+//! Mutates: `Business` finance/version/policy/manager and dynasty treasury
+//! via `transfer_business_cash` / `spend_*_to_market` primitives.
+//! Does not own: daily production/sales pipeline (simulation owns).
+//! Invariants: every cash move keeps `version`; zero-stock transfer
+//! reuses prior version; policy/wage cooldowns are audit-enforced.
+//! Focused tests: `src/systems/commands/commands_tests.rs` holding paths.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

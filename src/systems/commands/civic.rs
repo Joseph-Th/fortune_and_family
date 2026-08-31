@@ -1,4 +1,16 @@
 //! Public-work sponsorship and direct funding commands.
+//!
+//! Purpose: own the validated player path for `StartPublicWork` and
+//! `FundPublicWork`, including direct funding of another house's stalled work.
+//! Owns: `apply_public_work` / `apply_public_work_funding`,
+//! `quote_public_work_funding`, cooldown, office-gate checks, and audit/outbox.
+//! Reads: `Registry` districts, `AppState` public works + dynasties.
+//! Mutates: public works (`budget`/`spent`/`progress`/`status`), dynasty
+//! treasury + civic contributions + legitimacy, market clearing pool.
+//! Does not own: terrain or civic-service simulation (strategic owns).
+//! Invariants: every spend stays via `spend_player_treasury` → clearing-pool
+//! credit; external contributions earn bounded legitimacy/relationship gain.
+//! Focused tests: `src/systems/commands/commands_tests.rs` public-work paths.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

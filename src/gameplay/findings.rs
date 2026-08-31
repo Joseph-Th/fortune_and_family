@@ -1,4 +1,17 @@
-//! Part of the gameplay harness module tree.
+//! Gameplay findings and limitations — the interpretation layer.
+//!
+//! Purpose: turn reconciled `GameplayAggregate` / `GameplayCampaignReport`
+//! evidence into `Info`/`Warning`/`Critical` findings and stated limitations.
+//! Owns: every finding rule (unreachable command families, quiet-cycle
+//! dominance, weak interconnection, narrow mature play, etc.) and their
+//! severity thresholds.
+//! Reads: `GameplayHarnessReport` aggregates only (no direct state).
+//! Mutates: nothing (pure predicates over the report).
+//! Does not own: harness orchestration or scoring weights.
+//! Invariants: every finding carries severity, domain, and reproducibility
+//! context; no rule invents evidence absent from the report; limited tiers
+//! stay combinable.
+//! Focused tests: `src/gameplay_tests.rs` finding-rule unit tests.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace
 use super::*;

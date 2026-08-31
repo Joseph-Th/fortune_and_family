@@ -1,4 +1,20 @@
-//! Part of the gameplay harness module tree.
+//! Gameplay report schema — the machine contract between harness and consumers.
+//!
+//! Purpose: own every serialized type (`GameplayHarnessReport`,
+//! `GameplayCampaignReport`, `GameplayAggregate`, `GameplaySnapshot`,
+//! `GameplayTraceStep`, `GameplayFinding`, etc.) and its
+//! `GAMEPLAY_REPORT_SCHEMA_VERSION` so reports are reproducible and
+//! versioned.
+//! Owns: `GameplayCommandKind` (32), `GameplayDomain` (17),
+//! `GameplayHarnessConfig`, all projection/score/finding/snapshot structs,
+//! and `serde(deny_unknown_fields)` schemas.
+//! Reads: nothing at definition time (populated by harness).
+//! Mutates: nothing (pure data definitions).
+//! Does not own: orchestration or presentation; consumers are CLI and
+//! `scripts/check_gameplay.py`.
+//! Invariants: exhaustive `ALL_COMMAND_KINDS`/`ALL_DOMAINS`; schema version
+//! bumps on shape change; every trace step carries phase + window context.
+//! Focused tests: `src/gameplay_tests.rs` catalog exhaustiveness.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace
 use super::*;

@@ -1,4 +1,14 @@
 //! Indexed pixel buffers and the compositing operations shared by every renderer.
+//!
+//! Purpose: own the 8-bit indexed `Canvas` (transparent index 0) and its
+//! rect, blit, fill, and composition primitives.
+//! Owns: `Canvas`, `Rect`, pixel storage, bounds checks, and blending.
+//! Reads: palette indices only (no color interpretation).
+//! Mutates: canvas pixels via `set`, `fill_rect`, `blit`.
+//! Does not own: palette tables, rig math, or PNG encoding.
+//! Invariants: every pixel is a `u8` palette index; `TRANSPARENT_INDEX` (0)
+//! is never conflated with opaque color; bounds are clipped, not wrapped.
+//! Focused tests: `src/art/*` harness and sprite rendering.
 
 use super::color::TRANSPARENT_INDEX;
 

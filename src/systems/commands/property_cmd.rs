@@ -1,4 +1,18 @@
 //! Property purchase and liquidation commands.
+//!
+//! Purpose: own the validated player path for `BuyProperty` and
+//! `SellProperty`, including unowned-property pool credit and distressed
+//! lien settlement.
+//! Owns: `apply_property_purchase` / `apply_property_sale` / `apply_property_sale` quotes,
+//! vacancy-income routing, and lien payoff via collateral.
+//! Reads: `AppState` properties / businesses / dynasties / districts.
+//! Mutates: property `owner_dynasty_id` / `tenant_dynasty_id`, dynasty
+//! treasury, market clearing pool for unowned proceeds and rents.
+//! Does not own: rent scaling or eviction weekly systems (strategic/property).
+//! Invariants: every unowned sale funds the clearing pool; distressed
+//! civic guarantees overlay; weekly rent is district-indexed and
+//! fire-discounted when material.
+//! Focused tests: `src/systems/commands/commands_tests.rs` property paths.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

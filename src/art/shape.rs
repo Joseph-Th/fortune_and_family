@@ -1,8 +1,15 @@
 //! Shaded rasterization primitives that write form into a [`Surface`].
 //!
-//! Every primitive derives a surface normal from its own geometry and converts that normal into
-//! a light value with the supplied [`Shading`]. Volumes therefore read as volumes rather than as
-//! flat fills, which is the basis of the semi-realistic look.
+//! Purpose: rasterize capsules, ellipsoids, and polygons with derived normals
+//! so volume reads as volume, not flat fill.
+//! Owns: `Form` / `Shading`, normal derivation, light mapping, and `Brush`
+//! fill of `Surface` (material + light + depth buffers).
+//! Reads: `Surface` dimensions, `MaterialTable`; no palette or canvas.
+//! Mutates: `Surface` buffers via `fill_*` primitives.
+//! Does not own: palette resolution, canvas export, or rig hierarchy.
+//! Invariants: every primitive computes a normal from its own geometry;
+//! lighting stays integer (`ONE` = 4096); depth respects painter order.
+//! Focused tests: `src/art/shape.rs` normal and raster bounds.
 
 use super::math::{ONE, perpendicular_component, scale};
 use super::surface::{Brush, MaterialId, Surface};

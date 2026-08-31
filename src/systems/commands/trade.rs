@@ -1,4 +1,17 @@
 //! Supply-contract and private-credit negotiation with NPC counterparties.
+//!
+//! Purpose: own the validated player path for `CreateSupplyContract` and
+//! `IssueLoan` against rival-house reserve/rate/capacity policy.
+//! Owns: `apply_contract` / `apply_loan`, NPC acceptance gates (reserve
+//! retention, rate bounds, collateral LTV, contract capacity), and
+//! `LoanTerms`/`SupplyContractTerms` construction.
+//! Reads: `Registry` goods, `AppState` businesses / loans / properties.
+//! Mutates: `SupplyContract` / `Loan` insertion, property collateral links,
+//! dynasty treasury via clearing-pool credit, audit log.
+//! Does not own: weekly settlement (strategic/contracts, strategic/credit).
+//! Invariants: every issuance validates reserve/capacity/rate/collateral;
+//! defaulted-pair blocking and collateral size gates preserve recovery paths.
+//! Focused tests: `src/systems/commands/commands_tests.rs` trade paths.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

@@ -1,4 +1,19 @@
-//! Part of the gameplay harness module tree.
+//! Gameplay candidate generation, probing, and selection — the acting layer.
+//!
+//! Purpose: build state-derived `PlayerCommand` candidates, probe them
+//! through `apply_player_command_scratch` on clones, rank them by persona
+//! priorities + urgency + reserves, and diagnose quiet cycles.
+//! Owns: `probe_candidates`, per-command-kind generators, persona ranking,
+//! `GameplayCommandKind` coverage, and quiet-cause taxonomy.
+//! Reads: `Registry` + `AppState` via authoritative projections and
+//! production validators (never a second legality oracle).
+//! Mutates: nothing durable (operates on disposable clones); probes are
+//! bounded by `max_candidate_probes`.
+//! Does not own: report schema/finding rules (findings/scoring own).
+//! Invariants: every candidate that reaches selection has passed the
+//! canonical validator; `ActivationPredicateDrift` fails the cycle if a
+//! probe proves the predicate wrong; determinism via stable ordering.
+//! Focused tests: `src/gameplay_tests.rs` candidate reachability.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace
 use super::*;

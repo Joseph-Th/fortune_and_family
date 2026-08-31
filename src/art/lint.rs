@@ -1,7 +1,15 @@
 //! Automated review checks that turn common pixel-art defects into reportable findings.
 //!
-//! The visual harness is only efficient if the obvious failures are found mechanically, leaving
-//! human review for judgment calls about form, weight, and readability.
+//! Purpose: provide mechanical guards for palette bloat, stray transparency,
+//! silhouette errors, and single-pixel noise so human review focuses on form.
+//! Owns: per-sprite `ArtFinding` predicates and severity (`Critical` >
+//! `Warning` > `Info`), thresholds, and `split_frames` helpers.
+//! Reads: `Canvas` / `SpriteSheet` / `Palette` (immutable).
+//! Mutates: nothing (pure predicates).
+//! Does not own: harness orchestration or sprite construction.
+//! Invariants: every finding is deterministic, bounded, and carries a
+//! severity; no check invents a second source of truth for geometry.
+//! Focused tests: `src/art/lint.rs` defect detection.
 
 use super::canvas::{Canvas, Rect};
 use super::color::{Palette, TRANSPARENT_INDEX};

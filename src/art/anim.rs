@@ -1,4 +1,15 @@
 //! Keyframed animation clips and deterministic pose sampling.
+//!
+//! Purpose: own the small deterministic animation vocabulary (`Keyframe`,
+//! `Clip`, `Sample`) that drives the rig without floating point.
+//! Owns: `Keyframe` / `Clip` construction and `Clip::sample` interpolation,
+//! `HumanClip` catalog and `humanoid_clip_library`.
+//! Reads: `rig::Pose` / `Skeleton` for joint counts and rest poses.
+//! Mutates: nothing (value types; `Clip::sample` is pure).
+//! Does not own: rig resolution, surface drawing, or review harness.
+//! Invariants: keyframes strictly increase, share one pose length, and fall
+//! inside `frame_count`; sampling is deterministic and integer-only.
+//! Focused tests: `src/art/anim.rs::tests` keyframe validation and sampling.
 
 use super::math::ease_in_out;
 use super::rig::{HumanJoint, Pose, Skeleton, to_subpixels};

@@ -1,5 +1,18 @@
 //! Deterministic simulation kernel for Civic Dynasty.
 //!
+//! Rivergate is modeled as a deterministic political economy:
+//! `Registry` (immutable authored definitions) plus `AppState` (every mutable
+//! value needed for continuation, including RNG) flows through canonical
+//! `systems/*` mutations and is observed through read-only `projection` or
+//! HTML. Every adapter — CLI, persistence, gameplay harness, art — reuses
+//! the same production path rather than reimplementing rules.
+//!
+//! Profiles: **Universal · Stateful Application · Deterministic System ·
+//! Automated Behavior Evaluation · Artifact Generation**. Related authorities:
+//! `README.md` (run/surface), `AGENTS.md` (execution card), `ARCHITECTURE.md`
+//! (ownership), `STATUS.md` (current scope/schemas), `TESTING.md`
+//! (verification), `DESIGN.md` (intent), `GAMEPLAY_HARNESS.md` (report).
+//!
 //! ```
 //! use civic_dynasty::{NewGameConfig, advance_days, build_new_game, build_rivergate_registry};
 //!
@@ -10,6 +23,14 @@
 //!
 //! assert_eq!(state.clock().day(), 1);
 //! ```
+//!
+//! Determinism contract: given the same registry, state seed, command
+//! sequence, and day count, execution reproduces bit-identically (state-owned
+//! RNG, `BTreeMap`-ordered iteration, typed-ID tie-breakers, fixed-point
+//! `Money`/`Quantity`).
+//! Failure semantics: consequential operations validate before mutation,
+//! preserve state on rejection, and report a typed
+//! `CommandError`/`SimulationError`/`PersistenceError` variant.
 
 pub mod art;
 pub mod core;
