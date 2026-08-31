@@ -2971,7 +2971,7 @@ pub(crate) fn add_civic_health_findings(
             severity: GameplayFindingSeverity::Warning,
             title: "District employment collapses from the campaign baseline".to_owned(),
             evidence: format!(
-                "{employment_collapse} of {} mature campaigns lost more than 1,500 bp of average district employment from start to finish. District employment is part of civic stability and should not collapse merely because the simulation begins recomputing a previously implicit background economy.",
+                "{employment_collapse} of {} mature campaigns lost more than 1,500 bp of average district employment from start to finish. District employment is part of civic stability and must remain bounded rather than collapsing under background economy accounting.",
                 mature.len()
             ),
         });

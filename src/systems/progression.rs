@@ -46,12 +46,10 @@ pub(crate) fn contract_deliveries_for_dynasty(state: &AppState, dynasty_id: Dyna
 /// Durable milestone evidence gathered from the append-only history ledgers
 /// and live delivery records.
 ///
-/// Phase derivation previously rescanned laws, public works, contracts, and
-/// the entire audit log once per dynasty on every simulated day; because the
-/// audit log grows without bound, that made each day's cost grow with the
-/// campaign length. Collection now folds the audit history incrementally into
-/// [`CampaignEvidenceMemo`] and rescans only the small live maps (laws,
-/// public works, contracts) per refresh, producing identical answers.
+/// Audited milestones fold incrementally into [`CampaignEvidenceMemo`] and
+/// live maps (laws, public works, contracts) are rescanned per refresh.
+/// The result is identical to a full rescan and keeps daily cost bounded as
+/// the audit log grows.
 #[derive(Default, Clone, PartialEq, Debug)]
 pub(crate) struct CampaignPhaseEvidence {
     city_shaping: BTreeSet<DynastyId>,

@@ -67,12 +67,9 @@ pub(crate) fn prepare_invariant_ids(registry: &Registry) -> Option<RegistryIds> 
 /// Panics in debug builds when state contains invalid references, stale indexes, invalid lifecycle
 /// combinations, negative constrained values, or inconsistent derived data.
 pub fn validate_invariants(registry: &Registry, state: &AppState) {
-    // The battery is documented as debug-only: every check is a
-    // `debug_assert!`, so release builds previously kept only the cost —
-    // per-call registry-ID sets and full-state index rebuilds that exist to
-    // feed assertions the compiler had already removed. The compile-time gate
-    // makes the release no-op explicit and free without touching debug
-    // behavior.
+    // Battery is debug-only: every check is `debug_assert!`. The
+    // compile-time gate skips registry-ID and index preparation in release
+    // so the call is free with no change to debug behavior.
     if !cfg!(debug_assertions) {
         return;
     }

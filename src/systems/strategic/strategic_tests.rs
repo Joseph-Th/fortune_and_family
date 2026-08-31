@@ -8554,9 +8554,9 @@ mod ai {
                 .get(business_id)
                 .expect("selected business must exist"),
         );
-        // The owner can cover most of the shortfall but not all of it: exactly
-        // the situation that previously produced daily trickle injections and
-        // weekly distressed-to-recovered churn.
+        // Owner covers most of the shortfall but not all of it. This partial
+        // cover must not trigger daily trickle injections or weekly
+        // distressed-to-recovered churn.
         state
             .dynasties
             .get_mut(&owner_dynasty_id)
@@ -10183,12 +10183,10 @@ mod ai {
 
     #[test]
     fn vacant_workshop_value_converges_to_its_anchor_instead_of_collapsing() {
-        // Regression: revaluation used to anchor workshops on
-        // `weekly_rent * 82`, a ratio calibrated for business premises rents.
-        // A vacant workshop's modest rent implied an anchor far below its real
-        // value, so every month silently wrote its value down toward that
-        // broken target. The persisted neutral-district anchor must keep the
-        // value orbiting its authored level instead.
+        // Vacant-workshop anchor is the persisted `anchor_value` scaled by
+        // rent index. Anchoring on `weekly_rent * 82` would tie value to a
+        // modest premises rent and collapse it monthly; the value must stay
+        // near its authored level.
         let mut state = make_test_campaign();
         let (district_id, workshop_id) = state
             .properties
@@ -10238,11 +10236,10 @@ mod ai {
 
     #[test]
     fn residence_appreciation_is_bounded_by_its_anchor_and_fully_settles() {
-        // Regression: residences used to revalue against their own drifting
-        // value, so any district with an above-neutral rent index compounded
-        // appreciation month after month without bound. With the persisted
-        // anchor, appreciation is capped by the anchored repricing and the
-        // monthly step decays geometrically until the value fully settles.
+        // Residence revaluation anchors to persisted `anchor_value` capped by
+        // rent-index scaling. Revaluing against drifting value would compound
+        // appreciation without bound; anchored repricing caps it and decays
+        // geometrically to settlement.
         let mut state = make_test_campaign();
         let residence_id = state
             .properties
