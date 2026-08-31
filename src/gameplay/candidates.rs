@@ -2585,11 +2585,14 @@ pub(crate) fn generate_contract_candidates(
     }
 }
 
-/// Commitment bases mirror the canonical five-day contract capacity window:
+/// Commitment bases mirror the canonical contract capacity window:
 /// incoming supply commits a fuller week than outgoing sales, because a buyer
 /// wants dependable input while a prudent seller reserves slack.
-const AGENT_CONTRACT_COMMITMENT_DAYS: i64 = 5;
-const AGENT_SELL_COMMITMENT_DAYS: i64 = 3;
+/// Raised from 5/3 to 7/5 so contract quantities create material fulfillment
+/// pressure — small token contracts never generate the breach grievances
+/// that ground legal enforcement drama.
+const AGENT_CONTRACT_COMMITMENT_DAYS: i64 = 7;
+const AGENT_SELL_COMMITMENT_DAYS: i64 = 5;
 
 /// Candidate sizes to try, largest first: the full commitment, then halves,
 /// so a house with thin working cash still secures some supply instead of
@@ -2926,7 +2929,7 @@ pub(crate) fn generate_finance_candidates(
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) {
-    add_borrow_candidate(state, persona, candidates);
+    add_borrow_candidate(registry, state, persona, candidates);
     add_lend_candidate(registry, state, persona, candidates);
     add_property_liquidation_candidates(registry, state, persona, candidates);
     let treasury = state
@@ -2953,9 +2956,9 @@ pub(crate) fn generate_finance_candidates(
         GameplayPersona::Steward => 700,
     };
     let minimum_property_yield_basis_points = match persona {
-        GameplayPersona::Entrepreneur => 1_000,
-        GameplayPersona::Opportunist => 1_100,
-        GameplayPersona::PowerBroker | GameplayPersona::Steward => 1_200,
+        GameplayPersona::Entrepreneur => 900,
+        GameplayPersona::Opportunist => 1_000,
+        GameplayPersona::PowerBroker | GameplayPersona::Steward => 1_050,
     };
     let affordability_cap = treasury.saturating_sub(portfolio_satiation).saturating_sub(
         property_purchase_liquidity_floor(state, state.player_dynasty_id),
@@ -3288,6 +3291,7 @@ pub(crate) fn has_property_liquidation_opportunity(registry: &Registry, state: &
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn add_borrow_candidate(
+    registry: &Registry,
     state: &AppState,
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
@@ -3340,7 +3344,10 @@ pub(crate) fn add_borrow_candidate(
                     .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
                     .is_some_and(|available| available >= Money::from_copper(1_000))
         });
-        if !fresh_lender_exists || player.treasury() >= borrowing_trigger {
+        let acquisition_borrow_need = has_acquisition_borrow_need(registry, state, persona);
+        if !fresh_lender_exists
+            || (player.treasury() >= borrowing_trigger && !acquisition_borrow_need)
+        {
             return;
         }
     }
@@ -3461,6 +3468,61 @@ pub(crate) fn unpledged_player_property(state: &AppState) -> Option<&crate::core
     state.properties.values().find(|property| {
         property.owner_dynasty_id == Some(state.player_dynasty_id)
             && property.collateral_loan_id.is_none()
+    })
+}
+
+pub(crate) fn has_acquisition_borrow_need(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+) -> bool {
+    if !matches!(
+        persona,
+        GameplayPersona::Entrepreneur | GameplayPersona::Opportunist
+    ) {
+        return false;
+    }
+    let player_id = state.player_dynasty_id;
+    let treasury = state
+        .dynasties
+        .get(&player_id)
+        .expect("player dynasty must exist")
+        .treasury();
+    let owned = state
+        .businesses
+        .ids_for_owner(player_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.businesses.get(*id))
+        .collect::<Vec<_>>();
+    // If portfolio already at limit, no expansion borrowing needed.
+    let portfolio_limit = match persona {
+        GameplayPersona::Entrepreneur | GameplayPersona::Opportunist => 3,
+        _ => 2,
+    };
+    if owned.len() >= portfolio_limit {
+        return false;
+    }
+    if !portfolio_ready_for_acquisition(state, &owned) {
+        return false;
+    }
+    // Check if there's any acquirable business whose cost exceeds treasury
+    // but would be reachable with a modest loan (up to 12k principal).
+    state.businesses.iter().any(|business| {
+        if business.owner_dynasty_id() == player_id {
+            return false;
+        }
+        let Ok(quote) =
+            quote_business_acquisition(registry, state, player_id, business.id())
+        else {
+            return false;
+        };
+        let Some(recapitalization) = acquisition_recapitalization(registry, state, business, quote)
+        else {
+            return false;
+        };
+        let required = quote.purchase_price.saturating_add(recapitalization);
+        required > treasury && required <= treasury.saturating_add(Money::from_copper(12_000))
     })
 }
 

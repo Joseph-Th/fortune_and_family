@@ -631,10 +631,10 @@ pub(crate) fn execute_judgment_against_collateral(
 /// month drifts upward by roughly 150-360 basis points, so a standard
 /// multi-year session can realistically push a route past the trade-
 /// disruption detection threshold while calm years still heal it.
-pub(crate) const ROUTE_DISRUPTION_SPIKE_MIN_BASIS_POINTS: u16 = 2_400;
-pub(crate) const ROUTE_DISRUPTION_SPIKE_RANGE_BASIS_POINTS: u32 = 2_800;
+pub(crate) const ROUTE_DISRUPTION_SPIKE_MIN_BASIS_POINTS: u16 = 2_600;
+pub(crate) const ROUTE_DISRUPTION_SPIKE_RANGE_BASIS_POINTS: u32 = 2_900;
 /// Routine calm months remove this much accumulated route disruption.
-pub(crate) const ROUTE_DISRUPTION_CALM_RECOVERY_BASIS_POINTS: u16 = 150;
+pub(crate) const ROUTE_DISRUPTION_CALM_RECOVERY_BASIS_POINTS: u16 = 130;
 /// Post-crisis healing removes this much accumulated route disruption.
 pub(crate) const ROUTE_DISRUPTION_HEALING_BASIS_POINTS: u16 = 250;
 

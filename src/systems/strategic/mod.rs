@@ -88,12 +88,14 @@ pub(crate) const DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS: i64 = 90;
 pub(crate) const PROPERTY_LIQUIDATION_BASIS_POINTS: i64 = 5_000;
 const PROPERTY_AUCTION_DISTRESS_TREASURY_LIMIT: Money = Money::from_copper(2_000);
 
-/// Contract commitments are sized against a four-day operating week even
+/// Contract commitments are sized against a six-day operating week even
 /// though the simulation week has seven days: the margin keeps both parties
 /// free to keep trading the good on the open market alongside the contract,
-/// while a slightly tighter reserve makes sustained over-commitment visible
+/// while a tighter reserve makes sustained over-commitment visible
 /// as inventory and cash-flow stress instead of silent buffer.
-const CONTRACT_CAPACITY_COMMITMENT_DAYS: i64 = 4;
+/// Raised from 4 to 6 so contracts create material fulfillment pressure
+/// and breach grievances become reachable inside one session.
+const CONTRACT_CAPACITY_COMMITMENT_DAYS: i64 = 6;
 
 const UNADDRESSED_CRISIS_MONTHLY_ESCALATION_BASIS_POINTS: u16 = 240;
 const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;

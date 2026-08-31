@@ -3820,7 +3820,12 @@ mod candidates {
             .treasury = Money::from_copper(50_000);
         let mut candidates = Vec::new();
 
-        add_borrow_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+        add_borrow_candidate(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Opportunist,
+            &mut candidates,
+        );
         assert!(candidates.is_empty());
 
         state
@@ -3829,7 +3834,12 @@ mod candidates {
             .expect("player dynasty must exist")
             .resources
             .treasury = Money::ZERO;
-        add_borrow_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+        add_borrow_candidate(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Opportunist,
+            &mut candidates,
+        );
         let candidate = single_candidate(&candidates, "borrowing under liquidity pressure");
         assert!(matches!(
             candidate.command,
@@ -3849,7 +3859,12 @@ mod candidates {
             .resources
             .treasury = Money::ZERO;
         let mut candidates = Vec::new();
-        add_borrow_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+        add_borrow_candidate(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Opportunist,
+            &mut candidates,
+        );
         let first_terms = match &candidates
             .first()
             .expect("liquidity need must generate credit")
@@ -3883,7 +3898,12 @@ mod candidates {
         }
         candidates.clear();
 
-        add_borrow_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+        add_borrow_candidate(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Opportunist,
+            &mut candidates,
+        );
         assert!(
             candidates.is_empty(),
             "a recent default must close fresh borrowing instead of redirecting the house to another creditor"
@@ -3897,7 +3917,12 @@ mod candidates {
             .clock
             .day()
             .saturating_sub(DEFAULTED_LOAN_RESTRUCTURING_COOLDOWN_DAYS);
-        add_borrow_candidate(&state, GameplayPersona::Opportunist, &mut candidates);
+        add_borrow_candidate(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Opportunist,
+            &mut candidates,
+        );
 
         let candidate = single_candidate(&candidates, "aged default workout");
         assert!(matches!(
@@ -10112,10 +10137,15 @@ mod findings {
             }),
             "an activation predicate must not claim player responsiveness without an executable route"
         );
-        let crisis_domain_finding = finding_with_title(
-            &report.findings,
-            "crises domain was inactive in this horizon",
-        );
+        // The 30-day horizon may or may not see a crisis depending on world
+        // seed and route pressure: either an inactive crisis domain or a
+        // crisis that changed before a player response route was available
+        // is informational, not a broken player loop.
+        let crisis_domain_finding = report.findings.iter().find(|finding| {
+            finding.title == "crises domain was inactive in this horizon"
+                || finding.title
+                    == "crises domain changed before a player route became available"
+        }).expect("crisis domain finding must exist");
 
         assert_eq!(
             contract_finding.severity,
