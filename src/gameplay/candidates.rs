@@ -707,13 +707,39 @@ pub(crate) fn organic_candidate_variation(
     value = value.wrapping_add(u64::from(accumulator.decision_cycles));
     value = value.wrapping_add(u64::from(accumulator.total_viable_choices));
     value = value.wrapping_add(u64::from(accumulator.quiet_cycles));
-    // Mix campaign state that diverges across seeds/backgrounds so nearby
-    // worlds do not replay identical close-call rankings.
+    // Mix campaign-distinct state so nearby worlds/personas do not replay
+    // identical close-call rankings. Uses only live AppState/accumulator
+    // signals already sampled during the decision cycle to keep the variation
+    // reproducible without consuming the game RNG.
     value ^= accumulator
         .peak_player_treasury
         .copper()
         .cast_unsigned()
         .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    value = value.wrapping_add(
+        u64::from(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .map_or(0, |d| d.runtime.generation),
+        )
+        .wrapping_mul(0x94D049BB_133111EB),
+    );
+    value = value.wrapping_add(
+        u64::try_from(state.businesses.iter().count())
+            .unwrap_or(u64::MAX)
+            .wrapping_mul(0xDA942042_E4DD58B5),
+    );
+    value ^= u64::try_from(
+        state
+            .crises
+            .values()
+            .filter(|c| c.status.is_active())
+            .count(),
+    )
+    .unwrap_or(u64::MAX)
+    .wrapping_mul(0xA4093822_299F31D0);
+    value ^= u64::from(accumulator.total_viable_command_kinds).wrapping_mul(0xBE5466CF_34E90C6C);
     for byte in persona
         .label()
         .bytes()

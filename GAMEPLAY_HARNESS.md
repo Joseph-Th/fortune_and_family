@@ -99,7 +99,7 @@ Personas expose different viable routes through the same canonical systems. Cand
 
 Standing policies across personas:
 
-- Candidate scores include deterministic exploration variation (range 520, decision interval jitter ±12 days) derived from campaign state. It flips close calls without overriding urgency, reserve protection, or persona priorities.
+- Candidate scores include deterministic exploration variation (range 520, decision interval jitter ±12 days) derived from campaign state and persona. Timing jitter mixes persona and generation/crisis state so campaigns sharing a world seed sample distinct calendars; score variation mixes generation, business, and crisis state besides the RNG. Both flip close calls without overriding urgency, reserve protection, or persona priorities.
 - Optional standing expenses (education, wards, patronage) respect a discretionary floor: emergency reserve plus two months of committed loan service. Below the floor, standing spending is deferred.
 - Standing-burning responses (suppression, profiteering) additionally respect a legitimacy reserve, matching treasury reserve policy.
 
@@ -272,7 +272,7 @@ Divergence between harness and game is a harness defect.
 
 - Activation predicates are checked every cycle (`ActivationPredicateDrift` on mismatch).
 - Report schema version bumps on any semantic change (activation, scoring, findings, trace meaning).
-- Organic variation (jitter ±12 days plus score range 520) prevents rigid replay while urgency and persona priorities remain dominant.
+- Organic variation (jitter ±12 days plus score range 520, each persona- and state-aware) prevents rigid replay while urgency and persona priorities remain dominant.
 - Bounded work: probe caps, horizons, trace limits bound every run in domain terms. Parallelism capped by `CIVIC_DYNASTY_JOBS`; ordering is stable.
 
 ## Interpretation limits

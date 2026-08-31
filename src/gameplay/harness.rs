@@ -1019,7 +1019,7 @@ pub(crate) fn run_campaign(
     accumulator.observe_crisis_kinds(&state);
     let mut remaining = config.days_per_campaign;
     while remaining > 0 {
-        let jittered_interval = jittered_decision_interval(&state, config, &accumulator);
+        let jittered_interval = jittered_decision_interval(&state, config, persona, &accumulator);
         let configured_step = jittered_interval.min(remaining);
         let step_days = next_campaign_step_days(&state, configured_step).min(remaining);
         run_decision_cycle(
@@ -1061,6 +1061,7 @@ pub(crate) fn run_campaign(
 pub(crate) fn jittered_decision_interval(
     state: &AppState,
     config: &GameplayHarnessConfig,
+    persona: GameplayPersona,
     accumulator: &CampaignAccumulator,
 ) -> u32 {
     let base = u32::from(config.decision_interval_days);
@@ -1074,6 +1075,14 @@ pub(crate) fn jittered_decision_interval(
     sample = sample.wrapping_add(u64::from(config.seed_count));
     sample = sample.wrapping_add(config.start_seed & 0xFFFF_FFFF);
     sample = sample.wrapping_add(u64::from(state.player_dynasty_id.value()));
+    // Mix persona so campaigns that share a world seed but follow different
+    // diagnostic roles sample distinct calendar offsets instead of replaying
+    // one rigid schedule. Mirrors the candidate-level variation which already
+    // keys on persona, extending the same organic divergence to timing.
+    for byte in persona.label().bytes() {
+        sample ^= u64::from(byte).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        sample = sample.rotate_left(7);
+    }
     sample ^= u64::from(accumulator.total_viable_choices).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     sample ^= u64::from(accumulator.quiet_cycles).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     // Widen to +/-12 days so campaigns sample different calendar offsets even
