@@ -1,23 +1,20 @@
 //! Deterministic daily economic pipeline and 30-day/360-day coordinated cadence.
 //!
-//! Purpose: advance one campaign day at a time through a fixed causal order
+//! Purpose: advance one campaign day through a fixed causal order
 //! (routes/laws/crises → purchases → production → sales → household
 //! consumption → maintenance → spoilage/pricing → weekly/monthly/annual
 //! strategic hooks → chronicle/audit → invariants).
 //! Owns: `advance_days` (clone-then-replace atomicity), `advance_days_scratch`
-//! (exclusive-branch optimization), and the per-day decision/apply phases;
-//! `purchases.rs` extracts input procurement and `market.rs` extracts spoilage,
-//! pricing, and break-even.
+//! (in-place variant for disposable branches), and the per-day decision/apply phases.
+//! `purchases.rs` owns input procurement; `market.rs` owns spoilage, pricing, and
+//! break-even floors; `mod.rs` owns workshop maintenance and lifecycle.
 //! Reads: `Registry`, `AppState` (mutable working copy).
-//! Mutates: the working `AppState` (market, businesses, households, strategic
-//! state); callers see all-or-nothing replacement.
-//! Does not own: strategic weekly/monthly rules (each `strategic/*.rs` owns
-//! its own), or persistence.
-//! Determinism: ordered `BTreeMap` iteration, typed-ID tie-breakers, and
-//! state-owned RNG only; parallel `DailyCapacityScratch` preserves order.
-//! Invariants: maintenance and procurement respect cash reserves and tool
-//! scarcity with daily rotation for fair allocation; pricing respects
-//! production break-even floors.
+//! Mutates: the working `AppState`; callers observe all-or-nothing replacement.
+//! Does not own: scheduled weekly/monthly/annual rules (`strategic/*.rs`) or persistence.
+//! Determinism: ordered `BTreeMap` iteration, typed-ID tie-breakers, state-owned RNG; parallel
+//! `DailyCapacityScratch` preserves order.
+//! Invariants: maintenance and procurement respect cash reserves and tool scarcity with daily
+//! rotation for fair allocation; pricing enforces production break-even floors.
 //! Focused tests: `src/systems/simulation/simulation_tests.rs`, soak gates.
 
 use super::SimulationError;
@@ -186,11 +183,8 @@ pub fn advance_days(
 ) -> Result<(), SimulationError> {
     validate_advance_preconditions(registry, state, days)?;
 
-    // Debug builds re-check the full invariant battery after every simulated
-    // day; release builds compile those assertions out entirely. The
-    // registry-ID lookup sets are per-registry constants, so preparing them
-    // once per call keeps the debug sweep proportional to state size instead
-    // of multiplying it by the requested day count.
+    // Invariant IDs are per-registry constants; prepare once per call so the debug sweep
+    // scales with state size. Invariants run only in debug builds.
     let invariant_ids = super::invariants::prepare_invariant_ids(registry);
     let mut next_state = state.clone();
     run_day_loop(registry, &mut next_state, days, invariant_ids.as_ref())?;
@@ -201,17 +195,10 @@ pub fn advance_days(
 
 /// Advances an exclusively owned scratch state in place.
 ///
-/// Identical to [`advance_days`] on success, including per-day validation and
-/// deterministic ordering. It skips only the defensive whole-campaign copy:
-/// the caller must hold `state` as a disposable working branch, because when
-/// a day fails, `state` may be partially advanced and has to be discarded.
-///
-/// The gameplay harness counterfactual branches (candidate probes, ambient
-/// baselines, consequence horizons) clone a campaign and then immediately
-/// advance the clone; going through [`advance_days`] there would deep-copy
-/// every history record twice per branch. This entry point keeps one copy --
-/// the caller's own -- while preserving observable results on every success
-/// path and on every error path that discards the scratch state.
+/// Identical to [`advance_days`] on success, including validation and ordering.
+/// Skips the defensive whole-campaign copy: the caller must hold `state` as
+/// a disposable branch and discard it when a day fails (state may be partially advanced).
+/// Used by harness counterfactual branches to avoid a second deep copy per branch.
 pub(crate) fn advance_days_scratch(
     registry: &Registry,
     state: &mut AppState,
@@ -262,48 +249,32 @@ fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), Simulati
     // 2. Daily strategic pre-phase: routes, laws, crisis effects, AI
     // recovery, external route supply.
     super::strategic::run_daily_strategic_systems(registry, state)?;
-    // Business status cannot change until after production/sales
-    // (lifecycle evaluation runs later), so one capacity snapshot serves
+    // Business status is fixed until lifecycle evaluation after sales; one snapshot serves
     // purchases, production, and sales without per-phase rescans.
-    // 3-4. One shared capacity snapshot for the business pipeline (status
-    // cannot change until after sales, so it stays valid across purchases→
-    // production→sales without per-phase rescans).
     let capacity_scratch = super::DailyCapacityScratch::collect(state);
 
-    // 5. Input procurement — decide against shared stock/cash, then apply.
     let purchase_plan = purchases::decide_business_purchases(registry, state, &capacity_scratch)?;
     purchases::apply_business_purchases(state, purchase_plan)?;
 
-    // 6-7. Production — worker/ input/ cash/ tool-constrained batch choice.
     let production_plan = decide_production(registry, state, &capacity_scratch);
     apply_production(state, production_plan)?;
 
-    // 8-9. Sales — skill/renown/guild-gated placement against shared
-    // absorption ceiling.
     let sale_plan = decide_business_sales(registry, state, &capacity_scratch)?;
     apply_business_sales(state, sale_plan)?;
 
-    // 10-11. Household consumption — staple preference + secondary needs.
     let household_plan = decide_household_consumption(registry, state);
     apply_household_consumption(state, household_plan)?;
 
-    // 12. Workshop maintenance — condition/quality drift and tool demand.
     let maintenance_plan = decide_maintenance(registry, state);
     apply_maintenance(state, maintenance_plan)?;
 
-    // 13-15. Spoilage, pricing (pressure + floors), and business lifecycle.
     apply_market_spoilage(registry, state);
     update_market_prices(registry, state)?;
     super::strategic::apply_law_price_controls(registry, state);
     update_business_lifecycle(registry, state)?;
 
-    // 16. Clock and expiry — advance day, then expire reports/directives.
     state.clock.advance_one_day();
     super::strategic::expire_time_limited_state(state);
-    // 17. Scheduled hooks: weekly (wages, contracts, loans, rents,
-    // employment, dividends, works, reputation), monthly (districts,
-    // living costs, selections, duties, AI, crises), annual
-    // (health, succession), then phase refresh.
     if state.clock.is_week_boundary() {
         settle_weekly_external_income(state)?;
         super::strategic::run_weekly_strategic_systems(registry, state)?;
@@ -350,11 +321,8 @@ fn decide_production(
     let tools_price = tools_quote.price;
     let mut remaining_tools_stock = tools_quote.stock;
     let mut lines = Vec::new();
-    // Daily rotation of tool-allocation priority: the same low-ID businesses must not win the
-    // scarce tool race every day. Rotating by the clock day keeps the order deterministic and
-    // stable (ID tie-breaker) while spreading shortage pressure fairly across the city over time.
-    // `clock.day()` starts at 0 and advances monotonically, so the low 32 bits are a
-    // deterministic hash of campaign age; wrapping is intentional for the `wrapping_add`.
+    // Rotate tool-allocation priority by campaign day so low IDs do not always win the scarce
+    // tool race. Wrapping on `clock.day()` is intentional.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let day_hash = state.clock.day() as u32;
     let mut businesses: Vec<_> = state.businesses.iter().collect();

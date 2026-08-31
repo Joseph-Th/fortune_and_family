@@ -10141,11 +10141,15 @@ mod findings {
         // seed and route pressure: either an inactive crisis domain or a
         // crisis that changed before a player response route was available
         // is informational, not a broken player loop.
-        let crisis_domain_finding = report.findings.iter().find(|finding| {
-            finding.title == "crises domain was inactive in this horizon"
-                || finding.title
-                    == "crises domain changed before a player route became available"
-        }).expect("crisis domain finding must exist");
+        let crisis_domain_finding = report
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.title == "crises domain was inactive in this horizon"
+                    || finding.title
+                        == "crises domain changed before a player route became available"
+            })
+            .expect("crisis domain finding must exist");
 
         assert_eq!(
             contract_finding.severity,

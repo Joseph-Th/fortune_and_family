@@ -53,11 +53,8 @@ pub(crate) fn probe_candidates_with_parallelism(
 ) -> Result<ProbeResult, GameplayHarnessError> {
     let baseline = GameplaySnapshot::capture(state);
     let candidates: Vec<_> = candidates.collect();
-    // Alternative branches are the hot path: project three decision
-    // intervals so delayed tradeoffs are visible, while leaving the more
-    // expensive command-specific horizon for the selected action below.
-    // Keeping one shared horizon is important because profiles must be
-    // comparable across command families.
+    // Project three decision intervals for counterfactual comparison; keep one shared horizon
+    // so profiles remain comparable across command families.
     let shared_projection_days = projection_days
         .saturating_mul(3)
         .min(u32::from(max_consequence_horizon_days))
@@ -119,11 +116,8 @@ pub(crate) fn probe_candidates_with_parallelism(
                         family_scores.push(candidate.score);
                     }
                     viable_options.push(evaluated.option);
-                    // Commit the highest-ranked viable substantive action,
-                    // not merely the first viable one: probe order is
-                    // kind-diversity-first, so a rejected leader must not
-                    // suppress a viable variant with a better score. Ties
-                    // keep the earlier probed candidate, which is stable.
+                    // Select the highest-ranked viable action; probe order is kind-diversity-first.
+                    // Ties keep the earlier candidate for determinism.
                     if selected_substantive
                         .as_ref()
                         .is_none_or(|current: &Candidate| candidate.score > current.score)
@@ -207,8 +201,7 @@ pub(crate) fn probe_candidate(
     projection_days: u32,
 ) -> Result<CandidateProbeOutcome, GameplayHarnessError> {
     let mut probe = state.clone();
-    // The clone above is disposable, so the probe applies through the
-    // scratch entry and pays one campaign copy instead of two.
+    // Probe via the scratch entry to avoid a second deep copy of the campaign.
     match apply_player_command_scratch(registry, &mut probe, candidate.command.clone()) {
         Ok(_) => Ok(CandidateProbeOutcome::Viable {
             evaluated: Box::new(evaluate_viable_option(
@@ -253,10 +246,8 @@ pub(crate) fn probe_candidate_outcomes(
             .collect();
     }
 
-    // A campaign clone is self-contained but comparatively large. Cap nested
-    // workers so a high-core developer machine does not trade throughput for
-    // clone-memory churn; shared history text keeps each working copy modest,
-    // but eight concurrent branches still bound peak residency sensibly.
+    // Cap nested workers to bound clone-memory residency; each campaign clone shares history
+    // text but remains comparatively large.
     let worker_count = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(8)
@@ -3512,8 +3503,7 @@ pub(crate) fn has_acquisition_borrow_need(
         if business.owner_dynasty_id() == player_id {
             return false;
         }
-        let Ok(quote) =
-            quote_business_acquisition(registry, state, player_id, business.id())
+        let Ok(quote) = quote_business_acquisition(registry, state, player_id, business.id())
         else {
             return false;
         };

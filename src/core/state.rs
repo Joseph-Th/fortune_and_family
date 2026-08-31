@@ -677,8 +677,7 @@ impl<T: Clone> Clone for HistoryLog<T> {
         Self {
             base: self.base.clone(),
             tail: self.tail.clone(),
-            // A cloned log shares the same entry stream, so the memo state
-            // transfers verbatim and stays valid on both copies.
+            // Memo state copies verbatim; cloned log shares the same entry stream.
             checksum_len: AtomicU64::new(self.checksum_len.load(Ordering::Relaxed)),
             checksum_state: AtomicU64::new(self.checksum_state.load(Ordering::Relaxed)),
         }
@@ -720,13 +719,12 @@ impl<'a, T> Iterator for HistoryLogIter<'a, T> {
     }
 
     fn nth(&mut self, n: usize) -> Option<Self::Item> {
-        // Specialized so adapters like `Skip` position in constant time
-        // instead of walking the folded bulk one entry at a time.
+        // Constant-time positioning for adapters like `Skip`.
         let base_len = self.base.len();
         if n < base_len {
             return self.base.nth(n);
         }
-        // Skipping past every remaining base entry exhausts it outright.
+        // Exhaust the base slice before advancing the tail.
         let _ = self.base.nth(base_len);
         self.tail.nth(n - base_len)
     }
