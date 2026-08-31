@@ -2,7 +2,7 @@
 
 **BCA policy:** advisory
 
-This file is the execution card for repository work. [ARCHITECTURE.md](ARCHITECTURE.md) owns implementation structure and mutation contracts, [STATUS.md](STATUS.md) owns current capability, [TESTING.md](TESTING.md) owns test policy and completion gates, [DESIGN.md](DESIGN.md) owns product intent, and [GAMEPLAY_HARNESS.md](GAMEPLAY_HARNESS.md) owns harness report semantics. Root [`../AGENTS.md`](../AGENTS.md) owns workspace coordination, task leases, and filesystem hygiene.
+Execution card for repository work. [ARCHITECTURE.md](ARCHITECTURE.md) owns implementation structure and mutation contracts, [STATUS.md](STATUS.md) owns current capability and schemas, [TESTING.md](TESTING.md) owns test policy and completion gates, [DESIGN.md](DESIGN.md) owns product intent, and [GAMEPLAY_HARNESS.md](GAMEPLAY_HARNESS.md) owns harness report semantics. Root [`../AGENTS.md`](../AGENTS.md) owns workspace coordination, task leases, and filesystem hygiene.
 
 ## Profiles
 
@@ -10,11 +10,11 @@ This repository implements **Universal**, **Stateful Application**, **Determinis
 
 ## Procedure
 
-1. Inspect working-tree state (`git status --short`) and preserve unrelated concurrent work; do not treat another agent's dirty files as cleanup targets.
-2. Read [README.md](README.md), [STATUS.md](STATUS.md), and only the relevant section of [ARCHITECTURE.md](ARCHITECTURE.md) for the change.
-3. Identify the owning source module and sibling tests; trace the public entry point (`src/lib.rs` → `src/systems/*`) to canonical mutation and invariant validation.
-4. Identify the narrowest test that proves the change. Run it before editing only to reproduce a failure; otherwise run it once behavior is ready for proof.
-5. Use [TESTING.md](TESTING.md) to choose the smallest completion lane that owns the changed surface.
+1. Inspect working-tree state (`git status --short`) and preserve unrelated concurrent work.
+2. Read [README.md](README.md), [STATUS.md](STATUS.md), and the relevant section of [ARCHITECTURE.md](ARCHITECTURE.md).
+3. Trace the public entry point (`src/lib.rs` → `src/systems/*`) to the owning module, sibling tests, and invariant checks.
+4. Identify the narrowest test that proves the change. Run before editing only to reproduce a failure; otherwise run once behavior is ready.
+5. Select the smallest completion lane from [TESTING.md](TESTING.md) that owns the changed surface.
 6. Update the one document that owns any changed architecture, behavior, schema, API, command, harness, or scope contract.
 
 ## Primary owners
