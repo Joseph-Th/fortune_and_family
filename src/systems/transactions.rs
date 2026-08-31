@@ -481,10 +481,15 @@ pub fn validate_business_cash_transfer(
             business_id: to_business_id,
         });
     }
-    if source.cash() < amount {
+    // Portfolio transfers must not hollow out the operating reserve that daily
+    // purchase and production decisions rely on: a firm cannot be stripped below
+    // its policy floor and then claim it cannot afford inputs.
+    let reserve = source.policy.minimum_cash_reserve;
+    let spendable = source.cash().saturating_sub(reserve).max(Money::ZERO);
+    if spendable < amount {
         return Err(SimulationError::InsufficientBusinessCash {
             business_id: from_business_id,
-            available: source.cash(),
+            available: spendable,
             required: amount,
         });
     }
@@ -697,11 +702,18 @@ mod tests {
                 businesses.next().expect("target business must exist"),
             )
         };
-        let available = state
+        let cash = state
             .businesses()
             .get(from_business_id)
             .expect("source business must exist")
             .cash();
+        let reserve = state
+            .businesses()
+            .get(from_business_id)
+            .expect("source business must exist")
+            .policy
+            .minimum_cash_reserve;
+        let available = cash.saturating_sub(reserve).max(Money::ZERO);
         let required = Money::from_copper(i64::MAX);
         let before = state.clone();
 
@@ -862,12 +874,22 @@ mod tests {
             )
         };
         let amount = Money::from_copper(1);
+        // Source must cover its operating reserve plus the requested amount; the overflow
+        // error is about the target, so the source is funded accordingly.
+        let reserve = state
+            .businesses()
+            .get(from_business_id)
+            .expect("source business must exist")
+            .policy
+            .minimum_cash_reserve;
         state
             .businesses
             .get_mut(from_business_id)
             .expect("source business must exist")
             .finance
-            .cash = amount;
+            .cash = reserve
+            .saturating_add(amount)
+            .saturating_add(Money::from_copper(100));
         state
             .businesses
             .get_mut(to_business_id)

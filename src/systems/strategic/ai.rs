@@ -80,7 +80,17 @@ pub(crate) fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), Simula
             let family_members = state
                 .family_councils
                 .get(&dynasty.id())
-                .map_or(0, |council| council.members.len());
+                .map_or(0, |council| {
+                    council
+                        .members
+                        .iter()
+                        .filter(|member_id| {
+                            state.characters.get(**member_id).is_some_and(|character| {
+                                character.status() == CharacterStatus::Active
+                            })
+                        })
+                        .count()
+                });
             let business_count = state
                 .businesses
                 .ids_for_owner(dynasty.id())

@@ -33,9 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod purchases;
 #[allow(unused_imports)]
-pub(crate) use purchases::{
-    BusinessPurchaseLine, BusinessPurchasePlan, apply_business_purchases, decide_business_purchases,
-};
+pub(crate) use purchases::{apply_business_purchases, decide_business_purchases};
 
 #[derive(Clone, Debug)]
 struct ProductionLine {
@@ -2950,12 +2948,15 @@ fn generate_next_heir(
     } else {
         // A generated sibling must always be younger than the incoming head,
         // even when forced succession elevates a child or adolescent heir.
+        // Enforce at least a one-year gap so siblings are not 1 day apart,
+        // which would be biologically incoherent and could create a minor
+        // heir whose sibling is practically the same age.
         (
             state
                 .clock
                 .day()
                 .saturating_sub(18 * 360)
-                .max(incoming_birth_day.saturating_add(1)),
+                .max(incoming_birth_day.saturating_add(360)),
             FamilyLinkKind::Sibling,
         )
     };
