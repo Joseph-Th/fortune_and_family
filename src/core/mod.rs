@@ -1,11 +1,18 @@
 //! Core facade: persistent records, state container, and checksum folding.
 //!
 //! Purpose: re-export the durable types that systems and adapters need
-//! without exposing internal module layout.
+//! without exposing internal module layout, so callers import `crate::core::*`
+//! rather than reaching into `records`/`state`/`extended` directly.
 //! Owns: module wiring only (`records`, `state`, `extended`, `checksum`).
-//! Reads/Mutates: as its submodules.
-//! Does not own: business rules, persistence, or projection.
-//! Focused tests: as submodules (`state_tests.rs`, persistence, invariants).
+//! Reads/Mutates: as its submodules (this file itself holds no state).
+//! Does not own: business rules, persistence, or projection — it only
+//! types the state those layers operate on.
+//! Canonical operations: re-export only; callers use `AppState`, store
+//! accessors, `HistoryLog`, and record getters defined in submodules.
+//! Relevant invariants: none directly; enforces facade boundary so internal
+//! layout can change without touching callers.
+//! Focused tests: as submodules (`state_tests.rs`, persistence round-trip,
+//! invariant batteries).
 
 mod checksum;
 mod extended;

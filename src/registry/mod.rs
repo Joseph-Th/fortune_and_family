@@ -2,18 +2,25 @@
 //!
 //! Purpose: define the single shared `Registry` that all simulation,
 //! bootstrap, command, and projection paths read, plus its deterministic
-//! `fingerprint` used for save compatibility.
+//! `fingerprint` that binds saves to the exact definitions they were built
+//! against.
 //! Owns: `ScenarioDef` / `DistrictDef` / `GoodDef` / `RecipeDef` /
-//! `InstitutionDef`, dense typed-ID indexing, `guild_for_recipe`, and
-//! `build_rivergate_registry` assembly.
-//! Reads: nothing.
-//! Mutates: nothing (immutable after construction).
-//! Does not own: mutable campaign state or business rules.
-//! Invariants: dense 0..N indexing validated by `debug_assert!`; every
-//! recipe and institution reference checked at build; `fingerprint` covers
-//! all behavior-relevant defs in stable order.
-//! Focused tests: `src/registry/mod.rs::tests` duplicate-key, reference,
-//! chartered-guild coverage.
+//! `InstitutionDef`, dense 0..N typed-ID indexing, `guild_for_recipe`
+//! trade→guild mapping, `build_rivergate_registry` assembly, and the
+//! `DeterministicRegistryHasher` used for fingerprint and `SaveRevision`.
+//! Reads: nothing (definitions are authored, not loaded).
+//! Mutates: nothing after construction (builder pattern only during
+//! `build`; afterwards `Registry` is `&`-shared).
+//! Does not own: mutable campaign state, simulation rules, or persistence.
+//! Canonical operations: `build_rivergate_registry()` → `get_*` / `get_*_id`
+//! lookups → `fingerprint()` for save/load binding; builder `register_*`
+//! apis with duplicate-key and reference validation.
+//! Relevant invariants: dense 0..N indexing validated by `debug_assert!`;
+//! every recipe and institution reference checked at build; `fingerprint`
+//! covers all behavior-relevant defs in stable typed-ID order via FNV-1a;
+//! guild mapping is exhaustive and tested.
+//! Focused tests: `src/registry/mod.rs::tests` duplicate-key and reference
+//! validation, chartered-guild coverage, key-resolution round-trip.
 
 use crate::ids::{DistrictId, GoodId, InstitutionId, RecipeId};
 use crate::money::{Money, Quantity};

@@ -2,19 +2,27 @@
 //! that scheduled strategic systems mutate and invariants validate.
 //!
 //! Purpose: define durable record shapes for contracts, credit, property,
-//! employment, family, institutions, law, routes, crises, and outbox.
+//! employment, family governance, institutions, law, routes, crises, and
+//! outbox, so `src/systems/strategic/*` operates on typed state rather than
+//! untyped maps.
 //! Owns: every `*Status` / `*Kind` enum, `SupplyContract` / `Loan` /
-//! `Property` / `EmploymentAgreement` / `FamilyLink` / `InstitutionRuntime` /
-//! `CivicDebt` / `LegalCase` / `Crisis` / `OutboxMessage` etc. as pure
-//! data; helpers like `has_consistent_arrears` or labels.
-//! Reads: nothing.
-//! Mutates: nothing directly (systems in `src/systems/strategic/` mutate).
-//! Does not own: state container, indexes, persistence, or business rules.
-//! Invariants: every field is validated at persistence boundaries and by
-//! `src/systems/invariants.rs`; `Option` is explicit for optional
-//! relationships, no sentinel IDs.
+//! `Property` / `EmploymentAgreement` / `FamilyLink` / `FamilyCouncilState` /
+//! `InstitutionRuntime` / `CivicDebt` / `EnactedLaw` / `LegalCase` /
+//! `Crisis` / `OutboxMessage` etc. as pure data, plus helpers like
+//! `has_consistent_arrears`, `has_consistent_severity`, and `label()`.
+//! Reads: nothing (pure definitions).
+//! Mutates: nothing directly (systems in `src/systems/strategic/` own
+//! mutation; records validate via invariants on load).
+//! Does not own: `AppState` container, synchronized indexes, persistence, or
+//! business rules.
+//! Canonical operations: record construction, `status()`/`label()` queries,
+//! `has_consistent_*` validation predicates used by invariants.
+//! Relevant invariants: every numeric field is validated at persistence
+//! boundaries and by `src/systems/invariants.rs`; `Option` is explicit for
+//! optional relationships (no sentinel IDs); lifecycle/status transitions are
+//! validated where they mutate.
 //! Focused tests: `src/systems/strategic/strategic_tests.rs`, persistence
-//! and invariant batteries.
+//! numeric-range checks, and invariant batteries.
 
 use crate::ids::{
     BusinessId, CharacterId, CivicDebtId, ContractId, CrisisId, DistrictId, DynastyId,

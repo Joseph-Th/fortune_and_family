@@ -1,21 +1,33 @@
 //! Deterministic daily economic pipeline and 30-day/360-day coordinated cadence.
 //!
-//! Purpose: advance one campaign day through a fixed causal order
+//! Purpose: advance one campaign day through a fixed 18-step causal order
 //! (routes/laws/crises → purchases → production → sales → household
-//! consumption → maintenance → spoilage/pricing → weekly/monthly/annual
-//! strategic hooks → chronicle/audit → invariants).
+//! consumption → maintenance → spoilage/pricing → price controls → lifecycle
+//! → clock/expiry → weekly/monthly/annual strategic hooks → phase refresh →
+//! chronicle/audit → invariants). Order is a product contract.
 //! Owns: `advance_days` (clone-then-replace atomicity), `advance_days_scratch`
-//! (in-place variant for disposable branches), and the per-day decision/apply phases.
-//! `purchases.rs` owns input procurement; `market.rs` owns spoilage, pricing, and
-//! break-even floors; `mod.rs` owns workshop maintenance and lifecycle.
-//! Reads: `Registry`, `AppState` (mutable working copy).
-//! Mutates: the working `AppState`; callers observe all-or-nothing replacement.
-//! Does not own: scheduled weekly/monthly/annual rules (`strategic/*.rs`) or persistence.
-//! Determinism: ordered `BTreeMap` iteration, typed-ID tie-breakers, state-owned RNG; parallel
-//! `DailyCapacityScratch` preserves order.
-//! Invariants: maintenance and procurement respect cash reserves and tool scarcity with daily
-//! rotation for fair allocation; pricing enforces production break-even floors.
-//! Focused tests: `src/systems/simulation/simulation_tests.rs`, soak gates.
+//! (in-place variant for disposable harness branches), and the per-day
+//! decide/apply phases. `purchases.rs` owns input procurement;
+//! `market.rs` owns spoilage, pricing, and break-even floors; this file owns
+//! workshop maintenance and lifecycle.
+//! Reads: `Registry` (immutable defs) and `AppState` (mutable working copy).
+//! Mutates: the working `AppState`; callers observe all-or-nothing
+//! replacement — a failed day leaves the original unchanged.
+//! Does not own: scheduled weekly/monthly/annual rules (`strategic/*.rs`)
+//! or persistence/validation.
+//! Canonical operations: `advance_days(registry, &mut state, days)` and
+//! `advance_days_scratch` (disposable branch); `run_one_day` orchestrates
+//! the 18 steps with `decide_*` → `apply_*` per phase.
+//! Relevant invariants: maintenance and procurement respect cash reserves and
+//! tool scarcity with daily rotation for fair allocation; pricing enforces
+//! production break-even floors so operating income covers input costs;
+//! business status transitions respect cash/inventory thresholds with
+//! hysteresis; audit days are nondecreasing.
+//! Determinism: ordered `BTreeMap` iteration, typed-ID tie-breakers,
+//! state-owned RNG; `DailyCapacityScratch` preserves order under parallel
+//! planning.
+//! Focused tests: `src/systems/simulation/simulation_tests.rs`, soak and
+//! deterministic-replay gates.
 
 use super::SimulationError;
 use super::transactions::{

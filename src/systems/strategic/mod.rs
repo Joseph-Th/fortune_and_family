@@ -2,18 +2,29 @@
 //!
 //! Purpose: own the cross-domain scheduled layer that `advance_days` calls at
 //! fixed cadences (routes/crises daily, contracts/loans/employment weekly,
-//! district conditions/AI/selections monthly, succession annually).
+//! district conditions/AI/selections monthly, succession annually), so the
+//! daily economic pipeline stays focused on production/trade and the strategic
+//! layer owns every calendared transition.
 //! Owns: per-domain submodules (`contracts`, `credit`, `property`,
 //! `households`, `businesses`, `labor`, `offices`, `ai`, `legal_cases`,
 //! `crises`, `initialization`) behind one facade; shared relationship/law/
-//! information helpers used by several submodules.
+//! information helpers and `DailyCapacityScratch`-derived scheduling.
 //! Reads/Mutates: `AppState` via each subdomain; `DailyCapacityScratch` is
-//! collected once per phase for deterministic sharing.
-//! Does not own: daily economic pipeline (`simulation/mod.rs`) or command
-//! validation (`commands/*`).
-//! Invariants: weekly due dates stay settleable within the coming fortnight;
-//! monthly district/rent/public-work drifts validate against shared helpers.
-//! Focused tests: `src/systems/strategic/strategic_tests.rs`, soak gates.
+//! collected once per day-phase for deterministic sharing across purchases,
+//! production, sales, and strategic reads.
+//! Does not own: daily economic pipeline (`simulation/mod.rs`) or player-
+//! command validation (`commands/*`), though strategic helpers quote and
+//! validate those commands.
+//! Canonical operations: `run_daily_strategic_systems` →
+//! `run_weekly_strategic_systems` → `run_monthly_strategic_systems` →
+//! `run_annual_strategic_systems`, each delegating to domain files; daily
+//! `expire_time_limited_state` for reports and directives.
+//! Relevant invariants: weekly due dates stay settleable within the coming
+//! fortnight (checked at persistence); monthly district/rent/public-work
+//! drifts validate against shared helpers; office duties net cost but
+//! stipend offsets; acknowledged-outbox pruning respects retention window.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs`, soak and
+//! gameplay gates.
 
 pub(crate) use super::SimulationError;
 pub(crate) use super::commands::CrisisResponse;

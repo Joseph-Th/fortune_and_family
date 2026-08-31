@@ -2,15 +2,24 @@
 //!
 //! Purpose: derive immutable read models (`StateSummary`, `CampaignProjection`)
 //! and a standalone HTML dashboard from `Registry` + `AppState` for CLI,
-//! dashboard, and gameplay observation.
-//! Owns: projection structs, `build_*_projection` assemblers, `CampaignProjection::attention`
-//! as the single canonical attention classification, and `render_campaign_html`.
-//! Reads: `Registry`, `AppState` (immutable).
-//! Mutates: nothing (adapters perform IO after projection).
+//! dashboard, and gameplay observation, with no mutation or domain rule
+//! reimplementation.
+//! Owns: projection structs (`DynastyProjection`, `MarketProjection`, etc.),
+//! `build_*_projection` assemblers, `CampaignProjection::attention` as the
+//! single canonical attention classification, and `render_campaign_html`
+//! with self-contained styling/assets.
+//! Reads: `Registry` and `AppState` immutably (single coherent snapshot).
+//! Mutates: nothing (adapters perform I/O after projection is built).
 //! Does not own: command validation, simulation, or persistence.
-//! Invariants: every projection derives from the same immutable snapshot;
-//! `attention` is produced once and formatted everywhere so CLI and dashboard agree.
-//! Focused tests: `src/projection_tests.rs`, CLI smoke `summary` / `dashboard`.
+//! Canonical operations: `build_state_summary` → `build_campaign_projection`
+//! → `render_campaign_html` (with attention items computed once and
+//! formatted identically for CLI and dashboard).
+//! Relevant invariants: every projection derives from the same immutable
+//! snapshot; `attention` is produced once and formatted everywhere so CLI
+//! and dashboard never diverge; no derived projection becomes an alternate
+//! source of truth.
+//! Focused tests: `src/projection_tests.rs` snapshot and HTML embedding,
+//! CLI smoke `summary` / `dashboard`.
 
 use crate::core::{
     AppState, BusinessStatus, CampaignPhase, CivicDebtStatus, ContractStatus, CrisisKind,

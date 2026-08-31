@@ -1,15 +1,25 @@
-//! Structural checksum folding shared by gameplay observation and history
-//! logs.
+//! Structural checksum folding shared by gameplay observation and history logs.
 //!
-//! Every `serde` callback writes a distinct type tag followed by fixed-width
+//! Purpose: give gameplay snapshots and `HistoryLog` streams a stable,
+//! content-sensitive fingerprint without depending on JSON formatting. Every
+//! `serde` callback writes a distinct type tag followed by fixed-width
 //! little-endian payload bytes into an FNV-1a fold, so two values collide
 //! only when their serialized shapes, field names, ordering, and contents all
 //! match. This keeps the guarantees — stable ordering in, stable checksum
 //! out, sensitive to any visited field — while removing number formatting,
 //! string escaping, and JSON framing from observation paths.
-//!
-//! Serialization of observed state is infallible, so the error slot exists
-//! only to satisfy the [`serde::ser::Serializer`] trait.
+//! Owns: `ChecksumFolder` (the `Serializer` impl) and the running FNV state.
+//! Reads: serialized content of whatever value is being folded.
+//! Mutates: the fold state only.
+//! Does not own: authoritative state, persistence, or RNG.
+//! Canonical operations: `ChecksumFolder::new()` → `value.serialize(&mut
+//! folder)` → `folder.finish()` / `finish_with_entry_count(n)` for
+//! history streams; incremental resume via `from_raw`/`raw`.
+//! Relevant invariants: serialization of observed state is infallible, so the
+//! error slot exists only to satisfy [`serde::ser::Serializer`]; tag + length
+//! prefixing keeps "ab"+"c" distinct from "a"+"bc".
+//! Focused tests: history checksum determinism and incrementality in
+//! `src/core/state_tests.rs`.
 
 use serde::Serialize;
 use serde::ser;

@@ -1,16 +1,24 @@
-//! Serializable deterministic randomness owned by `AppState`.
+//! Serializable deterministic randomness owned by `AppState` — the sole entropy source.
 //!
 //! Purpose: supply reproducible entropy for simulation, bootstrap, and
-//! gameplay-harness variation without touching OS or thread-local RNG.
-//! Owns: `DeterministicRng` state, its SplitMix-derived `next_u64`, and
-//! bounded helpers `range_u32` / `is_chance_success`.
+//! gameplay-harness variation without touching OS entropy, thread-local RNG,
+//! or wall-clock time. Every decision that needs randomness reads
+//! `AppState.rng` so a saved campaign resumes with identical future draws.
+//! Owns: `DeterministicRng` state, its SplitMix64-derived `next_u64` step,
+//! and bounded helpers `range_u32` / `is_chance_success`.
 //! Reads: nothing.
-//! Mutates: its own `state` (owned by `AppState.rng`).
-//! Does not own: clocks, registries, or domain decisions.
-//! Determinism: given the same seed, sequence of calls, and persisted
-//! state, every campaign reproduces bit-identically; `AppState` persists
-//! the RNG so continuation is exact.
-//! Focused tests: `src/rng.rs::tests` distinct streams, `src/simulation/*` determinism.
+//! Mutates: its own `state` (persisted inside `AppState.rng`; callers hold
+//! `&mut AppState` while drawing).
+//! Does not own: clocks, registries, market or business rules, or any
+//! domain decision that consumes the draw.
+//! Canonical operations: `seeded` → `next_u64` → `range_u32` /
+//! `is_chance_success` (every call advances the persisted stream).
+//! Relevant invariants: given the same seed and the same ordered call
+//! sequence, the stream is bit-identical across builds; `AppState`
+//! persistence includes the RNG word so continuation is exact; no fallback
+//! to OS entropy exists.
+//! Focused tests: `src/rng.rs::tests` distinct and identical streams,
+//! `src/simulation/*` cross-day determinism, persistence round-trip includes RNG.
 
 use serde::{Deserialize, Serialize};
 

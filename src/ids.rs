@@ -1,16 +1,25 @@
 //! Typed persistent identifiers for registry definitions and runtime records.
 //!
-//! Purpose: give every cross-subsystem reference a distinct type so a
-//! `DistrictId` cannot be confused with a `DynastyId` at compile time.
-//! Owns: all `*Id` newtypes, their ordering/hashing/display, and the
-//! `IdentifierAllocationError` variants used when a state-owned allocator
-//! exhausts its `u32` space.
+//! Purpose: give every cross-subsystem reference a distinct compile-time
+//! type so `DistrictId` cannot be confused with `DynastyId`, and make
+//! persistent relationships explicit `*Id` values rather than names or
+//! positional indexes.
+//! Owns: all `*Id` newtypes, their ordering/hashing/display/`serde` shape,
+//! and the `IdentifierAllocationError` variants used when a state-owned
+//! `NextIds` counter exhausts its `u32` space.
 //! Reads: nothing.
-//! Mutates: nothing (allocation mutates `NextIds` in `src/core/state.rs`).
-//! Does not own: state storage, registry definitions, or business rules.
-//! Invariants: every `*Id` is `Copy + Ord + Hash` so it can serve as a
-//! stable deterministic tie-breaker; serialized shape is transparent `u32`.
-//! Focused tests: `src/core/state_tests.rs` allocation and staleness.
+//! Mutates: nothing directly (allocation mutates `NextIds` in
+//! `src/core/state.rs`; IDs themselves are value types).
+//! Does not own: state storage, registry definitions, or domain validation.
+//! Canonical operations: `*Id::new(value)` ↔ `*Id::value()` (transparent
+//! `u32` round-trip), display as decimal, ordered use as `BTreeMap` keys
+//! and deterministic tie-breakers.
+//! Relevant invariants: every `*Id` is `Copy + Ord + Hash + Eq` so it can
+//! serve as a stable deterministic tie-breaker; serialized shape is
+//! transparent `u32`; IDs never cross `NextIds` exhaustion sentinel
+//! (`u32::MAX - 1` and `u32::MAX` are invalid allocator states).
+//! Focused tests: `src/core/state_tests.rs` allocation, exhaustion, and
+//! staleness; `src/persistence_tests.rs` typed-ID recovery.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

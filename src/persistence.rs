@@ -1,20 +1,30 @@
 //! Current-schema JSON persistence with release validation and atomic staging.
 //!
 //! Purpose: own the only durable write path (`save_state*`) and read path
-//! (`load_state*`), with schema/current-only policy, registry-fingerprint
+//! (`load_state*`), with current-schema-only policy, registry-fingerprint
 //! binding, 256 MiB bound, duplicate-member rejection, and parent-dir
-//! durability distinction (`SaveOutcome`).
+//! durability distinction (`SaveOutcome::Committed` vs
+//! `CommittedWithDegradedDurability`).
 //! Owns: `MAX_SAVE_FILE_BYTES`, `SaveRevision` CAS tokens, atomic
-//! same-directory temp+`persist` + `sync_all`, and `validate_state` layering
-//! (schema, scenario, refs, indexes, ranges, phases, allocators).
-//! Reads: `AppState`, `Registry` fingerprint.
-//! Mutates: filesystem at the supplied path (staging then visibility commit).
-//! Does not own: domain rules (validates via invariants/core validators) or
-//! UI formatting.
-//! Invariants: exact current-schema round trip; older/future/missing schemas
-//! rejected; non-regular or oversized inputs rejected before parsing;
-//! history order preserved by `HistoryLog` serialization.
-//! Focused tests: `src/persistence_tests.rs`, CLI `validate` smoke.
+//! same-directory temp + `persist` + `sync_all`, `write_generated_file` for
+//! derived artifacts, and `validate_state` layering (schema, scenario,
+//! definition refs, primary/strategic records, numeric ranges, phases,
+//! allocators).
+//! Reads: `AppState` (serialized) and `Registry` fingerprint.
+//! Mutates: filesystem at the supplied path (staging then atomic visibility
+//! commit at `persist`; directory sync is the durability boundary).
+//! Does not own: domain rules (validates via `src/systems/invariants.rs` and
+//! core validators) or UI formatting.
+//! Canonical operations: `save_state` / `save_state_new` / `save_state_cas`
+//! (with `SaveRevision` optimistic concurrency) → `load_state` /
+//! `load_state_with_revision` with bounded, duplicate-rejecting, schema-
+//! probing read; `write_generated_file` for HTML/report staging.
+//! Relevant invariants: exact current-schema round trip; older/future/
+//! missing schemas rejected; non-regular or oversized inputs rejected before
+//! parsing; history order preserved by `HistoryLog` serialization; registry
+//! fingerprint mismatch fails closed.
+//! Focused tests: `src/persistence_tests.rs` round-trip, rejection, CAS, and
+//! atomic-write batteries; CLI `validate` smoke.
 
 use crate::core::{
     AppState, AuditKind, CURRENT_SCHEMA_VERSION, FamilyLinkKind, InformationTarget, LegalCaseKind,

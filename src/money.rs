@@ -1,18 +1,25 @@
 //! Fixed-point economic arithmetic for every simulation and command path.
 //!
 //! Purpose: represent money (`Money`, copper = 1/100 cr) and quantities
-//! (`Quantity`, milliunits) without floating-point nondeterminism or
-//! truncation that silently makes transfers free.
-//! Owns: `Money` / `Quantity`, ratio helpers (`saturating_mul_ratio`,
-//! `saturating_mul_ratio_ceil_nonnegative`, `ceil_div_*`), `cost_for`,
-//! `affordable_quantity`, and wide-intermediate overflow discipline.
+//! (`Quantity`, milliunits) without floating-point nondeterminism, hidden
+//! truncation, or intermediate overflow that silently makes transfers free.
+//! Owns: `Money` / `Quantity` value types, ratio helpers
+//! (`saturating_mul_ratio`, `saturating_mul_ratio_ceil_nonnegative`,
+//! `ceil_div_*`), `cost_for` / `checked_cost_for` / `affordable_quantity`,
+//! and the `i128` wide-intermediate overflow discipline.
 //! Reads: nothing.
-//! Mutates: nothing (value types).
-//! Does not own: market pricing, budgets, or persistence.
-//! Invariants: `cost_for` never undercharges positive fractional copper;
-//! `affordable_quantity` stays affordable under `cost_for`; ratios use
-//! `i128` intermediates then saturate only the final `i64`.
-//! Focused tests: `src/money.rs::tests`, persistence numeric-range checks.
+//! Mutates: nothing (copy value types).
+//! Does not own: market pricing, budget policy, or persistence I/O.
+//! Canonical operations: `cost_for(quantity, unit_price)` with ceiling on
+//! fractional copper → `affordable_quantity(cash, unit_price)` stays within
+//! `cost_for`; `saturating_mul_ratio` with single final saturation; `Money`
+//! / `Quantity` checked vs saturating arithmetic.
+//! Relevant invariants: `cost_for` never undercharges positive fractional
+//! copper; `affordable_quantity` stays affordable under `cost_for`; ratios
+//! use `i128` intermediates then saturate only the final `i64` narrowing;
+//! display preserves `cr`/milliunit units explicitly.
+//! Focused tests: `src/money.rs::tests` rounding/overflow/affordability,
+//! market-trade value overflow, persistence numeric-range checks.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

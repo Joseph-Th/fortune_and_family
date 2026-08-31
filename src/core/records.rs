@@ -1,15 +1,27 @@
 //! Core population, economic, and chronicle records owned by `AppState`.
 //!
 //! Purpose: define the durable shape of characters, dynasties, households,
-//! businesses, market quotes, chronicle, and audit events.
+//! businesses, market quotes, chronicle, and audit events that every other
+//! system reads and mutates through `AppState`.
 //! Owns: record structs (`Character`, `Dynasty`, `Household`, `Business`,
-//! `MarketState` …), lifecycle/status enums, `AuditSubject` semantics.
-//! Reads: nothing.
-//! Mutates: only through store methods on `AppState`; systems validate first.
-//! Does not own: state container, indexes, persistence, or business rules.
-//! Invariants: private fields, explicit `Option` relations, lifecycle-
-//! membership coherence validated by `src/systems/invariants.rs`.
-//! Focused tests: `src/core/state_tests.rs`, persistence and invariant batteries.
+//! `MarketState`, `ChronicleEntry`, `AuditRecord` …), lifecycle/status
+//! enums, `CampaignPhase`, `StartingBackground`, and `AuditSubject` typed
+//! subject text.
+//! Reads: nothing (pure data definitions).
+//! Mutates: only through store methods on `AppState`; systems validate every
+//! reference, lifecycle, and numeric bound before mutation.
+//! Does not own: state container, synchronized indexes, persistence I/O, or
+//! business rules — those live in `state.rs`, `persistence.rs`, and
+//! `src/systems/*`.
+//! Canonical operations: record construction during bootstrap, field access
+//! via typed getters (`character.id()`, `business.cash()`, etc.), inventory
+//! `add`/`remove` with checked arithmetic.
+//! Relevant invariants: private fields enforce construction through owners;
+//! explicit `Option` for optional relations (no sentinel IDs); lifecycle-
+//! membership coherence validated by `src/systems/invariants.rs`;
+//! `AuditSubject` carries typed segment parsing, not raw string matching.
+//! Focused tests: `src/core/state_tests.rs`, persistence round-trip, and
+//! invariant batteries; `audit_subject_tests` for typed parsing.
 
 use crate::ids::{
     BusinessId, CharacterId, ChronicleEntryId, DistrictId, DynastyId, GoodId, InstitutionId,

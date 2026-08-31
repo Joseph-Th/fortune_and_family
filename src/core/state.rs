@@ -3,17 +3,28 @@
 //! Purpose: own the single serializable `AppState` that determines every
 //! future simulation step, plus the synchronized `CharacterStore` /
 //! `BusinessStore` / `HouseholdStore` indexes and the cheap-clone
-//! `HistoryLog<T>` / `CampaignEvidenceMemo` derivations.
-//! Owns: `AppState`, `SimulationClock`, `NextIds` allocation, store
-//! insert/transfer/lookup, `HistoryLog` copy-on-write + incremental
-//! checksum, and `validate_next_ids`.
-//! Reads: registry fingerprint (validated at bootstrap/load).
-//! Mutates: its own stores and logs through validated system calls.
-//! Does not own: domain rules, projection, or persistence IO.
-//! Invariants: every consequential fact has one owner; indexes mirror
-//! records; RNG and generated records required for continuation are persisted;
-//! `PartialEq` excludes derivation memos.
-//! Focused tests: `src/core/state_tests.rs`, invariant and persistence batteries.
+//! `HistoryLog<T>` / `CampaignEvidenceMemo` derivations. This is the sole
+//! authoritative owner of mutable campaign truth; every other layer reads or
+//! mutates through it.
+//! Owns: `AppState` (every persisted field), `SimulationClock`, `NextIds`
+//! allocation with exhaustion sentinels, store `insert`/`transfer`/`lookup`
+//! with index coherence, `HistoryLog` copy-on-write + incremental checksum,
+//! and `validate_next_ids` allocator consistency.
+//! Reads: registry fingerprint (validated at bootstrap/load before use).
+//! Mutates: its own stores and logs exclusively through validated system
+//! calls (stores assert uniqueness and index alignment).
+//! Does not own: domain rules (systems), projection, persistence I/O, or
+//! HTML rendering.
+//! Canonical operations: `AppState` construction via `src/systems/bootstrap`,
+//! `HistoryLog::push`/`iter`/`retain` with cheap clone sharing, `NextIds`
+//! `try_*` allocation, and `validate_next_ids` covering every ID class.
+//! Relevant invariants: every consequential fact has one owner; indexes
+//! mirror records (store methods assert alignment); RNG and every generated
+//! record required for deterministic continuation are persisted;
+//! `PartialEq` excludes pure derivation memos (`CampaignEvidenceMemo`,
+//! checksum) so equality means persisted-state equality.
+//! Focused tests: `src/core/state_tests.rs` store coherence and allocation,
+//! invariant and persistence batteries, clone-cheapness.
 
 use super::{
     AiObjective, AuditRecord, Business, Character, ChronicleEntry, CivicDebt, Crisis,

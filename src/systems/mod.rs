@@ -4,15 +4,27 @@
 //! invariants | legal | progression | simulation | strategic | transactions`)
 //! behind one import surface, expose shared constants/helpers
 //! (`capacity_weighted_route_disruption`, `DailyCapacityScratch`,
-//! `OfficePower::*` derivation), and re-export the handful of symbols the
-//! CLI, gameplay harness, and projection need.
+//! `OfficePower::*` derivation, scheduling predicates), and re-export the
+//! handful of symbols the CLI, gameplay harness, and projection need. This is
+//! the single discovery point for system ownership.
 //! Owns: subsystem module wiring and the shared scheduling/employment/route
-//! math that multiple domains read.
-//! Reads/Mutates: as its submodules (this file itself owns no domain state).
-//! Does not own: any single domain's mutation (each subsystem owns its own).
-//! Invariants: `OFFICE_TERM_DAYS` / `OFFICE_VACANCY_RETRY_DAYS` and weekly
-//! settleability are canonical; callers reuse them rather than re-deriving.
-//! Focused tests: as submodules (`simulation_tests`, `strategic_tests`, `commands_tests`).
+//! math that multiple domains read (weekly settleability, directive expiry,
+//! rent index bounds, worker-capacity helpers).
+//! Reads/Mutates: as its submodules (this file itself owns no domain state;
+//! re-exports are pass-through).
+//! Does not own: any single domain's mutation (each subsystem owns its own
+//! validation → commit path).
+//! Canonical operations: `build_new_game` (bootstrap), `apply_player_command`
+//! / `apply_player_command_scratch` (commands), `advance_days` /
+//! `advance_days_scratch` (simulation), persistence `validate_invariants`;
+//! scheduling helpers `is_settleable_weekly_due_day` and
+//! `is_valid_*` used by persistence validation.
+//! Relevant invariants: `OFFICE_TERM_DAYS` / `OFFICE_VACANCY_RETRY_DAYS` and
+//! weekly settleability are canonical — callers reuse them rather than
+//! re-deriving; route disruption weighting is centralized so household income,
+//! crises, and trade share one formula.
+//! Focused tests: as submodules (`simulation_tests`, `strategic_tests`,
+//! `commands_tests`) plus facade unit tests for scheduling predicates.
 
 use crate::ids::{CharacterId, RecipeId};
 use crate::registry::Registry;

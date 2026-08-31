@@ -1,23 +1,34 @@
 //! Deterministic gameplay harness — the automated behavior-evaluation layer.
 //!
 //! Purpose: drive exhaustive `build_new_game` → `apply_player_command` →
-//! `advance_days` loops through the canonical public pipelines (no direct
-//! record patching) to produce a `GameplayHarnessReport` that is the
+//! `advance_days` loops exclusively through canonical public pipelines (no
+//! direct record patching) to produce a `GameplayHarnessReport` that is the
 //! machine contract for reachability/variety/interconnection/feedback/
-//! resilience scores and findings.
+//! resilience scores and findings. Every campaign is an independent
+//! counterfactual experiment.
 //! Owns: `GameplayHarnessConfig`/`Report`, `GameplayCommandKind` (32 kinds)
 //! / `GameplayDomain` (17 domains), the `ALL_COMMAND_KINDS`/`ALL_DOMAINS`
 //! exhaustive catalogs, report schema version, and re-exports of the seven
-//! internal submodules.
-//! Reads: `Registry`, `AppState` via lib entry points; gameplay tests use
-//! `advance_days` through this facade.
-//! Mutates: nothing directly; harness mutates cloned working states.
-//! Does not own: simulation or command policy (it validates through them)
-//! or UI prose (render is a presentation layer over structured facts).
-//! Invariants: every report lists both observed and intentionally unobserved
-//! state components; findings are derived facts, not prose; persona variation
-//! stays behind `apply_player_command` boundaries.
-//! Focused tests: `src/gameplay_tests.rs`, `bash scripts/test.sh gameplay`.
+//! internal submodules (`candidates`, `harness`, `persona`, `findings`,
+//! `scoring`, `types`, `render`).
+//! Reads: `Registry` (immutable) and `AppState` via `lib.rs` entry points;
+//! gameplay tests use `advance_days` through this facade.
+//! Mutates: nothing directly; harness mutates cloned working states on
+//! isolated branches (action vs baseline) and never patches authoritative
+//! records.
+//! Does not own: simulation or command policy (it validates through them) or
+//! UI prose (render is a presentation layer over structured facts).
+//! Canonical operations: `GameplayHarnessConfig::default` →
+//! `run_gameplay_harness` → `GameplayHarnessReport` → `render_gameplay_report`
+//! / JSON; decision cycle `capture → generate → rank → probe (clone) →
+//! select → commit → advance action + baseline → attribute → score`.
+//! Relevant invariants: bounded work (`max_candidate_probes`, horizons,
+//! `trace_limit`); every report lists both observed and intentionally
+//! unobserved state components; findings are derived facts, not prose;
+//! persona variation stays behind `apply_player_command` boundaries;
+//! `GAMEPLAY_REPORT_SCHEMA_VERSION` bumps on any semantic change.
+//! Focused tests: `src/gameplay_tests.rs`, `bash scripts/test.sh gameplay`
+//! (36+3 campaigns) and `gameplay-audit`.
 
 use crate::core::{
     AppState, AuditKind, AuditRecord, AuditSubject, BusinessStatus, CharacterStatus,
