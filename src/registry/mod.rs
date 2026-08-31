@@ -889,7 +889,7 @@ fn register_rivergate_goods(builder: &mut RegistryBuilder) -> RivergateGoods {
             "tools",
             "Tools",
             GoodCategory::Tool,
-            Money::from_copper(110),
+            Money::from_copper(150),
             Quantity::from_units(180),
             0,
         ),
@@ -982,9 +982,9 @@ fn register_material_recipes(builder: &mut RegistryBuilder, goods: RivergateGood
             (goods.iron, Quantity::from_units(3)),
             (goods.charcoal, Quantity::from_units(2)),
         ],
-        (goods.tools, Quantity::from_units(4)),
-        Money::from_copper(145),
-        12,
+        (goods.tools, Quantity::from_units(5)),
+        Money::from_copper(115),
+        10,
     );
 }
 

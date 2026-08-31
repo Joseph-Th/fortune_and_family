@@ -170,6 +170,66 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
         unique_crisis_kinds,
         aggregate.interactions.len()
     );
+    // Background balance at a glance: margin spread surfaces trade profitability
+    // divergence within the evaluated horizon without requiring a separate
+    // 10-year matrix. Wealth rank shows whether early capital lets the player
+    // compete.
+    {
+        use std::collections::BTreeMap;
+        let mut by_bg: BTreeMap<crate::core::StartingBackground, (i128, usize, i64)> =
+            BTreeMap::new();
+        for c in &report.campaigns {
+            let margin = c
+                .end
+                .player_business_lifetime_revenue
+                .copper()
+                .saturating_sub(c.end.player_business_lifetime_costs.copper());
+            let entry = by_bg.entry(c.background).or_insert((0, 0, 0));
+            entry.0 = entry.0.saturating_add(i128::from(margin));
+            entry.1 += 1;
+            entry.2 = entry.2.saturating_add(c.end.player_treasury.copper());
+        }
+        let mut bg_line = String::new();
+        for (bg, (total_margin, count, total_treas)) in by_bg {
+            let avg_margin = Money::from_copper(
+                i64::try_from(total_margin / i128::from(count as i64)).unwrap_or(0),
+            );
+            let avg_treas = Money::from_copper(total_treas / i64::try_from(count).unwrap_or(1));
+            let _ = write!(
+                bg_line,
+                "{:?} margin {} treasury {} | ",
+                bg, avg_margin, avg_treas
+            );
+        }
+        if !bg_line.is_empty() {
+            let _ = writeln!(
+                output,
+                "  background economics (avg): {}",
+                bg_line.trim_end_matches(" | ")
+            );
+        }
+        let poorest = report
+            .campaigns
+            .iter()
+            .filter(|c| c.rival_context.player_treasury_rank == c.rival_context.dynasty_count)
+            .count();
+        let best_rank = report
+            .campaigns
+            .iter()
+            .map(|c| c.rival_context.player_treasury_rank)
+            .min()
+            .unwrap_or(0);
+        let dynasty_cnt = report
+            .campaigns
+            .first()
+            .map(|c| c.rival_context.dynasty_count)
+            .unwrap_or(0);
+        let _ = writeln!(
+            output,
+            "  wealth mobility: {poorest}/{} bottom-ranked | best rank {best_rank}/{dynasty_cnt}",
+            report.campaigns.len()
+        );
+    }
     let dominant_phase = aggregate
         .phase_stats
         .iter()

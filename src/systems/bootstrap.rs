@@ -244,8 +244,8 @@ fn insert_player_foundation(
             district_id,
             recipe_id,
             name: background.business_name().to_owned(),
-            cash: Money::from_copper(32_000),
-            capacity_batches_per_day: 2,
+            cash: Money::from_copper(36_000),
+            capacity_batches_per_day: 3,
         },
     );
     dynasty_id

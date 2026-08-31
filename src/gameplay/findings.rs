@@ -40,6 +40,8 @@ pub(crate) fn derive_findings(
     add_counterparty_risk_finding(campaigns, &mut findings);
     add_mature_capital_pressure_finding(campaigns, &mut findings);
     add_starting_trade_economic_balance_finding(campaigns, &mut findings);
+    add_early_background_imbalance_finding(campaigns, &mut findings);
+    add_wealth_rank_persistence_finding(campaigns, &mut findings);
     add_rival_commercial_pressure_finding(aggregate, campaigns, &mut findings);
     add_succession_cohesion_finding(campaigns, &mut findings);
     add_succession_political_recovery_finding(campaigns, &mut findings);
@@ -197,6 +199,126 @@ pub(crate) fn add_mature_capital_pressure_finding(
             "{} of {} mature campaigns ended with at least five times their starting treasury and at least 2,000 cr in liquid dynasty cash without ever entering player-borrowing delinquency or default; only {liquidators} of those campaigns needed to liquidate property. This is an anti-snowball warning: successful houses may be accumulating cash faster than business investment, credit, civic commitments, family strategy, and political obligations can absorb it.",
             financially_unpressured.len(),
             mature.len(),
+        ),
+    });
+}
+
+pub(crate) fn add_early_background_imbalance_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    let mut averages = Vec::new();
+    let backgrounds: BTreeSet<StartingBackground> = campaigns
+        .iter()
+        .map(|campaign| campaign.background)
+        .collect();
+    for background in backgrounds {
+        let sampled: Vec<_> = campaigns
+            .iter()
+            .filter(|campaign| {
+                campaign.background == background && campaign.simulated_days >= 1_080
+            })
+            .collect();
+        if sampled.len() < 4 {
+            continue;
+        }
+        let total_margin: i128 = sampled.iter().fold(0_i128, |sum, campaign| {
+            let margin = campaign
+                .end
+                .player_business_lifetime_revenue
+                .copper()
+                .saturating_sub(campaign.end.player_business_lifetime_costs.copper());
+            sum.saturating_add(i128::from(margin))
+        });
+        let avg_margin = total_margin / i128::try_from(sampled.len()).expect("count fits i128");
+        averages.push((background, avg_margin));
+    }
+    if averages.len() < 2 {
+        return;
+    }
+    let Some((strongest_background, strongest_avg)) =
+        averages.iter().max_by_key(|(_, avg)| *avg).copied()
+    else {
+        return;
+    };
+    let Some((weakest_background, weakest_avg)) =
+        averages.iter().min_by_key(|(_, avg)| *avg).copied()
+    else {
+        return;
+    };
+    let strongest_treasury = campaigns
+        .iter()
+        .filter(|c| c.background == strongest_background)
+        .map(|c| c.end.player_treasury.copper())
+        .sum::<i64>()
+        / i64::try_from(
+            campaigns
+                .iter()
+                .filter(|c| c.background == strongest_background)
+                .count(),
+        )
+        .unwrap_or(0);
+    let weakest_treasury = campaigns
+        .iter()
+        .filter(|c| c.background == weakest_background)
+        .map(|c| c.end.player_treasury.copper())
+        .sum::<i64>()
+        / i64::try_from(
+            campaigns
+                .iter()
+                .filter(|c| c.background == weakest_background)
+                .count(),
+        )
+        .unwrap_or(0);
+    let margin_spread = strongest_avg.saturating_sub(weakest_avg);
+    let treasury_spread = strongest_treasury.saturating_sub(weakest_treasury);
+    if margin_spread < 30_000 && treasury_spread < 50_000 {
+        return;
+    }
+    if weakest_avg < 0 && strongest_avg > 0 {
+        findings.push(GameplayFinding {
+            severity: GameplayFindingSeverity::Warning,
+            title: "Early background economics diverge sharply by trade".to_owned(),
+            evidence: format!(
+                "At 1080-day horizon, {strongest_background:?} averaged margin {} vs {weakest_background:?} at {} (spread {}), with treasury {} vs {}. A trade that is structurally unprofitable in the first three years creates a hidden difficulty mode rather than distinct pressures.",
+                Money::from_copper(i64::try_from(strongest_avg).expect("avg fits")),
+                Money::from_copper(i64::try_from(weakest_avg).expect("avg fits")),
+                Money::from_copper(i64::try_from(margin_spread).expect("spread fits")),
+                Money::from_copper(strongest_treasury),
+                Money::from_copper(weakest_treasury),
+            ),
+        });
+    }
+}
+
+pub(crate) fn add_wealth_rank_persistence_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if campaigns.len() < 8 {
+        return;
+    }
+    let dynasty_count = campaigns
+        .first()
+        .map_or(0, |c| c.rival_context.dynasty_count);
+    let poorest = campaigns
+        .iter()
+        .filter(|c| c.rival_context.player_treasury_rank == dynasty_count)
+        .count();
+    if scaled_ratio_usize(poorest, campaigns.len(), 100) < 75 {
+        return;
+    }
+    let best_rank = campaigns
+        .iter()
+        .map(|c| c.rival_context.player_treasury_rank)
+        .min()
+        .unwrap_or(dynasty_count);
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Player wealth stays persistently bottom-ranked".to_owned(),
+        evidence: format!(
+            "{poorest} of {} campaigns ended ranked {dynasty_count}/{dynasty_count} by treasury (poorest), with best rank {best_rank}/{dynasty_count}. Persistent bottom wealth suggests starting capital, early margins, or AI wealth scaling leaves little room to outcompete rivals within the evaluated horizon.",
+            campaigns.len()
         ),
     });
 }
