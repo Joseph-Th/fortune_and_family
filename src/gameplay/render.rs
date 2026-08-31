@@ -21,6 +21,7 @@ use crate::core::ChecksumFolder;
 pub fn render_gameplay_report(report: &GameplayHarnessReport) -> String {
     let mut output = String::new();
     render_report_header(report, &mut output);
+    render_player_fantasy_fidelity(report, &mut output);
     render_persona_summary(report, &mut output);
     render_phase_summary(report, &mut output);
     render_health_summary(report, &mut output);
@@ -35,6 +36,148 @@ pub fn render_gameplay_report(report: &GameplayHarnessReport) -> String {
     render_campaign_summaries(report, &mut output);
     render_decision_log(report, &mut output);
     output
+}
+
+pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, output: &mut String) {
+    let aggregate = &report.aggregate;
+    let total = report.campaigns.len().max(1) as f64;
+    let governance_share = aggregate
+        .phase_stats
+        .get(&GameplayPhase::DynasticGovernance)
+        .map(|s| s.decision_cycles as f64 / total / aggregate.campaigns as f64 * 100.0)
+        .unwrap_or(0.0);
+    let succession_reached = report
+        .campaigns
+        .iter()
+        .filter(|c| c.fantasy_arc.first_succession_day.is_some())
+        .count();
+    let city_shaping = report
+        .campaigns
+        .iter()
+        .filter(|c| c.fantasy_arc.first_city_shaping_action_day.is_some())
+        .count();
+    let avg_offices: f64 = report
+        .campaigns
+        .iter()
+        .map(|c| c.end.offices_held as f64)
+        .sum::<f64>()
+        / total;
+    let horizon_years = report.config.days_per_campaign as f64 / 360.0;
+    let horizon_label = if horizon_years < 5.0 {
+        "foundation-establishment"
+    } else if horizon_years < 8.0 {
+        "establishment-ascent"
+    } else {
+        "generation-scale"
+    };
+    let blocked_share = if aggregate.decision_cycles == 0 {
+        0
+    } else {
+        aggregate.blocked_cycles * 100 / u64::from(aggregate.decision_cycles)
+    };
+    let _ = writeln!(
+        output,
+        "Player fantasy fidelity ({} horizon, {:.1} years)",
+        horizon_label, horizon_years
+    );
+    let _ = writeln!(
+        output,
+        "  core loop: work → standing → power → continuity | city-shaping {}/{} ({:.0}%) | succession {}/{} ({:.0}%) | avg offices {:.1} | blocked choices {}%",
+        city_shaping,
+        report.campaigns.len(),
+        city_shaping as f64 / total * 100.0,
+        succession_reached,
+        report.campaigns.len(),
+        succession_reached as f64 / total * 100.0,
+        avg_offices,
+        blocked_share
+    );
+    let _ = writeln!(
+        output,
+        "  phase texture: foundation {} cycles | establishment {} | ascent {} | governance {} | legacy {} | quiet streak longest {} (ascent) / {} (governance)",
+        aggregate
+            .phase_stats
+            .get(&GameplayPhase::Foundation)
+            .map_or(0, |s| s.decision_cycles),
+        aggregate
+            .phase_stats
+            .get(&GameplayPhase::Establishment)
+            .map_or(0, |s| s.decision_cycles),
+        aggregate
+            .phase_stats
+            .get(&GameplayPhase::InstitutionalAscent)
+            .map_or(0, |s| s.decision_cycles),
+        aggregate
+            .phase_stats
+            .get(&GameplayPhase::DynasticGovernance)
+            .map_or(0, |s| s.decision_cycles),
+        aggregate
+            .phase_stats
+            .get(&GameplayPhase::SuccessionLegacy)
+            .map_or(0, |s| s.decision_cycles),
+        aggregate
+            .phase_stats
+            .get(&GameplayPhase::InstitutionalAscent)
+            .map_or(0, |s| s.longest_quiet_streak_cycles),
+        aggregate
+            .phase_stats
+            .get(&GameplayPhase::DynasticGovernance)
+            .map_or(0, |s| s.longest_quiet_streak_cycles),
+    );
+    let legal_active = aggregate
+        .causal_domain_changes
+        .get(&GameplayDomain::Legal)
+        .copied()
+        .unwrap_or(0);
+    let breach_total: u64 = report
+        .campaigns
+        .iter()
+        .map(|c| u64::from(c.end.attributed_breach_contracts))
+        .sum();
+    let cases_total: u64 = report
+        .campaigns
+        .iter()
+        .map(|c| u64::from(c.end.legal_cases_filed_total))
+        .sum();
+    let crisis_total: u64 = report
+        .campaigns
+        .iter()
+        .flat_map(|c| c.observed_crisis_kinds.iter())
+        .count() as u64;
+    let unique_crisis_kinds = report
+        .campaigns
+        .iter()
+        .flat_map(|c| c.observed_crisis_kinds.iter())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let _ = writeln!(
+        output,
+        "  emergent systems: breach contracts {} | legal cases {} | causal legal changes {} | crisis observations {} across {} kinds | interconnection {} edges",
+        breach_total,
+        cases_total,
+        legal_active,
+        crisis_total,
+        unique_crisis_kinds,
+        aggregate.interactions.len()
+    );
+    let dominant_phase = aggregate
+        .phase_stats
+        .iter()
+        .max_by_key(|(_, s)| s.substantive_actions)
+        .map(|(p, _)| p.label())
+        .unwrap_or("none");
+    let _ = writeln!(
+        output,
+        "  dynamism: dominant phase {} | governance share {:.1}% of decision life | fantasy governance {}",
+        dominant_phase,
+        governance_share,
+        if city_shaping > 0 {
+            "reached"
+        } else {
+            "unreached"
+        }
+    );
+    let _ = writeln!(output);
 }
 
 pub(crate) fn render_persona_summary(report: &GameplayHarnessReport, output: &mut String) {

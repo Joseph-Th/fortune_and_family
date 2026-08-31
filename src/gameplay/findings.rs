@@ -636,7 +636,7 @@ pub(crate) fn add_phase_quality_findings(
         PhaseQualityThresholds {
             minimum_action_share: 60,
             maximum_static_quiet_share: 35,
-            maximum_quiet_streak_cycles: 6,
+            maximum_quiet_streak_cycles: 9,
             minimum_multi_family_share: 25,
             minimum_average_choices_tenths: 25,
             minimum_average_families_tenths: 15,

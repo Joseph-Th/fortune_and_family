@@ -2900,24 +2900,24 @@ fn succession_shock(
     if formally_prepared {
         SuccessionShock {
             formally_prepared,
-            family_unity_loss: 1_000_u16
-                .saturating_add(succession_risk_basis_points / 5)
-                .min(2_500),
-            family_loyalty_loss: 350_u16
-                .saturating_add(succession_risk_basis_points / 12)
-                .min(1_200),
-            legitimacy_loss: succession_risk_basis_points / 8,
+            family_unity_loss: 1_600_u16
+                .saturating_add(succession_risk_basis_points / 4)
+                .min(3_200),
+            family_loyalty_loss: 500_u16
+                .saturating_add(succession_risk_basis_points / 8)
+                .min(1_500),
+            legitimacy_loss: succession_risk_basis_points / 6,
         }
     } else {
         SuccessionShock {
             formally_prepared,
-            family_unity_loss: 2_500_u16
-                .saturating_add(succession_risk_basis_points / 3)
-                .min(5_000),
-            family_loyalty_loss: 1_000_u16
-                .saturating_add(succession_risk_basis_points / 8)
-                .min(2_500),
-            legitimacy_loss: succession_risk_basis_points / 3,
+            family_unity_loss: 3_200_u16
+                .saturating_add(succession_risk_basis_points / 2)
+                .min(6_000),
+            family_loyalty_loss: 1_400_u16
+                .saturating_add(succession_risk_basis_points / 5)
+                .min(3_000),
+            legitimacy_loss: succession_risk_basis_points / 2,
         }
     }
 }

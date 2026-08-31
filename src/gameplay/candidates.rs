@@ -3325,6 +3325,7 @@ pub(crate) fn add_borrow_candidate(
         let fresh_lender_exists = state.dynasties.values().any(|dynasty| {
             dynasty.id() != player_id
                 && !credit_pair_blocks_new_loan(state, dynasty.id(), player_id)
+                && unresolved_default_owed_elsewhere(state, player_id, dynasty.id()).is_none()
                 && dynasty
                     .treasury()
                     .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
@@ -3348,6 +3349,9 @@ pub(crate) fn add_borrow_candidate(
             .values()
             .filter(|dynasty| dynasty.id() != player_id)
             .filter(|dynasty| !credit_pair_blocks_new_loan(state, dynasty.id(), player_id))
+            .filter(|dynasty| {
+                unresolved_default_owed_elsewhere(state, player_id, dynasty.id()).is_none()
+            })
             .filter(|dynasty| {
                 dynasty
                     .treasury()

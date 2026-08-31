@@ -140,7 +140,7 @@ impl Default for GameplayHarnessConfig {
             // civic drift) need several independent worlds to be meaningful.
             // Agent-choice claims still aggregate across every campaign.
             seed_count: 3,
-            days_per_campaign: 1_080,
+            days_per_campaign: 1_440,
             decision_interval_days: 30,
             max_candidate_probes: 16,
             max_consequence_horizon_days: 360,
