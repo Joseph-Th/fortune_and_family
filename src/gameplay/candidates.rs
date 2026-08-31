@@ -1202,7 +1202,7 @@ pub(crate) fn generate_reactive_candidates(
                     "respond {response:?} to the {:?} crisis (crisis {})",
                     crisis.kind, crisis.id
                 ),
-                crisis_response_bonus(persona, response),
+                crisis_response_bonus_for_state(state, persona, response),
             );
         }
     }
@@ -4598,7 +4598,7 @@ pub(crate) fn law_persona_bonus(persona: GameplayPersona, kind: LawKind) -> i64 
         GameplayPersona::Steward => match kind {
             LawKind::BreadPriceCeiling | LawKind::EmergencyImports => 220,
             LawKind::FireCode | LawKind::RentRestriction => 180,
-            LawKind::PublicDebtAuthorization => 100,
+            LawKind::PublicDebtAuthorization => 180,
             LawKind::ForeignMerchantToll
             | LawKind::InterestLimit
             | LawKind::GuildEntryRestriction => 0,
@@ -4614,7 +4614,7 @@ pub(crate) fn law_persona_bonus(persona: GameplayPersona, kind: LawKind) -> i64 
             | LawKind::PublicDebtAuthorization => 0,
         },
         GameplayPersona::PowerBroker => match kind {
-            LawKind::PublicDebtAuthorization => 260,
+            LawKind::PublicDebtAuthorization => 360,
             LawKind::BreadPriceCeiling
             | LawKind::ForeignMerchantToll
             | LawKind::InterestLimit
@@ -6685,9 +6685,8 @@ pub(crate) fn rank_adjustment(
 /// restoring the house's standing, not idling between crises. Without this
 /// nudge the legacy phase degenerates into crisis whack-a-mole while the
 /// commercial recovery routes sit unexercised. Acquisitions are deliberately
-/// excluded: buying a distressed house mid-recovery has repeatedly turned a
-/// profitable estate into a consolidated loss centre, so expansion stays
-/// persona-driven rather than phase-driven.
+/// included at a lower bonus than direct investment so a profitable recovery
+/// still favors operational repair before expansion.
 pub(crate) fn legacy_rebuild_priority(arc: &GameplayFantasyArc, kind: GameplayCommandKind) -> i64 {
     if arc.first_succession_day.is_none() {
         return 0;
@@ -6696,12 +6695,16 @@ pub(crate) fn legacy_rebuild_priority(arc: &GameplayFantasyArc, kind: GameplayCo
         GameplayCommandKind::InvestInBusiness
         | GameplayCommandKind::SecureSupply
         | GameplayCommandKind::BuyProperty
-        | GameplayCommandKind::AcquireBusiness => 620,
+        | GameplayCommandKind::RespondToCrisis => 820,
         GameplayCommandKind::CultivateInstitutionSupport
         | GameplayCommandKind::EndowInstitution
         | GameplayCommandKind::NominateForOffice
         | GameplayCommandKind::SetBusinessPolicy
-        | GameplayCommandKind::SetBusinessWages => 380,
+        | GameplayCommandKind::SetBusinessWages
+        | GameplayCommandKind::FundPublicWork
+        | GameplayCommandKind::EnactLaw
+        | GameplayCommandKind::ExerciseOfficePower => 520,
+        GameplayCommandKind::AcquireBusiness => 320,
         _ => 0,
     }
 }
@@ -7290,6 +7293,27 @@ pub(crate) fn crisis_response_bonus(persona: GameplayPersona, response: CrisisRe
             CrisisResponse::Relief | CrisisResponse::Reform | CrisisResponse::Suppress => 100,
         },
     }
+}
+
+pub(crate) fn crisis_response_bonus_for_state(
+    state: &AppState,
+    persona: GameplayPersona,
+    response: CrisisResponse,
+) -> i64 {
+    let base = crisis_response_bonus(persona, response);
+    if response == CrisisResponse::Exploit {
+        let food = crate::core::population_weighted_food_satisfaction_basis_points(
+            state.households.iter(),
+        )
+        .unwrap_or(10_000);
+        if food < 5_000 {
+            return base.saturating_sub(900);
+        }
+        if food < 7_000 {
+            return base.saturating_sub(400);
+        }
+    }
+    base
 }
 
 pub(crate) fn labor_responses(persona: GameplayPersona) -> [LaborResponse; 3] {

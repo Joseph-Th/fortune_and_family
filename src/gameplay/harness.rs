@@ -1055,7 +1055,7 @@ pub(crate) fn run_campaign(
 
 /// Small deterministic jitter for the ordinary decision cadence so the harness
 /// does not sample the same calendar offsets every campaign. The variation is
-/// derived from the campaign RNG and current state, stays within +/-15 days,
+/// derived from the campaign RNG and current state, stays within +/-22 days,
 /// never consumes the game RNG, and is clamped to at least 7 days to keep
 /// urgent sub-week steps meaningful.
 pub(crate) fn jittered_decision_interval(
@@ -1097,11 +1097,11 @@ pub(crate) fn jittered_decision_interval(
     )
     .unwrap_or(u64::MAX)
     .wrapping_mul(0xDA94_2042_E4DD_58B5);
-    // Widen to +/-15 days so campaigns sample different calendar offsets even
+    // Widen to +/-22 days so campaigns sample different calendar offsets even
     // when personas share a world seed. The variation stays inside one decision
     // cycle so the 30-day cadence remains legible while each world and persona
     // samples slightly different observation windows across campaigns.
-    let delta = i64::try_from(sample % 31).unwrap_or(0) - 15;
+    let delta = i64::try_from(sample % 45).unwrap_or(0) - 22;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         i64::from(base).saturating_add(delta).max(7) as u32
