@@ -5,7 +5,7 @@
 //! (`AcknowledgeNotification`) without leaking diagnostic oracles.
 //! Owns: `commission_information` / `leverage_information` / `acknowledge`,
 //! report `created_day` / `expires_day` windows, and audit/outbox.
-//! Reads: `AppState` information_reports + outbox (immutable for quote).
+//! Reads: `AppState` `information_reports` + outbox (immutable for quote).
 //! Mutates: `InformationReport` lifecycle on commission/leverage, outbox
 //! `acknowledged` flag, treasury via clearing-pool credit.
 //! Does not own: strategic information-report expiry (strategic owns) or

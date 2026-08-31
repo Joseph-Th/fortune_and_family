@@ -58,7 +58,7 @@ fast iteration (solo local machine):
   $0 gameplay            # ~8s warm (36 + 3 campaigns, 60k simulated days)
 
 knobs:
-  CIVIC_DYNASTY_JOBS=4           cap parallelism on a busy machine
+  CIVIC_DYNASTY_JOBS=4           cap cargo + harness parallelism (also caps gameplay campaign fan-out)
   CIVIC_DYNASTY_PROFILE=release  force release CLI for adapters/playtest
   CIVIC_DYNASTY_BINARY=/path/to/civic-dynasty  reuse a prebuilt CLI
   CIVIC_DYNASTY_SKIP_CLI_BUILD=1 skip CLI rebuild (lib-only iteration)

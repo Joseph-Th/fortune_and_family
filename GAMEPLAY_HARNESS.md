@@ -88,7 +88,16 @@ The decision interval is an observation cadence, not a limit on how many command
 
 ### Parallelism and world sampling
 
-Independent campaigns run in parallel with the machine's available parallelism; each campaign owns its `AppState` and the registry is immutable, so scheduling changes no results. Report ordering is fixed by seed, background, and persona. A single-campaign matrix stays serial and probes its counterfactuals on a small bounded worker set instead.
+Independent campaigns run in parallel with the machine's available parallelism
+capped by `CIVIC_DYNASTY_JOBS` when set
+(e.g. `CIVIC_DYNASTY_JOBS=4` keeps a busy desktop responsive);
+each campaign owns its `AppState` and the registry is immutable,
+so scheduling changes no results. Report ordering is fixed by seed,
+background, and persona. A single-campaign matrix stays serial and probes
+its counterfactuals on a small bounded worker set instead.
+The same `CIVIC_DYNASTY_JOBS` variable also caps `cargo --jobs`
+in `scripts/test.sh`, so one knob governs both build and harness
+parallelism for targeted, non-disruptive iteration.
 
 The default matrix samples three independent world seeds. Personas share a world whenever the seed is fixed, so world-content claims — crisis variety, counterparty failure rates, civic drift — need several worlds before "never detected" means anything. Agent-choice claims (persona variety, command coverage) aggregate across every campaign.
 

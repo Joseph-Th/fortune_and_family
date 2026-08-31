@@ -9,7 +9,7 @@
 //! Reads: `AppState` legal cases / loans / contracts / dynasties.
 //! Mutates: `LegalCase` filing + status, dynasty treasuries for damages /
 //! filing fees, market clearing pool for fees.
-//! Does not own: hearing/judgment/execution (strategic/legal_cases).
+//! Does not own: hearing/judgment/execution (`strategic/legal_cases`).
 //! Invariants: every case grounds to a real delinquent loan or breached
 //! contract; filing respects interval + reputation; settlement is the only
 //! path that fabricates no money.

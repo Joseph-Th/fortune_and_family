@@ -872,9 +872,13 @@ pub(crate) fn execute_campaigns(
             })
             .collect();
     }
-    let parallelism = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(work.len());
+    let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let capped = std::env::var("CIVIC_DYNASTY_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+        .unwrap_or(available);
+    let parallelism = capped.min(available).min(work.len());
     let chunks: Vec<&[CampaignWorkItem]> = work.chunks(work.len().div_ceil(parallelism)).collect();
     let results: Result<
         Vec<Result<GameplayCampaignReport, GameplayHarnessError>>,

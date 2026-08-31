@@ -23,7 +23,7 @@ This document defines test tiers, suite organization, assertion standards, and c
 | Focused harness run | `bash scripts/test.sh playtest [args...]` | <1s warm (debug) | Single campaign iteration (debug by default) |
 | Release gameplay gates | `bash scripts/test.sh gameplay` | ~8s warm | 36 + 3 campaigns, 60k days (release) |
 | Deep gameplay design audit | `bash scripts/test.sh gameplay-audit` | ~20s warm | Multi-seed / generation / credit stress |
-| Fast CI verification lane | `bash scripts/test.sh ci-verify` | ~10s | Format + clippy + lib + docs |
+| Fast CI verification lane | `bash scripts/test.sh ci-verify` | ~5s warm | Format + clippy + lib + docs + doc warnings |
 | Deep CI gates lane | `bash scripts/test.sh ci-gates` | ~1 min | Release + soaks + adapters + gameplay + audit |
 | Heavy release gates without audit | `bash scripts/test.sh slow` | ~40s | Release gates without security audit |
 | Full deep design gate | `bash scripts/test.sh deep` | ~1 min | slow + gameplay-audit |
@@ -37,7 +37,7 @@ On Windows without bash on PATH, every mode is also available through `.\scripts
 
 | Variable | Effect |
 |---|---|
-| `CIVIC_DYNASTY_JOBS=<n>` | Forwards `--jobs <n>` to every `cargo test` / `cargo build`; lower it to keep a busy machine responsive. |
+| `CIVIC_DYNASTY_JOBS=<n>` | Forwards `--jobs <n>` to every `cargo test` / `cargo build` and caps gameplay-harness campaign parallelism; lower it to keep a busy machine responsive. |
 | `CIVIC_DYNASTY_NEXTEST=1` | Runs library tests under `cargo-nextest` instead of plain `cargo test`: per-test isolation at some warm-run speed. |
 | `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` | Skips CLI rebuilds when iterating on library code only. |
 | `CIVIC_DYNASTY_PROFILE=release` | Makes `adapters`/`playtest` use a release binary. Gate lanes (`gameplay`, `ci-gates`, `slow`) always use release regardless. |
@@ -53,7 +53,21 @@ On Windows without bash on PATH, every mode is also available through `.\scripts
 - `release`: the everyday optimized profile for soaks and gameplay gates — `opt-level = 3`, 16 codegen units, incremental, no LTO, so a warm edited-file rebuild is ~1s while throughput stays within ~10% of peak and gameplay output is identical.
 - `release-max`: serialized single-unit + thin-LTO. Build only when peak performance itself is under measurement (`cargo build --profile release-max`).
 
-Build tuning for a solo local machine is intentionally minimal: `.cargo/config.toml` keeps `incremental = true` and `jobs = 0` (all cores), and `Cargo.toml` keeps 16 parallel codegen units in every profile. No remote cache or wrapper is required — warm `fast` is ~2s, `standard` is ~4s, and a focused `playtest` is <1s because the debug CLI stays hot until you need a release gate.
+Build tuning for a solo local machine is intentionally minimal:
+`.cargo/config.toml` keeps `incremental = true` and `jobs = 0` (all cores),
+and `Cargo.toml` keeps 16 parallel codegen units in every profile.
+No remote cache or wrapper is required — warm `fast` is ~2s, `standard` is ~4s,
+`ci-verify` is ~5s warm (incremental clippy <1s), and a focused `playtest` is <1s
+because the debug CLI stays hot until you need a release gate.
+Each lane reuses the same incremental cache; a one-line lib change rebuilds
+only that crate in ~1s, not the whole workspace.
+
+Targeted iteration: use `check` for syntax (<1s, no tests),
+`fast <filter>` for one domain (~2s), `standard` once behavior is ready (~5s).
+`adapters` and `gameplay` lanes reuse a single CLI build across sub-gates
+so you never pay one build per smoke group.
+`CIVIC_DYNASTY_JOBS=4` caps both cargo parallelism and harness campaign
+fan-out for a loaded machine.
 
 Plain `cargo test` shares campaign-fixture setup inside one process and is the fastest default runner. Long-running gameplay JSON assertions live in `scripts/check_gameplay.py`.
 
@@ -76,7 +90,7 @@ Optional hooks install with `bash scripts/install_hooks.sh`: pre-commit runs for
 | Soak | Long deterministic invariant and multi-generation behavior | Accumulating simulation changes | ~1s warm |
 | Gameplay | Release-mode systemic quality and succession gates | Cross-domain gameplay changes | ~8s |
 | Gameplay audit | Larger matrices for rare and mature behavior | Design review | ~20s |
-| CI verify | The exact fast CI verification lane | Reproducing the fast lane locally | ~10s |
+| CI verify | The exact fast CI verification lane | Reproducing the fast lane locally | ~5s warm |
 | CI gates | The deep CI lane; requires `cargo-audit` | Reproducing release, adapter, gameplay, and security gates | ~1 min |
 | Slow | Release gates without the security audit or design audit | Deep verification without the audit dependency | ~40s |
 | Deep | The complete design gate: slow gates plus gameplay audit | Design review and deepest verification | ~1 min |
