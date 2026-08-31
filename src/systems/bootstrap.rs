@@ -576,7 +576,7 @@ fn insert_household_groups(state: &mut AppState, registry: &Registry) {
             let income_multiplier = match social_class {
                 SocialClass::Laboring => 1,
                 SocialClass::Artisan => 2,
-                SocialClass::Merchant => 4,
+                SocialClass::Merchant => 3,
             };
             let household_id = state.next_ids.household();
             state.households.insert(Household {

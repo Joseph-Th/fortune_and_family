@@ -194,12 +194,33 @@ pub(crate) fn apply_banking_panic_losses(
                 .expect("total banking-panic loss must fit Money");
         }
     }
+    // Households also hold deposits in the same banking system: a panic that
+    // only hits business vaults while household savings sit untouched is
+    // incoherent and makes the crisis wealth-destroying for one sector only.
+    // Household exposure is half the business rate — personal savings are less
+    // leveraged than commercial operating cash — but still material so a panic
+    // tightens the whole city's liquidity, not just the workshop ledger.
+    for household in state.households.iter_mut() {
+        let loss = household
+            .cash
+            .saturating_mul_ratio(i64::from(severity), 2_000_000);
+        if loss > Money::ZERO {
+            household.cash = household
+                .cash
+                .checked_sub(loss)
+                .expect("banking-panic household loss must not exceed cash");
+            total_loss = total_loss
+                .checked_add(loss)
+                .expect("total banking-panic loss must fit Money");
+        }
+    }
     if total_loss > Money::ZERO {
         // Deposits flee to the pooled market sector rather than vanishing:
-        // every business debit keeps a credited counterparty. The loss is also
-        // deliberately kept out of `lifetime_costs`, which measures operating
-        // history — a one-day panic must not permanently brand a recovered
-        // house as structurally unprofitable for dividends and reputation.
+        // every business and household debit keeps a credited counterparty.
+        // The loss is also deliberately kept out of `lifetime_costs`, which
+        // measures operating history — a one-day panic must not permanently
+        // brand a recovered house as structurally unprofitable for dividends
+        // and reputation.
         credit_market_clearing_account(state, total_loss)?;
     }
     Ok(())

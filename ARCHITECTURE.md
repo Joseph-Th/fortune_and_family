@@ -56,7 +56,7 @@ Dependency direction is one way:
 | `src/systems/mod.rs` | Systems facade: entry-point re-exports, shared scheduling/worker helpers, and canonical `capacity_weighted_route_disruption` used by both daily household/trade availability and crisis detection. |
 | `src/systems/legal.rs` | Grounded debt and contract claims. |
 | `src/systems/progression.rs` | Monotonic campaign progression. |
-| `src/systems/simulation/` | Daily economic pipeline and time advancement: pipeline orchestration in `mod.rs` with business input procurement extracted to `purchases.rs` (further domain splits follow the same pattern). |
+| `src/systems/simulation/` | Daily economic pipeline and time advancement: pipeline orchestration in `mod.rs` with business input procurement (`purchases.rs`) and market spoilage/pricing (`market.rs`) extracted (further domain splits follow the same pattern). |
 | `src/systems/strategic/` | Scheduled strategic systems, split by domain (see below). |
 | `src/systems/transactions.rs` | Reusable validated transaction primitives. |
 | `src/systems/invariants.rs` | Runtime cross-record invariants. |
