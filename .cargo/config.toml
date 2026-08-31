@@ -2,7 +2,8 @@
 # all cores by default. This file stays minimal — no remote cache or wrappers
 # are required for fast iteration. Each profile in Cargo.toml keeps
 # `incremental = true` + 16 codegen units so an edited file rebuilds in ~1s
-# warm (check ~1-2s, fast ~2s, standard ~5s, playtest debug <1s).
+# warm (check ~1s, fast ~2s, standard ~4s, playtest debug <1s, gameplay
+# release ~16s warm for 60k simulated days).
 [build]
 # Pipelining lets Cargo start compiling dependents before dependencies finish,
 # shaving wall time on warm incremental builds without extra configuration.
@@ -13,4 +14,6 @@ incremental = true
 # Unset so Cargo defaults to all logical cores. Caps are opt-in:
 # `CIVIC_DYNASTY_JOBS=4` limits both `cargo --jobs` and the harness campaign
 # fan-out without editing this file. The harness reads the same variable at
-# runtime to avoid oversubscribing a busy machine.
+# runtime to avoid oversubscribing a busy machine. Single-threaded harnesses
+# (playtest with one campaign) stay serial and only parallelize candidate
+# probes when worthwhile.

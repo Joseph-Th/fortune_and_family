@@ -308,11 +308,11 @@ function Run-CliGroup([string]$Group) {
 
 function Run-GameplayGates {
     Ensure-CliBinary "release"
-    Run-Step "Gameplay quality gate" {
+    Run-Step "Gameplay quality gate (36 campaigns)" {
         & $env:CIVIC_DYNASTY_BINARY playtest --minimum-overall 75 --fail-on-critical --json --output target\gameplay-quality-gate.json
         if ($LASTEXITCODE -ne 0) { throw "Gameplay quality gate failed" }
     }
-    Run-Step "Generation-length gameplay gate" {
+    Run-Step "Generation-length gameplay gate (3 campaigns, 7200 days)" {
         & $env:CIVIC_DYNASTY_BINARY playtest --days 7200 --persona steward --background baker --trace-limit 20 --minimum-overall 75 --fail-on-critical --json --output target\gameplay-generation-gate.json
         if ($LASTEXITCODE -ne 0) { throw "Generation gameplay gate failed" }
     }
@@ -326,15 +326,15 @@ function Run-GameplayGates {
 function Run-GameplayAudit {
     Ensure-CliBinary "release"
     $python = Resolve-PythonInterpreter
-    Run-Step "Mature multi-seed gameplay audit" {
+    Run-Step "Mature multi-seed gameplay audit (2 seeds, 3600 days)" {
         & $env:CIVIC_DYNASTY_BINARY playtest --days 3600 --start-seed 1 --seeds 2 --trace-limit 30 --minimum-overall 75 --fail-on-critical --json --output target\gameplay-deep-audit.json
         if ($LASTEXITCODE -ne 0) { throw "Mature multi-seed gameplay audit failed" }
     }
-    Run-Step "Generation-length persona audit" {
+    Run-Step "Generation-length persona audit (4 personas, 7200 days)" {
         & $env:CIVIC_DYNASTY_BINARY playtest --days 7200 --persona steward --persona entrepreneur --persona power-broker --persona opportunist --background baker --trace-limit 30 --minimum-overall 75 --fail-on-critical --json --output target\gameplay-generation-matrix.json
         if ($LASTEXITCODE -ne 0) { throw "Generation persona audit failed" }
     }
-    Run-Step "Opportunist credit stress audit" {
+    Run-Step "Opportunist credit stress audit (2 seeds, 7200 days)" {
         & $env:CIVIC_DYNASTY_BINARY playtest --days 7200 --start-seed 1 --seeds 2 --persona opportunist --trace-limit 20 --minimum-overall 75 --fail-on-critical --json --output target\gameplay-credit-stress.json
         if ($LASTEXITCODE -ne 0) { throw "Opportunist credit stress audit failed" }
     }

@@ -55,7 +55,12 @@ fast iteration (solo local machine):
   # Release playtest for gate fidelity
   CIVIC_DYNASTY_PROFILE=release $0 playtest --days 360 --persona entrepreneur
   # Full release gates (only when needed)
-  $0 gameplay            # ~8s warm (36 + 3 campaigns, 60k simulated days)
+  $0 gameplay            # ~16s warm: 36 + 3 campaigns, 60k simulated days, one release build
+
+warm budgets (incremental, after first build):
+  check      ~1s    fast       ~2s    standard  ~4s
+  docs       ~1s    adapters   ~2s    playtest  <1s (debug)
+  ci-verify  ~6s    gameplay  ~16s    all      ~25s
 
 knobs:
   CIVIC_DYNASTY_JOBS=4           cap cargo + harness parallelism (also caps gameplay campaign fan-out)
@@ -134,8 +139,18 @@ ensure_cli_binary() {
       ;;
   esac
 
-  run_step "Build $requested_profile CLI once" \
-    cargo build --quiet --locked "${job_args[@]}" "${profile_args[@]}" --bin civic-dynasty
+  local build_log
+  local build_started=$SECONDS
+  build_log=$(mktemp)
+  printf '\n==> Build %s CLI once\n' "$requested_profile"
+  if ! cargo build --quiet --locked "${job_args[@]}" "${profile_args[@]}" --bin civic-dynasty >"$build_log" 2>&1; then
+    cat "$build_log" >&2
+    rm -f "$build_log"
+    printf '<== Build %s CLI once FAILED in %s\n' "$requested_profile" "$(format_duration "$((SECONDS - build_started))")" >&2
+    return 1
+  fi
+  rm -f "$build_log"
+  printf '<== Build %s CLI once passed in %s\n' "$requested_profile" "$(format_duration "$((SECONDS - build_started))")"
 
   local binary="target/$requested_profile/civic-dynasty"
   if [[ ! -x "$binary" && -x "${binary}.exe" ]]; then
@@ -383,7 +398,7 @@ run_docs() {
 }
 
 run_gameplay() {
-  run_step 'Gameplay quality gate' \
+  run_step 'Gameplay quality gate (36 campaigns)' \
     run_release_playtest \
       --minimum-overall 75 \
       --fail-on-critical \
@@ -394,7 +409,7 @@ run_gameplay() {
 run_generation_gameplay() {
   local python_command
   python_command=$(resolve_python) || return
-  run_step 'Generation-length gameplay gate' \
+  run_step 'Generation-length gameplay gate (3 campaigns, 7200 days)' \
     run_release_playtest \
       --days 7200 \
       --persona steward \
@@ -411,7 +426,7 @@ run_generation_gameplay() {
 run_gameplay_audit() {
   local python_command
   python_command=$(resolve_python) || return
-  run_step 'Mature multi-seed gameplay audit' \
+  run_step 'Mature multi-seed gameplay audit (2 seeds, 3600 days)' \
     run_release_playtest \
       --days 3600 \
       --start-seed 1 \
@@ -421,7 +436,7 @@ run_gameplay_audit() {
       --fail-on-critical \
       --json \
       --output target/gameplay-deep-audit.json
-  run_step 'Generation-length persona audit' \
+  run_step 'Generation-length persona audit (4 personas, 7200 days)' \
     run_release_playtest \
       --days 7200 \
       --persona steward \
@@ -434,7 +449,7 @@ run_gameplay_audit() {
       --fail-on-critical \
       --json \
       --output target/gameplay-generation-matrix.json
-  run_step 'Opportunist credit stress audit' \
+  run_step 'Opportunist credit stress audit (2 seeds, 7200 days)' \
     run_release_playtest \
       --days 7200 \
       --start-seed 1 \

@@ -28,10 +28,11 @@ thiserror = "2.0"
 
 # Solo-dev fast-iteration tuning: every profile keeps incremental compilation and
 # parallel codegen units so an edited file rebuilds in seconds, not minutes.
-# `dev`/`test` use opt-level 1 (dependencies at 2) so simulation-heavy tests
-# finish in seconds with identical assertions. `release` is the everyday harness
-# profile — full optimization without LTO, so gameplay gates stay fast on warm
-# rebuilds. Use `release-max` only when peak throughput itself is measured.
+# `dev`/`test` use opt-level 1 (dependencies at 2) so 980 library tests finish in
+# ~1.3s with identical assertions. `release` is the everyday harness profile —
+# full optimization without LTO, so gameplay gates stay fast on warm rebuilds
+# (incremental edited-file rebuild ~1s). Use `release-max` only when peak
+# throughput itself is measured.
 [profile.dev]
 opt-level = 1
 debug = 1
@@ -52,7 +53,7 @@ opt-level = 2
 
 # Release is the everyday optimized profile for gates and harnesses: full
 # optimization with parallel codegen units, incremental reuse, and no
-# cross-crate LTO, so an edited source file rebuilds in seconds instead of
+# cross-crate LTO, so an edited source file rebuilds in ~1s warm instead of
 # minutes. Simulation throughput stays within roughly ten percent of the
 # release-max profile, and all gameplay output is identical.
 [profile.release]

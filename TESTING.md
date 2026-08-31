@@ -21,13 +21,13 @@ This document defines test tiers, suite organization, assertion standards, and c
 | Gameplay CLI smoke | `bash scripts/test.sh gameplay-cli` | ~1s warm | Harness CLI (30-day) |
 | All adapter smoke groups | `bash scripts/test.sh adapters` | ~2s warm | All CLI surfaces (one CLI build) |
 | Focused harness run | `bash scripts/test.sh playtest [args...]` | <1s warm (debug) | Single campaign iteration (debug by default) |
-| Release gameplay gates | `bash scripts/test.sh gameplay` | ~8s warm | 36 + 3 campaigns, 60k days (release) |
-| Deep gameplay design audit | `bash scripts/test.sh gameplay-audit` | ~20s warm | Multi-seed / generation / credit stress |
-| Fast CI verification lane | `bash scripts/test.sh ci-verify` | ~5s warm | Format + clippy + lib + docs + doc warnings |
+| Release gameplay gates | `bash scripts/test.sh gameplay` | ~16s warm | 36 + 3 campaigns, 60k days (release, one CLI build) |
+| Deep gameplay design audit | `bash scripts/test.sh gameplay-audit` | ~30s warm | Multi-seed / generation / credit stress (release) |
+| Fast CI verification lane | `bash scripts/test.sh ci-verify` | ~6s warm | Format + clippy + lib + docs + doc warnings |
 | Deep CI gates lane | `bash scripts/test.sh ci-gates` | ~1 min | Release + soaks + adapters + gameplay + audit |
-| Heavy release gates without audit | `bash scripts/test.sh slow` | ~40s | Release gates without security audit |
-| Full deep design gate | `bash scripts/test.sh deep` | ~1 min | slow + gameplay-audit |
-| Complete scripted test tier | `bash scripts/test.sh all` | ~15s | Standard + soak + adapters + gameplay |
+| Heavy release gates without audit | `bash scripts/test.sh slow` | ~45s | Release gates without security audit |
+| Full deep design gate | `bash scripts/test.sh deep` | ~1.2 min | slow + gameplay-audit |
+| Complete scripted test tier | `bash scripts/test.sh all` | ~25s | Standard + soak + adapters + gameplay |
 
 Successful steps print concise summaries with elapsed time. Failures print the complete command output, including compiler diagnostics when a CLI build fails. A filter matching no executable library test exits with code 2.
 
@@ -57,8 +57,9 @@ Build tuning for a solo local machine is intentionally minimal:
 `.cargo/config.toml` keeps `incremental = true`, `pipelining = true`, and `jobs = 0` (all cores),
 and `Cargo.toml` keeps 16 parallel codegen units in every profile.
 No remote cache or wrapper is required — warm `fast` is ~2s, `standard` is ~4s,
-`ci-verify` is ~5s warm (incremental clippy ~1s), and a focused `playtest` is <1s
-because the debug CLI stays hot until you need a release gate.
+`ci-verify` is ~6s warm (incremental clippy <1s after the first build), and a focused
+`playtest` is <1s because the debug CLI stays hot until you need a release gate.
+`gameplay` is ~16s warm (one release CLI build + 39 campaigns, 60k simulated days).
 Each lane reuses the same incremental cache; a one-line lib change rebuilds
 only that crate in ~1s, not the whole workspace.
 
@@ -88,13 +89,13 @@ Optional hooks install with `bash scripts/install_hooks.sh`: pre-commit runs for
 | Standard | Check + fast library + docs + core CLI | Normal pre-commit | ~4s |
 | Adapter smoke | External CLI contracts grouped by core, art, and gameplay | Adapter changes | ~2s |
 | Soak | Long deterministic invariant and multi-generation behavior | Accumulating simulation changes | ~1s warm |
-| Gameplay | Release-mode systemic quality and succession gates | Cross-domain gameplay changes | ~8s |
-| Gameplay audit | Larger matrices for rare and mature behavior | Design review | ~20s |
-| CI verify | The exact fast CI verification lane | Reproducing the fast lane locally | ~5s warm |
+| Gameplay | Release-mode systemic quality and succession gates | Cross-domain gameplay changes | ~16s |
+| Gameplay audit | Larger matrices for rare and mature behavior | Design review | ~30s |
+| CI verify | The exact fast CI verification lane | Reproducing the fast lane locally | ~6s warm |
 | CI gates | The deep CI lane; requires `cargo-audit` | Reproducing release, adapter, gameplay, and security gates | ~1 min |
-| Slow | Release gates without the security audit or design audit | Deep verification without the audit dependency | ~40s |
-| Deep | The complete design gate: slow gates plus gameplay audit | Design review and deepest verification | ~1 min |
-| All | Standard + soak + adapters + gameplay gates | Cross-cutting test coverage | ~15s |
+| Slow | Release gates without the security audit or design audit | Deep verification without the audit dependency | ~45s |
+| Deep | The complete design gate: slow gates plus gameplay audit | Design review and deepest verification | ~1.2 min |
+| All | Standard + soak + adapters + gameplay gates | Cross-cutting test coverage | ~25s |
 
 Only `fast`/`quick`/`check` belong in the inner loop. Do not run `ci-gates`, `slow`, `deep`, or `all` before every commit — they exist for release or deep-design checkpoints and intentionally trade thoroughness for 40s–60s of build + simulation. The pre-push hook defaults to `quick` precisely so a solo developer is never blocked by a heavy gate after a one-line fix.
 

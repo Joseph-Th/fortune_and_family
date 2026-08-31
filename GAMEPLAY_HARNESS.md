@@ -52,12 +52,16 @@ cargo run --release --locked -- playtest \
   --output gameplay-report.json
 ```
 
-Repository gates (always release, ~8s–20s warm):
+Repository gates (always release, one CLI build reused):
 
 ```bash
-bash scripts/test.sh gameplay        # 36 + 3 campaigns, 60k simulated days, release gates
-bash scripts/test.sh gameplay-audit  # larger multi-seed / generation / credit-stress matrices
+bash scripts/test.sh gameplay        # ~16s warm: 36 + 3 campaigns, 60k simulated days
+bash scripts/test.sh gameplay-audit  # ~30s warm: multi-seed / generation / credit-stress matrices
 ```
+
+Warm budgets assume an incremental release build is already hot (`target/release/civic-dynasty`
+built once); a cold release build adds ~25s once. Debug `playtest` stays <1s warm because it
+reuses the `target/debug` CLI until a release gate is requested.
 
 Every run prints a concise progress line to stderr: elapsed time, campaign count, simulated days, actions, overall score, finding count, and simulated days per second. A quality-gate failure reports the exact score reason in the error output.
 
