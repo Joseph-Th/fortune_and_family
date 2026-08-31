@@ -56,7 +56,7 @@ Dependency direction is one way:
 | `src/systems/mod.rs` | Systems facade: entry-point re-exports, shared scheduling/worker helpers, and canonical `capacity_weighted_route_disruption` used by both daily household/trade availability and crisis detection. |
 | `src/systems/legal.rs` | Grounded debt and contract claims. |
 | `src/systems/progression.rs` | Monotonic campaign progression. |
-| `src/systems/simulation/` | Daily economic pipeline and time advancement: pipeline orchestration in `mod.rs` with business input procurement (`purchases.rs`), market spoilage/pricing (`market.rs`), and workshop maintenance (`maintenance.rs`) extracted (further domain splits follow the same pattern). |
+| `src/systems/simulation/` | Daily economic pipeline and time advancement: pipeline orchestration in `mod.rs` with business input procurement (`purchases.rs`) and market spoilage/pricing (`market.rs`) extracted; workshop maintenance remains inline in `mod.rs` (further domain splits follow `purchases`/`market` extraction pattern when they justify a separate module). |
 | `src/systems/strategic/` | Scheduled strategic systems, split by domain (see below). |
 | `src/systems/transactions.rs` | Reusable validated transaction primitives. |
 | `src/systems/invariants.rs` | Runtime cross-record invariants. |
@@ -278,7 +278,18 @@ Independent matrix campaigns run in parallel; each campaign owns its state and t
 
 ### Art
 
-The art layer owns deterministic rendering specifications, integer geometry/shading, sprite composition, encoding, automated review, and review HTML. It owns no campaign state and no gameplay rules.
+The art layer owns deterministic rendering specifications, integer geometry/shading,
+ sprite composition, encoding, automated review, and review HTML. It owns no campaign
+ state and no gameplay rules.
+
+Fidelity boundary: the sprite renderer is a one-way semantic → rasterization
+ (`CharacterSpec` → indexed `Canvas` → PNG bytes → embedded data URI). Rendering to
+ HTML does not preserve editable sprite structure; decoding the PNG does not recover
+ ramps or rig joints. No round-trip or editability is claimed. Generated HTML/PNG
+ are derived outputs; the authored `CharacterSpec`/palette/rig remain the source of
+ truth and defects are fixed in the renderer, not by hand-patching generated files
+ (artifact-generation profile: staged publication, regeneration freshness, no
+ round-trip fidelity beyond what the renderer guarantees).
 
 ## Determinism contract
 

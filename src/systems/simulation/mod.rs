@@ -15,6 +15,9 @@
 //! its own), or persistence.
 //! Determinism: ordered `BTreeMap` iteration, typed-ID tie-breakers, and
 //! state-owned RNG only; parallel `DailyCapacityScratch` preserves order.
+//! Invariants: maintenance and procurement respect cash reserves and tool
+//! scarcity with daily rotation for fair allocation; pricing respects
+//! production break-even floors.
 //! Focused tests: `src/systems/simulation/simulation_tests.rs`, soak gates.
 
 use super::SimulationError;
@@ -39,7 +42,6 @@ use crate::money::{Money, Quantity, affordable_quantity, checked_cost_for, cost_
 use crate::registry::{GoodCategory, RecipeDef, Registry};
 use std::collections::{BTreeMap, BTreeSet};
 
-mod maintenance;
 pub(crate) mod market;
 mod purchases;
 #[allow(unused_imports)]

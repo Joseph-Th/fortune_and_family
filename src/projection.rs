@@ -188,7 +188,7 @@ pub struct CampaignProjection {
     pub attention: Vec<AttentionItem>,
 }
 
-/// Severity of an [`AttentionItem`].
+/// Severity of an [`AttentionItem`]: how urgently the condition needs a decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum AttentionTone {
     Urgent,
@@ -196,6 +196,7 @@ pub enum AttentionTone {
     Info,
 }
 
+/// One condition flagged by the canonical attention classification shared by CLI and dashboard.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AttentionItem {
     pub tone: AttentionTone,
@@ -205,6 +206,7 @@ pub struct AttentionItem {
     pub action: String,
 }
 
+/// Family council and succession state for the player house.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FamilyProjection {
     pub governance: HouseGovernance,
@@ -216,6 +218,7 @@ pub struct FamilyProjection {
     pub members: usize,
 }
 
+/// Calendar and city-wide snapshot derived from `AppState` + `Registry`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ScenarioProjection {
     pub name: String,

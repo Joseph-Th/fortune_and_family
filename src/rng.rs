@@ -20,6 +20,8 @@ pub struct DeterministicRng {
 }
 
 impl DeterministicRng {
+    /// Creates an RNG whose entire future stream is determined by `seed`.
+    /// `AppState.rng` persists this value so continuation is exact.
     #[must_use]
     pub const fn seeded(seed: u64) -> Self {
         Self { state: seed }

@@ -268,6 +268,9 @@ impl fmt::Display for Quantity {
     }
 }
 
+/// Computes the transaction cost for `quantity` at `unit_price`, rounding any
+/// positive fractional copper upward so a transfer never becomes free through
+/// truncation. Saturates only the final `i64` narrowing.
 #[must_use]
 pub fn cost_for(quantity: Quantity, unit_price: Money) -> Money {
     Money::from_copper(saturating_i128_to_i64(rounded_cost_copper_wide(
@@ -290,6 +293,8 @@ pub(crate) fn rounded_cost_copper_wide(quantity: Quantity, unit_price: Money) ->
     whole_copper + i128::from(positive_remainder)
 }
 
+/// Returns the greatest `Quantity` whose [`cost_for`] does not exceed `cash`.
+/// Returns zero when `cash` or `unit_price` is non-positive.
 #[must_use]
 pub fn affordable_quantity(cash: Money, unit_price: Money) -> Quantity {
     if cash.copper() <= 0 || unit_price.copper() <= 0 {

@@ -4210,7 +4210,13 @@ pub(crate) fn add_succession_before_office_finding(
     let inverted = with_both
         .iter()
         .filter(|c| {
-            c.fantasy_arc.first_succession_day.unwrap() < c.fantasy_arc.first_office_day.unwrap()
+            c.fantasy_arc
+                .first_succession_day
+                .expect("filtered to some succession")
+                < c
+                    .fantasy_arc
+                    .first_office_day
+                    .expect("filtered to some office")
         })
         .count();
     if scaled_ratio_usize(inverted, with_both.len(), 100) < 50 {
@@ -4276,8 +4282,14 @@ pub(crate) fn add_short_horizon_background_imbalance_finding(
     if averages.len() < 2 {
         return;
     }
-    let (strongest, s_avg) = *averages.iter().max_by_key(|(_, a)| *a).unwrap();
-    let (weakest, w_avg) = *averages.iter().min_by_key(|(_, a)| *a).unwrap();
+    let (strongest, s_avg) = *averages
+        .iter()
+        .max_by_key(|(_, a)| *a)
+        .expect("averages has at least two backgrounds");
+    let (weakest, w_avg) = *averages
+        .iter()
+        .min_by_key(|(_, a)| *a)
+        .expect("averages has at least two backgrounds");
     let spread = s_avg.saturating_sub(w_avg);
     if spread < 12_000 {
         return;

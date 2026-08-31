@@ -31,6 +31,15 @@
 //! Failure semantics: consequential operations validate before mutation,
 //! preserve state on rejection, and report a typed
 //! `CommandError`/`SimulationError`/`PersistenceError` variant.
+//!
+//! Ownership map (see `ARCHITECTURE.md`):
+//! - `Registry` owns immutable Rivergate definitions.
+//! - `AppState` owns every mutable value required for continuation.
+//! - `systems/*` own canonical validation → commit pipelines.
+//! - `persistence` / `projection` / `gameplay` / `art` / `main.rs` are
+//!   adapters that reuse the canonical path and own no domain rules.
+//!
+//! Verification: `bash scripts/test.sh <lane>` per `TESTING.md`; no hosted CI.
 
 pub mod art;
 pub mod core;
