@@ -113,6 +113,44 @@ pub(crate) fn manager_holds_chartered_guild_membership(
         .is_some_and(|institution| institution.members.contains(&manager_id))
 }
 
+/// Capacity-weighted disruption across active external routes, mirroring
+/// household and import-trade availability. Centralized so crisis detection,
+/// household income, and import-trade throttling share one weighting.
+#[must_use]
+pub(crate) fn capacity_weighted_route_disruption(state: &crate::core::AppState) -> u16 {
+    if state.external_routes.is_empty() {
+        return 0;
+    }
+    let active: Vec<_> = state
+        .external_routes
+        .values()
+        .filter(|route| route.active)
+        .collect();
+    if active.is_empty() {
+        return 10_000;
+    }
+    let mut total_weighted: u64 = 0;
+    let mut total_capacity_milli: u64 = 0;
+    for route in &active {
+        let disruption = u64::from(route.disruption_basis_points);
+        let capacity_milli = u64::try_from(route.daily_capacity.milliunits().max(0)).unwrap_or(0);
+        if capacity_milli == 0 {
+            continue;
+        }
+        total_weighted = total_weighted.saturating_add(disruption.saturating_mul(capacity_milli));
+        total_capacity_milli = total_capacity_milli.saturating_add(capacity_milli);
+    }
+    if total_capacity_milli == 0 {
+        let total: u32 = active
+            .iter()
+            .map(|route| u32::from(route.disruption_basis_points))
+            .sum();
+        let count = u32::try_from(active.len()).unwrap_or(u32::MAX);
+        return u16::try_from(total / count.max(1)).unwrap_or(10_000);
+    }
+    u16::try_from(total_weighted / total_capacity_milli).unwrap_or(10_000)
+}
+
 pub(crate) fn institution_powers_for(
     kind: crate::registry::InstitutionKind,
 ) -> std::collections::BTreeSet<crate::core::OfficePower> {

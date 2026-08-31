@@ -8215,12 +8215,13 @@ mod routes {
             route.risk_basis_points = 0;
             route.disruption_basis_points = 0;
         }
-        state
-            .external_routes
-            .values_mut()
-            .next()
-            .expect("campaign must contain an external route")
-            .disruption_basis_points = 7_300;
+        // Capacity-weighted disruption must exceed the threshold: a single
+        // minor route cannot by itself represent a city-wide trade crisis,
+        // so every active route is set above the threshold as a network-wide
+        // severe disruption.
+        for route in state.external_routes.values_mut() {
+            route.disruption_basis_points = 7_300;
+        }
 
         run_monthly_strategic_systems(registry, &mut state)
             .expect("monthly strategic systems must run");

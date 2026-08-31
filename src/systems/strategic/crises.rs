@@ -374,12 +374,7 @@ pub(crate) fn advance_existing_crises(
             )
         })
         .collect();
-    let worst_route_disruption = state
-        .external_routes
-        .values()
-        .map(|route| route.disruption_basis_points)
-        .max()
-        .unwrap_or(0);
+    let weighted_disruption = capacity_weighted_route_disruption(state);
     for crisis in state.crises.values_mut() {
         if !crisis.status.is_active() {
             continue;
@@ -392,8 +387,8 @@ pub(crate) fn advance_existing_crises(
         // route has healed below it the crisis recovers month over month even
         // without a player response.
         let next_severity = if crisis.kind == CrisisKind::TradeDisruption {
-            if worst_route_disruption >= TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD {
-                crisis.severity_basis_points.max(worst_route_disruption)
+            if weighted_disruption >= TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD {
+                crisis.severity_basis_points.max(weighted_disruption)
             } else {
                 // Every route has healed below the detection threshold: the
                 // tracked condition is gone, so the disruption ends with it
@@ -598,16 +593,13 @@ pub(crate) fn apply_epidemic_household_pressure(
     }
 }
 
+pub(crate) use crate::systems::capacity_weighted_route_disruption;
+
 pub(crate) fn detect_trade_disruption(state: &mut AppState) -> Result<(), SimulationError> {
     if has_active_crisis(state, CrisisKind::TradeDisruption) {
         return Ok(());
     }
-    let disruption = state
-        .external_routes
-        .values()
-        .map(|route| route.disruption_basis_points)
-        .max()
-        .unwrap_or(0);
+    let disruption = capacity_weighted_route_disruption(state);
     if disruption >= TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD {
         insert_crisis(
             state,

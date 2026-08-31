@@ -42,10 +42,10 @@ Dependency direction is one way:
 | `src/rng.rs` | Serializable deterministic RNG. |
 | `src/systems/bootstrap.rs` | New campaign construction. |
 | `src/systems/commands/` | `PlayerCommand` schema, dispatch, and command-owned mutation (see below). |
-| `src/systems/mod.rs` | Systems facade: entry-point re-exports and shared scheduling and worker helpers. |
+| `src/systems/mod.rs` | Systems facade: entry-point re-exports, shared scheduling/worker helpers, and canonical `capacity_weighted_route_disruption` used by both daily household/trade availability and crisis detection. |
 | `src/systems/legal.rs` | Grounded debt and contract claims. |
 | `src/systems/progression.rs` | Monotonic campaign progression. |
-| `src/systems/simulation/` | Daily economic pipeline and time advancement, split into pipeline orchestration and domain phases (purchases, production, sales, households, maintenance, market, succession). |
+| `src/systems/simulation/` | Daily economic pipeline and time advancement: pipeline orchestration in `mod.rs` with business input procurement extracted to `purchases.rs` (further domain splits follow the same pattern). |
 | `src/systems/strategic/` | Scheduled strategic systems, split by domain (see below). |
 | `src/systems/transactions.rs` | Reusable validated transaction primitives. |
 | `src/systems/invariants.rs` | Runtime cross-record invariants. |

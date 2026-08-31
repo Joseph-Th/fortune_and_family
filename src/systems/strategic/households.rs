@@ -5,15 +5,16 @@ use super::*;
 
 /// Monthly cost of living for every household: food beyond market staples,
 /// clothing upkeep, rent-equivalent services, and unmodeled consumables.
-/// The charge scales with household size and district desirability so
-/// households in a prosperous district pay more to live there, and the
-/// copper flows into the market clearing pool like every other payment for
-/// unmodeled services. Households that cannot cover the cost spend down to
-/// zero and see food satisfaction erode, so a household budget that looks
-/// cash-rich on its external-income alone still faces realistic pressure.
-/// Market staples are paid separately through daily household consumption;
-/// living costs therefore track district rents, not bread-price doubling,
-/// so a staple spike does not charge households twice for the same bread.
+/// The charge scales with household size, social class, and district
+/// desirability so households in a prosperous district or at higher class
+/// pay more to live there, and the copper flows into the market clearing
+/// pool like every other payment for unmodeled services. Households that
+/// cannot cover the cost spend down to zero and see food satisfaction erode,
+/// so a household budget that looks cash-rich on its external-income alone
+/// still faces realistic pressure. Market staples are paid separately through
+/// daily household consumption; living costs therefore track district rents,
+/// not bread-price doubling, so a staple spike does not charge households
+/// twice for the same bread.
 pub(crate) fn apply_household_living_costs(
     _registry: &Registry,
     state: &mut AppState,
@@ -21,7 +22,7 @@ pub(crate) fn apply_household_living_costs(
     let mut total_living_cost = Money::ZERO;
     let household_ids: Vec<_> = state.households.records().keys().copied().collect();
     for household_id in household_ids {
-        let (members, district_id, cash_before) = {
+        let (members, district_id, social_class, cash_before) = {
             let household = state
                 .households
                 .get(household_id)
@@ -29,6 +30,7 @@ pub(crate) fn apply_household_living_costs(
             (
                 household.members(),
                 household.district_id(),
+                household.social_class(),
                 household.cash(),
             )
         };
@@ -37,7 +39,12 @@ pub(crate) fn apply_household_living_costs(
             .get(&district_id)
             .expect("household district must exist")
             .rent_index_basis_points;
-        let base_copper = i64::from(members).saturating_mul(2);
+        let per_member_copper = match social_class {
+            crate::core::SocialClass::Laboring => 2,
+            crate::core::SocialClass::Artisan => 3,
+            crate::core::SocialClass::Merchant => 4,
+        };
+        let base_copper = i64::from(members).saturating_mul(per_member_copper);
         let scaled_copper = base_copper.saturating_mul(i64::from(rent_index)) / 10_000;
         if scaled_copper <= 0 {
             continue;
