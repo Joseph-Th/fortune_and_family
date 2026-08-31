@@ -212,7 +212,7 @@ function Run-Check([string]$TestFilter) {
         }
     }
     Run-Step $label {
-        & cargo check --quiet --locked @JobArgs --all-targets
+        & cargo check --quiet --locked @JobArgs --lib --bins
         if ($LASTEXITCODE -ne 0) { throw "Syntax check failed" }
     }
 }

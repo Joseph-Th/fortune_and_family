@@ -2,8 +2,11 @@
 # all cores by default. This file stays minimal — no remote cache or wrappers
 # are required for fast iteration. Each profile in Cargo.toml keeps
 # `incremental = true` + 16 codegen units so an edited file rebuilds in ~1s
-# warm (check <1s, fast ~2s, standard ~5s, playtest debug <1s).
+# warm (check ~1-2s, fast ~2s, standard ~5s, playtest debug <1s).
 [build]
+# Pipelining lets Cargo start compiling dependents before dependencies finish,
+# shaving wall time on warm incremental builds without extra configuration.
+pipelining = true
 # Incremental is set in Cargo.toml profiles; this keeps `cargo check` and
 # `cargo clippy` warm for sub-second editor feedback as well.
 incremental = true

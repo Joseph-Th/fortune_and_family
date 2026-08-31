@@ -286,9 +286,11 @@ run_check() {
   if [[ -n "$filter" ]]; then
     label="Syntax check matching '$filter'"
   fi
-  # cargo check is sub-second warm and proves syntax/type correctness without
-  # running any tests. Use it for the absolute fastest editor feedback.
-  local command=(cargo check --quiet --locked "${job_args[@]}" --all-targets)
+  # cargo check is the fastest syntax gate (warm incremental after the first
+  # build). --all-targets would also typecheck benches/examples; the routine
+  # gate only needs the real shipped artifacts (lib + bins) to stay fast, so
+  # check them here while `cargo test`/`cargo clippy` separately verify tests.
+  local command=(cargo check --quiet --locked "${job_args[@]}" --lib --bins)
   if [[ -n "$filter" ]]; then
     # cargo check does not filter by test name, but we can still validate that
     # the filter would match at least one test to give precise feedback.
@@ -367,7 +369,8 @@ list_tests() {
 run_soak() {
   # Soak tests simulate thousands of days; release mode runs them ~100x faster
   # than the debug test profile with the same deterministic assertions. Warm
-  # incremental rebuild is ~1s; cold is ~50s (one-time).
+  # incremental rebuild is ~1s; cold is ~50s (one-time). Filter matches the
+  # canonical `::soak::` module so a stale `ignored` marker cannot hide drift.
   run_step 'Deterministic soak tests (release)' \
     cargo test --release --quiet --locked "${job_args[@]}" --lib '::soak::' -- --ignored
 }

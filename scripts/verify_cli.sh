@@ -84,7 +84,11 @@ binary=${CIVIC_DYNASTY_BINARY:-target/$profile/civic-dynasty}
 if [[ -z "${CIVIC_DYNASTY_BINARY:-}" ]]; then
   build_log=$(mktemp)
   trap 'rm -f "$build_log"' EXIT
-  if ! cargo build --quiet --locked "${cargo_profile_args[@]}" --bin civic-dynasty \
+  job_args=()
+  if [[ -n "${CIVIC_DYNASTY_JOBS:-}" ]]; then
+    job_args=(--jobs "$CIVIC_DYNASTY_JOBS")
+  fi
+  if ! cargo build --quiet --locked "${job_args[@]}" "${cargo_profile_args[@]}" --bin civic-dynasty \
     >"$build_log" 2>&1; then
     cat "$build_log" >&2
     rm -f "$build_log"

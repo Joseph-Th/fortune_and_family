@@ -79,7 +79,9 @@ if (-not $env:CIVIC_DYNASTY_BINARY) {
     # direct invocation never exercises a stale CLI. Cargo incrementality keeps
     # an already-current build at no-op cost.
     Write-Host "Building $Profile CLI binary..."
-    & cargo build --quiet --locked @CargoProfileArgs --bin civic-dynasty
+    $jobArgs = @()
+    if ($env:CIVIC_DYNASTY_JOBS) { $jobArgs = @("--jobs", $env:CIVIC_DYNASTY_JOBS) }
+    & cargo build --quiet --locked @jobArgs @CargoProfileArgs --bin civic-dynasty
     if ($LASTEXITCODE -ne 0) {
         Fail "CLI $Profile binary build failed"
     }

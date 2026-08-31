@@ -6,7 +6,7 @@ This document defines test tiers, suite organization, assertion standards, and c
 
 | Goal | Command | Warm cost | When to use |
 |---|---|---|---|
-| Fastest syntax check | `bash scripts/test.sh check [filter]` | <1s | Editor feedback — no tests run |
+| Fastest syntax check | `bash scripts/test.sh check [filter]` | ~1s | Editor feedback — no tests run |
 | One domain or behavior | `bash scripts/test.sh fast <filter>` | ~2s | Tight edit loop (e.g. `fast simulation`) |
 | Fastest library-only loop | `bash scripts/test.sh quick <filter>` | ~2s | Alias for fast, never triggers docs/CLI |
 | All ordinary library tests | `bash scripts/test.sh fast` | ~2s | Full library sweep |
@@ -54,16 +54,16 @@ On Windows without bash on PATH, every mode is also available through `.\scripts
 - `release-max`: serialized single-unit + thin-LTO. Build only when peak performance itself is under measurement (`cargo build --profile release-max`).
 
 Build tuning for a solo local machine is intentionally minimal:
-`.cargo/config.toml` keeps `incremental = true` and `jobs = 0` (all cores),
+`.cargo/config.toml` keeps `incremental = true`, `pipelining = true`, and `jobs = 0` (all cores),
 and `Cargo.toml` keeps 16 parallel codegen units in every profile.
 No remote cache or wrapper is required — warm `fast` is ~2s, `standard` is ~4s,
-`ci-verify` is ~5s warm (incremental clippy <1s), and a focused `playtest` is <1s
+`ci-verify` is ~5s warm (incremental clippy ~1s), and a focused `playtest` is <1s
 because the debug CLI stays hot until you need a release gate.
 Each lane reuses the same incremental cache; a one-line lib change rebuilds
 only that crate in ~1s, not the whole workspace.
 
-Targeted iteration: use `check` for syntax (<1s, no tests),
-`fast <filter>` for one domain (~2s), `standard` once behavior is ready (~5s).
+Targeted iteration: use `check` for syntax (~1s, no tests),
+`fast <filter>` for one domain (~2s), `standard` once behavior is ready (~4-5s).
 `adapters` and `gameplay` lanes reuse a single CLI build across sub-gates
 so you never pay one build per smoke group.
 `CIVIC_DYNASTY_JOBS=4` caps both cargo parallelism and harness campaign
@@ -83,7 +83,7 @@ Optional hooks install with `bash scripts/install_hooks.sh`: pre-commit runs for
 
 | Tier | Purpose | Expected use | Warm budget |
 |---|---|---|---|
-| Check | Syntax/type only (`cargo check`) | Editor feedback before compile | <1s |
+| Check | Syntax/type only (`cargo check --lib --bins`) | Editor feedback before compile | ~1s |
 | Fast library | Deterministic unit and focused behavioral coverage | Normal edit-test cycle | ~2s |
 | Standard | Check + fast library + docs + core CLI | Normal pre-commit | ~4s |
 | Adapter smoke | External CLI contracts grouped by core, art, and gameplay | Adapter changes | ~2s |
@@ -174,9 +174,9 @@ Collection helpers should show observed members. Candidate and finding helpers s
 Run the narrowest relevant subset while editing. Once behavior is ready, run one routine completion lane rather than climbing through progressively broader tiers:
 
 ```bash
-bash scripts/test.sh check          # <1s syntax only, before any test run
+bash scripts/test.sh check          # ~1s syntax only, before any test run
 bash scripts/test.sh fast simulation # ~2s for the one domain you touched
-bash scripts/test.sh standard        # ~4s normal pre-commit once behavior is ready
+bash scripts/test.sh standard        # ~4-5s normal pre-commit once behavior is ready
 ```
 
 Specialized lanes are selected by the contract that changed:
