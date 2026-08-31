@@ -1,4 +1,22 @@
 //! Political-office lifecycle: duties, stipends, powers, directives, and elections.
+//!
+//! Purpose: own the monthly political layer — office term timing, duty
+//! funding from holder treasury into institutional budget, stipend repayment,
+//! power application (licenses, tolls, inspections etc.), directive
+//! lifecycle, and deterministic elections with coalition backlash.
+//! Owns: `apply_office_duties`, `apply_office_stipends`,
+//! `apply_active_office_directives`, `resolve_institution_selections`,
+//! election scoring / forfeiture on repeated duty shortfall.
+//! Reads: `Registry` institutions, `AppState` institutions/characters/
+//! dynasties/relationships.
+//! Mutates: `AppState` institutions, dynasties (treasury/legitimacy),
+//! relationships, audit/outbox.
+//! Does not own: command-side nomination/directives — `commands/politics.rs`.
+//! Invariants: every term advances `term_number`/`next_selection_day`;
+//! monthly fee is repaid from institutional budget; administrative load
+//! scales with power count × office count.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs` office and
+//! institution selection.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

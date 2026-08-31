@@ -1,4 +1,20 @@
 //! Business input procurement: decided before production and applied atomically.
+//!
+//! Purpose: resolve how operating businesses replenish recipe inputs from the
+//! shared market before `decide_production` runs.
+//! Owns: `BusinessPurchasePlan`/`Line`, `decide_business_purchases` (immutable
+//! planning against shared stock/cash snapshots) and `apply_business_purchases`
+//! (checked mutation + `MarketClearingAccount` credit + audit record).
+//! Reads: `Registry` (recipes), `AppState` market quotes + business inventories
+//! and `DailyCapacityScratch` (effective batches / worker limits).
+//! Mutates: `AppState` market stock/demand/clearing and business cash/inventory
+//! only through the validated plan; rejected plans leave state unchanged.
+//! Does not own: production, sales, or pricing — `mod.rs`/`market.rs`.
+//! Invariants: one shared `remaining_stock` vector indexed by dense `GoodId`;
+//! distressed firms ignore `minimum_cash_reserve`; `affordable_quantity` +
+//! `cost_for` keep purchases affordable under fixed-point rounding.
+//! Focused tests: `src/systems/simulation/simulation_tests.rs` purchase and
+//! distress-reserve behavior.
 
 use crate::core::{AppState, AuditKind, AuditRecord, BusinessStatus};
 use crate::ids::{BusinessId, GoodId};

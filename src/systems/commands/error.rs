@@ -1,4 +1,16 @@
 //! Typed player-command failures and their conversions.
+//!
+//! Purpose: make every rejection distinguishable without parsing prose.
+//! Owns: `CommandError` and `PublicWorkFundingError` variants plus `From`
+//! conversions for `StrategicError`/`SimulationError`/ID exhaustion.
+//! Reads: nothing; variants carry typed fields (IDs, Money, cooldown days).
+//! Mutates: nothing.
+//! Does not own: validation logic — each `commands/*.rs` submodule returns
+//! these variants; adapter display lives in `projection.rs`/`main.rs`.
+//! Invariants: every consequential precondition has a dedicated variant;
+//! `Insufficient*` variants preserve `available/required` for diagnostics.
+//! Focused tests: `src/systems/commands/commands_tests.rs` exact-variant
+//! assertions and `assert_state_unchanged` rejection proofs.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

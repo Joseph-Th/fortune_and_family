@@ -1,4 +1,20 @@
 //! Supply contracts: terms, validated commits, capacity, and weekly settlement.
+//!
+//! Purpose: own the single semantic path for supply contracts — validated
+//! `SupplyContractTerms`, creation against capacity, weekly delivery +
+//! payment, breach attribution / penalty debt, and termination on inactive
+//! standing — used by both player commands and AI upkeep.
+//! Owns: `validate_supply_contract`, `create_supply_contract_scratch`,
+//! `available_supply_contract_capacity`, weekly `settle_supply_contracts`,
+//! and termination on business loss of standing.
+//! Reads: `Registry` goods/recipes, `AppState` businesses/contracts/market.
+//! Mutates: `AppState` contracts, business cash/inventory, market clearing,
+//! audit log.
+//! Does not own: persistence or projection.
+//! Invariants: every delivery is priced at contract `unit_price`; breach
+//! victim is the first attributable miss; unpaid penalties cap at `penalty`.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs` contract
+//! lifecycle and `commands_tests.rs` validation.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

@@ -1,4 +1,18 @@
 //! Household living costs and monthly family pressure.
+//!
+//! Purpose: own the monthly living-cost levy that makes cash-rich houses
+//! still face district-scaled pressure and erodes satisfaction on shortfall.
+//! Owns: `apply_household_living_costs` (rent-index-scaled charge, payment
+//! to clearing pool, satisfaction erosion on underpayment).
+//! Reads: `AppState` households + districts (rent index) and `MarketState`
+//! clearing account.
+//! Mutates: `AppState` household cash/satisfaction and market clearing.
+//! Does not own: daily market consumption — `simulation/mod.rs`.
+//! Invariants: charge scales with members × class × rent index; market
+//! staples paid separately so no double bread inflation; surpluses credit
+//! the clearing pool per AUDIT.md.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs` living-cost
+//! and satisfaction behavior.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

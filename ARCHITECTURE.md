@@ -284,11 +284,20 @@ The art layer owns deterministic rendering specifications, integer geometry/shad
 
 Given the same registry, state, seed, command sequence, and day count, execution must produce identical state.
 
-- Use `state.rng` for simulation randomness.
-- Use ordered collections or explicit sorting for result-affecting iteration.
+```text
+registry (fingerprint-bound)
++ serialized AppState (clock, RNG, allocators, records)
++ ordered explicit inputs (commands + day count)
+= bit-identical successor AppState
+```
+
+- Use `state.rng` for simulation randomness; do not read OS entropy, thread scheduling, or wall-clock time.
+- Use ordered collections (`BTreeMap`/`BTreeSet`) or explicit sorting for result-affecting iteration.
 - Use typed IDs as stable tie-breakers.
-- Persist RNG state and generated values that affect future behavior.
+- Persist RNG state and every generated value that can affect future behavior (`AppState.rng` + generated records).
 - Exclude wall-clock time, environment state, filesystem order, external services, and sleeps from core logic.
+- Use fixed-point `Money`/`Quantity` with wide `i128` intermediates; no floating-point participates in authored or simulated values so compiler/target floating-point variance cannot affect results.
+- Execution envelope: the guarantee is same-process repeatability and same-build replay on the supported stable toolchain (see `Cargo.toml` `rust-version` + `rust-toolchain.toml`). Cross-toolchain or cross-platform byte identity is not claimed beyond fixed-point/behavioral equivalence; a saved state's `registry_fingerprint` and `schema_version` bind it to its definitions so load fails closed on mismatch.
 
 ## Mutation and accounting contract
 

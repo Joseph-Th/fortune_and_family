@@ -1,4 +1,16 @@
 //! Tuning constants for every player command family.
+//!
+//! Purpose: single owner for command costs, cooldowns, thresholds, and
+//! capability gates so balancing and audit predicates stay coherent.
+//! Owns: all `*_INTERVAL_DAYS`, `*_COST`, `*_REQUIREMENT`, and basis-point
+//! thresholds consumed by `commands/*.rs` and `strategic/*.rs`.
+//! Reads: nothing.
+//! Mutates: nothing (constants only).
+//! Does not own: domain decision or validation — submodules own that.
+//! Invariants: every cooldown/cost paired with an audit-cooldown lookup;
+//! monetary constants remain `Money` for fixed-point safety.
+//! Focused tests: `src/systems/commands/commands_tests.rs` cooldown and
+//! cost assertions.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

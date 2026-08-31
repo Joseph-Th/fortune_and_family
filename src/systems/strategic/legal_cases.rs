@@ -1,4 +1,21 @@
 //! Grounded legal-case hearings, judgments, negotiated settlements, and claim discharge.
+//!
+//! Purpose: own the monthly adjudication of debt/contract claims — filing
+//! against a concrete obligation, hearing delay, evidence-capped judgment,
+//! installment execution, settlement, and discharge of the underlying claim
+//! so no dynasty is trapped by an uncollectible procedure.
+//! Owns: filing validation, hearing scheduling, judgment execution,
+//! settlement path, and terminal write-off when a judgment proves
+//! uncollectible.
+//! Reads: `Registry` + `AppState` loans/contracts/civic debts.
+//! Mutates: `AppState` legal cases, associated loans/contracts, treasuries,
+//! district conditions, legitimacy, and audit/outbox.
+//! Does not own: law sponsorship — `strategic/mod.rs` law appliers.
+//! Invariants: every case traces to a grounded claim; damages ≤ claim cap;
+//! filing fees credit the Civic Court; settled claims discharge their
+//! backing obligation per DESIGN.md recovery guarantee.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs` legal and
+//! `commands_tests.rs` filing/settlement validation.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

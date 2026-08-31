@@ -1,4 +1,17 @@
 //! Deterministic bootstrap initialization of the strategic runtime state.
+//!
+//! Purpose: deterministically seed every strategic subsystem (institutions,
+//! districts, routes, crises, market clearing) from registry + RNG so a
+//! fresh campaign is fully reproducible from its seed.
+//! Owns: `initialize_strategic_state` called once by `bootstrap.rs`.
+//! Reads: `Registry` + `DeterministicRng` from `AppState`.
+//! Mutates: `AppState` strategic maps (institutions, districts, routes,
+//! households, AI objectives) exactly once per `build_new_game`.
+//! Does not own: campaign construction or validation — `bootstrap.rs`.
+//! Invariants: every institution/district initialized; route health and
+//! market quotes mirror registry seed; RNG state advanced deterministically.
+//! Focused tests: `src/systems/bootstrap_tests.rs` deterministic
+//! construction.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

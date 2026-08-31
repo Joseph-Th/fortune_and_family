@@ -1,4 +1,23 @@
 //! Weekly employment settlement, market wage fairness, and workforce disputes.
+//!
+//! Purpose: own the weekly wage settlement where business cash funds
+//! household income, wage posture's standing commitment drives loyalty
+//! toward dispute or recovery, and market bread-price discipline keeps
+//! `ReferenceWage` fair.
+//! Owns: `settle_employment`, `LaborEnvironment`,
+//! `REFERENCE_WEEKLY_WORKER_WAGE_COPPER` and stingy/generous thresholds,
+//! `business_labor_utilization_basis_points`, wage-pressure
+//! auto-adjustment for non-player rivals.
+//! Reads: `Registry` recipes, `AppState` businesses/employment/households/
+//! market + `DailyCapacityScratch`.
+//! Mutates: `AppState` employment (loyalty/conditions/status), business and
+//! household cash, audit/outbox.
+//! Does not own: business wage-policy commands — `commands/holdings.rs`.
+//! Invariants: every employer retains a week of operating cover during
+//! settlement; sub-fair wages erode loyalty toward dispute, generous wages
+//! build a buffer; wage stall keeps disputed crews from reconciling.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs` employment and
+//! labor-response behavior.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;

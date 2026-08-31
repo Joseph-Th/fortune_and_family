@@ -24,9 +24,15 @@ use super::transactions::{
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
     CharacterIdentity, CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry,
-    ChronicleKind, CrisisKind, EmploymentStatus, FamilyLink, FamilyLinkKind, HouseGovernance,
-    MarketCause, OutboxKind, SocialClass,
+    ChronicleKind, CrisisKind, FamilyLink, FamilyLinkKind, HouseGovernance, OutboxKind,
+    SocialClass,
 };
+// `EmploymentStatus` and `MarketCause` are re-exported via `super::*` for
+// `simulation_tests.rs` (`use super::*`); production paths reference them
+// through `crate::core::*`/`crate::systems::strategic::*` instead, so keep
+// the test-visible re-exports without triggering `unused_imports` in dev builds.
+#[allow(unused_imports)]
+use crate::core::{EmploymentStatus, MarketCause};
 use crate::ids::{BusinessId, CharacterId, DynastyId, GoodId, RecipeId};
 use crate::money::{Money, Quantity, affordable_quantity, checked_cost_for, cost_for};
 #[allow(unused_imports)]

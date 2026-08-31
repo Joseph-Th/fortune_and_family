@@ -38,14 +38,21 @@ pub fn render_gameplay_report(report: &GameplayHarnessReport) -> String {
     output
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, output: &mut String) {
+    // Render is presentation-only and deliberately keeps one function per section
+    // for stable diffing; `too_many_lines` does not indicate a hidden owner.
     let aggregate = &report.aggregate;
+    // `campaigns.len()` is bounded by harness config (<1M); `usize→f64` precision
+    // loss is irrelevant for human-readable percentages.
+    #[allow(clippy::cast_precision_loss)]
     let total = report.campaigns.len().max(1) as f64;
     let governance_share = aggregate
         .phase_stats
         .get(&GameplayPhase::DynasticGovernance)
-        .map(|s| s.decision_cycles as f64 / total / aggregate.campaigns as f64 * 100.0)
-        .unwrap_or(0.0);
+        .map_or(0.0, |s| {
+            f64::from(s.decision_cycles) / total / f64::from(aggregate.campaigns) * 100.0
+        });
     let succession_reached = report
         .campaigns
         .iter()
@@ -59,10 +66,10 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
     let avg_offices: f64 = report
         .campaigns
         .iter()
-        .map(|c| c.end.offices_held as f64)
+        .map(|c| f64::from(c.end.offices_held))
         .sum::<f64>()
         / total;
-    let horizon_years = report.config.days_per_campaign as f64 / 360.0;
+    let horizon_years = f64::from(report.config.days_per_campaign) / 360.0;
     let horizon_label = if horizon_years < 5.0 {
         "foundation-establishment"
     } else if horizon_years < 8.0 {
@@ -70,16 +77,19 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
     } else {
         "generation-scale"
     };
+    #[allow(clippy::manual_checked_ops)]
     let blocked_share = if aggregate.decision_cycles == 0 {
         0
     } else {
-        aggregate.blocked_cycles * 100 / u64::from(aggregate.decision_cycles)
+        // Checked above: divisor is non-zero, so plain division is safe.
+        aggregate.blocked_cycles * 100 / aggregate.decision_cycles
     };
     let _ = writeln!(
         output,
-        "Player fantasy fidelity ({} horizon, {:.1} years)",
-        horizon_label, horizon_years
+        "Player fantasy fidelity ({horizon_label} horizon, {horizon_years:.1} years)"
     );
+    // Bounded counts (<1M) so `usize→f64` for percentages is presentation-safe.
+    #[allow(clippy::cast_precision_loss)]
     let _ = writeln!(
         output,
         "  core loop: work → standing → power → continuity | city-shaping {}/{} ({:.0}%) | succession {}/{} ({:.0}%) | avg offices {:.1} | blocked choices {}%",
@@ -164,8 +174,7 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
         .phase_stats
         .iter()
         .max_by_key(|(_, s)| s.substantive_actions)
-        .map(|(p, _)| p.label())
-        .unwrap_or("none");
+        .map_or("none", |(p, _)| p.label());
     let _ = writeln!(
         output,
         "  dynamism: dominant phase {} | governance share {:.1}% of decision life | fantasy governance {}",
