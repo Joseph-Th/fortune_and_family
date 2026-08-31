@@ -33,6 +33,7 @@ pub(crate) fn derive_findings(
     add_information_leverage_trajectory_finding(aggregate, &mut findings);
     add_crisis_trajectory_finding(aggregate, &mut findings);
     add_crisis_coverage_finding(aggregate, campaigns, &mut findings);
+    add_crisis_determinism_finding(aggregate, campaigns, &mut findings);
     add_office_directive_trajectory_finding(aggregate, &mut findings);
     add_welfare_dynamism_finding(aggregate, campaigns, &mut findings);
     add_long_horizon_risk_findings(aggregate, campaigns, &mut findings);
@@ -1316,6 +1317,68 @@ pub(crate) fn add_crisis_coverage_finding(
             unobserved.join(", "),
         ),
     });
+}
+
+pub(crate) fn add_crisis_determinism_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    if campaigns.len() < 8 || average_campaign_days(aggregate) < 720 {
+        return;
+    }
+    // Long horizons (10 years) should eventually see every crisis; determinism
+    // is only a tuning signal on the standard 3-year matrix where emergence
+    // must be proven per crisis kind within a single generation.
+    if average_campaign_days(aggregate) >= 1_800 {
+        return;
+    }
+    let total = campaigns.len();
+    let mut kind_counts: std::collections::BTreeMap<CrisisKind, usize> =
+        std::collections::BTreeMap::new();
+    for campaign in campaigns {
+        for kind in &campaign.observed_crisis_kinds {
+            *kind_counts.entry(*kind).or_default() += 1;
+        }
+    }
+    for (kind, count) in &kind_counts {
+        let share = scaled_ratio_usize(*count, total, 100);
+        if share >= 95 {
+            findings.push(GameplayFinding {
+                severity: GameplayFindingSeverity::Info,
+                title: format!("{:?} is near-deterministic, not emergent", kind),
+                evidence: format!(
+                    "{count} of {total} campaigns observed {kind:?} ({share}%). When a crisis kind appears in essentially every world seed it is a guaranteed schedule rather than an emergent response to structural weakness. Consider raising its disruption/threshold so route and credit stress must actually accumulate.",
+                ),
+            });
+        }
+    }
+    // Banking panic specific diagnostic: when it never appears, show how close default pressure came.
+    // Only warn on horizons long enough for distress to plausibly accumulate.
+    if !kind_counts.contains_key(&CrisisKind::BankingPanic)
+        && average_campaign_days(aggregate) >= 1_800
+    {
+        let max_defaults = campaigns
+            .iter()
+            .map(|c| c.end.defaulted_loans.max(c.maximum_defaulted_loans))
+            .max()
+            .unwrap_or(0);
+        let max_delinquent = campaigns
+            .iter()
+            .map(|c| c.end.delinquent_loans.max(c.maximum_delinquent_loans))
+            .max()
+            .unwrap_or(0);
+        if max_defaults == 0 && max_delinquent == 0 {
+            findings.push(GameplayFinding {
+                severity: GameplayFindingSeverity::Warning,
+                title: "Credit distress never reaches delinquency, so banking panic cannot trigger"
+                    .to_owned(),
+                evidence: format!(
+                    "Across {total} campaigns the city never recorded a delinquent or defaulted private loan (peak delinquent {max_delinquent}, peak defaulted {max_defaults}). Banking panic detection requires ≥2 concurrent defaults (rising with each prior panic within 3 years), so the crisis is structurally unreachable until lending becomes riskier or businesses face tighter cash flow. The recent speculative-loan tuning aims to create that pressure; if this persists, consider lowering the effective default threshold or loosening speculative eligibility further."
+                ),
+            });
+        }
+    }
 }
 
 pub(crate) fn add_welfare_dynamism_finding(

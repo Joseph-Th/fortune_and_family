@@ -24,7 +24,7 @@ pub(crate) enum ObjectiveProgress {
 }
 
 pub(crate) const AI_OBJECTIVE_REVIEW_DAYS: i64 = 720;
-pub(crate) const AI_BUSINESS_RECOVERY_TREASURY_RESERVE: Money = Money::from_copper(20_000);
+pub(crate) const AI_BUSINESS_RECOVERY_TREASURY_RESERVE: Money = Money::from_copper(25_000);
 /// Routine patronage buys rival legitimacy only up to this plateau: standing
 /// above it must come from offices, works, and crisis stewardship rather than
 /// a monthly stipend, so passive rivals cannot out-rank an actively governing
