@@ -1,10 +1,10 @@
 # Testing
 
-Defines test tiers, suite organization, assertion standards, and completion gates.
+Test tiers, suite organization, assertion standards, and completion gates.
 
 ## Commands
 
-Solo-dev iteration is one command — everything else runs only when its contract changed.
+Solo-dev iteration is one command — other lanes run only when their contract changed.
 
 | Goal | Command | Warm | When |
 |---|---|---|---|
@@ -32,7 +32,7 @@ Solo-dev iteration is one command — everything else runs only when its contrac
 | Full design gate | `bash scripts/test.sh deep` | ~1.2min | `slow` + `gameplay-audit` |
 | Everything | `bash scripts/test.sh all` | ~25s | `standard` + `soak` + `adapters` + `gameplay` |
 
-Failures print full diagnostics. A filter matching no test exits with code 2. On Windows without bash, use `.\scripts\test.ps1 <mode> [filter]`.
+Failures print full diagnostics. A filter matching no test exits with code 2. On Windows without bash, use `.\scripts\test.ps1 <mode> [filter>`.
 
 ## Runner environment
 
@@ -50,17 +50,17 @@ Failures print full diagnostics. A filter matching no test exits with code 2. On
 ## Build profiles
 
 - `check`: inherits `dev`, never executed; `cargo check` feedback ~0.3s cached.
-- `dev` / `test`: `opt-level = 1` (deps `2`), 16 codegen units, incremental. Single-crate incremental: ~4s after a lib-file edit, <1s when cached, ~2s for full suite exec (980 tests).
+- `dev` / `test`: `opt-level = 1` (deps `2`), 16 codegen units, incremental. Single-crate incremental: ~4s after a lib-file edit, <1s cached, ~2s for suite exec. First cold clippy ~12s, release ~56s are one-time costs.
 - `release`: `opt-level = 3`, 16 codegen units, incremental, no LTO. Used for `soak`/`gameplay`; warm rebuild ~1s, within ~10% of peak throughput.
 - `release-max`: single codegen unit + thin LTO; peak measurement only.
 
-Warm budgets (cached, after one-time cold clippy ~12s / release ~56s): `check` ~0.3s, `fast` ~4s after edit / ~2s cached, `standard` ~7s, `adapters` ~2s, `playtest` debug <1s, `gameplay` ~16s. `check` and `test` share dependency artifacts warm. Single-crate rebuild cost (~4s) is the compile, not the test exec.
+`check` and `test` share dependency artifacts warm. Single-crate rebuild cost (~4s) is the compile, not test exec.
 
 ## Receipts and hooks
 
-Unfiltered `quick`/`fast`, `standard`, and `all` runs record a content-addressed receipt under Git metadata. The pre-push hook reuses a receipt of equal or broader strength instead of recompiling identical bytes. Any tracked or non-ignored change invalidates it; receipts refuse to issue if bytes change mid-run.
+Unfiltered `quick`/`fast`, `standard`, and `all` record a content-addressed receipt under Git metadata. The pre-push hook reuses a receipt of equal or broader strength instead of recompiling identical bytes. Any tracked or non-ignored change invalidates it; receipts refuse to issue if bytes change mid-run.
 
-Install hooks once: `bash scripts/install_hooks.sh` (`core.hooksPath` → `scripts/hooks`). `pre-commit` is format + shell + whitespace (~1s). `pre-push` defaults to `quick` (~2s) and skips the build when a current receipt exists. Use `git commit --no-verify` mid-edit; set `CIVIC_DYNASTY_PRE_PUSH=standard` when a stronger push gate is needed.
+Install hooks once: `bash scripts/install_hooks.sh` (`core.hooksPath` → `scripts/hooks`). `pre-commit` is format + shell + whitespace (~1s). `pre-push` defaults to `quick` (~2s) and skips the build when a current receipt exists. Use `git commit --no-verify` mid-edit; set `CIVIC_DYNASTY_PRE_PUSH=standard` for a stronger push gate.
 
 ## Test tiers
 
@@ -77,9 +77,7 @@ Install hooks once: `bash scripts/install_hooks.sh` (`core.hooksPath` → `scrip
 | CI gates | Deep CI lane | ~1min |
 | All | Standard + soak + adapters + gameplay | ~25s |
 
-`fast`/`quick`/`check`/`changed` belong in the inner loop. `ci-gates`, `slow`, `deep`, and `all` are release checkpoints.
-
-Fast tests use no sleeps, wall-clock, or external services. Soak tests always run in release (debug would be ~100× slower); assertions are identical across profiles.
+`fast`/`quick`/`check`/`changed` belong in the inner loop. `ci-gates`, `slow`, `deep`, `all` are release checkpoints. Fast tests use no sleeps or external services. Soak tests run in release (debug would be ~100× slower); assertions are identical across profiles.
 
 ## Suite organization
 
@@ -96,7 +94,7 @@ Fast tests use no sleeps, wall-clock, or external services. Soak tests always ru
 | Art | `src/art/*` module tests |
 | Shared fixtures | `src/test_support.rs` |
 
-Use stable nested modules so filters remain useful. Put a test in the narrowest domain that owns the behavior. Create an external integration-test target only for a true external crate boundary.
+Use stable nested modules so filters remain useful. Put each test in the narrowest domain that owns the behavior. Create an external integration-test target only for a true external crate boundary.
 
 ## Fixtures
 
@@ -172,11 +170,10 @@ If `fast <filter>` already covered the changed surface and `standard` is green, 
 
 Persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and report schemas require focused owner coverage plus the relevant specialized lane. When the selected lane already executes that coverage, do not rerun a focused test beforehand. Do not run a compile-only build immediately before an executable lane that recompiles the same surface unless the separate diagnostic is required — prefer one build per checkpoint.
 
-Filtered `fast <filter>` and `changed` avoid running unrelated test domains (they still
-trigger a single-crate incremental compile — ~4s on this workspace — but exec only the
-matched subset). `changed` maps `git diff HEAD` to the narrowest filter in one cargo build;
-`Cargo.toml`/`.cargo` changes trigger the full suite. Docs-only edits run `docs` alone.
-`CIVIC_DYNASTY_SKIP_CLI_BUILD=1` / `CIVIC_DYNASTY_SKIP_DOCS=1` skip the debug CLI/docs build
-for lib-only iteration. `playtest` without args is a 60-day single-persona debug check
-(trace-limit 8); pass explicit `--days`/`--persona` or `CIVIC_DYNASTY_PROFILE=release`
-only when probing deeper design questions. The `all` tier reuses one debug CLI build.
+Filtered `fast <filter>` and `changed` avoid running unrelated domains (they still trigger a single-crate
+incremental compile — ~4s — but exec only the matched subset). `changed` maps `git diff HEAD` to the
+narrowest filter in one build; `Cargo.toml`/`.cargo` changes trigger the full suite. Docs-only edits
+run `docs` alone. `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` / `CIVIC_DYNASTY_SKIP_DOCS=1` skip the debug CLI/docs build
+for lib-only iteration. `playtest` without args is a 60-day single-persona debug check (trace-limit 8);
+pass explicit `--days`/`--persona` or `CIVIC_DYNASTY_PROFILE=release` only when probing deeper design
+questions. The `all` tier reuses one debug CLI build.

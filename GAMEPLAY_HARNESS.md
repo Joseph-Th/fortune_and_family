@@ -1,6 +1,6 @@
 # Gameplay Harness
 
-Runs deterministic player agents through the same campaign construction, command, and simulation APIs used by the product. Evaluates whether systems produce reachable, varied, consequential, recoverable, and multi-generation play.
+Deterministic player agents that exercise the same campaign construction, command, and simulation APIs used by the product. Evaluates whether systems produce reachable, varied, consequential, recoverable, and multi-generation play.
 
 Complements behavioral tests and human playtesting; replaces neither.
 
@@ -13,28 +13,20 @@ Complements behavioral tests and human playtesting; replaces neither.
 
 This document owns harness mechanics, report semantics, and integration requirements. Ranking constants and thresholds that do not define the external report contract are authoritative in code.
 
-## When to use it
+## When to use
 
-Run analysis when a change affects:
+Run analysis when a change affects candidate discoverability or validation, pacing/cooldowns/eligibility, delayed or persistent consequences, cross-domain interaction, recovery and failure states, political progression or succession, or report fields/scores/findings/traces.
 
-- Candidate discoverability or command validation
-- Pacing, cooldowns, or eligibility
-- Delayed or persistent consequences
-- Cross-domain interaction
-- Recovery and failure states
-- Political progression or succession
-- Report fields, scores, findings, or traces
-
-Use focused runs during implementation. Use release matrices for cross-domain validation and design review.
+Use focused runs during implementation; use release matrices for cross-domain validation and design review.
 
 ## Commands
 
 Inner loop — debug harness, <1s warm, no release build:
 
 ```bash
-bash scripts/test.sh playtest  # 60-day single-persona smoke, <1s warm (no args = default)
+bash scripts/test.sh playtest  # 60-day single-persona smoke, <1s warm
 bash scripts/test.sh playtest --days 90 --persona entrepreneur --background baker
-cargo run --locked -- playtest --days 90 --persona steward          # raw cargo
+cargo run --locked -- playtest --days 90 --persona steward
 # Gate-fidelity iteration (same candidates, optimized sim, still ~1s warm after first release build):
 CIVIC_DYNASTY_PROFILE=release bash scripts/test.sh playtest --days 360 --persona entrepreneur
 cargo run --release --locked -- playtest --days 360 --persona entrepreneur --trace-limit 20
@@ -47,14 +39,14 @@ cargo run --release --locked -- playtest
 cargo run --release --locked -- playtest --start-seed 1 --seeds 10 --days 1080 --json --output gameplay-report.json
 ```
 
-Repository gates — always release, one CLI build (warm budgets after one-time cold ~56s):
+Repository gates — always release, one CLI build (warm after one-time cold ~56s):
 
 ```bash
 bash scripts/test.sh gameplay        # ~16s warm: 36 + 3 campaigns, 60k days
 bash scripts/test.sh gameplay-audit  # ~30s warm: multi-seed / generation / credit-stress
 ```
 
-`playtest` without args is the solo-dev default: debug CLI, 60 days, one persona, trace-limit 8 — fast enough to run after every edit. `gameplay`/`gameplay-audit` always use release. Every run prints one progress line to stderr (`elapsed, campaigns, simulated days, actions, overall score, findings, days/s`) so you can see at a glance whether a change moved the metric. Quality-gate failures report the exact score reason.
+`playtest` without args is the solo-dev default: debug CLI, 60 days, one persona, trace-limit 8. `gameplay`/`gameplay-audit` always use release. Every run prints one progress line to stderr (`elapsed, campaigns, simulated days, actions, overall score, findings, days/s`) and fails with the exact score reason when a quality gate is not met.
 
 ## Configuration
 
@@ -75,15 +67,20 @@ bash scripts/test.sh gameplay-audit  # ~30s warm: multi-seed / generation / cred
 | `--minimum-overall` | Fail below overall score | Disabled |
 | `--fail-on-critical` | Fail on a critical finding | Disabled |
 
-The decision interval is an observation cadence, not a player action limit.
+Decision interval is an observation cadence, not a player action limit.
 
 ### Parallelism and world sampling
 
-Independent campaigns run in parallel, capped by `CIVIC_DYNASTY_JOBS` when set. Each campaign owns its `AppState`; the `Registry` is immutable, so scheduling does not affect results. Report ordering is fixed by seed, background, and persona. Single-campaign matrices probe counterfactuals on a bounded worker set. The same `CIVIC_DYNASTY_JOBS` caps `cargo --jobs` in `scripts/test.sh`.
+Independent campaigns run in parallel, capped by `CIVIC_DYNASTY_JOBS`. Each campaign owns its `AppState`; the `Registry` is immutable, so scheduling does not affect results. Report ordering is fixed by seed, background, and persona. `CIVIC_DYNASTY_JOBS` also caps `cargo --jobs` in `scripts/test.sh`.
 
-The default matrix samples three independent world seeds. Personas share a world when the seed is fixed, so world-content claims (crisis variety, failure rates, civic drift) require multiple worlds. Agent-choice claims (persona variety, command coverage) aggregate across all campaigns.
+Default matrix samples three independent world seeds.
 
-The CLI rotates its default seed base deterministically by UTC calendar day (printed as `world seed base`), so scheduled runs sample fresh worlds while remaining reproducible from the report. Pass `--start-seed` to pin a world. Library `GameplayHarnessConfig::default` remains fully deterministic.
+- Personas sharing a seed share a world, so world-content claims (crisis variety, failure rates, civic drift) require multiple worlds.
+- Agent-choice claims (persona variety, command coverage) aggregate across all campaigns.
+
+The CLI rotates its default seed base by UTC calendar day (printed as `world seed base`), so scheduled
+runs sample fresh worlds while remaining reproducible from the report. Pass `--start-seed` to pin a world;
+library `GameplayHarnessConfig::default` remains fully deterministic.
 
 ## Personas
 
@@ -96,22 +93,18 @@ Deterministic diagnostic policies, not optimal strategies.
 | `power-broker` | Family capacity, institutions, intelligence, laws, courts, governance |
 | `opportunist` | Leverage, acquisition, higher-risk credit, legal pressure, crisis exploitation, replacement labor |
 
-Personas expose different viable routes through the same canonical systems. Candidate generation may rank per persona, but must not create domain state or bypass canonical validation.
+Candidate generation may rank per persona, but must not create domain state or bypass canonical validation.
 
-Standing policies across personas:
+Standing policies:
 
-- Candidate scores include deterministic exploration variation
-  (range 1800, decision interval jitter ±28 days) derived from campaign
-  state and persona. Timing jitter mixes persona, generation,
-  business/property, and crisis state so campaigns sharing a world seed
-  sample distinct calendars; score variation mixes generation, business,
-  property, legal, and crisis state besides the RNG. Both flip close
-  calls without overriding urgency, reserve protection, or persona
-  priorities. Exploratory injection additionally samples restrained routes
-  (~14% per eligible family, up to two per cycle) so deliberately narrowed
-  generators are still proven reachable.
+- Candidate scores include deterministic exploration variation (range 1800, jitter ±28 days) derived from
+  campaign state and persona. Timing jitter mixes persona, generation, business/property, and crisis state;
+  score variation mixes generation, business, property, legal, and crisis state. Both flip close calls
+  without overriding urgency, reserves, or persona priorities.
+- Exploratory injection samples restrained routes (~14% per eligible family, up to two per cycle) so
+  deliberately narrowed generators are still proven reachable.
 - Optional standing expenses (education, wards, patronage) respect a discretionary floor: emergency reserve plus two months of committed loan service. Below the floor, standing spending is deferred.
-- Standing-burning responses (suppression, profiteering) additionally respect a legitimacy reserve, matching treasury reserve policy.
+- Standing-burning responses (suppression, profiteering) additionally respect a legitimacy reserve.
 
 ## Decision cycle
 
@@ -122,13 +115,13 @@ Each cycle:
 3. Rank by urgency, persona priorities, resources, coverage, repetition.
 4. Preserve probe capacity across command families.
 5. Probe via `apply_player_command_scratch` on clones.
-6. Select a viable substantive command; notification acknowledgement is fallback housekeeping.
+6. Select a viable substantive command; notification acknowledgement is the fallback.
 7. Commit through `apply_player_command`.
 8. Advance the action branch; counterfactual branches use the same day loop on disposable clones.
 9. Advance a no-action baseline from the same decision point.
 10. Record outcomes, attribution, scores, findings, and trace data.
 
-The harness never directly mutates domain records. Spending policies may reserve cash for known obligations and rank recovery ahead of growth, but must still use canonical commands and quotes.
+The harness never directly mutates domain records. Spending policies may reserve cash for obligations and rank recovery ahead of growth, but must still use canonical commands and quotes.
 
 ## Progression and phases
 
@@ -144,7 +137,7 @@ The harness records durable milestones: commercial standing, institutional suppo
 
 A house whose founder dies before city-shaping remains on the ascent arc under its heir; only a governing dynasty after succession enters the legacy era.
 
-Phase diagnostics evaluate actionability, quiet/blocked time, choice breadth, consequence differentiation, strategic diversity, civic endpoints, recovery pressure, and post-succession continuity. Exact thresholds live in `src/gameplay/` and its tests.
+Phase diagnostics evaluate actionability, quiet/blocked time, choice breadth, consequence differentiation, strategic diversity, civic endpoints, recovery pressure, and post-succession continuity. Thresholds live in `src/gameplay/` and its tests.
 
 ## Counterfactual attribution
 
@@ -179,8 +172,8 @@ A quiet cycle has no viable substantive choice. Each quiet cycle resolves to one
 Rules:
 
 - Every command kind has an activation predicate: *would the canonical game accept some concrete command of this kind in this state?* Predicates mirror resource, cooldown, eligibility, capacity, and target gates. An activation is recorded even when no candidate is generated, so quiet cycles are never misread as dormant because a generator declined an offer.
-- Mechanically enforced: a viable probe whose kind did not fire an activation fails the cycle with `ActivationPredicateDrift`.
-- Deliberately narrowed routes (distress sales, wage-fairness cadence, succession-pressure designations, commission pacing, discretionary floors) classify an unfired activation as agent restraint, not generator gap. This keeps `generator_gaps` meaning "offered action with no construction logic."
+- A viable probe whose kind did not fire an activation fails the cycle with `ActivationPredicateDrift`.
+- Deliberately narrowed routes (distress sales, wage-fairness cadence, succession-pressure designations, commission pacing, discretionary floors) classify an unfired activation as agent restraint, not generator gap.
 - Operational fallbacks (cash transfers, withdrawals) are context, not causes. An operational-only cycle notes that atop the strategic cause.
 
 Counts are recorded per campaign and summed in aggregates. Each quiet trace step carries a human-readable `no_action_reason`.
@@ -208,15 +201,13 @@ Counts are recorded per campaign and summed in aggregates. Each quiet trace step
 
 Milestone days prefer the exact chronicle day over the observation day (decision windows can straddle a year boundary).
 
-Unexecuted routes aggregate into three summary findings by cause: activations with no candidate construction (Critical for non-restraint routes, Warning for deliberate-restraint routes) and kinds the world never offered (Info). Per-kind findings remain for more specific conditions.
+Unexecuted routes aggregate into three summary findings by cause: activations with no candidate construction (Critical for non-restraint routes, Warning for deliberate-restraint routes) and kinds the world never offered (Info).
 
 ### Decision traces
 
 Each step records its phase and three consequence profiles: immediate changes at commit, action-attributable changes at the horizon vs the baseline, and ambient baseline changes. Feedback groups state coverage (`simulation_window_days`, `ambient_window_days`): substantive cycles attribute over the horizon; quiet cycles use the ordinary advance for both.
 
-Traces retain bounded outbox and chronicle feedback events.
-
-Alternatives carry `projected_horizon_days` and compare over a shared horizon of three decision intervals bounded by `max_consequence_horizon_days`. The human log deduplicates identical projected outcomes and caps quiet-reason lists with a remainder count; the structured report keeps full lists.
+Traces retain bounded outbox and chronicle feedback events. Alternatives carry `projected_horizon_days` and compare over a shared horizon of three decision intervals bounded by `max_consequence_horizon_days`. The human log deduplicates identical projected outcomes and caps quiet-reason lists with a remainder count; the structured report keeps full lists.
 
 Context lines carry treasury, business cash, offices, legitimacy, generation, and legal exposure.
 
@@ -224,7 +215,7 @@ Context lines carry treasury, business cash, offices, legitimacy, generation, an
 
 Portfolio cash transfers and withdrawals are observable but excluded from substantive-action and strategic-streak metrics; a finding reports when they dominate. `ExtendCredit` counts separately: new advances that immediately changed business state, new advances that stayed treasury-only, and zero-principal workouts of existing defaults. Workouts are recovery actions excluded from the productive-financing ratio.
 
-The normal cadence is 30 days, shortened to seven days while an uncontained crisis or player labor dispute is active, and narrowed toward an underfunded legal hearing.
+Normal cadence is 30 days, shortened to seven days while an uncontained crisis or player labor dispute is active, and narrowed toward an underfunded legal hearing.
 
 ## Scores
 
@@ -259,7 +250,7 @@ Severity `Info`, `Warning`, `Critical`. Identify conditions such as:
 - Crisis kinds never detected
 - Counterparty performance that never fails
 
-Finding-rule tests arrange minimal report fields needed to test the rule, not long simulations.
+Finding-rule tests arrange minimal report fields to test each rule, not long simulations.
 
 ## Integration checklist
 
@@ -283,7 +274,7 @@ Divergence between harness and game is a harness defect.
 - Activation predicates are checked every cycle (`ActivationPredicateDrift` on mismatch).
 - Report schema version bumps on any semantic change (activation, scoring, findings, trace meaning).
 - Organic variation (jitter ±28 days plus score range 1800, each persona- and state-aware, plus bounded exploratory injection) prevents rigid replay while urgency and persona priorities remain dominant.
-- Bounded work: probe caps, horizons, trace limits bound every run in domain terms. Parallelism capped by `CIVIC_DYNASTY_JOBS`; ordering is stable.
+- Bounded work: probe caps, horizons, trace limits bound every run. Parallelism capped by `CIVIC_DYNASTY_JOBS`; ordering is stable.
 
 ## Interpretation limits
 

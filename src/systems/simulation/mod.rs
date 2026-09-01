@@ -348,24 +348,20 @@ fn decide_production(
 }
 
 /// Share of daily operating cost attributable to tool wear and replacement.
-/// At 25% tools are a meaningful but not dominant industrial input, so a
-/// tool shortage constrains production without making every workshop's daily
-/// viability depend on 80% of its operating budget being tools.
+/// At 25% tools constrain production under shortage without making daily
+/// viability depend on most of the operating budget.
 const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASIS_POINTS;
 
 /// Heads become eligible for succession at this age. Combined with the
-/// annual chance ramp below, this keeps the first transition within a
-/// playable session rather than pushing the dynasty fantasy past the
-/// horizon most campaigns reach. At 52 the 50-52 year old founders have
-/// two quiet years to establish institutional standing before succession
-/// pressure begins, so office reliably precedes succession.
+/// annual chance ramp, the first transition falls inside a playable session
+/// while founders aged 50-52 have time to establish institutional standing
+/// before succession pressure begins.
 const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 52;
 
-/// Health an heir resumes natural aging from when they accede to the headship.
-/// The annual health pass pins a designated heir's collapsed health at a
-/// survivable floor so a sick heir can neither collapse into incapacity nor
-/// die before inheriting; accession lifts that artificial floor so the new
-/// head does not carry a guaranteed next-year collapse into office.
+/// Health floor an heir resumes natural aging from on accession. The annual
+/// health pass pins a designated heir's collapsed health at a survivable
+/// floor; accession lifts that floor so the new head does not carry a
+/// guaranteed next-year collapse.
 const SUCCESSION_ACCESSION_HEALTH_FLOOR: u16 = 1_000;
 
 /// Survivable health floor for characters the lifecycle cannot retire: a
@@ -375,13 +371,11 @@ const SUCCESSION_ACCESSION_HEALTH_FLOOR: u16 = 1_000;
 /// same annual pass.
 const COLLAPSED_HEALTH_SURVIVABLE_FLOOR: u16 = 1;
 
-/// Falling into distress needs three days of operating cover — two proved
-/// too eager to tip a workshop on a single price swing, stranding players
-/// in thrash without adding drama.
+/// Cash threshold to enter `Distressed`: three days of operating cover.
+/// Three days avoids thrash from a single price swing; recovery requires
+/// four days, providing hysteresis so businesses near the threshold do not
+/// flap on daily noise while remaining reachable for cash-positive shops.
 const ACTIVE_CASH_DAYS_OF_OPERATING_COST: i64 = 3;
-/// Climbing out needs four, so a business near the threshold cannot flap
-/// between `Distressed` and `Active` on daily price noise, but recovery
-/// stays reachable for cash-positive workshops rather than stranding them.
 const RECOVERY_CASH_DAYS_OF_OPERATING_COST: i64 = 4;
 
 /// Canonical business operating status after its cash or inventory changes:
