@@ -57,8 +57,12 @@ pub(crate) fn decide_business_purchases(
         available_cash[business.id().value() as usize] = business.cash();
     }
     let mut lines = Vec::new();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let day_hash = state.clock.day() as u32;
+    let mut businesses: Vec<_> = state.businesses.iter().collect();
+    businesses.sort_by_key(|business| business.id().value().wrapping_add(day_hash));
 
-    for business in state.businesses.iter() {
+    for business in businesses {
         if matches!(
             business.status(),
             BusinessStatus::Closed | BusinessStatus::Insolvent

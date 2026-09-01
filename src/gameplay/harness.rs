@@ -1489,8 +1489,7 @@ pub(crate) fn run_decision_cycle_internal(
         let treasury = state
             .dynasties
             .get(&state.player_dynasty_id)
-            .map(|d| d.treasury())
-            .unwrap_or(Money::ZERO);
+            .map_or(Money::ZERO, crate::core::Dynasty::treasury);
         let floor = crate::gameplay::dynasty_discretionary_floor(state);
         let office_reserve = crate::gameplay::player_office_duty_reserve(state, 0);
         let budget_note = if treasury < floor {

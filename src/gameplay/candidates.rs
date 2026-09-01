@@ -7620,7 +7620,7 @@ pub(crate) fn inject_exploratory_candidates(
     for b in persona.label().bytes() {
         roll = roll.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(11) ^ u64::from(b);
     }
-    if roll % 8 != 0 {
+    if !roll.is_multiple_of(8) {
         return;
     }
     let player_id = state.player_dynasty_id;
