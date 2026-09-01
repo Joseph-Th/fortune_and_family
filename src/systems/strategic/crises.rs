@@ -640,13 +640,13 @@ pub(crate) fn detect_epidemic(state: &mut AppState) -> Result<(), SimulationErro
         return Ok(());
     };
     let deficiency = 10_000_u16.saturating_sub(sanitation);
-    // Emergent outbreak, not scheduled drama: a mediocre district (~6500
-    // sanitation) no longer has a guaranteed ~10% chance per check. Only
-    // genuinely deprived sanitation (>3500 deficiency) produces material
-    // pressure, so route and credit stress must actually accumulate.
+    // Epidemic chance is deficiency-driven: only genuine deprivation
+    // (>3500 deficiency) produces material pressure, so route and credit
+    // stress must actually accumulate before an outbreak is likely. A mid-range
+    // district (~6500 sanitation) therefore stays low-risk by design.
     let chance = deficiency.saturating_div(5).saturating_add(120).min(10_000);
-    // Suppress low-deficiency noise: below 2800 deficiency (<7200 sanitation)
-    // the chance floor is not enough to fire without additional risk.
+    // Below 2800 deficiency (<7200 sanitation) the floor chance is insufficient
+    // to trigger without additional compounding risk; suppress noise there.
     if deficiency < 2_800 {
         return Ok(());
     }

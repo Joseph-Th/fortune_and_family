@@ -42,7 +42,7 @@
 //!
 //! assert!(page.starts_with("<!DOCTYPE html>"));
 //! ```
-//! Focused tests: sibling test suite.
+//! Focused tests: `src/art/*` rendering and harness suites, `bash scripts/test.sh art-cli`.
 
 pub mod anim;
 pub mod canvas;
