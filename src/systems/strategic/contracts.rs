@@ -11,8 +11,9 @@
 //! Mutates: `AppState` contracts, business cash/inventory, market clearing,
 //! audit log.
 //! Does not own: persistence or projection.
-//! Invariants: every delivery is priced at contract `unit_price`; breach
+//! Relevant invariants: every delivery is priced at contract `unit_price`; breach
 //! victim is the first attributable miss; unpaid penalties cap at `penalty`.
+//! Canonical operations: `advance_contracts`, supply contract settlement and breach.
 //! Focused tests: `src/systems/strategic/strategic_tests.rs` contract
 //! lifecycle and `commands_tests.rs` validation.
 

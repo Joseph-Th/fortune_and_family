@@ -10,6 +10,8 @@
 //! Mutates: `AppState.crises` severity/status, route disruption, audit.
 //! Does not own: crisis-response command validation (`commands/response.rs`)
 //! or household income scaling (reads the shared `capacity_weighted_...`).
+//! Canonical operations: `detect_crises`, escalation, response effects, route risk.
+//! Relevant invariants: detection via route/price/food/stock signals; responses bounded window.
 //! Focused tests: `strategic_tests` crisis lifecycle, gameplay world-stress
 //! aggregates.
 

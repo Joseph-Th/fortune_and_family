@@ -7,6 +7,10 @@
 //! Reads: `GameplayHarnessReport` aggregates via synthetic report fixtures.
 //! Mutates: nothing persistent.
 //! Focused lane: `bash scripts/test.sh fast` (and `gameplay` for matrices).
+//! Does not own: harness logic (tested, not owned).
+//! Canonical operations: no canonical ops (test suite).
+//! Relevant invariants: as stated in this header.
+//! Focused tests: sibling test suite.
 
 use super::*;
 use crate::core::{

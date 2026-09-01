@@ -7,6 +7,10 @@
 //! Reads: `Registry`, `AppState` via `build_new_game` / `save_state` / `load_state`.
 //! Mutates: temporary files under `tempfile::tempdir` only.
 //! Focused lane: `bash scripts/test.sh standard` (and `deep` for release boundary).
+//! Does not own: persistence (tested, not owned).
+//! Canonical operations: no canonical ops (test suite).
+//! Relevant invariants: as stated in this header.
+//! Focused tests: sibling test suite.
 
 use super::*;
 use crate::core::{

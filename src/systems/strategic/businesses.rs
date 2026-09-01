@@ -9,6 +9,8 @@
 //! Mutates: `Business` finance/ownership and dynasty treasury/administrative
 //! load through checked arithmetic and version reservation.
 //! Does not own: daily production/sales pipeline or CLI.
+//! Canonical operations: `advance_businesses`, ownership, distributions, recapitalization.
+//! Relevant invariants: recovery hysteresis; distress efficiency 75%; store indexes coherent.
 //! Focused tests: `strategic_tests` acquisition/dividend, `commands_tests`
 //! business capital.
 

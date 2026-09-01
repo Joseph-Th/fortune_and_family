@@ -11,9 +11,10 @@
 //! Mutates: `AppState` legal cases, associated loans/contracts, treasuries,
 //! district conditions, legitimacy, and audit/outbox.
 //! Does not own: law sponsorship — `strategic/mod.rs` law appliers.
-//! Invariants: every case traces to a grounded claim; damages ≤ claim cap;
+//! Relevant invariants: every case traces to a grounded claim; damages ≤ claim cap;
 //! filing fees credit the Civic Court; settled claims discharge their
 //! backing obligation per DESIGN.md recovery guarantee.
+//! Canonical operations: `advance_legal_cases`, hearings, judgments, write-offs.
 //! Focused tests: `src/systems/strategic/strategic_tests.rs` legal and
 //! `commands_tests.rs` filing/settlement validation.
 

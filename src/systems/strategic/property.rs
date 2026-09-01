@@ -9,6 +9,8 @@
 //! Reads: `Registry` districts, `AppState` properties/districts/businesses.
 //! Mutates: properties, business premises links, district conditions.
 //! Does not own: command dispatch (calls into here via `property_cmd.rs`).
+//! Canonical operations: `advance_property`, rents, occupancy, value drift, public works.
+//! Relevant invariants: rent scaled by district index; fire discount; eviction for closed firms.
 //! Focused tests: `strategic_tests` tenancy/rent, `commands_tests` property
 //! acquisition.
 

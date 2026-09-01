@@ -12,9 +12,10 @@
 //! Mutates: `AppState.loans` / `civic_debts` / `properties` collateral
 //! links through weekly systems; treasury cash via market clearing pool.
 //! Does not own: command dispatch (trade.rs) or market pricing.
-//! Invariants: every balance is `Money`; missed-payment counters track
+//! Relevant invariants: every balance is `Money`; missed-payment counters track
 //! arrears per `LoanStatus::has_consistent_arrears`; collateral pledged at
 //! most once; unresolved defaults block fresh credit per pair.
+//! Canonical operations: `advance_credit`, loan/municipal debt service and collateral.
 //! Focused tests: `src/systems/strategic/strategic_tests.rs` credit, `src/systems/commands/commands_tests.rs` issuance.
 
 #[allow(clippy::wildcard_imports)]

@@ -10,8 +10,9 @@
 //! Mutates: per-campaign `AppState` clones; harness owns its accumulator
 //! but not the authoritative dynasty stores.
 //! Does not own: candidate generation (candidates) or findings (findings).
-//! Invariants: every campaign owns its `AppState`; registry immutable,
+//! Relevant invariants: every campaign owns its `AppState`; registry immutable,
 //! ordering stable, random-state owned; daily rotation is adapter policy.
+//! Canonical operations: `run_gameplay_harness`, campaign orchestration and counterfactuals.
 //! Focused tests: `src/gameplay_tests.rs` harness integration.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace

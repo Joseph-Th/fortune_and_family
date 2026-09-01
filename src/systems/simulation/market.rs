@@ -9,8 +9,9 @@
 //! Reads: `Registry` goods/recipes, `AppState` market/businesses/employment.
 //! Mutates: `AppState.market` quotes/prices and chronicle for price shocks.
 //! Does not own: production or household decisions.
-//! Invariants: every good has a market quote; break-even median is robust to
+//! Relevant invariants: every good has a market quote; break-even median is robust to
 //! outliers; price shocks are suppressed for 14 days per good.
+//! Canonical operations: `apply_market_spoilage`, `production_price_floors`, pricing.
 //! Focused tests: `src/systems/simulation/simulation_tests.rs` market.
 
 use super::{effective_capacity_batches, maintenance_cost};

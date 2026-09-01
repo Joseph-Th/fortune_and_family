@@ -42,6 +42,7 @@
 //!
 //! assert!(page.starts_with("<!DOCTYPE html>"));
 //! ```
+//! Focused tests: sibling test suite.
 
 pub mod anim;
 pub mod canvas;

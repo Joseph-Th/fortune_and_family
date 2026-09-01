@@ -9,9 +9,10 @@
 //! Mutates: property `owner_dynasty_id` / `tenant_dynasty_id`, dynasty
 //! treasury, market clearing pool for unowned proceeds and rents.
 //! Does not own: rent scaling or eviction weekly systems (strategic/property).
-//! Invariants: every unowned sale funds the clearing pool; distressed
+//! Relevant invariants: every unowned sale funds the clearing pool; distressed
 //! civic guarantees overlay; weekly rent is district-indexed and
 //! fire-discounted when material.
+//! Canonical operations: property purchase and liquidation commands.
 //! Focused tests: `src/systems/commands/commands_tests.rs` property paths.
 
 #[allow(clippy::wildcard_imports)]

@@ -10,10 +10,11 @@
 //! `acknowledged` flag, treasury via clearing-pool credit.
 //! Does not own: strategic information-report expiry (strategic owns) or
 //! projection read-models.
-//! Invariants: every report carries `source`/`confidence`/`expiry`;
+//! Relevant invariants: every report carries `source`/`confidence`/`expiry`;
 //! leverage requires confirmed commissioned intelligence; expiry is
 //! `created ≤ today ≤ expires ≤ created + LIFETIME`; notifications are
 //! acknowledged in order without mutation of history.
+//! Canonical operations: intelligence commission and leverage commands.
 //! Focused tests: `src/systems/commands/commands_tests.rs` info paths.
 
 #[allow(clippy::wildcard_imports)]

@@ -7,6 +7,10 @@
 //! Reads: `Registry` via `test_registry`.
 //! Mutates: nothing persistent (returns owned `AppState`).
 //! Focused lane: `bash scripts/test.sh fast bootstrap`.
+//! Does not own: campaign construction (tested, not owned).
+//! Canonical operations: no canonical ops (test suite).
+//! Relevant invariants: as stated in this header.
+//! Focused tests: sibling test suite.
 
 use super::*;
 use crate::test_support::rivergate_registry_for_test as test_registry;

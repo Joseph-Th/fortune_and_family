@@ -9,9 +9,10 @@
 //! treasury/legitimacy, market clearing pool via `credit_*`.
 //! Does not own: law price-control effects (simulation) or debt
 //! delinquency (credit strategic).
-//! Invariants: `PublicDebtAuthorization` value is issuance principal;
+//! Relevant invariants: `PublicDebtAuthorization` value is issuance principal;
 //! other law values validate via `LawKind::is_value_valid`; office +
 //! power + establishment-day gates before sponsorship; cooldown audited.
+//! Canonical operations: law sponsorship and civic debt commands.
 //! Focused tests: `src/systems/commands/commands_tests.rs` law paths.
 
 #[allow(clippy::wildcard_imports)]

@@ -13,6 +13,8 @@
 //! Mutates: only the Civic Court budget when collecting the fee after
 //! validated debit.
 //! Does not own: hearing/judgment/settlement lifecycle (`strategic/legal_cases.rs`).
+//! Canonical operations: `quote_grounded_legal_claim`, `LegalClaimQuote`.
+//! Relevant invariants: quotes derive from grounded obligations; no duplicate economic paths.
 //! Focused tests: `strategic_tests` grounded-claim and settlement coverage.
 
 use crate::core::{AppState, LegalCaseKind, LegalClaimSource, LoanStatus};

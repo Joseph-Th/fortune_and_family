@@ -8,8 +8,9 @@
 //! Mutates: public works (`budget`/`spent`/`progress`/`status`), dynasty
 //! treasury + civic contributions + legitimacy, market clearing pool.
 //! Does not own: terrain or civic-service simulation (strategic owns).
-//! Invariants: every spend stays via `spend_player_treasury` → clearing-pool
+//! Relevant invariants: every spend stays via `spend_player_treasury` → clearing-pool
 //! credit; external contributions earn bounded legitimacy/relationship gain.
+//! Canonical operations: `apply_civic_commands` - public works and funding.
 //! Focused tests: `src/systems/commands/commands_tests.rs` public-work paths.
 
 #[allow(clippy::wildcard_imports)]

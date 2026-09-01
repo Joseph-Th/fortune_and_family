@@ -7,8 +7,9 @@
 //! Reads: `rig::Pose` / `Skeleton` for joint counts and rest poses.
 //! Mutates: nothing (value types; `Clip::sample` is pure).
 //! Does not own: rig resolution, surface drawing, or review harness.
-//! Invariants: keyframes strictly increase, share one pose length, and fall
+//! Relevant invariants: keyframes strictly increase, share one pose length, and fall
 //! inside `frame_count`; sampling is deterministic and integer-only.
+//! Canonical operations: `Keyframe::new`, `Clip::sample`, `humanoid_clip_library` - animation sampling.
 //! Focused tests: `src/art/anim.rs::tests` keyframe validation and sampling.
 
 use super::math::ease_in_out;

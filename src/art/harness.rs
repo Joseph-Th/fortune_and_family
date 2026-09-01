@@ -8,8 +8,9 @@
 //! Reads: `sprite::CharacterSpec` / `SpriteSheet`, `lint` findings.
 //! Mutates: nothing persistent (returns owned `ArtReview` value).
 //! Does not own: campaign state, simulation, or persistence.
-//! Invariants: every configured seed×role renders; output is one HTML file
+//! Relevant invariants: every configured seed×role renders; output is one HTML file
 //! with no external assets; determinism via integer math only.
+//! Canonical operations: `build_art_review`, `build_art_review_report`, `render_art_review_html`.
 //! Focused tests: `src/art/harness.rs` batch and encoding checks.
 
 use super::lint::{ArtFinding, ArtSeverity, count_at_least, review_sheet, split_frames};

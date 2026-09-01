@@ -8,9 +8,10 @@
 //! Reads: `GameplayHarnessReport` aggregates only (no direct state).
 //! Mutates: nothing (pure predicates over the report).
 //! Does not own: harness orchestration or scoring weights.
-//! Invariants: every finding carries severity, domain, and reproducibility
+//! Relevant invariants: every finding carries severity, domain, and reproducibility
 //! context; no rule invents evidence absent from the report; limited tiers
 //! stay combinable.
+//! Canonical operations: `evaluate_findings`, finding rules and thresholds.
 //! Focused tests: `src/gameplay_tests.rs` finding-rule unit tests.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace

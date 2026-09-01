@@ -11,6 +11,8 @@
 //! one `RegistryIds` across many consecutive checks.
 //! Mutates: nothing.
 //! Does not own: authoritative persistence validation (`src/persistence.rs`) or recovery.
+//! Canonical operations: `validate_invariants` - cross-record checks.
+//! Relevant invariants: cross-record invariants checked during simulation and at persistence boundary.
 //! Focused tests: exercised indirectly by every behavioral test that builds or advances
 //! a campaign in debug mode; persistence tests cover release validation.
 

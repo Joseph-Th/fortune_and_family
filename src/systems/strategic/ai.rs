@@ -11,6 +11,8 @@
 //! Mutates: AI dynasties, objectives, and businesses through canonical
 //! strategic primitives (same validation as player paths).
 //! Does not own: simulation daily loop or persistence.
+//! Canonical operations: `advance_ai_objectives`, `apply_ai_dynasty_upkeep`, AI autonomy.
+//! Relevant invariants: AI uses same canonical commands and obeys discretionary floor.
 //! Focused tests: `strategic_tests` AI objectives/upkeep, gameplay harness
 //! persona diversity.
 

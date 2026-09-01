@@ -13,9 +13,10 @@
 //! Mutates: `dynasty.runtime.phase` and the caller-owned memo.
 //! Does not own: mission definitions or narrative prose (labels live on
 //! `CampaignPhase::label`).
-//! Invariants: phases never regress; evidence is memo-consistency checked
+//! Relevant invariants: phases never regress; evidence is memo-consistency checked
 //! (audit shrinking or day regression forces rebuild); phase derived only
 //! from durable milestones, not volatile cache.
+//! Canonical operations: `refresh_campaign_phases`, `campaign_phase_is_consistent`.
 //! Focused tests: `src/systems/strategic/*` succession, harness phase diagnostics.
 
 use super::{OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT};

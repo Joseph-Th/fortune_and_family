@@ -8,8 +8,9 @@
 //! Mutates: `AppState` strategic maps (institutions, districts, routes,
 //! households, AI objectives) exactly once per `build_new_game`.
 //! Does not own: campaign construction or validation — `bootstrap.rs`.
-//! Invariants: every institution/district initialized; route health and
+//! Relevant invariants: every institution/district initialized; route health and
 //! market quotes mirror registry seed; RNG state advanced deterministically.
+//! Canonical operations: deterministic strategic state bootstrap.
 //! Focused tests: `src/systems/bootstrap_tests.rs` deterministic
 //! construction.
 

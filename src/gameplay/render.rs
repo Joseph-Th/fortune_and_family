@@ -8,8 +8,9 @@
 //! Reads: `GameplayHarnessReport` aggregates/snapshots/traces (immutable).
 //! Mutates: output `String` only.
 //! Does not own: report generation, scoring, or finding derivation.
-//! Invariants: every section mirrors the structured report's aggregation;
+//! Relevant invariants: every section mirrors the structured report's aggregation;
 //! rendered alternatives deduplicate identical projected outcomes.
+//! Canonical operations: `render_gameplay_report`, human report rendering.
 //! Focused tests: `src/gameplay_tests.rs` report snapshot.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace

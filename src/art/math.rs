@@ -8,8 +8,9 @@
 //! Reads: nothing.
 //! Mutates: nothing (pure value math).
 //! Does not own: canvas, palette, or skeleton data.
-//! Invariants: every wrap stays in `0..65_536`; `sin`/`cos` bounded by `±ONE`;
+//! Relevant invariants: every wrap stays in `0..65_536`; `sin`/`cos` bounded by `±ONE`;
 //! determinism integer-only; `ONE` is the fixed-point unit.
+//! Canonical operations: `ease_in_out`, fixed-point math helpers.
 //! Focused tests: `src/art/math.rs::tests` sine, wrapping, monotonic ease.
 
 use serde::{Deserialize, Serialize};

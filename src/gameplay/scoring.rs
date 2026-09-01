@@ -8,8 +8,9 @@
 //! Reads: `CampaignAccumulator` + `GameplaySnapshot` pairs (start/end).
 //! Mutates: nothing (pure folds).
 //! Does not own: findings or advisory thresholds.
-//! Invariants: every score is 0..=100; `overall` is explicit weighted sum;
+//! Relevant invariants: every score is 0..=100; `overall` is explicit weighted sum;
 //! command acceptance never improves utility; aggregation is deterministic.
+//! Canonical operations: `score_campaign`, `score_aggregate` - metric derivation.
 //! Focused tests: `src/gameplay_tests.rs` scoring gates.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace

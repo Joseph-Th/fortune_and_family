@@ -8,9 +8,10 @@
 //! clearing account.
 //! Mutates: `AppState` household cash/satisfaction and market clearing.
 //! Does not own: daily market consumption — `simulation/mod.rs`.
-//! Invariants: charge scales with members × class × rent index; market
+//! Relevant invariants: charge scales with members × class × rent index; market
 //! staples paid separately so no double bread inflation; surpluses credit
 //! the clearing pool per AUDIT.md.
+//! Canonical operations: `advance_households` - living costs and family pressure.
 //! Focused tests: `src/systems/strategic/strategic_tests.rs` living-cost
 //! and satisfaction behavior.
 

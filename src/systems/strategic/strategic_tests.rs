@@ -7,6 +7,10 @@
 //! Reads: `Registry`, `AppState` via fixtures + `advance_days`.
 //! Mutates: local clones; soak horizons run in release.
 //! Focused lane: `bash scripts/test.sh fast strategic` (and `soak`).
+//! Does not own: strategic systems (tested, not owned).
+//! Canonical operations: no canonical ops (test suite).
+//! Relevant invariants: as stated in this header.
+//! Focused tests: sibling test suite.
 
 use super::*;
 use crate::systems::{advance_days, validate_invariants};

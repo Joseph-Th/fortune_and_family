@@ -9,8 +9,9 @@
 //! Mutates: `SupplyContract` / `Loan` insertion, property collateral links,
 //! dynasty treasury via clearing-pool credit, audit log.
 //! Does not own: weekly settlement (strategic/contracts, strategic/credit).
-//! Invariants: every issuance validates reserve/capacity/rate/collateral;
+//! Relevant invariants: every issuance validates reserve/capacity/rate/collateral;
 //! defaulted-pair blocking and collateral size gates preserve recovery paths.
+//! Canonical operations: supply contract and credit negotiation commands.
 //! Focused tests: `src/systems/commands/commands_tests.rs` trade paths.
 
 #[allow(clippy::wildcard_imports)]

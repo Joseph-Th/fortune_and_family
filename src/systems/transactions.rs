@@ -8,10 +8,12 @@
 //! Owns: `SimulationError` / `TimelineError`, `checked_future_day`,
 //! `next_business_finance_version` / `next_family_charter_version`, and the
 //! business-cash transfer helper.
-//! Reads/Mutates: narrowly scoped to the `AppState` fields each helper owns.
+//! Reads: narrowly scoped `AppState` fields per helper.
+//! Mutates: narrowly scoped `AppState` fields per helper.
 //! Does not own: domain decision or policy (callers validate first).
-//! Invariants: every future-day stays ≤ `i64::MAX` sentinel; version bumps
+//! Relevant invariants: every future-day stays ≤ `i64::MAX` sentinel; version bumps
 //! reserve before mutating so the commit phase is infallible.
+//! Canonical operations: `transfer_business_cash`, `checked_future_day`, validated tokens.
 //! Focused tests: exercised indirectly via `commands_tests` and `simulation_tests`.
 
 use crate::core::{AppState, AuditKind, AuditRecord, Business, BusinessStatus};

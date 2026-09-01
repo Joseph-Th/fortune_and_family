@@ -12,8 +12,9 @@
 //! Mutates: nothing (pure data definitions).
 //! Does not own: orchestration or presentation; consumers are CLI and
 //! `scripts/check_gameplay.py`.
-//! Invariants: exhaustive `ALL_COMMAND_KINDS`/`ALL_DOMAINS`; schema version
+//! Relevant invariants: exhaustive `ALL_COMMAND_KINDS`/`ALL_DOMAINS`; schema version
 //! bumps on shape change; every trace step carries phase + window context.
+//! Canonical operations: report types, `GameplayHarnessConfig`, `GameplayHarnessReport`.
 //! Focused tests: `src/gameplay_tests.rs` catalog exhaustiveness.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace

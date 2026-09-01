@@ -4,102 +4,86 @@ Defines test tiers, suite organization, assertion standards, and completion gate
 
 ## Commands
 
-Solo-dev iteration is one command — everything else is a gate you run only when its contract changed.
+Solo-dev iteration is one command — everything else runs only when its contract changed.
 
-| Goal | Command | Warm cost | When to use |
+| Goal | Command | Warm | When |
 |---|---|---|---|
-| Fastest syntax check | `bash scripts/test.sh check [filter]` | <1s | Editor feedback — no tests run |
-| One domain or behavior | `bash scripts/test.sh fast <filter>` | <1s | Tight edit loop (e.g. `fast simulation` — 82 tests, 0.12s exec) |
-| Changed domains only | `bash scripts/test.sh changed` | <1s | Auto-detects touched domains from the current diff |
-| Fastest library-only loop | `bash scripts/test.sh quick [filter]` | ~2s | Alias for fast, never triggers docs/CLI |
-| All ordinary library tests | `bash scripts/test.sh fast` | ~2s | Full sweep — 980 tests, 1.7s exec warm |
-| Normal pre-commit loop | `bash scripts/test.sh standard` | ~4s | Syntax + lib + docs + core CLI |
-| List matching tests | `bash scripts/test.sh list <filter>` | <1s | Discover filter names |
-| One exact test | `bash scripts/test.sh exact <fully-qualified-name>` | ~1s | Pinpoint a single test |
-| One exact test with output | `bash scripts/test.sh debug <fully-qualified-name>` | ~1s | Pinpoint with --nocapture |
-| Deterministic soaks | `bash scripts/test.sh soak` | ~1s warm / ~50s cold | Long-horizon invariants (release) |
-| Documentation checks | `bash scripts/test.sh docs` | ~1s warm | Docs + doctests |
-| Core CLI smoke | `bash scripts/test.sh cli` | ~1s warm | Campaign/projection CLI |
-| Art CLI smoke | `bash scripts/test.sh art-cli` | ~1s warm | Sprite review CLI |
-| Gameplay CLI smoke | `bash scripts/test.sh gameplay-cli` | ~1s warm | Harness CLI (30-day) |
-| All adapter smoke groups | `bash scripts/test.sh adapters` | ~2s warm | All CLI surfaces (one CLI build) |
-| Focused harness run | `bash scripts/test.sh playtest [args...]` | <1s warm (debug) | Single campaign — no args = 60-day quick check |
-| Release gameplay gates | `bash scripts/test.sh gameplay` | ~16s warm | 36 + 3 campaigns, 60k days (release) |
-| Deep gameplay design audit | `bash scripts/test.sh gameplay-audit` | ~30s warm | Multi-seed / generation / credit stress (release) |
-| Fast CI verification lane | `bash scripts/test.sh ci-verify` | ~5s warm | Format + clippy + lib + docs + doc warnings |
-| Fast CI verification lane | `bash scripts/test.sh ci` | ~5s warm | Alias for ci-verify |
-| Deep CI gates lane | `bash scripts/test.sh ci-gates` | ~1 min | Release + soaks + adapters + gameplay + audit |
-| Heavy release gates without audit | `bash scripts/test.sh slow` | ~45s | Release gates without security audit |
-| Full deep design gate | `bash scripts/test.sh deep` | ~1.2 min | slow + gameplay-audit |
-| Complete scripted test tier | `bash scripts/test.sh all` | ~25s | Standard + soak + adapters + gameplay |
+| Syntax check | `bash scripts/test.sh check [filter]` | <1s | Editor feedback, no tests |
+| One domain | `bash scripts/test.sh fast <filter>` | <1s | Tight loop, e.g. `fast simulation` (82 tests, 0.12s) |
+| Changed domains | `bash scripts/test.sh changed` | <1s | Auto-detects touched domains from `git diff` |
+| Library sweep | `bash scripts/test.sh fast` | ~2s | Full library, 980 tests, 1.7s exec |
+| Pre-commit | `bash scripts/test.sh standard` | ~4s | Syntax + lib + docs + core CLI |
+| List candidates | `bash scripts/test.sh list <filter>` | <1s | Discover filter names |
+| One test | `bash scripts/test.sh exact <name>` | ~1s | Pinpoint single test |
+| One test with output | `bash scripts/test.sh debug <name>` | ~1s | With `--nocapture` |
+| Long horizons | `bash scripts/test.sh soak` | ~1s warm | Determinism and multi-generation invariants (release) |
+| Docs | `bash scripts/test.sh docs` | ~1s | Links and prose contracts |
+| Adapter smoke | `bash scripts/test.sh adapters` | ~2s | All CLI surfaces, one build |
+| Harness smoke | `bash scripts/test.sh playtest [args]` | <1s | 60-day single persona, debug |
+| Gameplay gate | `bash scripts/test.sh gameplay` | ~16s | 36+3 campaigns, 60k days (release) |
+| Design audit | `bash scripts/test.sh gameplay-audit` | ~30s | Multi-seed and credit stress (release) |
+| CI verify | `bash scripts/test.sh ci-verify` | ~5s | Format + clippy + lib + docs (`bash scripts/test.sh ci` is an alias) |
+| Deep CI | `bash scripts/test.sh ci-gates` | ~1min | Release + soaks + adapters + gameplay + audit |
+| Single CLI | `bash scripts/test.sh cli` | ~1s | Core CLI smoke |
+| Art CLI | `bash scripts/test.sh art-cli` | ~1s | Sprite review CLI |
+| Harness CLI | `bash scripts/test.sh gameplay-cli` | ~1s | Harness CLI (30-day) |
+| Quick | `bash scripts/test.sh quick` | ~2s | Alias for `fast` (no docs/CLI) |
+| Release without audit | `bash scripts/test.sh slow` | ~45s | Release gates without `cargo-audit` |
+| Full design gate | `bash scripts/test.sh deep` | ~1.2min | `slow` + `gameplay-audit` |
+| Everything | `bash scripts/test.sh all` | ~25s | `standard` + `soak` + `adapters` + `gameplay` |
 
-Failures print complete output including compiler diagnostics. A filter matching no executable test exits with code 2.
-
-On Windows without bash on PATH, use `.\scripts\test.ps1 <mode> [filter]` (mirrors `scripts/test.sh`).
+Failures print full diagnostics. A filter matching no test exits with code 2. On Windows without bash, use `.\scripts\test.ps1 <mode> [filter]`.
 
 ## Runner environment
 
 | Variable | Effect |
 |---|---|
-| `CIVIC_DYNASTY_JOBS=<n>` | Forwards `--jobs <n>` to cargo and caps harness campaign parallelism. |
-| `CIVIC_DYNASTY_NEXTEST=1` | Runs library tests under `cargo-nextest` (per-test isolation). |
-| `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` | Skips CLI rebuilds when iterating on library code. |
-| `CIVIC_DYNASTY_SKIP_DOCS=1` | Skips docs in `standard` for lib-only iteration (~3s). |
-| `CIVIC_DYNASTY_PROFILE=release` | Forces `adapters`/`playtest` to use a release binary. Gate lanes always use release. |
-| `CIVIC_DYNASTY_BINARY=<path>` | Reuses an existing binary for smoke groups. |
-| `CIVIC_DYNASTY_BINARY_OVERRIDE=<path>` | Pins an exact binary over every profile choice. |
-| `CIVIC_DYNASTY_PRE_PUSH=standard` | Strengthens the pre-push hook from its `quick` default. |
-| `CIVIC_DYNASTY_PYTHON=<interpreter>` | Selects the Python interpreter. |
+| `CIVIC_DYNASTY_JOBS=<n>` | Caps cargo jobs and harness parallelism |
+| `CIVIC_DYNASTY_NEXTEST=1` | Run under `cargo-nextest` |
+| `CIVIC_DYNASTY_SKIP_CLI_BUILD=1` | Skip CLI rebuild for lib-only iteration |
+| `CIVIC_DYNASTY_SKIP_DOCS=1` | Skip docs in `standard` |
+| `CIVIC_DYNASTY_PROFILE=release` | Force `adapters`/`playtest` to release binary; gate lanes always use release |
+| `CIVIC_DYNASTY_BINARY=<path>` | Reuse existing binary for smoke groups |
+| `CIVIC_DYNASTY_PRE_PUSH=standard` | Use `standard` for pre-push hook (`quick` is default) |
+| `CIVIC_DYNASTY_PYTHON=<interpreter>` | Select Python interpreter |
 
 ## Build profiles
 
-- `dev` / `test`: crate `opt-level = 1`, dependencies `2`, `split-debuginfo = off`. Simulation-heavy tests finish in seconds. 16 codegen units, incremental, pipelining.
-- `check`: inherits `dev`, never executed; used by `cargo check` for sub-second feedback.
-- `release`: soaks and gameplay gates — `opt-level = 3`, 16 codegen units, incremental, no LTO. Warm rebuild stays ~1s; throughput within ~10% of peak.
-- `release-max`: single codegen unit + thin-LTO. Use only when measuring peak throughput.
+- `check`: inherits `dev`, never executed; `cargo check` feedback in <1s.
+- `dev` / `test`: `opt-level = 1` (deps `2`), 16 codegen units, incremental. Simulation tests finish in seconds.
+- `release`: `opt-level = 3`, 16 codegen units, incremental, no LTO. Used for `soak`/`gameplay`; warm rebuild ~1s, within ~10% of peak throughput.
+- `release-max`: single codegen unit + thin LTO; peak measurement only.
 
-Shared tuning: `.cargo/config.toml` (`incremental = true`, `pipelining = true`, `jobs = 0`) and `Cargo.toml` (16 codegen units per profile, split-debuginfo off for dev/test). No remote cache required. First build of a new profile is one-time (clippy ~11s cold, release ~56s cold); warm thereafter is <1s incremental.
-
-Warm budgets (incremental, after first build): `check` <1s (~0.3s), `fast` filtered <1s (82–197 tests, 0.1–0.3s exec) / full ~2s (980 tests, 1.7s exec), `standard` ~4s (lib 2s + docs 1s + one debug CLI <1s), `ci` / `ci-verify` ~5s, debug `playtest` <1s (60 days, ~400 days/s), `gameplay` ~16s (one release build + 39 campaigns, 60k days). Each lane reuses the incremental cache; `check` (`profile.check` inherits `dev`) and `test` share dependency artifacts warm.
-
-Long gameplay JSON assertions live in `scripts/check_gameplay.py`. `adapters`/`gameplay` lanes build their CLI once and reuse it.
+Warm budgets after first build: `check` ~0.3s, `fast` filtered <1s / full ~2s, `standard` ~4s, `adapters` ~2s, `playtest` debug <1s, `gameplay` ~16s. `check` and `test` share dependency artifacts warm.
 
 ## Receipts and hooks
 
-Successful unfiltered `quick`/`fast`, `standard`, and `all` runs record a content-addressed receipt under local Git metadata. The pre-push hook reuses a current receipt of equal or broader strength instead of recompiling identical bytes. Any tracked or non-ignored change invalidates it; receipt-eligible lanes refuse to issue evidence if bytes change mid-run.
+Unfiltered `quick`/`fast`, `standard`, and `all` runs record a content-addressed receipt under Git metadata. The pre-push hook reuses a receipt of equal or broader strength instead of recompiling identical bytes. Any tracked or non-ignored change invalidates it; receipts refuse to issue if bytes change mid-run.
 
-Install local hooks once with `bash scripts/install_hooks.sh`
-(sets `core.hooksPath` to `scripts/hooks`). `pre-commit` is the cheapest useful gate
-(~1s: format + shell syntax + cached whitespace) so you don't wait on builds per commit.
-`pre-push` defaults to `quick` (~2s warm, lib only) and reuses a content-addressed
-receipt — if these bytes already passed `quick`/`standard`, the push skips the duplicate
-build. Use `git commit --no-verify` mid-edit and `CIVIC_DYNASTY_PRE_PUSH=standard`
-when a stronger push gate (docs + CLI smoke) is warranted.
+Install hooks once: `bash scripts/install_hooks.sh` (`core.hooksPath` → `scripts/hooks`). `pre-commit` is format + shell + whitespace (~1s). `pre-push` defaults to `quick` (~2s) and skips the build when a current receipt exists. Use `git commit --no-verify` mid-edit; set `CIVIC_DYNASTY_PRE_PUSH=standard` when a stronger push gate is needed.
 
 ## Test tiers
 
-| Tier | Purpose | Warm budget |
+| Tier | Purpose | Warm |
 |---|---|---|
-| Check | Syntax/type only | ~1s |
-| Fast library | Deterministic unit and focused behavioral coverage | ~2s |
-| Standard | Check + fast library + docs + core CLI | ~4s |
-| Adapter smoke | CLI contracts grouped by core, art, gameplay | ~2s |
-| Soak | Long deterministic invariant and multi-generation behavior | ~1s warm |
-| Gameplay | Release-mode systemic quality and succession gates | ~16s |
-| Gameplay audit | Larger matrices for rare and mature behavior | ~30s |
-| CI verify | Fast CI lane (`ci` / `ci-verify`) | ~5s warm |
-| CI gates | Deep CI lane; requires `cargo-audit` when installed | ~1 min |
-| Slow | Release gates without audit | ~45s |
-| Deep | Complete design gate: slow + gameplay audit | ~1.2 min |
+| Check | Syntax and types | ~1s |
+| Fast library | Deterministic unit and focused behavior | ~2s |
+| Standard | Check + fast + docs + core CLI | ~4s |
+| Adapter smoke | CLI contracts | ~2s |
+| Soak | Long-horizon invariants | ~1s warm |
+| Gameplay | Systemic quality and succession | ~16s |
+| Gameplay audit | Rare and mature behavior | ~30s |
+| CI verify | Fast CI lane | ~5s |
+| CI gates | Deep CI lane | ~1min |
 | All | Standard + soak + adapters + gameplay | ~25s |
 
-Only `fast`/`quick`/`check`/`changed` belong in the inner loop. `ci-gates`, `slow`, `deep`, and `all` are release or deep-design checkpoints.
+`fast`/`quick`/`check`/`changed` belong in the inner loop. `ci-gates`, `slow`, `deep`, and `all` are release checkpoints.
 
-Fast tests must not use sleeps, wall-clock time, external services, or environment-dependent behavior. Soak tests always run in release mode (debug would be ~100× slower for long horizons); assertions are identical across profiles. Use `check` when only syntax needs proof.
+Fast tests use no sleeps, wall-clock, or external services. Soak tests always run in release (debug would be ~100× slower); assertions are identical across profiles.
 
 ## Suite organization
 
-| Area | Test file |
+| Area | File |
 |---|---|
 | Core state and stores | `src/core/state_tests.rs` |
 | Campaign bootstrap | `src/systems/bootstrap_tests.rs` |
@@ -118,28 +102,25 @@ Use stable nested modules so filters remain useful. Put a test in the narrowest 
 
 - `rivergate_registry_for_test` — shared immutable registry.
 - `make_test_campaign` — isolated clone of the deterministic default campaign.
-- `make_test_campaign_with` — variant where seed, name, or background is part of the contract.
+- `make_test_campaign_with` — variant where seed, name, or background is the contract.
 
-Select fixture data semantically: prefer "property owned by the player and not pledged" over a hard-coded ID or position.
-
-Extract setup helpers when they describe reusable domain conditions. Extract assertion helpers only when reuse improves clarity or diagnostics; mark shared assertion helpers `#[track_caller]`.
+Select fixture data semantically: prefer "property owned by the player and not pledged" over a hard-coded ID. Extract setup helpers for reusable domain conditions; extract assertion helpers only when reuse improves clarity, marking them `#[track_caller]`.
 
 ## Assertion standards
 
 Assert public behavior, durable state, accounting, or explicit invariants.
 
-- Use exact values for accounting, arithmetic boundaries, schemas, serialization, and ordering when order is a contract.
-- Use relational assertions for intentionally flexible emergent behavior (e.g. `assert_in_range`, `assert_money_in_range`, `>=`, `>`) — do not pin emergent totals to exact prose or incidental IDs.
-- Compare sets for exhaustive route or enum coverage and report missing/unexpected members via `assert_set_eq`.
+- Exact values for accounting, arithmetic, schemas, serialization, and ordering when order is a contract.
+- Relational assertions (`assert_in_range`, `>=`, `>`) for intentionally flexible emergent behavior — do not pin emergent totals to incidental prose or IDs.
+- Set comparison with `assert_set_eq` for exhaustive enum/route coverage.
 - Assert preconditions when a test could otherwise pass vacuously.
-- Prefer typed error variants and fields over formatted error text.
-- For successful commands, assert durable state and typed feedback categories rather than prose unless text is the contract.
-- When matching history, prove the command added the event with a count delta or newly appended typed record.
-- Use `assert_state_unchanged` for rejected mutations and stale-token commits.
-- Use `assert_state_eq` when full-state equality is the contract.
+- Typed error variants and fields over formatted text.
+- For successful commands, durable state and typed feedback categories over prose unless text is the contract.
+- History: prove the command added the event via count delta or newly appended typed record.
+- `assert_state_unchanged` for rejected mutations and stale-token commits; `assert_state_eq` when full equality is the contract.
 - Derive expected values from arranged state when fixture details are not the contract.
 
-Avoid incidental IDs, generated prose, internal call order, and unrelated state. When an assertion must inspect prose, match a stable token or structure, not the full sentence.
+Avoid incidental IDs, generated prose, internal call order, and unrelated state.
 
 ## Coverage expectations
 
@@ -154,53 +135,43 @@ Consequential mutation normally requires:
 7. Invariant coverage for new cross-record requirements.
 8. Projection or durable-feedback coverage when the result must be observable.
 
-Save-schema changes additionally require a schema increment, rejection tests for non-current schemas, current-schema round-trip equality, invalid-state rejection, and atomic-write tests when write behavior changes.
+Schema changes additionally require a schema increment, rejection tests for non-current schemas, current-schema round-trip equality, invalid-state rejection, and atomic-write tests when write behavior changes.
 
-Gameplay-harness changes should cover candidate discoverability, classification, pacing, consequence attribution, resilience metrics, progression, and report semantics. Keep finding-rule tests cheap; long-horizon behavior belongs in harness or release tiers. See `GAMEPLAY_HARNESS.md`.
+Harness changes should cover candidate discoverability, classification, pacing, consequence attribution, resilience, progression, and report semantics. Keep finding-rule tests cheap; long-horizon behavior belongs in harness or release tiers. See `GAMEPLAY_HARNESS.md`.
 
 ## Failure diagnostics
 
-A useful failure identifies the behavior, expected and observed values, relevant entity IDs/state, and the first differing path when state should remain equal.
-
-Collection helpers should show observed members. Candidate and finding helpers should show available candidates or finding titles.
+A useful failure identifies the violated contract, expected and observed values, relevant entity IDs/state, and the first differing path when state should remain equal. Collection helpers show observed members; candidate and finding helpers show available candidates or finding titles.
 
 ## Completion gate
 
-Run the narrowest relevant subset while editing. Once behavior is ready, run one routine lane rather than climbing through broader tiers:
+While editing, run the narrowest relevant subset. Once behavior is ready, run one routine lane:
 
 ```bash
-bash scripts/test.sh check            # <1s syntax only, no tests (~0.3s warm)
-bash scripts/test.sh fast simulation  # <1s filtered — the one domain you touched (82 tests, 0.12s exec)
-bash scripts/test.sh changed          # <1s — auto-detects the touched domain (1 filter, or 2-3 OR filters in one build)
-bash scripts/test.sh fast             # ~2s full library sweep (980 tests, 1.7s exec)
-bash scripts/test.sh playtest         # <1s quick 60-day single-persona harness smoke (debug, no args)
-bash scripts/test.sh standard         # ~4s normal pre-commit (syntax + lib + docs + core CLI)
+bash scripts/test.sh check            # <1s syntax
+bash scripts/test.sh fast simulation  # <1s filtered
+bash scripts/test.sh changed          # <1s auto-detect
+bash scripts/test.sh fast             # ~2s full sweep
+bash scripts/test.sh playtest         # <1s harness smoke
+bash scripts/test.sh standard         # ~4s pre-commit
 ```
 
-Select specialized lanes by changed contract:
+Specialized lanes by contract:
 
-- `soak` — long-horizon simulation, determinism, invariant evidence
-- `adapters` — CLI/adapter surfaces
-- `gameplay` / `gameplay-audit` — gameplay report and design-evaluation contracts
+- `soak` — long-horizon and determinism
+- `adapters` — CLI surfaces
+- `gameplay` / `gameplay-audit` — harness report and design evaluation
 - `docs` — documentation infrastructure
-- `slow` — release-profile behavior that can differ from development
-- `ci` / `ci-verify`, `ci-gates`, `all`, `deep` — verification topology, dependency/security work, broadly shared build config, or a deliberate release checkpoint
+- `slow` / `ci-gates` / `all` / `deep` — release or broadly shared build config
 
 If `fast <filter>` already covered the changed surface and `standard` is green, the work is complete. Do not escalate to `all`/`slow`/`ci-gates` for a typical feature.
 
-Persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and report schemas require focused owner coverage plus the relevant specialized lane above. This is a coverage requirement, not automatically two invocations: when the selected lane already executes the necessary owner coverage, do not rerun a focused test beforehand.
+Persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and report schemas require focused owner coverage plus the relevant specialized lane. When the selected lane already executes that coverage, do not rerun a focused test beforehand. Do not run a compile-only build immediately before an executable lane that recompiles the same surface unless the separate diagnostic is required — prefer one build per checkpoint.
 
-Do not run a compile-only or lint build immediately before an executable lane that recompiles the same surface unless the separate diagnostic is required. Prefer one build-producing operation per checkpoint.
-
-Filtered `fast <filter>` and `changed` avoid rebuilding unrelated domains —
-`changed` maps `git diff HEAD` to the narrowest filter (one domain, or 2-3
-OR filters in one cargo build via `--`); multi-domain fallback is still one
-compilation. Docs-only edits run `docs` alone. Use either for the inner loop and
-`CIVIC_DYNASTY_SKIP_CLI_BUILD=1` / `CIVIC_DYNASTY_SKIP_DOCS=1` when iterating
-lib-only to skip even the debug CLI/docs build. `playtest` without args runs a
-lightweight 60-day single-persona check (debug, trace-limit 8) so the harness
-stays in the <1s loop; pass explicit `--days`/`--persona` flags only when
-probing deeper design questions, or `CIVIC_DYNASTY_PROFILE=release` for gate
-fidelity.
-
-The local runner owns the scripted lanes so focused and complete reproduction use the same commands. The `all` tier reuses one debug CLI build across adapter smoke groups and remains an explicit broad tier rather than a routine prerequisite.
+Filtered `fast <filter>` and `changed` avoid rebuilding unrelated domains.
+`changed` maps `git diff HEAD` to the narrowest filter in one cargo build.
+Docs-only edits run `docs` alone.
+`CIVIC_DYNASTY_SKIP_CLI_BUILD=1` / `CIVIC_DYNASTY_SKIP_DOCS=1` skip even the debug CLI/docs build for lib-only iteration.
+`playtest` without args runs a lightweight 60-day single-persona check (debug, trace-limit 8);
+pass explicit `--days`/`--persona` or `CIVIC_DYNASTY_PROFILE=release` only when probing deeper design questions.
+The `all` tier reuses one debug CLI build across smoke groups.

@@ -6,6 +6,10 @@
 //! Reads: `Registry`, `AppState` via fixtures.
 //! Mutates: nothing persistent (pure projections).
 //! Focused lane: `bash scripts/test.sh standard` (and `adapters` for HTML smoke).
+//! Does not own: projection (tested, not owned).
+//! Canonical operations: no canonical ops (test suite).
+//! Relevant invariants: as stated in this header.
+//! Focused tests: sibling test suite.
 
 use super::*;
 use crate::core::{

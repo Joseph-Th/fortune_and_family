@@ -7,6 +7,8 @@
 //! Reads: `Registry`, `AppState` via lib entry points.
 //! Mutates: nothing persistent (returns owned clones).
 //! Does not own: domain rules or persistence IO.
+//! Canonical operations: `make_test_campaign`, `rivergate_registry_for_test` fixtures.
+//! Relevant invariants: fixtures are deterministic clones; no hidden mutation.
 //! Focused tests: as consumers (`*_tests.rs`) — this is test infrastructure.
 
 use crate::core::{AppState, NewGameConfig};

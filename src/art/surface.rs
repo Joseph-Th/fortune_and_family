@@ -7,8 +7,9 @@
 //! Reads: `color::RampHandle` via `MaterialTable`.
 //! Mutates: `Surface` buffers during `fill_*`; produces `Canvas` on resolve.
 //! Does not own: rig or shape primitives beyond what they write into it.
-//! Invariants: primitives write material/light/depth, not palette indices;
+//! Relevant invariants: primitives write material/light/depth, not palette indices;
 //! resolution maps light via hue-shifted ramps deterministically.
+//! Canonical operations: `Surface`, `resolve` - material/light/depth surface.
 //! Focused tests: `src/art/surface.rs` dither and edge shading.
 
 use super::canvas::Canvas;

@@ -7,9 +7,10 @@
 //! Reads: `AppState` via candidate scores and campaign accumulator.
 //! Mutates: nothing durable (scores are transient; probes still canonical).
 //! Does not own: candidate construction or findings thresholds.
-//! Invariants: every persona uses the same discretionary floor (emergency
+//! Relevant invariants: every persona uses the same discretionary floor (emergency
 //! reserve + 2 months loan service); standing-burning actions add a
 //! legitimacy reserve; ranking is deterministic and reproducible.
+//! Canonical operations: `GameplayPersona`, persona bias and scoring.
 //! Focused tests: `src/gameplay_tests.rs` persona diversity.
 
 use super::*;

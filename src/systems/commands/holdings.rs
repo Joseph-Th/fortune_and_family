@@ -11,8 +11,9 @@
 //! Mutates: `Business` finance/version/policy/manager and dynasty treasury
 //! via `transfer_business_cash` / `spend_*_to_market` primitives.
 //! Does not own: daily production/sales pipeline (simulation owns).
-//! Invariants: every cash move keeps `version`; zero-stock transfer
+//! Relevant invariants: every cash move keeps `version`; zero-stock transfer
 //! reuses prior version; policy/wage cooldowns are audit-enforced.
+//! Canonical operations: business transfer, capital, policy, wage commands.
 //! Focused tests: `src/systems/commands/commands_tests.rs` holding paths.
 
 #[allow(clippy::wildcard_imports)]

@@ -7,6 +7,10 @@
 //! Reads: `AppState`, `CharacterStore`/`BusinessStore` via fixtures.
 //! Mutates: local clones only.
 //! Focused lane: `bash scripts/test.sh soak` (release) and `fast state`.
+//! Does not own: domain rules (tested, not owned).
+//! Canonical operations: no canonical ops (test suite).
+//! Relevant invariants: as stated in this header.
+//! Focused tests: sibling test suite.
 
 use super::*;
 use crate::money::Money;

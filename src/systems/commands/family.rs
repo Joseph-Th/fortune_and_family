@@ -11,8 +11,9 @@
 //! dynasty legitimacy, character capabilities, family links, treasury via
 //! clearing-pool credit.
 //! Does not own: succession execution (annual) or charter persistence.
-//! Invariants: `HEIR_DESIGNATION_INTERVAL` gated by audit; ward capacity
+//! Relevant invariants: `HEIR_DESIGNATION_INTERVAL` gated by audit; ward capacity
 //! bounded; education respects per-character / per-dynasty cooldowns.
+//! Canonical operations: house governance, council, heir, ward, education commands.
 //! Focused tests: `src/systems/commands/commands_tests.rs` family paths.
 
 #[allow(clippy::wildcard_imports)]

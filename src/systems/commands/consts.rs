@@ -7,8 +7,9 @@
 //! Reads: nothing.
 //! Mutates: nothing (constants only).
 //! Does not own: domain decision or validation — submodules own that.
-//! Invariants: every cooldown/cost paired with an audit-cooldown lookup;
+//! Relevant invariants: every cooldown/cost paired with an audit-cooldown lookup;
 //! monetary constants remain `Money` for fixed-point safety.
+//! Canonical operations: constant definitions only.
 //! Focused tests: `src/systems/commands/commands_tests.rs` cooldown and
 //! cost assertions.
 

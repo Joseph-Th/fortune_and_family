@@ -7,8 +7,9 @@
 //! Mutates: nothing.
 //! Does not own: validation logic — each `commands/*.rs` submodule returns
 //! these variants; adapter display lives in `projection.rs`/`main.rs`.
-//! Invariants: every consequential precondition has a dedicated variant;
+//! Relevant invariants: every consequential precondition has a dedicated variant;
 //! `Insufficient*` variants preserve `available/required` for diagnostics.
+//! Canonical operations: `CommandError`, `CommandOutcome` - typed failures.
 //! Focused tests: `src/systems/commands/commands_tests.rs` exact-variant
 //! assertions and `assert_state_unchanged` rejection proofs.
 

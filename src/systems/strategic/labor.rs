@@ -13,9 +13,10 @@
 //! Mutates: `AppState` employment (loyalty/conditions/status), business and
 //! household cash, audit/outbox.
 //! Does not own: business wage-policy commands — `commands/holdings.rs`.
-//! Invariants: every employer retains a week of operating cover during
+//! Relevant invariants: every employer retains a week of operating cover during
 //! settlement; sub-fair wages erode loyalty toward dispute, generous wages
 //! build a buffer; wage stall keeps disputed crews from reconciling.
+//! Canonical operations: `advance_labor`, employment settlement and disputes.
 //! Focused tests: `src/systems/strategic/strategic_tests.rs` employment and
 //! labor-response behavior.
 

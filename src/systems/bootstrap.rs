@@ -8,9 +8,10 @@
 //! Reads: `Registry` (immutable definitions).
 //! Mutates: the freshly constructed `AppState` (no prior state).
 //! Does not own: persistence IO, projection, or gameplay policy.
-//! Invariants: validated treasury / capacity / inventory; founder ages
+//! Relevant invariants: validated treasury / capacity / inventory; founder ages
 //! place first succession inside the playable horizon; RNG draws stay
 //! state-owned for replay.
+//! Canonical operations: `build_new_game` - campaign construction.
 //! Focused tests: `src/systems/bootstrap_tests.rs`, persistence round-trip.
 
 use crate::core::{

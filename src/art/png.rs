@@ -7,8 +7,9 @@
 //! Reads: `Canvas` pixels and `Palette` RGB bytes.
 //! Mutates: nothing persistent (returns owned bytes / data URI).
 //! Does not own: canvas construction or art review orchestration.
-//! Invariants: every emitted PNG round-trips through spec decoders; stored
+//! Relevant invariants: every emitted PNG round-trips through spec decoders; stored
 //! blocks stay ≤ 65 535 bytes; determinism via integer math only.
+//! Canonical operations: `encode_png`, `decode_png` - indexed PNG.
 //! Focused tests: `src/art/png.rs` header and pixel fidelity.
 
 use super::canvas::Canvas;

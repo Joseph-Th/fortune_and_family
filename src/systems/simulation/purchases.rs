@@ -10,9 +10,10 @@
 //! Mutates: `AppState` market stock/demand/clearing and business cash/inventory
 //! only through the validated plan; rejected plans leave state unchanged.
 //! Does not own: production, sales, or pricing — `mod.rs`/`market.rs`.
-//! Invariants: one shared `remaining_stock` vector indexed by dense `GoodId`;
+//! Relevant invariants: one shared `remaining_stock` vector indexed by dense `GoodId`;
 //! distressed firms ignore `minimum_cash_reserve`; `affordable_quantity` +
 //! `cost_for` keep purchases affordable under fixed-point rounding.
+//! Canonical operations: input procurement decision and application.
 //! Focused tests: `src/systems/simulation/simulation_tests.rs` purchase and
 //! distress-reserve behavior.
 

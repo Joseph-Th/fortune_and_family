@@ -7,8 +7,9 @@
 //! Reads: `rig::Skeleton` / `anim::Clip`, `color::Ramp`.
 //! Mutates: nothing persistent (returns owned `SpriteSheet`).
 //! Does not own: animation clip authoring or harness orchestration.
-//! Invariants: integer geometry/shading; every valid config emits frames
+//! Relevant invariants: integer geometry/shading; every valid config emits frames
 //! with stable ordering and palette indices; determinism across profiles.
+//! Canonical operations: `Sprite`, `SpriteSheet` composition.
 //! Focused tests: `src/art/sprite.rs` composition and determinism.
 
 use super::anim::Clip;

@@ -10,6 +10,8 @@
 //! `apply_player_command`, `save_state*` / `write_generated_file`.
 //! Does not own: validation, simulation, pricing, legal, progression, or
 //! projection rules; every concrete step reuses the library's canonical path.
+//! Canonical operations: CLI dispatch - `new`, `simulate`, `execute`, `playtest`, `art`.
+//! Relevant invariants: CLI is thin adapter; no domain rules.
 //! Focused tests: `bash scripts/test.sh cli` / `art-cli` / `gameplay-cli`, plus
 //! `src/main.rs::tests` path-aliasing and generated-output isolation.
 

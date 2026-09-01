@@ -12,9 +12,10 @@
 //! Mutates: `AppState` institutions, dynasties (treasury/legitimacy),
 //! relationships, audit/outbox.
 //! Does not own: command-side nomination/directives — `commands/politics.rs`.
-//! Invariants: every term advances `term_number`/`next_selection_day`;
+//! Relevant invariants: every term advances `term_number`/`next_selection_day`;
 //! monthly fee is repaid from institutional budget; administrative load
 //! scales with power count × office count.
+//! Canonical operations: `advance_offices`, duties, directives, elections.
 //! Focused tests: `src/systems/strategic/strategic_tests.rs` office and
 //! institution selection.
 

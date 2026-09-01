@@ -11,9 +11,10 @@
 //! Mutates: institution `members`/`office_holder_id`/`budget`/
 //! `active_directive`, dynasty legitimacy/treasury, market clearing pool.
 //! Does not own: monthly selection (strategic/offices) or crisis response.
-//! Invariants: every nomination needs established support + capability
+//! Relevant invariants: every nomination needs established support + capability
 //! threshold; directives respect `OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS` and
 //! `next_directive_day`; withdrawals carry recovery audit detail.
+//! Canonical operations: institution, patronage, office, nomination, directive commands.
 //! Focused tests: `src/systems/commands/commands_tests.rs` politics paths.
 
 #[allow(clippy::wildcard_imports)]

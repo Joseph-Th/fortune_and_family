@@ -7,8 +7,9 @@
 //! Reads: `math::Angle` and `math::scale` only.
 //! Mutates: nothing persistent (pure construction); callers clone poses.
 //! Does not own: clip timing, surface shading, or canvas output.
-//! Invariants: joint positions in sixteenth-pixel units; small rotations
+//! Relevant invariants: joint positions in sixteenth-pixel units; small rotations
 //! still move limbs predictably before pixel snap; determinism integer-only.
+//! Canonical operations: `Skeleton`, `Pose`, `HumanJoint` - rig and pose.
 //! Focused tests: `src/art/rig.rs` proportion and pose blending.
 
 use super::math::{Angle, ONE, scale};

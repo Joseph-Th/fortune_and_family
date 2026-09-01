@@ -1,17 +1,21 @@
 //! Deterministic simulation kernel for Civic Dynasty — one city, one persistent `AppState`.
 //!
-//! Rivergate is modeled as a deterministic political economy:
-//! `Registry` (immutable authored definitions) plus `AppState` (every mutable
-//! value needed for continuation, including RNG) flows through canonical
-//! `systems/*` mutations and is observed through read-only `projection` or
-//! HTML. Every adapter — CLI, persistence, gameplay harness, art — reuses
-//! the same production path rather than reimplementing rules.
+//! Purpose: public library facade — one import surface for construction, commands, simulation, persistence, projection, harness, and art.
+//! Owns: re-exports only; no domain logic or state.
+//! Reads: nothing directly (delegates to owning modules).
+//! Mutates: nothing directly (delegates to owning modules).
+//! Does not own: domain rules, state shape, or adapter I/O (see `ARCHITECTURE.md` owners).
+//! Canonical operations: `build_rivergate_registry`, `build_new_game`, `advance_days`, `apply_player_command`, `save_state`/`load_state`, `build_state_summary`/`render_campaign_html`, `run_gameplay_harness`, `build_art_review`.
+//! Relevant invariants: facade preserves determinism and typed errors of owned systems; no alternate mutation path.
+//! Focused tests: exercised via `src/test_support.rs` and all domain suites.
 //!
 //! Profiles: **Universal · Stateful Application · Deterministic System ·
 //! Automated Behavior Evaluation · Artifact Generation**. Related authorities:
 //! `README.md` (run/surface), `AGENTS.md` (execution card), `ARCHITECTURE.md`
 //! (ownership), `STATUS.md` (current scope/schemas), `TESTING.md`
 //! (verification), `DESIGN.md` (intent), `GAMEPLAY_HARNESS.md` (report).
+//!
+//! Rivergate is a deterministic political economy: `Registry` (immutable defs) plus `AppState` (every mutable value needed for continuation, including RNG) flows through canonical `systems/*` mutations and is observed through read-only `projection`/HTML. Every adapter reuses the same production path.
 //!
 //! ```
 //! use civic_dynasty::{NewGameConfig, advance_days, build_new_game, build_rivergate_registry};

@@ -10,9 +10,10 @@
 //! Mutates: nothing durable (operates on disposable clones); probes are
 //! bounded by `max_candidate_probes`.
 //! Does not own: report schema/finding rules (findings/scoring own).
-//! Invariants: every candidate that reaches selection has passed the
+//! Relevant invariants: every candidate that reaches selection has passed the
 //! canonical validator; `ActivationPredicateDrift` fails the cycle if a
 //! probe proves the predicate wrong; determinism via stable ordering.
+//! Canonical operations: `probe_candidates`, candidate generators, persona ranking.
 //! Focused tests: `src/gameplay_tests.rs` candidate reachability.
 
 #[allow(clippy::wildcard_imports)] // the module tree re-exports one flat namespace

@@ -7,8 +7,9 @@
 //! Reads: `Surface` dimensions, `MaterialTable`; no palette or canvas.
 //! Mutates: `Surface` buffers via `fill_*` primitives.
 //! Does not own: palette resolution, canvas export, or rig hierarchy.
-//! Invariants: every primitive computes a normal from its own geometry;
+//! Relevant invariants: every primitive computes a normal from its own geometry;
 //! lighting stays integer (`ONE` = 4096); depth respects painter order.
+//! Canonical operations: `Shape`, `draw_shape` primitives.
 //! Focused tests: `src/art/shape.rs` normal and raster bounds.
 
 use super::math::{ONE, perpendicular_component, scale};

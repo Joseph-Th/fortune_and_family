@@ -12,6 +12,8 @@
 //! mutates an exclusively owned branch.
 //! Does not own: domain policy (each `commands/*.rs` submodule + the
 //! `strategic/*.rs` helpers it calls own their own policy).
+//! Canonical operations: `PlayerCommand` enum, `apply_player_command` dispatch.
+//! Relevant invariants: single dispatch; validation before mutation; atomic clone-then-replace.
 //! Focused tests: `src/systems/commands/commands_tests.rs`, gameplay candidate
 //! coverage, CLI `execute` smoke.
 

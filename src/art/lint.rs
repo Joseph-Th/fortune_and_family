@@ -7,8 +7,9 @@
 //! Reads: `Canvas` / `SpriteSheet` / `Palette` (immutable).
 //! Mutates: nothing (pure predicates).
 //! Does not own: harness orchestration or sprite construction.
-//! Invariants: every finding is deterministic, bounded, and carries a
+//! Relevant invariants: every finding is deterministic, bounded, and carries a
 //! severity; no check invents a second source of truth for geometry.
+//! Canonical operations: `lint_sprite`, palette and geometry checks.
 //! Focused tests: `src/art/lint.rs` defect detection.
 
 use super::canvas::{Canvas, Rect};

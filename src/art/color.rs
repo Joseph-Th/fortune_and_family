@@ -7,9 +7,10 @@
 //! Reads: nothing.
 //! Mutates: `Palette` storage via insertion; ramp construction is pure.
 //! Does not own: canvas geometry, rig math, or PNG encoding.
-//! Invariants: hue in `0..3600` tenth-degrees, s/l in `0..=1000` per-mille; palette
+//! Relevant invariants: hue in `0..3600` tenth-degrees, s/l in `0..=1000` per-mille; palette
 //! index 0 stays transparent; ramp steps monotonic in luminance; determinism via
 //! integer arithmetic only.
+//! Canonical operations: `Palette`, `Ramp`, `Material` - deterministic color ramps.
 //! Focused tests: `src/art/color.rs::tests` round-trip, ramp luminance, clamping.
 
 use serde::{Deserialize, Serialize};

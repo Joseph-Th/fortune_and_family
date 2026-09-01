@@ -11,8 +11,9 @@
 //! dynasty treasury/legitimacy, market clearing pool for mobilizations.
 //! Does not own: crisis detection/escalation (strategic/crises) or weekly
 //! employment settlement (strategic/labor).
-//! Invariants: every crisis response respects one-commit discipline;
+//! Relevant invariants: every crisis response respects one-commit discipline;
 //! suppression/exploit spend legitimacy outright; replacement costs reserve.
+//! Canonical operations: crisis and labor-dispute response commands.
 //! Focused tests: `src/systems/commands/commands_tests.rs` response paths.
 
 #[allow(clippy::wildcard_imports)]

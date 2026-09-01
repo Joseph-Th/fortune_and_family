@@ -6,8 +6,9 @@
 //! Reads: palette indices only (no color interpretation).
 //! Mutates: canvas pixels via `set`, `fill_rect`, `blit`.
 //! Does not own: palette tables, rig math, or PNG encoding.
-//! Invariants: every pixel is a `u8` palette index; `TRANSPARENT_INDEX` (0)
+//! Relevant invariants: every pixel is a `u8` palette index; `TRANSPARENT_INDEX` (0)
 //! is never conflated with opaque color; bounds are clipped, not wrapped.
+//! Canonical operations: `Canvas`, `Canvas::blit`, indexed pixel ops - sprite canvas.
 //! Focused tests: `src/art/*` harness and sprite rendering.
 
 use super::color::TRANSPARENT_INDEX;
