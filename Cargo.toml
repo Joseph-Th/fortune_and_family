@@ -26,17 +26,16 @@ serde_json = "1.0"
 tempfile = "3.20"
 thiserror = "2.0"
 
-# Solo-dev fast-iteration tuning: every profile keeps incremental compilation and
-# parallel codegen units so an edited file rebuilds in seconds, not minutes.
-# `dev`/`test` share `opt-level 1` (deps at 2) + 16 codegen units +
-# `incremental = true` + `pipelining = true` (.cargo/config.toml); `cargo
-# check` reuses the same incremental shape warm so the 980 library tests
-# finish in ~1.2s and a filtered domain finishes in ~0.1s with identical
-# assertions. A warm incremental rebuild is <1s for any profile; first build
-# of a new profile is one-time (clippy ~11s cold, release ~56s cold).
-# `release` is the everyday harness profile — full optimization without LTO, so
-# gameplay gates stay fast on warm rebuilds (incremental edited-file rebuild
-# ~1s). Use `release-max` only when peak throughput itself is measured.
+# Solo-dev fast-iteration tuning: every profile keeps incremental compilation
+# and 16 parallel codegen units so an edited file rebuilds in ~1s warm.
+# `dev`/`test` share `opt-level 1` (deps at 2) + `incremental = true` +
+# `pipelining = true` (.cargo/config.toml); `cargo check` reuses the same
+# incremental shape warm so the 980 library tests finish in ~1.7s exec and a
+# filtered domain in ~0.1s with identical assertions. Warm incremental rebuild
+# is <1s for any profile; first build of a new profile is one-time (clippy
+# ~11s cold, release ~56s cold). `release` is the everyday harness profile
+# — full optimization without LTO, so gameplay gates stay fast on warm
+# rebuilds. Use `release-max` only when peak throughput itself is measured.
 [profile.dev]
 opt-level = 1
 debug = 1

@@ -29,32 +29,32 @@ Use focused runs during implementation. Use release matrices for cross-domain va
 
 ## Commands
 
-Focused debug iteration (incremental, <1s warm — no release build):
+Inner loop — debug harness, <1s warm, no release build:
 
 ```bash
-bash scripts/test.sh playtest  # quick 60-day single-persona smoke, <1s warm (no args)
+bash scripts/test.sh playtest  # 60-day single-persona smoke, <1s warm (no args = default)
 bash scripts/test.sh playtest --days 90 --persona entrepreneur --background baker
-cargo run --locked -- playtest --days 90 --persona steward
-# Release-fidelity iteration (same candidates, optimized sim):
+cargo run --locked -- playtest --days 90 --persona steward          # raw cargo
+# Gate-fidelity iteration (same candidates, optimized sim, still ~1s warm after first release build):
 CIVIC_DYNASTY_PROFILE=release bash scripts/test.sh playtest --days 360 --persona entrepreneur
 cargo run --release --locked -- playtest --days 360 --persona entrepreneur --trace-limit 20
 ```
 
-Full matrix and structured output (release, one build reused):
+Release matrices and structured JSON (one release build reused):
 
 ```bash
 cargo run --release --locked -- playtest
 cargo run --release --locked -- playtest --start-seed 1 --seeds 10 --days 1080 --json --output gameplay-report.json
 ```
 
-Repository gates (always release, one CLI build — warm budgets after first cold release ~56s):
+Repository gates — always release, one CLI build (warm budgets after one-time cold ~56s):
 
 ```bash
 bash scripts/test.sh gameplay        # ~16s warm: 36 + 3 campaigns, 60k days
-bash scripts/test.sh gameplay-audit  # ~30s warm: multi-seed / generation / credit-stress matrices
+bash scripts/test.sh gameplay-audit  # ~30s warm: multi-seed / generation / credit-stress
 ```
 
-`playtest` defaults to a debug CLI for fast iteration; `gameplay`/`gameplay-audit` always use release. Every run prints one progress line to stderr (elapsed, campaigns, simulated days, actions, overall score, findings, days/s) so you can see at a glance whether a change moved the metric. Quality-gate failures report the exact score reason.
+`playtest` without args is the solo-dev default: debug CLI, 60 days, one persona, trace-limit 8 — fast enough to run after every edit. `gameplay`/`gameplay-audit` always use release. Every run prints one progress line to stderr (`elapsed, campaigns, simulated days, actions, overall score, findings, days/s`) so you can see at a glance whether a change moved the metric. Quality-gate failures report the exact score reason.
 
 ## Configuration
 

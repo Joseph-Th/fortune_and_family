@@ -29,34 +29,31 @@ if ($env:CIVIC_DYNASTY_JOBS) {
 function Show-Usage {
     @"
 usage:
-  .\scripts\test.ps1 check [filter]      fastest syntax check (cargo check, no tests)
-  .\scripts\test.ps1 fast [filter]       run non-ignored library tests (default loop)
-  .\scripts\test.ps1 quick [filter]      fastest loop: same as fast, skips docs/CLI
-  .\scripts\test.ps1 changed             run fast tests for domains touched by current diff only
-  .\scripts\test.ps1 standard            pre-commit loop: syntax, library, docs, core CLI smoke
-  .\scripts\test.ps1 exact <test-name>   run one fully qualified library test
-  .\scripts\test.ps1 debug <test-name>   run one exact test with captured output enabled
+  .\scripts\test.ps1 check [filter]      fastest syntax check (cargo check, ~0.3s warm, no tests)
+  .\scripts\test.ps1 fast [filter]       library tests — default loop (~2s full, <1s filtered)
+  .\scripts\test.ps1 quick [filter]      alias for fast (never triggers docs/CLI)
+  .\scripts\test.ps1 changed             auto-targeted: only domains touched by current diff (<1s)
+  .\scripts\test.ps1 standard            pre-commit: syntax + lib + docs + core CLI (~4s warm)
+  .\scripts\test.ps1 exact <test-name>   one fully-qualified test
+  .\scripts\test.ps1 debug <test-name>   one test with --nocapture output
   .\scripts\test.ps1 list [filter]       list matching library tests
-  .\scripts\test.ps1 soak                run soak tests in release mode
-  .\scripts\test.ps1 docs                run documentation consistency and doctests
-  .\scripts\test.ps1 cli                 run core campaign/projection/dashboard CLI smoke tests
-  .\scripts\test.ps1 art-cli             run procedural-art CLI smoke tests
-  .\scripts\test.ps1 gameplay-cli        run gameplay-harness CLI smoke tests
-  .\scripts\test.ps1 adapters            run all CLI smoke groups
-  .\scripts\test.ps1 gameplay            run release gameplay and generation-length quality gates
-  .\scripts\test.ps1 gameplay-audit      run mature multi-seed, generation, and credit-stress audits
-  .\scripts\test.ps1 playtest [args...]  focused harness run (no args defaults to quick 60-day debug check)
-  .\scripts\test.ps1 ci-verify           fast CI lane: format, clippy, library, docs
-  .\scripts\test.ps1 ci-gates            deep CI lane: release tests, soaks, adapters, gameplay, audit
-  .\scripts\test.ps1 all                 everything: standard + soak + adapters + gameplay
-  .\scripts\test.ps1 slow                heavy release gates (ci-gates minus audit)
-  .\scripts\test.ps1 deep                deepest design gates (slow + gameplay-audit)
+  .\scripts\test.ps1 soak                long-horizon soaks (release, ~1s warm)
+  .\scripts\test.ps1 docs                doc consistency + doctests (~1s warm)
+  .\scripts\test.ps1 cli                 core CLI smoke  |  .\scripts\test.ps1 art-cli       art smoke
+  .\scripts\test.ps1 gameplay-cli        harness CLI smoke  |  .\scripts\test.ps1 adapters    all CLI groups (~2s)
+  .\scripts\test.ps1 playtest [args...]  focused harness — no args = 60-day debug check (<1s)
+  .\scripts\test.ps1 gameplay            release quality gates: 36+3 campaigns, 60k days (~16s)
+  .\scripts\test.ps1 gameplay-audit      deep design audit: multi-seed / generation / credit stress (~30s)
+  .\scripts\test.ps1 ci-verify|ci        fast CI: format + clippy + lib + docs (~5s warm)
+  .\scripts\test.ps1 ci-gates            deep CI: release lib + soaks + adapters + gameplay + audit
+  .\scripts\test.ps1 all                 standard + soak + adapters + gameplay (~25s warm)
+  .\scripts\test.ps1 slow                release gates without audit  |  .\scripts\test.ps1 deep  slow + audit (~1.2m)
 
-fast iteration (solo local — incremental, no world rebuild):
-  .\scripts\test.ps1 fast simulation   filtered <1s (82 tests, 0.12s exec)
-  .\scripts\test.ps1 changed            only domains touched by current diff, <1s (auto)
-  .\scripts\test.ps1 check              <1s syntax only (~0.3s warm)
-  .\scripts\test.ps1 playtest            quick 60-day single-persona check, <1s (default)
+inner loop — solo local, every lane incremental (no world rebuild):
+  .\scripts\test.ps1 fast simulation   82 tests, 0.12s exec, <1s total warm
+  .\scripts\test.ps1 changed            auto-detects touched domain, <1s warm
+  .\scripts\test.ps1 check              syntax only, cargo check shares dev cache
+  .\scripts\test.ps1 playtest            60-day single-persona harness smoke, debug <1s
   .\scripts\test.ps1 playtest --days 90 --persona steward  # debug harness <1s
 
 warm budgets (incremental, after first build — cold once: clippy ~11s, release ~56s):
@@ -273,30 +270,33 @@ function Run-Changed {
     }
     $seen = @{}
     $filters = @()
+    $docsOnly = $true
     foreach ($file in $changedFiles) {
         $candidate = $null
         switch -Wildcard ($file) {
-            "src/systems/simulation/*" { $candidate = "simulation" }
-            "src/systems/strategic/*" { $candidate = "strategic" }
-            "src/systems/commands/*" { $candidate = "commands" }
-            "src/systems/bootstrap*" { $candidate = "bootstrap" }
-            "src/systems/invariants*" { $candidate = "invariants" }
-            "src/systems/legal*" { $candidate = "legal" }
-            "src/systems/progression*" { $candidate = "progression" }
-            "src/systems/transactions*" { $candidate = "transactions" }
-            "src/core/*" { $candidate = "core" }
-            "src/ids.rs" { $candidate = "core" }
-            "src/money.rs" { $candidate = "core" }
-            "src/rng.rs" { $candidate = "core" }
-            "src/persistence*" { $candidate = "persistence" }
-            "src/projection*" { $candidate = "projection" }
-            "src/registry/*" { $candidate = "persistence" }
-            "src/gameplay/*" { $candidate = "gameplay" }
-            "src/gameplay_tests.rs" { $candidate = "gameplay" }
-            "src/art/*" { $candidate = "art" }
-            "src/main.rs" { $candidate = "" }
-            "src/lib.rs" { $candidate = "" }
-            "scripts/*" { $candidate = "" }
+            "src/systems/simulation/*" { $candidate = "simulation"; $docsOnly = $false }
+            "src/systems/strategic/*" { $candidate = "strategic"; $docsOnly = $false }
+            "src/systems/commands/*" { $candidate = "commands"; $docsOnly = $false }
+            "src/systems/bootstrap*" { $candidate = "bootstrap"; $docsOnly = $false }
+            "src/systems/invariants*" { $candidate = "invariants"; $docsOnly = $false }
+            "src/systems/legal*" { $candidate = "legal"; $docsOnly = $false }
+            "src/systems/progression*" { $candidate = "progression"; $docsOnly = $false }
+            "src/systems/transactions*" { $candidate = "transactions"; $docsOnly = $false }
+            "src/core/*" { $candidate = "core"; $docsOnly = $false }
+            "src/ids.rs" { $candidate = "core"; $docsOnly = $false }
+            "src/money.rs" { $candidate = "core"; $docsOnly = $false }
+            "src/rng.rs" { $candidate = "core"; $docsOnly = $false }
+            "src/persistence*" { $candidate = "persistence"; $docsOnly = $false }
+            "src/projection*" { $candidate = "projection"; $docsOnly = $false }
+            "src/registry/*" { $candidate = "persistence"; $docsOnly = $false }
+            "src/gameplay/*" { $candidate = "gameplay"; $docsOnly = $false }
+            "src/gameplay_tests.rs" { $candidate = "gameplay"; $docsOnly = $false }
+            "src/art/*" { $candidate = "art"; $docsOnly = $false }
+            "src/main.rs" { $candidate = ""; $docsOnly = $false }
+            "src/lib.rs" { $candidate = ""; $docsOnly = $false }
+            "scripts/*" { $candidate = ""; $docsOnly = $false }
+            "*.md" { continue }
+            "docs/*" { continue }
             default { continue }
         }
         if ($candidate -eq "") {
@@ -308,6 +308,11 @@ function Run-Changed {
             $seen[$candidate] = $true
             $filters += $candidate
         }
+    }
+    if ($filters.Count -eq 0 -and $docsOnly) {
+        Write-Host "`n==> Changed files are docs-only — running documentation checks" -ForegroundColor Cyan
+        Run-Docs
+        return
     }
     if ($filters.Count -eq 0) {
         Write-Host "`n==> Changed files do not map to a library domain — running full library suite" -ForegroundColor Yellow
@@ -579,6 +584,7 @@ switch ($Mode) {
         }
     }
     "ci-verify"      { Run-CiVerify }
+    "ci"             { Run-CiVerify }
     "ci-gates"       { Run-CiGates }
     "slow"           { Run-SlowGates }
     "deep"           { Run-SlowGates; Run-GameplayAudit }
