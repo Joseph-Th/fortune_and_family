@@ -18,53 +18,37 @@ fi
 
 usage() {
   cat >&2 <<EOF
-usage:
-  $0 check [filter]      fastest syntax check (cargo check, ~0.3s warm, no tests)
-  $0 fast [filter]       library tests — default loop (~2s full, <1s filtered, incremental)
-  $0 quick [filter]      alias for fast (never triggers docs/CLI)
-  $0 changed             auto-targeted loop: only domains touched by current diff (<1s)
-  $0 standard            pre-commit loop: syntax + lib + docs + core CLI (~4s warm)
-  $0 exact <test-name>   one fully-qualified test (with --exact --include-ignored)
-  $0 debug <test-name>   one test with --nocapture output
-  $0 list [filter]       list matching library tests
-  $0 soak                long-horizon deterministic soaks (release, ~1s warm)
-  $0 docs                doc consistency + doctests (~1s warm)
-  $0 cli                 core CLI smoke (campaign/projection/dashboard)
-  $0 art-cli             art CLI smoke   |  $0 gameplay-cli   harness CLI smoke
-  $0 adapters            all CLI groups (one CLI build, ~2s warm)
-  $0 playtest [args...]  focused harness: no args = 60-day debug check (<1s warm)
-  $0 gameplay            release quality gates: 36+3 campaigns, 60k days (~16s warm)
-  $0 gameplay-audit      deep design audit: multi-seed / generation / credit stress (~30s)
-  $0 ci-verify|ci        fast CI: format + clippy + lib + docs (~5s warm)
-  $0 ci-gates            deep CI: release lib + soaks + adapters + gameplay + audit
-  $0 all                 standard + soak + adapters + gameplay (~25s warm)
-  $0 slow                release gates without audit  |  $0 deep  slow + audit (~1.2m)
+DAILY LOOP (solo dev — fast, incremental, no world rebuild):
+  $0 check                  syntax only, shares dev cache (~0.3s warm, no tests)
+  $0 fast <filter>          one domain: fast simulation | fast strategic | fast commands
+  $0 changed                auto-detects touched domains from git diff (<1s)
+  $0 fast                   full lib sweep: 980 tests (~2s warm)
+  $0 playtest               60-day harness smoke, debug CLI (<1s warm)
+  $0 standard               pre-commit: check + lib + docs + CLI (~5s warm)
 
-inner loop — solo dev, every lane is incremental (no world rebuild):
-  $0 fast simulation               # 82 tests, 0.12s exec, <1s total warm
-  $0 fast strategic                # 197 tests, 0.30s exec
-  $0 changed                       # auto-detects touched domain, <1s warm
-  $0 check                         # syntax only, cargo check shares dev cache
-  CIVIC_DYNASTY_SKIP_CLI_BUILD=1 $0 standard  # lib-only, skips debug CLI
-  CIVIC_DYNASTY_SKIP_DOCS=1 $0 standard       # skip docs (~3s)
-  $0 debug 'systems::simulation::tests::household_fallback'  # one test --nocapture
-  $0 playtest                      # 60-day single-persona harness smoke, debug <1s
-  $0 playtest --days 90 --persona steward --background baker
-  CIVIC_DYNASTY_PROFILE=release $0 playtest --days 360 --persona entrepreneur  # gate fidelity
-  $0 gameplay                      # full release gate, only when needed (one release build)
+FOCUSED DEBUG:
+  $0 list [filter]          list matching test names
+  $0 exact <name>           one fully-qualified test (--exact --include-ignored)
+  $0 debug <name>           one test with --nocapture output
+  $0 playtest --days 90 --persona entrepreneur --background baker  # harness slice
 
-warm budgets (incremental, after one-time cold: clippy ~11s, release ~56s):
-  check <1s | fast-filter <1s | fast ~2s (980 tests, 1.7s exec) | standard ~4s
-  docs ~1s | adapters ~2s | playtest <1s (debug) | ci-verify ~5s | gameplay ~16s | all ~25s | deep ~1.2m
+RELEASE GATES (one release build, cold ~56s once, warm ~1s):
+  $0 soak                   long-horizon determinism (release, ~1s warm)
+  $0 gameplay               quality gate: 36+3 campaigns, 60k days (~16s warm)
+  $0 gameplay-audit         deep audit: multi-seed + generation + credit stress (~30s)
+  $0 all                    standard + soak + adapters + gameplay (~25s warm)
+  $0 slow                   release gates without audit  |  $0 deep  slow + audit
 
-knobs (all optional):
-  CIVIC_DYNASTY_JOBS=4             cap cargo --jobs + harness parallelism
-  CIVIC_DYNASTY_PROFILE=release    force release CLI for adapters/playtest
-  CIVIC_DYNASTY_BINARY=/path/to/civic-dynasty  reuse prebuilt CLI
-  CIVIC_DYNASTY_SKIP_CLI_BUILD=1   skip CLI rebuild (lib-only iteration)
-  CIVIC_DYNASTY_SKIP_DOCS=1        skip docs in standard
-  CIVIC_DYNASTY_NEXTEST=1          run lib tests under cargo-nextest (isolated)
-  CIVIC_DYNASTY_PYTHON=python3     select Python interpreter
+CI (local only, no hosted runners):
+  $0 ci-verify | ci         format + clippy + lib + docs (~5s warm, cold ~14s clippy)
+  $0 ci-gates               release lib + soaks + adapters + gameplay + audit
+  $0 docs | cli | adapters  doc or CLI smoke alone (reuse one CLI build)
+
+TIPS:
+  CIVIC_DYNASTY_SKIP_CLI_BUILD=1 $0 standard   lib-only iteration (skip CLI build)
+  CIVIC_DYNASTY_SKIP_DOCS=1 $0 standard        skip docs lane (~1s faster)
+  CIVIC_DYNASTY_JOBS=4 $0 fast                cap cargo + harness parallelism
+  CIVIC_DYNASTY_PROFILE=release $0 playtest --days 360  gate-fidelity harness
 EOF
   exit 2
 }
@@ -278,6 +262,11 @@ run_test_step() {
   summaries=$(grep -E '^(running [0-9]+ tests?|test result:)' "$output_file" || true)
   if [[ -n "$summaries" ]]; then
     printf '%s\n' "$summaries" | sed 's/^/    /'
+    # Surface slow-filter hint when filtered lane pays full-suite cost
+    local elapsed=$((SECONDS - started))
+    if [[ -n "$match_description" ]] && ((elapsed > 6)); then
+      printf '    (filtered lane rebuilt — ~4s incremental is normal for this single-crate workspace)\n'
+    fi
   fi
   rm -f "$output_file"
   printf '<== %s passed in %s\n' "$label" "$(format_duration "$((SECONDS - started))")"
@@ -382,7 +371,8 @@ run_changed() {
       src/persistence*|src/projection*|src/registry/*) add_filter persistence; docs_only=0 ;;
       src/gameplay/*|src/gameplay_tests.rs) add_filter gameplay; docs_only=0 ;;
       src/art/*) add_filter art; docs_only=0 ;;
-      src/main.rs|src/lib.rs) add_filter ""; docs_only=0 ;; # top-level -> full suite
+      src/main.rs|src/lib.rs|src/test_support.rs) add_filter ""; docs_only=0 ;; # top-level -> full suite
+      Cargo.toml|Cargo.lock|.cargo/*) add_filter ""; docs_only=0 ;; # build config -> full suite
       *.md|docs/*) : ;; # docs-only, handled via docs_only flag
       scripts/*) add_filter ""; docs_only=0 ;; # script changes could affect any lane
       *) : ;;
@@ -564,6 +554,7 @@ run_ci_verify() {
   # Primary gate first so a failing lib test reports in ~2s warm before
   # paying for clippy/doc rebuilds; warm clippy/doc are <1s each.
   run_fast
+  # Only pay for doc/clippy if lib passed — keeps the fast signal fast.
   run_docs
   run_step 'Compile and lint' cargo clippy --all-targets --all-features --locked -- -D warnings
   run_step 'Documentation warnings' env RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked

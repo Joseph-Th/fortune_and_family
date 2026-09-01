@@ -1,14 +1,13 @@
 # Solo-dev fast iteration — minimal config, maximal reuse.
-# No remote cache, no wrappers, no custom linker on this machine.
-# Every profile keeps `incremental = true` + 16 codegen units + pipelining,
-# so an edited file rebuilds in ~1s warm without rebuilding the world:
-# check <1s (often 0.3s warm), fast <1s filtered / ~2s full (980 tests),
-# standard ~4s warm (lib + docs + one debug CLI), debug playtest <1s,
-# gameplay release ~16s warm for 60k days. First build of each profile is
-# one-time (clippy ~11s, release ~56s) — warm thereafter is <1s incremental.
+# No remote cache, no wrappers, no custom linker.
+# Every profile keeps `incremental = true` + 16 codegen units + pipelining.
 # `profile.check` inherits `dev` so `cargo check` and `cargo test` share
-# the same incremental cache warm; `cargo clippy` and `cargo test --doc`
-# reuse it too, so the inner loop never pays for a world rebuild.
+# the same incremental cache; `cargo clippy` and `cargo test --doc` reuse it
+# too. With a single 106k-line crate, incremental touches still recompile
+# dependent modules: expect ~4-5s after a lib-file edit, <1s when cached.
+# Full budgets (warm, after one-time cold of clippy ~12s / release ~56s):
+# check 0.3s | fast-filter 1-2s | fast 2-3s (980 tests) | standard 5-7s
+# (lib + docs + one debug CLI) | debug playtest <1s | gameplay ~16s.
 [build]
 # Pipelining lets Cargo start compiling dependents before dependencies finish,
 # shaving wall time on warm incremental builds without extra configuration.

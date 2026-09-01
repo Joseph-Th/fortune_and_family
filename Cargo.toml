@@ -26,16 +26,14 @@ serde_json = "1.0"
 tempfile = "3.20"
 thiserror = "2.0"
 
-# Solo-dev fast-iteration tuning: every profile keeps incremental compilation
-# and 16 parallel codegen units so an edited file rebuilds in ~1s warm.
-# `dev`/`test` share `opt-level 1` (deps at 2) + `incremental = true` +
-# `pipelining = true` (.cargo/config.toml); `cargo check` reuses the same
-# incremental shape warm so the 980 library tests finish in ~1.7s exec and a
-# filtered domain in ~0.1s with identical assertions. Warm incremental rebuild
-# is <1s for any profile; first build of a new profile is one-time (clippy
-# ~11s cold, release ~56s cold). `release` is the everyday harness profile
-# — full optimization without LTO, so gameplay gates stay fast on warm
-# rebuilds. Use `release-max` only when peak throughput itself is measured.
+# Solo-dev tuning: every profile keeps `incremental = true` + 16 codegen
+# units + `pipelining = true` (.cargo/config.toml). `dev`/`test` share
+# `opt-level 1` (deps at 2) so 980 tests finish ~1.5s exec, filtered domains
+# ~0.1s. `cargo check` shares the dev cache warm. Single-crate incremental
+# still recompiles dependents: ~4s after a lib edit, <1s when fully cached.
+# One-time cold costs: clippy ~12s, release ~56s. `release` is the harness
+# profile — full opt without LTO, warm ~1s, within ~10% of peak throughput.
+# Use `release-max` only when peak throughput itself is measured.
 [profile.dev]
 opt-level = 1
 debug = 1
@@ -56,11 +54,9 @@ split-debuginfo = "off"
 [profile.test.package."*"]
 opt-level = 2
 
-# Release is the everyday optimized profile for gates and harnesses: full
-# optimization with parallel codegen units, incremental reuse, and no
-# cross-crate LTO, so an edited source file rebuilds in ~1s warm instead of
-# minutes. Simulation throughput stays within roughly ten percent of the
-# release-max profile, and all gameplay output is identical.
+# Release is the everyday harness profile: full opt, 16 codegen units,
+# incremental, no LTO. Warm rebuild ~1s; throughput within ~10% of
+# release-max. All gameplay output is identical.
 [profile.release]
 opt-level = 3
 codegen-units = 16

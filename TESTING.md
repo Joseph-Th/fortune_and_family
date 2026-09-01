@@ -8,11 +8,11 @@ Solo-dev iteration is one command — everything else runs only when its contrac
 
 | Goal | Command | Warm | When |
 |---|---|---|---|
-| Syntax check | `bash scripts/test.sh check [filter]` | <1s | Editor feedback, no tests |
-| One domain | `bash scripts/test.sh fast <filter>` | <1s | Tight loop, e.g. `fast simulation` (82 tests, 0.12s) |
-| Changed domains | `bash scripts/test.sh changed` | <1s | Auto-detects touched domains from `git diff` |
-| Library sweep | `bash scripts/test.sh fast` | ~2s | Full library, 980 tests, 1.7s exec |
-| Pre-commit | `bash scripts/test.sh standard` | ~4s | Syntax + lib + docs + core CLI |
+| Syntax check | `bash scripts/test.sh check [filter]` | <1s | Editor feedback, no tests (0.3s cached) |
+| One domain | `bash scripts/test.sh fast <filter>` | ~4s after edit, <1s cached | Tight loop, e.g. `fast simulation` (82 tests, 0.12s exec) |
+| Changed domains | `bash scripts/test.sh changed` | ~4s after edit, <1s cached | Auto-detects touched domains from `git diff` |
+| Library sweep | `bash scripts/test.sh fast` | ~4s after edit, ~2s cached | Full library, 980 tests, 1.7s exec |
+| Pre-commit | `bash scripts/test.sh standard` | ~7s warm | Syntax + lib + docs + core CLI |
 | List candidates | `bash scripts/test.sh list <filter>` | <1s | Discover filter names |
 | One test | `bash scripts/test.sh exact <name>` | ~1s | Pinpoint single test |
 | One test with output | `bash scripts/test.sh debug <name>` | ~1s | With `--nocapture` |
@@ -49,12 +49,12 @@ Failures print full diagnostics. A filter matching no test exits with code 2. On
 
 ## Build profiles
 
-- `check`: inherits `dev`, never executed; `cargo check` feedback in <1s.
-- `dev` / `test`: `opt-level = 1` (deps `2`), 16 codegen units, incremental. Simulation tests finish in seconds.
+- `check`: inherits `dev`, never executed; `cargo check` feedback ~0.3s cached.
+- `dev` / `test`: `opt-level = 1` (deps `2`), 16 codegen units, incremental. Single-crate incremental: ~4s after a lib-file edit, <1s when cached, ~2s for full suite exec (980 tests).
 - `release`: `opt-level = 3`, 16 codegen units, incremental, no LTO. Used for `soak`/`gameplay`; warm rebuild ~1s, within ~10% of peak throughput.
 - `release-max`: single codegen unit + thin LTO; peak measurement only.
 
-Warm budgets after first build: `check` ~0.3s, `fast` filtered <1s / full ~2s, `standard` ~4s, `adapters` ~2s, `playtest` debug <1s, `gameplay` ~16s. `check` and `test` share dependency artifacts warm.
+Warm budgets (cached, after one-time cold clippy ~12s / release ~56s): `check` ~0.3s, `fast` ~4s after edit / ~2s cached, `standard` ~7s, `adapters` ~2s, `playtest` debug <1s, `gameplay` ~16s. `check` and `test` share dependency artifacts warm. Single-crate rebuild cost (~4s) is the compile, not the test exec.
 
 ## Receipts and hooks
 
@@ -152,12 +152,12 @@ No GitHub Actions are used; `python ../tools/check_no_github_actions.py` must pa
 While editing, run the narrowest relevant subset. Once behavior is ready, run one routine lane:
 
 ```bash
-bash scripts/test.sh check            # <1s syntax
-bash scripts/test.sh fast simulation  # <1s filtered
-bash scripts/test.sh changed          # <1s auto-detect
-bash scripts/test.sh fast             # ~2s full sweep
-bash scripts/test.sh playtest         # <1s harness smoke
-bash scripts/test.sh standard         # ~4s pre-commit
+bash scripts/test.sh check            # ~0.3s syntax (cached)
+bash scripts/test.sh fast simulation  # ~4s after lib edit, <1s cached (82 tests)
+bash scripts/test.sh changed          # auto-detect, same budget as fast <filter>
+bash scripts/test.sh fast             # ~4s after edit, ~2s cached (980 tests)
+bash scripts/test.sh playtest         # <1s harness smoke (60 days, debug)
+bash scripts/test.sh standard         # ~7s pre-commit (lib + docs + CLI)
 ```
 
 Specialized lanes by contract:
@@ -172,10 +172,11 @@ If `fast <filter>` already covered the changed surface and `standard` is green, 
 
 Persistence, public APIs, command schemas, simulation order, arithmetic, invariants, shared state, and report schemas require focused owner coverage plus the relevant specialized lane. When the selected lane already executes that coverage, do not rerun a focused test beforehand. Do not run a compile-only build immediately before an executable lane that recompiles the same surface unless the separate diagnostic is required — prefer one build per checkpoint.
 
-Filtered `fast <filter>` and `changed` avoid rebuilding unrelated domains.
-`changed` maps `git diff HEAD` to the narrowest filter in one cargo build.
-Docs-only edits run `docs` alone.
-`CIVIC_DYNASTY_SKIP_CLI_BUILD=1` / `CIVIC_DYNASTY_SKIP_DOCS=1` skip even the debug CLI/docs build for lib-only iteration.
-`playtest` without args runs a lightweight 60-day single-persona check (debug, trace-limit 8);
-pass explicit `--days`/`--persona` or `CIVIC_DYNASTY_PROFILE=release` only when probing deeper design questions.
-The `all` tier reuses one debug CLI build across smoke groups.
+Filtered `fast <filter>` and `changed` avoid running unrelated test domains (they still
+trigger a single-crate incremental compile — ~4s on this workspace — but exec only the
+matched subset). `changed` maps `git diff HEAD` to the narrowest filter in one cargo build;
+`Cargo.toml`/`.cargo` changes trigger the full suite. Docs-only edits run `docs` alone.
+`CIVIC_DYNASTY_SKIP_CLI_BUILD=1` / `CIVIC_DYNASTY_SKIP_DOCS=1` skip the debug CLI/docs build
+for lib-only iteration. `playtest` without args is a 60-day single-persona debug check
+(trace-limit 8); pass explicit `--days`/`--persona` or `CIVIC_DYNASTY_PROFILE=release`
+only when probing deeper design questions. The `all` tier reuses one debug CLI build.

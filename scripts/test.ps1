@@ -28,26 +28,36 @@ if ($env:CIVIC_DYNASTY_JOBS) {
 
 function Show-Usage {
     @"
-usage:
-  .\scripts\test.ps1 check [filter]      fastest syntax check (cargo check, ~0.3s warm, no tests)
-  .\scripts\test.ps1 fast [filter]       library tests — default loop (~2s full, <1s filtered)
-  .\scripts\test.ps1 quick [filter]      alias for fast (never triggers docs/CLI)
-  .\scripts\test.ps1 changed             auto-targeted: only domains touched by current diff (<1s)
-  .\scripts\test.ps1 standard            pre-commit: syntax + lib + docs + core CLI (~4s warm)
-  .\scripts\test.ps1 exact <test-name>   one fully-qualified test
-  .\scripts\test.ps1 debug <test-name>   one test with --nocapture output
-  .\scripts\test.ps1 list [filter]       list matching library tests
-  .\scripts\test.ps1 soak                long-horizon soaks (release, ~1s warm)
-  .\scripts\test.ps1 docs                doc consistency + doctests (~1s warm)
-  .\scripts\test.ps1 cli                 core CLI smoke  |  .\scripts\test.ps1 art-cli       art smoke
-  .\scripts\test.ps1 gameplay-cli        harness CLI smoke  |  .\scripts\test.ps1 adapters    all CLI groups (~2s)
-  .\scripts\test.ps1 playtest [args...]  focused harness — no args = 60-day debug check (<1s)
-  .\scripts\test.ps1 gameplay            release quality gates: 36+3 campaigns, 60k days (~16s)
-  .\scripts\test.ps1 gameplay-audit      deep design audit: multi-seed / generation / credit stress (~30s)
-  .\scripts\test.ps1 ci-verify|ci        fast CI: format + clippy + lib + docs (~5s warm)
-  .\scripts\test.ps1 ci-gates            deep CI: release lib + soaks + adapters + gameplay + audit
-  .\scripts\test.ps1 all                 standard + soak + adapters + gameplay (~25s warm)
-  .\scripts\test.ps1 slow                release gates without audit  |  .\scripts\test.ps1 deep  slow + audit (~1.2m)
+DAILY LOOP (solo dev — incremental, no world rebuild):
+  .\scripts\test.ps1 check                syntax only, shares dev cache (~0.3s cached)
+  .\scripts\test.ps1 fast <filter>        one domain: fast simulation | fast strategic
+  .\scripts\test.ps1 changed              auto-detects touched domains from git diff
+  .\scripts\test.ps1 fast                 full sweep: 980 tests (~4s after edit, ~2s cached)
+  .\scripts\test.ps1 playtest             60-day harness smoke, debug CLI (<1s)
+  .\scripts\test.ps1 standard             pre-commit: check + lib + docs + CLI (~7s warm)
+
+FOCUSED DEBUG:
+  .\scripts\test.ps1 list [filter]        list matching test names
+  .\scripts\test.ps1 exact <name>         one fully-qualified test
+  .\scripts\test.ps1 debug <name>         one test with --nocapture output
+
+RELEASE GATES (one release build, cold ~56s once, warm ~1s):
+  .\scripts\test.ps1 soak                 long-horizon determinism (release, ~1s)
+  .\scripts\test.ps1 gameplay             quality gate: 36+3 campaigns, 60k days (~16s)
+  .\scripts\test.ps1 gameplay-audit       deep audit: multi-seed + generation + credit stress (~30s)
+  .\scripts\test.ps1 all                  standard + soak + adapters + gameplay (~25s)
+  .\scripts\test.ps1 slow                 release gates without audit  | deep  slow + audit
+
+CI (local only):
+  .\scripts\test.ps1 ci-verify | ci       format + clippy + lib + docs (~5s warm, cold ~14s)
+  .\scripts\test.ps1 ci-gates             release lib + soaks + adapters + gameplay + audit
+  .\scripts\test.ps1 docs | cli | adapters  doc or CLI smoke alone
+
+TIPS:
+  CIVIC_DYNASTY_SKIP_CLI_BUILD=1 .\scripts\test.ps1 standard   lib-only (skip CLI)
+  CIVIC_DYNASTY_SKIP_DOCS=1 .\scripts\test.ps1 standard        skip docs (~1s faster)
+  CIVIC_DYNASTY_JOBS=4 .\scripts\test.ps1 fast                cap cargo + harness parallelism
+"@
 
 inner loop — solo local, every lane incremental (no world rebuild):
   .\scripts\test.ps1 fast simulation   82 tests, 0.12s exec, <1s total warm
@@ -294,6 +304,10 @@ function Run-Changed {
             "src/art/*" { $candidate = "art"; $docsOnly = $false }
             "src/main.rs" { $candidate = ""; $docsOnly = $false }
             "src/lib.rs" { $candidate = ""; $docsOnly = $false }
+            "src/test_support.rs" { $candidate = ""; $docsOnly = $false }
+            "Cargo.toml" { $candidate = ""; $docsOnly = $false }
+            "Cargo.lock" { $candidate = ""; $docsOnly = $false }
+            ".cargo/*" { $candidate = ""; $docsOnly = $false }
             "scripts/*" { $candidate = ""; $docsOnly = $false }
             "*.md" { continue }
             "docs/*" { continue }
