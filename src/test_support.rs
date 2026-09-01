@@ -123,10 +123,7 @@ pub(crate) fn assert_money_in_range(actual: Money, low: Money, high: Money, cont
     if actual.copper() >= low.copper() && actual.copper() <= high.copper() {
         return;
     }
-    panic!(
-        "{context}; money {} not in range [{}, {}]",
-        actual, low, high
-    );
+    panic!("{context}; money {actual} not in range [{low}, {high}]");
 }
 
 #[track_caller]

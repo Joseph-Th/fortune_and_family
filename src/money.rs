@@ -2,7 +2,10 @@
 //!
 //! Purpose: represent money (`Money`, copper = 1/100 cr) and quantities
 //! (`Quantity`, milliunits) without floating-point nondeterminism, hidden
-//! truncation, or intermediate overflow that silently makes transfers free.
+//! truncation, or intermediate overflow that silently makes transfers free or
+//! undercharges fractional copper. This is the sole arithmetic owner for all
+//! treasury, price, wage, rent, and stock calculations; no simulation or
+//! command path may use `f32`/`f64` for authored or simulated economic values.
 //! Owns: `Money` / `Quantity` value types, ratio helpers
 //! (`saturating_mul_ratio`, `saturating_mul_ratio_ceil_nonnegative`,
 //! `ceil_div_*`), `cost_for` / `checked_cost_for` / `affordable_quantity`,
@@ -291,7 +294,15 @@ impl fmt::Display for Quantity {
 
 /// Computes the transaction cost for `quantity` at `unit_price`, rounding any
 /// positive fractional copper upward so a transfer never becomes free through
-/// truncation. Saturates only the final `i64` narrowing.
+/// truncation. Saturates only the final `i64` narrowing via `i128` wide
+/// intermediate (see `rounded_cost_copper_wide`).
+///
+/// # Examples
+///
+/// ```
+/// use civic_dynasty::money::{Money, Quantity, cost_for};
+/// assert_eq!(cost_for(Quantity::from_milliunits(1), Money::from_copper(1)), Money::from_copper(1));
+/// ```
 #[must_use]
 pub fn cost_for(quantity: Quantity, unit_price: Money) -> Money {
     Money::from_copper(saturating_i128_to_i64(rounded_cost_copper_wide(
@@ -315,7 +326,10 @@ pub(crate) fn rounded_cost_copper_wide(quantity: Quantity, unit_price: Money) ->
 }
 
 /// Returns the greatest `Quantity` whose [`cost_for`] does not exceed `cash`.
-/// Returns zero when `cash` or `unit_price` is non-positive.
+/// Returns zero when `cash` or `unit_price` is non-positive. The result is
+/// the exact inverse of `cost_for` with ceiling, so buying the returned
+/// quantity never exceeds the supplied cash even when price is not a divisor
+/// of `1_000`.
 #[must_use]
 pub fn affordable_quantity(cash: Money, unit_price: Money) -> Quantity {
     if cash.copper() <= 0 || unit_price.copper() <= 0 {

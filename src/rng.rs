@@ -22,13 +22,20 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Deterministic, serializable RNG owned by `AppState`.
+/// Deterministic, serializable RNG owned by `AppState` — the sole entropy source.
 ///
 /// Wraps a `SplitMix64` step over a single `u64` word. The stream is fully
 /// determined by the seed and the ordered call sequence, persists across
-/// saves, and never falls back to OS entropy. Every stochastic simulation
-/// decision reads `AppState.rng` so a replay from the same save produces
-/// bit-identical futures.
+/// saves, and never falls back to OS entropy, thread-local RNG, or wall-clock
+/// time. Every stochastic simulation decision (bootstrap, AI variation,
+/// succession shocks, crisis sampling, persona jitter) reads `AppState.rng`
+/// so a replay from the same serialized save, registry fingerprint, seed,
+/// command sequence, and day count produces bit-identical futures.
+///
+/// Call ordering is part of the contract: insertion order in `BTreeMap`-ordered
+/// iteration determines draw order, so changing iteration order would change
+/// the stream. Tests assert identical seeds reproduce identical 16-draw
+/// windows and distinct seeds diverge on the first draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeterministicRng {
     state: u64,

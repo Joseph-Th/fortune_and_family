@@ -289,7 +289,10 @@ mod transfer_boundaries {
             .get(household_id)
             .expect("household must exist")
             .members();
-        let available = crate::systems::available_household_workers(&before, household_id) as i64;
+        let available = i64::from(crate::systems::available_household_workers(
+            &before,
+            household_id,
+        ));
         let available_ratio = if members > 0 {
             (available * 10_000 / i64::from(members)).clamp(2_000, 10_000)
         } else {
@@ -466,8 +469,12 @@ mod transfer_boundaries {
         let before = state.clone();
         let first = before.households.get(*first_id).expect("first");
         let second = before.households.get(*second_id).expect("second");
-        let avail1 = crate::systems::available_household_workers(&before, *first_id) as i64;
-        let avail2 = crate::systems::available_household_workers(&before, *second_id) as i64;
+        let avail1 = i64::from(crate::systems::available_household_workers(
+            &before, *first_id,
+        ));
+        let avail2 = i64::from(crate::systems::available_household_workers(
+            &before, *second_id,
+        ));
         let ratio1 = if first.members() > 0 {
             (avail1 * 10_000 / i64::from(first.members())).clamp(2_000, 10_000)
         } else {
@@ -515,8 +522,10 @@ mod transfer_boundaries {
             .households
             .iter()
             .map(|household| {
-                let available =
-                    crate::systems::available_household_workers(&state, household.id()) as i64;
+                let available = i64::from(crate::systems::available_household_workers(
+                    &state,
+                    household.id(),
+                ));
                 let members = i64::from(household.members());
                 let available_ratio = if members > 0 {
                     (available * 10_000 / members).clamp(2_000, 10_000)
@@ -594,8 +603,10 @@ mod transfer_boundaries {
         let expected_bp = u16::try_from((total_weighted / total_capacity.max(1)).min(10_000))
             .expect("weighted availability must fit u16");
         for household in state.households.iter() {
-            let available =
-                crate::systems::available_household_workers(&state, household.id()) as i64;
+            let available = i64::from(crate::systems::available_household_workers(
+                &state,
+                household.id(),
+            ));
             let members = i64::from(household.members());
             let available_ratio = if members > 0 {
                 (available * 10_000 / members).clamp(2_000, 10_000)

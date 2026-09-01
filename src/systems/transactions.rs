@@ -1,8 +1,10 @@
-//! Reusable validated transaction primitives and timeline/ simulation error types.
+//! Reusable validated transaction primitives and timeline/simulation error types.
 //!
 //! Purpose: give commands and simulation phases a shared validated-commit
 //! language (`transfer_business_cash`, `checked_future_day`, version bumps)
-//! with checked arithmetic and timeline bounds, without duplicating policy.
+//! with checked arithmetic, timeline bounds, and stale-token revalidation,
+//! without duplicating policy. Every token proves its preconditions atomically
+//! and consumes itself on commit, so concurrent invalidation is observable.
 //! Owns: `SimulationError` / `TimelineError`, `checked_future_day`,
 //! `next_business_finance_version` / `next_family_charter_version`, and the
 //! business-cash transfer helper.

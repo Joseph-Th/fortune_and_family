@@ -137,6 +137,20 @@ scripts/              Test runner, smoke groups, docs and gameplay checks, git h
 
 `ARCHITECTURE.md` owns the complete ownership map.
 
+## Determinism and failure contracts
+
+- **Determinism:** same `Registry` fingerprint + serialized `AppState` (clock,
+  RNG, allocators, records) + ordered explicit inputs (commands + day count)
+  → bit-identical successor state. See `ARCHITECTURE.md` § Determinism contract
+  for the full guarantee: state-owned `DeterministicRng`, ordered `BTreeMap`
+  iteration, typed-ID tie-breakers, fixed-point `Money`/`Quantity` with `i128`
+  intermediates, and no OS entropy / wall-clock dependency.
+- **Failure:** every consequential operation validates before mutation, leaves
+  state unchanged on rejection, and reports a typed
+  `CommandError`/`SimulationError`/`PersistenceError` variant with relevant
+  fields. Multi-record work resolves the complete result before commit or uses
+  a consumed `Validated*` token with revalidation; stale tokens fail closed.
+
 ## Public library surface
 
 `src/lib.rs` is the supported integration facade (`civic_dynasty`). Principal entry points:

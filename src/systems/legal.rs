@@ -3,7 +3,8 @@
 //! Purpose: ensure every legal case starts from a concrete delinquent/defaulted
 //! loan or attributed contract breach, with deterministic evidence floors and
 //! filing-fee headroom that both `commands/legal_cmd.rs` and `strategic/ai.rs`
-//! must respect.
+//! must respect. No case may be filed without a durably attributable source;
+//! speculative or sourceless claims are rejected at quote time.
 //! Owns: `LegalClaimQuote`, `LegalClaimSource`, the three evidence-floor
 //! constants (`7_500`/`9_000`/`8_500`), `quote_grounded_legal_claim`, and
 //! `collect_court_filing_fee` / `court_filing_fee_headroom` (market-conserving

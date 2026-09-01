@@ -43,6 +43,10 @@ use std::path::{Path, PathBuf};
 use tempfile::Builder;
 use thiserror::Error;
 
+/// Maximum serialized save-file size: 256 MiB. Inputs larger than this are
+/// rejected before parsing or allocation so an oversized file cannot exhaust
+/// memory or be mistaken for a valid campaign. Mirrors the `STATUS.md`
+/// platform contract.
 pub const MAX_SAVE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Business sales settle against the pooled market sector before households
@@ -168,9 +172,10 @@ pub enum SaveOutcome {
 }
 
 /// Deterministic fingerprint of the committed save bytes for optimistic
-/// concurrency (CAS). `hash` is the FNV-1a registry-style fold of the file
-/// bytes; `size` guards against hash collisions. `display_token` renders
-/// `hex:bytes` for mismatch diagnostics and is never parsed back.
+/// concurrency (CAS). `hash` is the FNV-1a fold of the exact file bytes
+/// (registry-style hasher); `size` guards against hash collisions.
+/// `display_token` renders `hex:bytes` for mismatch diagnostics and is
+/// intentionally never parsed back — comparisons use the structured fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SaveRevision {
     hash: u64,

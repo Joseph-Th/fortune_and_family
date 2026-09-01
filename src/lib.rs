@@ -1,4 +1,4 @@
-//! Deterministic simulation kernel for Civic Dynasty.
+//! Deterministic simulation kernel for Civic Dynasty — one city, one persistent `AppState`.
 //!
 //! Rivergate is modeled as a deterministic political economy:
 //! `Registry` (immutable authored definitions) plus `AppState` (every mutable

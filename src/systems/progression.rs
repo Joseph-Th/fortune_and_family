@@ -1,9 +1,11 @@
 //! Campaign-phase progression derived from durable milestones — never backward.
 //!
 //! Purpose: own the single monotonic `CampaignPhase` ladder (Foundation →
-//! Legacy) so `ARCHITECTURE.md`'s promised phase growth and
-//! `GAMEPLAY_HARNESS.md`'s phase grouping both derive from the same audit/
-//! collection evidence.
+//! Establishment → Ascendancy → Dominion → Legacy) so `ARCHITECTURE.md`'s
+//! promised phase growth and `GAMEPLAY_HARNESS.md`'s phase grouping both
+//! derive from the same durable evidence. Phases are earned by commercial,
+//! institutional, civic, and succession milestones and never regress even
+//! when underlying standing later softens.
 //! Owns: `refresh_campaign_phases` (with `CampaignEvidenceMemo` incremental
 //! fold), `campaign_phase_is_consistent` / `are_consistent`, and
 //! `CampaignPhaseEvidence::collect` (one sweep for all dynasties).
