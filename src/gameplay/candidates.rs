@@ -7603,29 +7603,76 @@ pub(crate) fn inject_exploratory_candidates(
     accumulator: &CampaignAccumulator,
     candidates: &mut Vec<Candidate>,
 ) {
+    // Deterministic exploration: when a world activation exists but the
+    // persona's strategic generator narrowed the route, occasionally inject a
+    // low-score exploratory candidate so organic gameplay variance is actually
+    // measured without overriding reserves or urgency. Each eligible family is
+    // rolled independently (~14% chance) but at most two injections per cycle
+    // keep the probe budget and persona priorities dominant.
+    let existing: BTreeSet<_> = candidates.iter().map(|c| c.kind).collect();
+    let world = pure_world_activation_set(registry, state, persona);
+    let mut injected = 0_usize;
+    let mut rng_copy = state.rng;
+    let mut base_roll = rng_copy.next_u64();
+    base_roll = base_roll.wrapping_add(state.clock.day().cast_unsigned());
+    base_roll = base_roll
+        .wrapping_add(u64::from(accumulator.decision_cycles).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    base_roll ^= u64::from(accumulator.quiet_cycles).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    for (index, kind) in world
+        .iter()
+        .filter(|kind| !existing.contains(kind))
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .enumerate()
+    {
+        if injected >= 2 {
+            break;
+        }
+        let mut roll = base_roll;
+        roll = roll.wrapping_add(u64::try_from(index).unwrap_or(u64::MAX).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        for b in persona.label().bytes().chain(kind.label().bytes()) {
+            roll = roll.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(11) ^ u64::from(b);
+        }
+        if !roll.is_multiple_of(7) {
+            continue;
+        }
+        let injected_now = match kind {
+            GameplayCommandKind::BorrowFunds => {
+                inject_exploratory_borrow(state, candidates)
+            }
+            GameplayCommandKind::AdoptWard => {
+                inject_exploratory_ward(state, persona, candidates)
+            }
+            GameplayCommandKind::EndowInstitution => {
+                inject_exploratory_endowment(registry, state, candidates)
+            }
+            GameplayCommandKind::BuyProperty => {
+                inject_exploratory_property(registry, state, candidates)
+            }
+            GameplayCommandKind::EducateFamilyMember => {
+                inject_exploratory_education(registry, state, persona, candidates)
+            }
+            GameplayCommandKind::AcquireBusiness => {
+                inject_exploratory_acquisition(registry, state, persona, candidates)
+            }
+            _ => false,
+        };
+        if injected_now {
+            injected += 1;
+        }
+    }
+}
+
+fn inject_exploratory_borrow(state: &AppState, candidates: &mut Vec<Candidate>) -> bool {
     if candidates
         .iter()
         .any(|c| c.kind == GameplayCommandKind::BorrowFunds)
     {
-        return;
+        return false;
     }
     if !has_borrow_opportunity(state) {
-        return;
-    }
-    // Deterministic exploration roll derived from the campaign RNG
-    // and cycle state so the same world/persona pair does not replay
-    // identical restraint every cycle. ~12% chance.
-    let mut rng = state.rng;
-    let mut roll = rng.next_u64();
-    roll = roll.wrapping_add(state.clock.day().cast_unsigned());
-    roll = roll
-        .wrapping_add(u64::from(accumulator.decision_cycles).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    roll ^= u64::from(accumulator.quiet_cycles).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    for b in persona.label().bytes() {
-        roll = roll.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(11) ^ u64::from(b);
-    }
-    if !roll.is_multiple_of(8) {
-        return;
+        return false;
     }
     let player_id = state.player_dynasty_id;
     let Some(lender) = state
@@ -7641,7 +7688,7 @@ pub(crate) fn inject_exploratory_candidates(
         })
         .max_by_key(|d| d.treasury())
     else {
-        return;
+        return false;
     };
     let available = lender
         .treasury()
@@ -7649,7 +7696,7 @@ pub(crate) fn inject_exploratory_candidates(
         .unwrap_or(Money::ZERO);
     let principal = Money::from_copper((available.copper() / 10).clamp(1_000, 8_000));
     if principal <= Money::ZERO {
-        return;
+        return false;
     }
     push_candidate(
         candidates,
@@ -7670,11 +7717,195 @@ pub(crate) fn inject_exploratory_candidates(
         ),
         50,
     );
-    // Keep harness bounded: more than one exploratory injection per cycle
-    // would defeat the probe budget and persona priorities. The single
-    // low-score borrow is enough to prove the route was sampled without
-    // dominating urgency-driven selection.
+    true
+}
+
+fn inject_exploratory_ward(
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) -> bool {
+    // Ward adoption is normally gated by discretionary floor and commercial
+    // standing; exploratory sampling relaxes only the standing reserve so the
+    // route is proven reachable without bankrupting the house.
+    let player = match state.dynasties.get(&state.player_dynasty_id) {
+        Some(p) => p,
+        None => return false,
+    };
+    if player.treasury() < WARD_ADOPTION_COST {
+        return false;
+    }
+    if state.family_councils.get(&state.player_dynasty_id).is_none_or(|c| c.unity_basis_points < WARD_ADOPTION_UNITY_COST) {
+        return false;
+    }
+    if active_player_ward_count(state) >= MAX_ACTIVE_WARDS {
+        return false;
+    }
+    if audit_records_within_cooldown(state, WARD_ADOPTION_INTERVAL_DAYS).any(|record| {
+        record.kind() == AuditKind::WardAdoption
+            && record
+                .subject()
+                .starts_with(&format!("dynasty:{}:", state.player_dynasty_id))
+    }) {
+        return false;
+    }
+    let focus = education_focus_order(persona)[0];
+    push_candidate(
+        candidates,
+        GameplayCommandKind::AdoptWard,
+        PlayerCommand::AdoptWard { focus },
+        format!("exploratory adopt a {focus:?}-focused ward (organic variation)"),
+        30,
+    );
+    true
+}
+
+fn inject_exploratory_endowment(
+    registry: &Registry,
+    state: &AppState,
+    candidates: &mut Vec<Candidate>,
+) -> bool {
+    let treasury = match state.dynasties.get(&state.player_dynasty_id) {
+        Some(d) => d.treasury(),
+        None => return false,
+    };
+    if treasury < INSTITUTION_ENDOWMENT_MIN {
+        return false;
+    }
+    if institution_endowment_next_day(state).is_some_and(|day| state.clock.day() < day) {
+        return false;
+    }
+    let Some(institution) = state.institutions.values().find(|i| {
+        has_established_player_institution_membership(state, i.institution_id)
+    }) else {
+        return false;
+    };
+    let amount = INSTITUTION_ENDOWMENT_MIN.min(treasury);
+    push_candidate(
+        candidates,
+        GameplayCommandKind::EndowInstitution,
+        PlayerCommand::EndowInstitution {
+            institution_id: institution.institution_id,
+            amount,
+        },
+        format!(
+            "exploratory endow {} with {amount} (organic variation)",
+            institution_label(registry, institution.institution_id)
+        ),
+        30,
+    );
+    true
+}
+
+fn inject_exploratory_property(
+    registry: &Registry,
+    state: &AppState,
+    candidates: &mut Vec<Candidate>,
+) -> bool {
+    let treasury = match state.dynasties.get(&state.player_dynasty_id) {
+        Some(d) => d.treasury(),
+        None => return false,
+    };
+    let Some(property) = state.properties.values().find(|p| {
+        p.owner_dynasty_id.is_none() && p.value <= treasury.saturating_sub(Money::from_copper(5_000))
+    }) else {
+        return false;
+    };
+    push_candidate(
+        candidates,
+        GameplayCommandKind::BuyProperty,
+        PlayerCommand::BuyProperty {
+            property_id: property.id,
+        },
+        format!(
+            "exploratory buy {:?} property {} in {} (organic variation)",
+            property.kind,
+            property.id,
+            district_label(registry, property.district_id())
+        ),
+        30,
+    );
+    true
+}
+
+fn inject_exploratory_education(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) -> bool {
+    let player = match state.dynasties.get(&state.player_dynasty_id) {
+        Some(p) => p,
+        None => return false,
+    };
+    if player.treasury() < FAMILY_EDUCATION_COST {
+        return false;
+    }
+    let Some(student) = state.characters.iter().find(|c| {
+        c.dynasty_id() == state.player_dynasty_id
+            && c.status() == CharacterStatus::Active
+            && character_focus_value(c, education_focus_order(persona)[0]) < 100
+            && family_education_next_day(state, c.id()).is_none_or(|day| state.clock.day() >= day)
+    }) else {
+        return false;
+    };
+    let focus = education_focus_order(persona)[0];
+    push_candidate(
+        candidates,
+        GameplayCommandKind::EducateFamilyMember,
+        PlayerCommand::EducateFamilyMember {
+            character_id: student.id(),
+            focus,
+        },
+        format!(
+            "exploratory educate {} in {focus:?} (organic variation)",
+            character_label(state, student.id())
+        ),
+        30,
+    );
     let _ = registry;
+    true
+}
+
+fn inject_exploratory_acquisition(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    candidates: &mut Vec<Candidate>,
+) -> bool {
+    let player_id = state.player_dynasty_id;
+    let treasury = match state.dynasties.get(&player_id) {
+        Some(d) => d.treasury(),
+        None => return false,
+    };
+    let Some(manager_id) = state.characters.iter().find(|c| c.dynasty_id() == player_id && c.status() == CharacterStatus::Active).map(|c| c.id()) else {
+        return false;
+    };
+    for business in state.businesses.iter().filter(|b| b.owner_dynasty_id() != player_id) {
+        let Ok(quote) = quote_business_acquisition(registry, state, player_id, business.id()) else { continue; };
+        let Some(recapitalization) = acquisition_recapitalization(registry, state, business, quote) else { continue; };
+        let required = quote.purchase_price.saturating_add(recapitalization);
+        if treasury < required {
+            continue;
+        }
+        if !acquisition_has_turnaround_thesis(registry, state, business) {
+            continue;
+        }
+        push_candidate(
+            candidates,
+            GameplayCommandKind::AcquireBusiness,
+            PlayerCommand::AcquireBusiness {
+                business_id: business.id(),
+                manager_id,
+                recapitalization,
+            },
+            format!("exploratory acquire {} (organic variation)", business_label(state, business.id())),
+            30,
+        );
+        let _ = persona;
+        return true;
+    }
+    false
 }
 
 pub(crate) const fn simulation_error_category(error: &SimulationError) -> &'static str {

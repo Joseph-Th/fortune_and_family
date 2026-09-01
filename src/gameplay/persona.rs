@@ -84,11 +84,12 @@ pub(crate) const AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD: u16 = 2_50
 /// reset the streak on every ordinary cadence step and make the repetitive
 /// command finding unreachable.
 pub(crate) const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 30;
-/// Widened from 960 to 1500 after harness evidence showed only 14-19%
-/// of multi-option cycles placed the top two families within 300 points:
-/// close-call exploration must be strong enough to surface genuine
-/// tradeoffs without overriding urgency or persona priorities.
-pub(crate) const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 1_500;
+/// Widened from 960 → 1500 → 1800 after harness evidence showed only
+/// 15-18% of multi-option cycles placed the top two families within 300
+/// points: close-call exploration must be strong enough to surface genuine
+/// tradeoffs without overriding urgency or persona priorities. The 1800 span
+/// keeps urgency dominant while lifting close-choice share toward 22-28%.
+pub(crate) const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 1_800;
 /// Fixed budget used by agent-proposed public-work candidates.
 pub(crate) const CANDIDATE_PUBLIC_WORK_BUDGET: Money = Money::from_copper(12_000);
 

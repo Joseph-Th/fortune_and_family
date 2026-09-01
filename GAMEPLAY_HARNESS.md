@@ -100,7 +100,16 @@ Personas expose different viable routes through the same canonical systems. Cand
 
 Standing policies across personas:
 
-- Candidate scores include deterministic exploration variation (range 960, decision interval jitter ±22 days) derived from campaign state and persona. Timing jitter mixes persona, generation, business/property, and crisis state so campaigns sharing a world seed sample distinct calendars; score variation mixes generation, business, property, legal, and crisis state besides the RNG. Both flip close calls without overriding urgency, reserve protection, or persona priorities.
+- Candidate scores include deterministic exploration variation
+  (range 1800, decision interval jitter ±28 days) derived from campaign
+  state and persona. Timing jitter mixes persona, generation,
+  business/property, and crisis state so campaigns sharing a world seed
+  sample distinct calendars; score variation mixes generation, business,
+  property, legal, and crisis state besides the RNG. Both flip close
+  calls without overriding urgency, reserve protection, or persona
+  priorities. Exploratory injection additionally samples restrained routes
+  (~14% per eligible family, up to two per cycle) so deliberately narrowed
+  generators are still proven reachable.
 - Optional standing expenses (education, wards, patronage) respect a discretionary floor: emergency reserve plus two months of committed loan service. Below the floor, standing spending is deferred.
 - Standing-burning responses (suppression, profiteering) additionally respect a legitimacy reserve, matching treasury reserve policy.
 
@@ -273,7 +282,7 @@ Divergence between harness and game is a harness defect.
 
 - Activation predicates are checked every cycle (`ActivationPredicateDrift` on mismatch).
 - Report schema version bumps on any semantic change (activation, scoring, findings, trace meaning).
-- Organic variation (jitter ±22 days plus score range 960, each persona- and state-aware) prevents rigid replay while urgency and persona priorities remain dominant.
+- Organic variation (jitter ±28 days plus score range 1800, each persona- and state-aware, plus bounded exploratory injection) prevents rigid replay while urgency and persona priorities remain dominant.
 - Bounded work: probe caps, horizons, trace limits bound every run in domain terms. Parallelism capped by `CIVIC_DYNASTY_JOBS`; ordering is stable.
 
 ## Interpretation limits
