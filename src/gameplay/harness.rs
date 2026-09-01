@@ -2858,13 +2858,11 @@ pub(crate) fn has_borrow_opportunity(state: &AppState) -> bool {
     if !state.dynasties.contains_key(&player_id) {
         return false;
     }
-    if state
-        .loans
-        .values()
-        .any(|loan| loan.borrower_dynasty_id == player_id && loan.status.is_repayment_active())
-    {
-        return false;
-    }
+    // Pair-scoped: an active loan with lender A blocks only that pair,
+    // matching `validate_loan` which checks `ExistingUnsettledLoan` per
+    // lender/borrower pair. A global "any active loan blocks all" would
+    // hide valid fresh-credit routes and is a harness divergence.
+    // Fresh-credit availability is decided by the per-lender scan below.
     // An aged default creates a canonical workout opportunity with its
     // existing creditor even when no new cash can be advanced.
     if state.loans.values().any(|loan| {

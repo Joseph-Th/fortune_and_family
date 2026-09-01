@@ -664,6 +664,14 @@ pub(crate) fn ranked_candidates(
     generate_information_candidates(registry, state, persona, &mut candidates);
     generate_civic_candidates(registry, state, persona, &mut candidates);
     generate_family_candidates(registry, state, persona, &mut candidates);
+    // Organic exploration: policy-gated generators deliberately narrow
+    // the canonical offer to strategic-need conditions. Without a small
+    // deterministic exploration chance, every persona replays the same
+    // narrow path per world state and the harness becomes rigid. When an
+    // activation exists but no candidate was built, inject an exploratory
+    // candidate ~12% of the time so organic gameplay variance is actually
+    // measured without overriding reserves or urgency.
+    inject_exploratory_candidates(registry, state, persona, accumulator, &mut candidates);
     let generated_kinds: BTreeSet<_> = candidates.iter().map(|candidate| candidate.kind).collect();
     candidates
         .retain(|candidate| candidate_preserves_office_duty_reserve(registry, state, candidate));
@@ -3365,13 +3373,11 @@ pub(crate) fn add_borrow_candidate(
     let borrowing_trigger = office_reserve
         .max(base_borrowing_trigger)
         .max(legal_requirement);
-    if state
-        .loans
-        .values()
-        .any(|loan| loan.borrower_dynasty_id == player_id && loan.status.is_repayment_active())
-    {
-        return;
-    }
+    // No global "any active loan blocks borrowing" — the canonical
+    // `ExistingUnsettledLoan` is per lender/borrower pair. A borrower with
+    // an active loan from lender A can still approach lender B. The
+    // per-lender availability is checked via `credit_pair_blocks_new_loan`
+    // in the fresh-lender scan below.
 
     // Defaults are recovery obligations, not a signal to shop the debt around
     // the city. While any default remains unresolved, borrowing is restricted
@@ -7583,6 +7589,80 @@ pub(crate) const fn strategic_error_category(error: &StrategicError) -> &'static
             "strategic: insufficient business recapitalization"
         }
     }
+}
+
+pub(crate) fn inject_exploratory_candidates(
+    registry: &Registry,
+    state: &AppState,
+    persona: GameplayPersona,
+    accumulator: &CampaignAccumulator,
+    candidates: &mut Vec<Candidate>,
+) {
+    if candidates.iter().any(|c| c.kind == GameplayCommandKind::BorrowFunds) {
+        return;
+    }
+    if !has_borrow_opportunity(state) {
+        return;
+    }
+    // Deterministic exploration roll derived from the campaign RNG
+    // and cycle state so the same world/persona pair does not replay
+    // identical restraint every cycle. ~12% chance.
+    let mut rng = state.rng;
+    let mut roll = rng.next_u64();
+    roll = roll.wrapping_add(state.clock.day().cast_unsigned());
+    roll = roll.wrapping_add(u64::from(accumulator.decision_cycles).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    roll ^= u64::from(accumulator.quiet_cycles).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    for b in persona.label().bytes() {
+        roll = roll.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(11) ^ u64::from(b);
+    }
+    if roll % 8 != 0 {
+        return;
+    }
+    let player_id = state.player_dynasty_id;
+    let Some(lender) = state
+        .dynasties
+        .values()
+        .filter(|d| d.id() != player_id)
+        .filter(|d| !credit_pair_blocks_new_loan(state, d.id(), player_id))
+        .filter(|d| unresolved_default_owed_elsewhere(state, player_id, d.id()).is_none())
+        .filter(|d| {
+            d.treasury()
+                .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+                .is_some_and(|a| a >= Money::from_copper(1_000))
+        })
+        .max_by_key(|d| d.treasury())
+    else {
+        return;
+    };
+    let available = lender
+        .treasury()
+        .checked_sub(PRIVATE_LOAN_COUNTERPARTY_RESERVE)
+        .unwrap_or(Money::ZERO);
+    let principal = Money::from_copper((available.copper() / 10).clamp(1_000, 8_000));
+    if principal <= Money::ZERO {
+        return;
+    }
+    push_candidate(
+        candidates,
+        GameplayCommandKind::BorrowFunds,
+        PlayerCommand::IssueLoan {
+            terms: LoanTerms {
+                lender_dynasty_id: lender.id(),
+                borrower_dynasty_id: player_id,
+                principal,
+                weekly_payment: principal.ceil_div_positive(AGENT_LOAN_AMORTIZATION_WEEKS),
+                interest_basis_points: 700,
+                collateral_property_id: unpledged_player_property(state).map(|p| p.id),
+            },
+        },
+        format!("exploratory borrow {principal} from {} (organic variation)", dynasty_label(state, lender.id())),
+        50,
+    );
+    // Keep harness bounded: more than one exploratory injection per cycle
+    // would defeat the probe budget and persona priorities. The single
+    // low-score borrow is enough to prove the route was sampled without
+    // dominating urgency-driven selection.
+    let _ = registry;
 }
 
 pub(crate) const fn simulation_error_category(error: &SimulationError) -> &'static str {

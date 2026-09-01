@@ -12,7 +12,7 @@ Current implementation surface, schemas, runtime guarantees, and deliberate limi
 | Save schema | 31 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 77 |
+| Gameplay report schema | 78 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
