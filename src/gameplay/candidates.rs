@@ -4597,8 +4597,7 @@ pub(crate) fn law_persona_bonus(persona: GameplayPersona, kind: LawKind) -> i64 
     match persona {
         GameplayPersona::Steward => match kind {
             LawKind::BreadPriceCeiling | LawKind::EmergencyImports => 220,
-            LawKind::FireCode | LawKind::RentRestriction => 180,
-            LawKind::PublicDebtAuthorization => 180,
+            LawKind::FireCode | LawKind::RentRestriction | LawKind::PublicDebtAuthorization => 180,
             LawKind::ForeignMerchantToll
             | LawKind::InterestLimit
             | LawKind::GuildEntryRestriction => 0,

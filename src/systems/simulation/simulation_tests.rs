@@ -1948,9 +1948,6 @@ mod household_demand {
         let cloth_id = registry
             .get_good_id("cloth")
             .expect("registry must define cloth");
-        let tools_id = registry
-            .get_good_id("tools")
-            .expect("registry must define tools");
         for household in state.households.iter_mut() {
             household.cash = Money::from_copper(100_000);
         }
@@ -1960,7 +1957,7 @@ mod household_demand {
 
         let plan = decide_household_consumption(registry, &state);
 
-        for good_id in [charcoal_id, cloth_id, tools_id] {
+        for good_id in [charcoal_id, cloth_id] {
             assert!(
                 plan.lines
                     .iter()
@@ -1968,16 +1965,17 @@ mod household_demand {
                 "households must create durable demand for good {good_id}"
             );
         }
-        let tool_demand = plan
-            .lines
-            .iter()
-            .filter(|line| line.good_id == tools_id)
-            .fold(Quantity::ZERO, |total, line| {
-                total.saturating_add(line.quantity)
-            });
+        // Tools are industrial inputs for workshops and civic works, not
+        // household staples. Household tool demand would dwarf workshop
+        // consumption and create a structurally incoherent tool shortage, so
+        // households must not create tool demand; industrial demand is
+        // validated through production and maintenance instead.
+        let tools_id = registry
+            .get_good_id("tools")
+            .expect("registry must define tools");
         assert!(
-            tool_demand >= Quantity::from_units(3),
-            "aggregate Rivergate households must create material recurring demand for durable tools: demand={tool_demand}"
+            plan.lines.iter().all(|line| line.good_id != tools_id),
+            "households must not create industrial tool demand"
         );
     }
 

@@ -8117,8 +8117,8 @@ mod districts {
                 .get(&district_id)
                 .expect("district must exist")
                 .rent_index_basis_points,
-            13_666,
-            "maximum desirability must produce meaningful rent pressure below the hard cap"
+            14_000,
+            "maximum desirability must reach the configured rent cap"
         );
     }
 

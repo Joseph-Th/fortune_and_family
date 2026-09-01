@@ -1174,9 +1174,6 @@ fn decide_household_consumption(registry: &Registry, state: &AppState) -> Househ
     let cloth_id = registry
         .get_good_id("cloth")
         .expect("Rivergate registry must define cloth");
-    let tools_id = registry
-        .get_good_id("tools")
-        .expect("Rivergate registry must define tools");
     // Shared market stock in a flat vector indexed by the registry's dense
     // good identifiers (see `decide_business_purchases`).
     let mut stock = vec![Quantity::ZERO; registry.goods().len()];
@@ -1221,13 +1218,15 @@ fn decide_household_consumption(registry: &Registry, state: &AppState) -> Househ
             );
             food_acquired = food_acquired.saturating_add(quantity);
         }
-        let (charcoal_need, cloth_need, tools_need) =
-            household_secondary_needs(household.social_class());
+        let (charcoal_need, cloth_need) = household_secondary_needs(household.social_class());
         // Cloth is the one secondary staple whose market must stay balanced
         // against the city's weaving capacity. Households do not pay any
         // price for it: dear cloth means mending and waiting, so demand
         // scales down with the going price instead of ratcheting a shortage
-        // ever upward.
+        // ever upward. Tools are an industrial input consumed only by
+        // workshops and civic construction; households do not consume tools
+        // as a daily staple, so tool demand is driven by production and
+        // maintenance rather than household shopping.
         let cloth_need = match cloth_ratio_basis_points {
             Some(ratio_basis_points) => cloth_need.saturating_mul_ratio(ratio_basis_points, 10_000),
             None => cloth_need,
@@ -1236,7 +1235,6 @@ fn decide_household_consumption(registry: &Registry, state: &AppState) -> Househ
             (ale_id, household.ale_need_daily),
             (charcoal_id, charcoal_need),
             (cloth_id, cloth_need),
-            (tools_id, tools_need),
         ] {
             plan_household_purchase(
                 household.id(),
@@ -1306,23 +1304,23 @@ fn plan_household_purchase(
     quantity
 }
 
-fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity, Quantity) {
+fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity) {
     // Clothing is a recurring household staple, not a luxury. Rivergate's
     // nominal cloth needs sit just under the city's weaving capacity (the
     // player's loomhouse plus the Veyra workshop), so both weavers sell at
     // viable margins instead of glutting the market into structural losses,
     // while [`cloth_price_ratio_basis_points`] scales need back when prices
     // climb so a shortage cannot ratchet. The household income in bootstrap is
-    // calibrated to carry this budget alongside food.
-    let (charcoal, cloth, tools) = match social_class {
-        SocialClass::Laboring => (180, 400, 60),
-        SocialClass::Artisan => (240, 800, 180),
-        SocialClass::Merchant => (300, 1_200, 260),
+    // calibrated to carry this budget alongside food. Tools are industrial
+    // inputs for workshops and civic works, not household staples.
+    let (charcoal, cloth) = match social_class {
+        SocialClass::Laboring => (180, 400),
+        SocialClass::Artisan => (240, 800),
+        SocialClass::Merchant => (300, 1_200),
     };
     (
         Quantity::from_milliunits(charcoal),
         Quantity::from_milliunits(cloth),
-        Quantity::from_milliunits(tools),
     )
 }
 

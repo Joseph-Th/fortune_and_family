@@ -536,14 +536,27 @@ pub(crate) fn reoccupy_recovered_premises(state: &mut AppState) {
 }
 
 /// Vacancy income is an abstraction funded by the market's own clearing
-/// pool; it is bounded by what that pool holds so the weekly settlement can
-/// never overdraw it. Returns the amount actually paid.
+/// pool. It may drive the pool into its deliberate short-term deficit
+/// (consumer credit) but never beyond the validated deficit limit, so a
+/// depleted pool degrades the take instead of aborting the settlement.
+/// Returns the amount actually paid.
 pub(crate) fn collect_vacancy_income(
     state: &mut AppState,
     owner_id: DynastyId,
     rent: Money,
 ) -> Result<Money, SimulationError> {
-    let paid = rent.min(state.market.clearing_account.max(Money::ZERO));
+    // Business sales already drive the clearing account into a bounded
+    // deficit (consumer credit); vacancy income shares the same pool and
+    // respects the same deficit limit instead of silencing landlords
+    // whenever the pool is already negative.
+    const MAX_DEFICIT: i64 = -10_000_000;
+    let available = state
+        .market
+        .clearing_account
+        .copper()
+        .saturating_sub(MAX_DEFICIT)
+        .max(0);
+    let paid = rent.min(Money::from_copper(available));
     if paid <= Money::ZERO {
         return Ok(Money::ZERO);
     }
@@ -1027,9 +1040,19 @@ pub(crate) fn update_district_conditions(state: &mut AppState) {
                 district_unrest_next_basis_points(district, satisfaction);
             let desirability = u32::from(district.safety_basis_points)
                 .saturating_add(u32::from(district.sanitation_basis_points));
+            // Map desirability 0..20_000 → rent 7_000..14_000 linearly so the
+            // full configured range is reachable. The previous `/3` capped at
+            // 13_666 and left the 14_000 ceiling dead. At neutral 5_000+5_000
+            // the index sits near 10_500 rather than 10_333, preserving the
+            // neutral band while making a fully restored district genuinely
+            // premium and a collapsed one genuinely cheap.
+            let rent_span = u32::from(
+                crate::systems::MAX_DISTRICT_RENT_INDEX_BASIS_POINTS
+                    - crate::systems::MIN_DISTRICT_RENT_INDEX_BASIS_POINTS,
+            );
             district.rent_index_basis_points = u16::try_from(
                 u32::from(crate::systems::MIN_DISTRICT_RENT_INDEX_BASIS_POINTS)
-                    .saturating_add(desirability / 3)
+                    .saturating_add(desirability.saturating_mul(rent_span) / 20_000)
                     .min(u32::from(
                         crate::systems::MAX_DISTRICT_RENT_INDEX_BASIS_POINTS,
                     )),

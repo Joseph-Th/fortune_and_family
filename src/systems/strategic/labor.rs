@@ -73,9 +73,10 @@ pub(crate) struct LaborEnvironment {
     pub(crate) wage_ratio_basis_points: u16,
 }
 
-/// Weekly per-worker wage the labor market treats as fair at base staple
-/// prices. It tracks the bread price so sustained food inflation or scarcity
-/// turns yesterday's fair wage into a stingy one.
+/// Weekly per-worker wage the labor market treats as fair at base living
+/// costs. It tracks bread price and the city's average rent index so
+/// sustained food inflation, scarcity, or housing pressure turns yesterday's
+/// fair wage into a stingy one. A dear city must pay dear wages.
 pub(crate) const REFERENCE_WEEKLY_WORKER_WAGE_COPPER: i64 = 35;
 /// At or above this wage-to-reference ratio a workforce considers its pay
 /// generous and builds loyalty that absorbs operating strain.
@@ -95,16 +96,42 @@ pub(crate) fn market_reference_weekly_wage(registry: &Registry, state: &AppState
         return None;
     }
     let quote_price = state.market.quotes.get(&bread_id)?.price;
-    let ratio_basis_points = quote_price
+    let bread_ratio_basis_points = quote_price
         .copper()
         .saturating_mul(10_000)
         .checked_div(base_price.copper())?;
-    let clamped = ratio_basis_points.clamp(6_000, 18_000);
-    Some(Money::from_copper(
-        REFERENCE_WEEKLY_WORKER_WAGE_COPPER
-            .saturating_mul(clamped)
-            .div_euclid(10_000),
-    ))
+    let bread_clamped = bread_ratio_basis_points.clamp(6_000, 18_000);
+    // Average rent index across districts: at neutral 10_000 the city is at
+    // baseline cost, at 14_000 housing is 40% dearer. Rent pressure
+    // modulates fair wages because 28/52/78 copper per member monthly
+    // living costs scale directly with the rent index. A prosperous,
+    // high-rent city must pay its workers more to keep them.
+    let avg_rent_index = if state.districts.is_empty() {
+        10_000_u32
+    } else {
+        let sum: u32 = state
+            .districts
+            .values()
+            .map(|d| u32::from(d.rent_index_basis_points))
+            .sum();
+        sum / u32::try_from(state.districts.len()).unwrap_or(1)
+    };
+    // Rent factor 7_000..14_000 maps to 0.7..1.4, clamped to avoid extremes
+    // where a single district collapse would halve fair wages.
+    let rent_factor = i64::from(avg_rent_index.clamp(7_000, 14_000));
+    let combined = REFERENCE_WEEKLY_WORKER_WAGE_COPPER
+        .saturating_mul(bread_clamped)
+        .saturating_mul(rent_factor)
+        .div_euclid(10_000)
+        .div_euclid(10_000);
+    // Final clamp keeps wage within 60%..210% of base so combined bread+rent
+    // pressure stays material but never produces a 3x wage spike from a
+    // simultaneous food and housing crisis.
+    let final_copper = combined.clamp(
+        REFERENCE_WEEKLY_WORKER_WAGE_COPPER * 6 / 10,
+        REFERENCE_WEEKLY_WORKER_WAGE_COPPER * 21 / 10,
+    );
+    Some(Money::from_copper(final_copper))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -783,11 +783,16 @@ pub(crate) fn apply_office_power(
         }
         OfficePower::MarketTolls | OfficePower::Taxation => {
             // Like vacancy income, toll and taxation revenue is funded by the
-            // market's own clearing pool; it is bounded by what that pool
-            // holds so a depleted pool degrades the office's take instead of
-            // aborting the monthly settlement.
-            let revenue =
-                Money::from_copper(100).min(state.market.clearing_account.max(Money::ZERO));
+            // market's own clearing pool and may drive it into the validated
+            // short-term deficit (consumer credit) but never beyond it.
+            const MAX_DEFICIT: i64 = -10_000_000;
+            let available = state
+                .market
+                .clearing_account
+                .copper()
+                .saturating_sub(MAX_DEFICIT)
+                .max(0);
+            let revenue = Money::from_copper(100).min(Money::from_copper(available));
             if revenue <= Money::ZERO {
                 return Ok(());
             }
