@@ -379,7 +379,7 @@ pub(crate) fn detect_and_advance_crises(
             .filter(|b| b.status() == crate::core::BusinessStatus::Distressed)
             .count()
             >= 1
-        && state.rng.is_chance_success(1_500)
+        && state.rng.is_chance_success(2_500)
     {
         insert_crisis(
             state,

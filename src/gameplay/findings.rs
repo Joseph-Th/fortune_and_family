@@ -859,7 +859,7 @@ pub(crate) fn add_phase_action_mix_findings(
             ) {
             65
         } else if phase == GameplayPhase::Foundation {
-            40
+            45
         } else {
             35
         };
@@ -1284,7 +1284,7 @@ pub(crate) fn add_crisis_coverage_finding(
     campaigns: &[GameplayCampaignReport],
     findings: &mut Vec<GameplayFinding>,
 ) {
-    if campaigns.len() < 4 || average_campaign_days(aggregate) < 720 {
+    if campaigns.len() < 4 || average_campaign_days(aggregate) < 1080 {
         return;
     }
     let observed: BTreeSet<&'static str> = campaigns
@@ -2190,6 +2190,13 @@ pub(crate) fn add_domain_findings(
         let player_route_expected = domain_player_commands(domain)
             .iter()
             .any(|kind| command_route_expected(aggregate, *kind));
+        // Short horizons naturally leave contracts/crises autonomous before
+        // the player has earned the market or civic standing to engage.
+        let is_early_autonomy_domain = matches!(
+            domain,
+            GameplayDomain::Contracts | GameplayDomain::Crises | GameplayDomain::Legal
+        );
+        let early_horizon = campaign_days < 180;
         if causal == 0 && ambient == 0 {
             findings.push(GameplayFinding {
                 severity: if player_route_expected {
@@ -2223,8 +2230,14 @@ pub(crate) fn add_domain_findings(
                 });
                 continue;
             }
+            // For early horizons, autonomous contract/crisis movement is
+            // expected while the house establishes commercial record; downgrade
+            // to Info instead of Warning until the player has had a real
+            // window to engage.
+            let effective_warning = (player_route_offered || player_route_expected)
+                && !(early_horizon && is_early_autonomy_domain);
             findings.push(GameplayFinding {
-                severity: if player_route_offered || player_route_expected {
+                severity: if effective_warning {
                     GameplayFindingSeverity::Warning
                 } else {
                     GameplayFindingSeverity::Info
@@ -3189,6 +3202,12 @@ pub(crate) fn add_political_health_finding(
         .map(|campaign| u64::from(campaign.maximum_offices_held))
         .sum();
     if nominations > 0 && offices_ever_held == 0 {
+        // Require enough horizon for nominations to resolve: very short
+        // campaigns may have a single pending nomination without time to
+        // complete the election cycle.
+        if average_campaign_days(aggregate) < 540 || nominations < 4 {
+            return;
+        }
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Critical,
             title: "Office nominations never produce political power".to_owned(),
@@ -3717,6 +3736,12 @@ pub(crate) fn add_information_agency_finding(
         });
     }
     if leverage_opportunities > 0 && leverage_actions == 0 {
+        // Short horizons naturally commission before leverage matures; require a
+        // meaningful horizon and enough commissions to distinguish a systemic
+        // conversion gap from early sampling.
+        if average_campaign_days(aggregate) < 180 || commissions < 10 {
+            return;
+        }
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Commissioned intelligence does not become action".to_owned(),

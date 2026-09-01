@@ -7630,7 +7630,11 @@ pub(crate) fn inject_exploratory_candidates(
             break;
         }
         let mut roll = base_roll;
-        roll = roll.wrapping_add(u64::try_from(index).unwrap_or(u64::MAX).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        roll = roll.wrapping_add(
+            u64::try_from(index)
+                .unwrap_or(u64::MAX)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15),
+        );
         for b in persona.label().bytes().chain(kind.label().bytes()) {
             roll = roll.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(11) ^ u64::from(b);
         }
@@ -7638,12 +7642,8 @@ pub(crate) fn inject_exploratory_candidates(
             continue;
         }
         let injected_now = match kind {
-            GameplayCommandKind::BorrowFunds => {
-                inject_exploratory_borrow(state, candidates)
-            }
-            GameplayCommandKind::AdoptWard => {
-                inject_exploratory_ward(state, persona, candidates)
-            }
+            GameplayCommandKind::BorrowFunds => inject_exploratory_borrow(state, candidates),
+            GameplayCommandKind::AdoptWard => inject_exploratory_ward(state, persona, candidates),
             GameplayCommandKind::EndowInstitution => {
                 inject_exploratory_endowment(registry, state, candidates)
             }
@@ -7735,7 +7735,11 @@ fn inject_exploratory_ward(
     if player.treasury() < WARD_ADOPTION_COST {
         return false;
     }
-    if state.family_councils.get(&state.player_dynasty_id).is_none_or(|c| c.unity_basis_points < WARD_ADOPTION_UNITY_COST) {
+    if state
+        .family_councils
+        .get(&state.player_dynasty_id)
+        .is_none_or(|c| c.unity_basis_points < WARD_ADOPTION_UNITY_COST)
+    {
         return false;
     }
     if active_player_ward_count(state) >= MAX_ACTIVE_WARDS {
@@ -7775,9 +7779,11 @@ fn inject_exploratory_endowment(
     if institution_endowment_next_day(state).is_some_and(|day| state.clock.day() < day) {
         return false;
     }
-    let Some(institution) = state.institutions.values().find(|i| {
-        has_established_player_institution_membership(state, i.institution_id)
-    }) else {
+    let Some(institution) = state
+        .institutions
+        .values()
+        .find(|i| has_established_player_institution_membership(state, i.institution_id))
+    else {
         return false;
     };
     let amount = INSTITUTION_ENDOWMENT_MIN.min(treasury);
@@ -7807,7 +7813,8 @@ fn inject_exploratory_property(
         None => return false,
     };
     let Some(property) = state.properties.values().find(|p| {
-        p.owner_dynasty_id.is_none() && p.value <= treasury.saturating_sub(Money::from_copper(5_000))
+        p.owner_dynasty_id.is_none()
+            && p.value <= treasury.saturating_sub(Money::from_copper(5_000))
     }) else {
         return false;
     };
@@ -7878,12 +7885,27 @@ fn inject_exploratory_acquisition(
         Some(d) => d.treasury(),
         None => return false,
     };
-    let Some(manager_id) = state.characters.iter().find(|c| c.dynasty_id() == player_id && c.status() == CharacterStatus::Active).map(|c| c.id()) else {
+    let Some(manager_id) = state
+        .characters
+        .iter()
+        .find(|c| c.dynasty_id() == player_id && c.status() == CharacterStatus::Active)
+        .map(|c| c.id())
+    else {
         return false;
     };
-    for business in state.businesses.iter().filter(|b| b.owner_dynasty_id() != player_id) {
-        let Ok(quote) = quote_business_acquisition(registry, state, player_id, business.id()) else { continue; };
-        let Some(recapitalization) = acquisition_recapitalization(registry, state, business, quote) else { continue; };
+    for business in state
+        .businesses
+        .iter()
+        .filter(|b| b.owner_dynasty_id() != player_id)
+    {
+        let Ok(quote) = quote_business_acquisition(registry, state, player_id, business.id())
+        else {
+            continue;
+        };
+        let Some(recapitalization) = acquisition_recapitalization(registry, state, business, quote)
+        else {
+            continue;
+        };
         let required = quote.purchase_price.saturating_add(recapitalization);
         if treasury < required {
             continue;
@@ -7899,7 +7921,10 @@ fn inject_exploratory_acquisition(
                 manager_id,
                 recapitalization,
             },
-            format!("exploratory acquire {} (organic variation)", business_label(state, business.id())),
+            format!(
+                "exploratory acquire {} (organic variation)",
+                business_label(state, business.id())
+            ),
             30,
         );
         let _ = persona;

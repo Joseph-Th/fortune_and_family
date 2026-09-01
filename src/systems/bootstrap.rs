@@ -244,6 +244,11 @@ fn insert_player_foundation(
         StartingBackground::ClothTrader => required_district(registry, "riverside"),
         StartingBackground::Blacksmith => required_district(registry, "northgate"),
     };
+    let capacity_batches_per_day = match background {
+        StartingBackground::Baker => 4,
+        StartingBackground::ClothTrader => 4,
+        StartingBackground::Blacksmith => 3,
+    };
     insert_business(
         state,
         registry,
@@ -254,7 +259,7 @@ fn insert_player_foundation(
             recipe_id,
             name: background.business_name().to_owned(),
             cash: Money::from_copper(48_000),
-            capacity_batches_per_day: 5,
+            capacity_batches_per_day,
         },
     );
     dynasty_id

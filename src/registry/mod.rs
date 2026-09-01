@@ -867,8 +867,8 @@ fn register_rivergate_goods(builder: &mut RegistryBuilder) -> RivergateGoods {
             "cloth",
             "Cloth",
             GoodCategory::Textile,
-            Money::from_copper(54),
-            Quantity::from_units(350),
+            Money::from_copper(58),
+            Quantity::from_units(380),
             1,
         ),
         timber: builder.register_good(
@@ -883,7 +883,7 @@ fn register_rivergate_goods(builder: &mut RegistryBuilder) -> RivergateGoods {
             "charcoal",
             "Charcoal",
             GoodCategory::Fuel,
-            Money::from_copper(28),
+            Money::from_copper(18),
             Quantity::from_units(450),
             1,
         ),
@@ -891,7 +891,7 @@ fn register_rivergate_goods(builder: &mut RegistryBuilder) -> RivergateGoods {
             "iron",
             "Iron",
             GoodCategory::Material,
-            Money::from_copper(48),
+            Money::from_copper(32),
             Quantity::from_units(300),
             0,
         ),
@@ -899,8 +899,8 @@ fn register_rivergate_goods(builder: &mut RegistryBuilder) -> RivergateGoods {
             "tools",
             "Tools",
             GoodCategory::Tool,
-            Money::from_copper(165),
-            Quantity::from_units(260),
+            Money::from_copper(205),
+            Quantity::from_units(360),
             0,
         ),
     }
@@ -920,7 +920,7 @@ fn register_food_recipes(builder: &mut RegistryBuilder, goods: RivergateGoods) {
         "Milling",
         vec![(goods.grain, Quantity::from_units(10))],
         (goods.flour, Quantity::from_units(16)),
-        Money::from_copper(60),
+        Money::from_copper(66),
         6,
     );
     builder.register_recipe(
@@ -928,7 +928,7 @@ fn register_food_recipes(builder: &mut RegistryBuilder, goods: RivergateGoods) {
         "Bread Baking",
         vec![(goods.flour, Quantity::from_units(5))],
         (goods.bread, Quantity::from_units(10)),
-        Money::from_copper(72),
+        Money::from_copper(100),
         7,
     );
     builder.register_recipe(
@@ -955,7 +955,7 @@ fn register_textile_recipes(builder: &mut RegistryBuilder, goods: RivergateGoods
         "Cloth Weaving",
         vec![(goods.wool, Quantity::from_units(6))],
         (goods.cloth, Quantity::from_units(6)),
-        Money::from_copper(115),
+        Money::from_copper(88),
         10,
     );
 }
@@ -974,7 +974,7 @@ fn register_material_recipes(builder: &mut RegistryBuilder, goods: RivergateGood
         "Charcoal Burning",
         vec![(goods.timber, Quantity::from_units(8))],
         (goods.charcoal, Quantity::from_units(10)),
-        Money::from_copper(55),
+        Money::from_copper(42),
         6,
     );
     builder.register_recipe(
@@ -982,7 +982,7 @@ fn register_material_recipes(builder: &mut RegistryBuilder, goods: RivergateGood
         "Valley Iron Trade",
         Vec::new(),
         (goods.iron, Quantity::from_units(10)),
-        Money::from_copper(105),
+        Money::from_copper(85),
         10,
     );
     builder.register_recipe(
@@ -992,8 +992,8 @@ fn register_material_recipes(builder: &mut RegistryBuilder, goods: RivergateGood
             (goods.iron, Quantity::from_units(2)),
             (goods.charcoal, Quantity::from_units(2)),
         ],
-        (goods.tools, Quantity::from_units(5)),
-        Money::from_copper(70),
+        (goods.tools, Quantity::from_units(3)),
+        Money::from_copper(68),
         10,
     );
 }
