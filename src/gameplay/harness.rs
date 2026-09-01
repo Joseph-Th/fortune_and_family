@@ -1468,7 +1468,7 @@ pub(crate) fn run_decision_cycle_internal(
     if !drifted.is_empty() {
         return Err(GameplayHarnessError::ActivationPredicateDrift { kinds: drifted });
     }
-    let no_action_reason = record_quiet_diagnostic(
+    let mut no_action_reason = record_quiet_diagnostic(
         accumulator,
         &probe,
         &raw_generated_kinds,
@@ -1477,6 +1477,30 @@ pub(crate) fn run_decision_cycle_internal(
         &probed_counts_by_kind,
         &activation_delta,
     );
+    // Harness clarity: surface the immediate budget constraint that a human
+    // player would feel — treasury vs the discretionary floor and office
+    // reserves that gate optional spending. Quiet cycles that look like
+    // "agent restraint" are often simply unaffordable, which is a distinct
+    // economy signal from strategic pacing.
+    if let Some(reason) = no_action_reason.as_mut()
+        && probe.substantive_viable_count == 0
+    {
+        let treasury = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .map(|d| d.treasury())
+            .unwrap_or(Money::ZERO);
+        let floor = crate::gameplay::dynasty_discretionary_floor(state);
+        let office_reserve = crate::gameplay::player_office_duty_reserve(state, 0);
+        let budget_note = if treasury < floor {
+            format!(" budget: treasury {treasury} < discretionary floor {floor}")
+        } else if office_reserve > Money::ZERO && treasury < office_reserve {
+            format!(" budget: treasury {treasury} < office duty reserve {office_reserve}")
+        } else {
+            format!(" budget: treasury {treasury} floor {floor} reserve {office_reserve}")
+        };
+        reason.push_str(&budget_note);
+    }
     let choice_metrics =
         record_choice_cycle_metrics(accumulator, substantive_candidate_count, &probe);
     // The ambient baseline branch advances a frozen pre-cycle clone, but only

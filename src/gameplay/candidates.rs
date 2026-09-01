@@ -7598,7 +7598,10 @@ pub(crate) fn inject_exploratory_candidates(
     accumulator: &CampaignAccumulator,
     candidates: &mut Vec<Candidate>,
 ) {
-    if candidates.iter().any(|c| c.kind == GameplayCommandKind::BorrowFunds) {
+    if candidates
+        .iter()
+        .any(|c| c.kind == GameplayCommandKind::BorrowFunds)
+    {
         return;
     }
     if !has_borrow_opportunity(state) {
@@ -7610,7 +7613,8 @@ pub(crate) fn inject_exploratory_candidates(
     let mut rng = state.rng;
     let mut roll = rng.next_u64();
     roll = roll.wrapping_add(state.clock.day().cast_unsigned());
-    roll = roll.wrapping_add(u64::from(accumulator.decision_cycles).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    roll = roll
+        .wrapping_add(u64::from(accumulator.decision_cycles).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     roll ^= u64::from(accumulator.quiet_cycles).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     for b in persona.label().bytes() {
         roll = roll.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(11) ^ u64::from(b);
@@ -7655,7 +7659,10 @@ pub(crate) fn inject_exploratory_candidates(
                 collateral_property_id: unpledged_player_property(state).map(|p| p.id),
             },
         },
-        format!("exploratory borrow {principal} from {} (organic variation)", dynasty_label(state, lender.id())),
+        format!(
+            "exploratory borrow {principal} from {} (organic variation)",
+            dynasty_label(state, lender.id())
+        ),
         50,
     );
     // Keep harness bounded: more than one exploratory injection per cycle

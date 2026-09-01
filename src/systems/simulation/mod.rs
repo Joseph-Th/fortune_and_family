@@ -385,11 +385,14 @@ const SUCCESSION_ACCESSION_HEALTH_FLOOR: u16 = 1_000;
 /// same annual pass.
 const COLLAPSED_HEALTH_SURVIVABLE_FLOOR: u16 = 1;
 
-/// Falling into distress needs two days of operating cover.
-const ACTIVE_CASH_DAYS_OF_OPERATING_COST: i64 = 2;
-/// Climbing out needs six, so a business near the threshold cannot flap
-/// between `Distressed` and `Active` on daily price noise.
-const RECOVERY_CASH_DAYS_OF_OPERATING_COST: i64 = 6;
+/// Falling into distress needs three days of operating cover — two proved
+/// too eager to tip a workshop on a single price swing, stranding players
+/// in thrash without adding drama.
+const ACTIVE_CASH_DAYS_OF_OPERATING_COST: i64 = 3;
+/// Climbing out needs four, so a business near the threshold cannot flap
+/// between `Distressed` and `Active` on daily price noise, but recovery
+/// stays reachable for cash-positive workshops rather than stranding them.
+const RECOVERY_CASH_DAYS_OF_OPERATING_COST: i64 = 4;
 
 /// Canonical business operating status after its cash or inventory changes:
 /// the same thresholds and rehabilitation clamp the daily lifecycle pass
@@ -622,7 +625,7 @@ pub(crate) fn effective_capacity_batches(
     };
     let status_efficiency = match business.status() {
         BusinessStatus::Active => 10_000_u16,
-        BusinessStatus::Distressed => 6_000_u16,
+        BusinessStatus::Distressed => 8_000_u16,
         BusinessStatus::Insolvent | BusinessStatus::Closed => 0,
     };
     let effective_basis_points = administrative_efficiency
@@ -2562,26 +2565,29 @@ fn succession_shock(
 ) -> SuccessionShock {
     let formally_prepared = heir_was_formally_prepared(state, dynasty_id, incoming_head_id);
     if formally_prepared {
+        // Harness showed stranded recoveries after succession: legitimacy at
+        // 15 bp and no patronage for 720 days despite building political
+        // embedding. Trim losses so a prepared heir can actually rebuild.
         SuccessionShock {
             formally_prepared,
-            family_unity_loss: 1_600_u16
-                .saturating_add(succession_risk_basis_points / 4)
-                .min(3_200),
-            family_loyalty_loss: 500_u16
+            family_unity_loss: 1_000_u16
                 .saturating_add(succession_risk_basis_points / 8)
-                .min(1_500),
-            legitimacy_loss: succession_risk_basis_points / 6,
+                .min(2_200),
+            family_loyalty_loss: 350_u16
+                .saturating_add(succession_risk_basis_points / 12)
+                .min(900),
+            legitimacy_loss: succession_risk_basis_points / 10,
         }
     } else {
         SuccessionShock {
             formally_prepared,
-            family_unity_loss: 3_200_u16
-                .saturating_add(succession_risk_basis_points / 2)
-                .min(6_000),
-            family_loyalty_loss: 1_400_u16
-                .saturating_add(succession_risk_basis_points / 5)
-                .min(3_000),
-            legitimacy_loss: succession_risk_basis_points / 2,
+            family_unity_loss: 2_200_u16
+                .saturating_add(succession_risk_basis_points / 3)
+                .min(4_500),
+            family_loyalty_loss: 900_u16
+                .saturating_add(succession_risk_basis_points / 6)
+                .min(2_000),
+            legitimacy_loss: succession_risk_basis_points / 3,
         }
     }
 }
@@ -2912,10 +2918,20 @@ fn apply_successions_in_place(
         dynasty.relationships.heir_id = Some(new_heir_id);
         dynasty.runtime.generation = next_generation;
         dynasty.runtime.phase = crate::core::CampaignPhase::Legacy;
-        dynasty.resources.legitimacy_basis_points = dynasty
+        let remaining = dynasty
             .resources
             .legitimacy_basis_points
             .saturating_sub(legitimacy_loss);
+        // A dynasty that built political embedding should not emerge from
+        // succession with single-digit legitimacy and no credible recovery
+        // route — the harness stranded such houses for 720+ days at 15 bp.
+        // Preserve a floor so the new head can afford the first patronage
+        // step that rebuilds institutional standing.
+        dynasty.resources.legitimacy_basis_points = if formally_prepared {
+            remaining.max(2_000)
+        } else {
+            remaining.max(1_500)
+        };
         record_succession_transition(
             state,
             dynasty_id,

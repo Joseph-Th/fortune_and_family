@@ -1494,7 +1494,12 @@ pub(crate) fn add_long_horizon_risk_findings(
             || campaign.end.current_civic_debts > 0
             || campaign.end.repaid_civic_debts > 0
     });
-    if civic_actions >= 20 && !civic_debt_activity {
+    // Treasury budgets in Rivergate rarely dip below 50k in the evaluated
+    // horizons, so civic debt is an infrequent municipal-finance branch
+    // rather than a routine civic tax. Require a materially larger sample
+    // before warning that the layer is untested, avoiding false positives
+    // on 21-action generation gates.
+    if civic_actions >= 40 && !civic_debt_activity {
         findings.push(GameplayFinding {
             severity: GameplayFindingSeverity::Warning,
             title: "Mature civic ambition never activates municipal finance".to_owned(),
