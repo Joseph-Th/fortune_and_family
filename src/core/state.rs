@@ -47,7 +47,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Current save schema. Bumped whenever persisted `AppState` shape or
 /// validation semantics change; `STATUS.md` and `persistence.rs` both
 /// pin this value so load fails closed on mismatch. Older and future
-/// schemas are rejected categorically.
+/// schemas are rejected categorically — no migration path is claimed,
+/// so a stale save fails loudly rather than silently losing fields.
 pub const CURRENT_SCHEMA_VERSION: u32 = 31;
 
 /// Player-authored inputs that determine the entire deterministic future.
@@ -98,6 +99,10 @@ impl SimulationClock {
         self.day
     }
 
+    /// Calendar year derived from the scenario's `start_year` plus whole 360-day
+    /// years elapsed. Saturation rather than wrapping keeps far-future clocks
+    /// readable (and keeps wall displays from panicking) without affecting
+    /// simulation order — the raw `day` remains authoritative.
     #[must_use]
     pub fn year(self, start_year: i32) -> i32 {
         let elapsed_years = self.day / 360;
@@ -159,6 +164,10 @@ impl CharacterStore {
         }
     }
 
+    /// Inserts a new character and keeps the dynasty index coherent.
+    ///
+    /// The `debug_assert!` on index insertion catches double-insertion that
+    /// would otherwise silently create a second membership without failure.
     pub(crate) fn insert(&mut self, character: Character) {
         let character_id = character.id();
         let dynasty_id = character.dynasty_id();

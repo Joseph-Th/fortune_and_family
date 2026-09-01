@@ -33,6 +33,12 @@ pub enum TimelineError {
     FutureDayOutOfRange { base_day: i64, offset_days: i64 },
 }
 
+/// Returns `base_day + offset_days` when the result stays within the
+/// schedulable range (`< i64::MAX`), otherwise a typed `TimelineError`.
+///
+/// The `i64::MAX` sentinel is never a valid due day (§10, state invariants),
+/// so callers must not schedule at that boundary. Negative offsets are
+/// rejected because they would move due dates backwards past creation.
 pub(crate) fn checked_future_day(base_day: i64, offset_days: i64) -> Result<i64, TimelineError> {
     if offset_days < 0 {
         return Err(TimelineError::FutureDayOutOfRange {

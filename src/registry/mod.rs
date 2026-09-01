@@ -3,7 +3,10 @@
 //! Purpose: define the single shared `Registry` that all simulation,
 //! bootstrap, command, and projection paths read, plus its deterministic
 //! `fingerprint` that binds saves to the exact definitions they were built
-//! against.
+//! against. This is the sole authority for what goods, recipes, districts,
+//! and institutions exist; every runtime record references them through
+//! typed IDs, so a mismatch fails closed on load rather than silently
+//! using a different rule set (§9.1 / §10.1).
 //! Owns: `ScenarioDef` / `DistrictDef` / `GoodDef` / `RecipeDef` /
 //! `InstitutionDef`, dense 0..N typed-ID indexing, `guild_for_recipe`
 //! trade→guild mapping, `build_rivergate_registry` assembly, and the

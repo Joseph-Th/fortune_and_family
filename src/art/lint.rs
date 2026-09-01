@@ -1,7 +1,11 @@
 //! Automated review checks that turn common pixel-art defects into reportable findings.
 //!
 //! Purpose: provide mechanical guards for palette bloat, stray transparency,
-//! silhouette errors, and single-pixel noise so human review focuses on form.
+//! silhouette errors, and single-pixel noise so human review focuses on form
+//! rather than counting colors or edge pixels. Each predicate is a pure,
+//! deterministic function of the rendered `Canvas`/`Palette`, never of the
+//! intermediate `Surface` or authored `CharacterSpec`, so review findings are
+//! reproducible from the derived artifact alone.
 //! Owns: per-sprite `ArtFinding` predicates and severity (`Critical` >
 //! `Warning` > `Info`), thresholds, and `split_frames` helpers.
 //! Reads: `Canvas` / `SpriteSheet` / `Palette` (immutable).

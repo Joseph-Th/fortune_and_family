@@ -236,6 +236,14 @@ fn validate_market_quotes(registry: &Registry, state: &AppState) -> Result<(), S
 /// 11-12 maintenance, 13-14 spoilage + pricing + price controls, 15
 /// lifecycle, 16 clock + expiry, 17 weekly/monthly/annual hooks +
 /// phase refresh, 18 audit + invariant validation (outer loop).
+///
+/// Why this order matters: input procurement must precede production,
+/// production before sales availability, sales before household demand has
+/// anything to buy, and maintenance after revenue so shops can fund repair
+/// from the day's income; pricing after spoilage so perishable supply
+/// settles before quotes form; lifecycle after all cash/stock movement so
+/// status reflects the day's full economics; clock/expiry last so that the
+/// day's effects are attributed to the day that caused them.
 fn run_one_day(registry: &Registry, state: &mut AppState) -> Result<(), SimulationError> {
     // 1. Reset per-good daily flow counters so the day's demand/supply is
     // isolated.

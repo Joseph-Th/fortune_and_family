@@ -2,7 +2,11 @@
 //!
 //! Purpose: build state-derived `PlayerCommand` candidates, probe them
 //! through `apply_player_command_scratch` on clones, rank them by persona
-//! priorities + urgency + reserves, and diagnose quiet cycles.
+//! priorities + urgency + reserves, and diagnose quiet cycles. This layer
+//! is the acting information boundary (§13): it may only use player-visible
+//! inspection data, production-exposed blockers, and persona config — never
+//! diagnostic-only oracle state. Diagnostics (findings/scoring) may inspect
+//! full `AppState` but must not feed future selection (§13.2).
 //! Owns: `probe_candidates`, per-command-kind generators, persona ranking,
 //! `GameplayCommandKind` coverage, and quiet-cause taxonomy.
 //! Reads: `Registry` + `AppState` via authoritative projections and

@@ -172,6 +172,13 @@ pub(crate) struct ReservedLoanCommit {
 /// Reserves, in the exact order [`commit_loan_reserved`] consumes them, every
 /// durable identifier the loan commit needs. Nothing has mutated when a
 /// reservation fails, so the allocator snapshot alone restores state.
+/// Validates loan terms and reserves the durable loan ID before any cash movement.
+///
+/// Resolving the complete `ValidatedLoan` (including whether it restructures a
+/// defaulted claim in place) before debiting lenders keeps the hot commit
+/// infallible: the subsequent `commit_loan_record` never needs to allocate,
+/// so a late allocation failure cannot leave one treasury debited without a
+/// matching credit (see §7 atomicity / §5.14 lifecycle atomics).
 pub(crate) fn reserve_loan_commit(
     state: &mut AppState,
     terms: &LoanTerms,

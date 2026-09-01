@@ -3,7 +3,13 @@
 //! Purpose: derive immutable read models (`StateSummary`, `CampaignProjection`)
 //! and a standalone HTML dashboard from `Registry` + `AppState` for CLI,
 //! dashboard, and gameplay observation, with no mutation or domain rule
-//! reimplementation.
+//! reimplementation. Every projection captures one coherent lifecycle moment
+//! (the completed state after the last `advance_days` day) so CLI `summary`,
+//! `inspect`, `dashboard`, and gameplay `snapshot` never mix values from
+//! incompatible ticks — satisfying `STANDARDS.md` §5.6 / §12 observation
+//! timing. Runtime values (durable results of the completed day) are kept
+//! distinct from projected values (read-only forecasts for the next decision)
+//! and the latter are labelled explicitly where both appear.
 //! Owns: projection structs (`DynastyProjection`, `MarketProjection`, etc.),
 //! `build_*_projection` assemblers, `CampaignProjection::attention` as the
 //! single canonical attention classification, and `render_campaign_html`

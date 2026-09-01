@@ -248,6 +248,15 @@ impl From<super::strategic::DurableFeedbackError> for CommandError {
 
 /// Applies a validated player command through the owning subsystem's canonical mutation path.
 ///
+/// This is the single supported entry point for every caller (CLI `execute`,
+/// gameplay harness `probe`→`commit`, and tests): validation, permission/
+/// lifecycle/capacity checks, complete multi-record resolution, atomic commit,
+/// and durable feedback all run behind this boundary, so no caller can
+/// bypass domain rules or create a second mutation path (§6.1 / §5.1).
+/// The clone-then-replace makes rejection atomic: the caller's `state`
+/// is untouched when validation fails, so a typed `CommandError` never
+/// leaves partial durable side-effects.
+///
 /// # Errors
 ///
 /// Returns a dedicated error when a command references missing records, violates ownership,

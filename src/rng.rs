@@ -16,7 +16,18 @@
 //! Relevant invariants: given the same seed and the same ordered call
 //! sequence, the stream is bit-identical across builds; `AppState`
 //! persistence includes the RNG word so continuation is exact; no fallback
-//! to OS entropy exists.
+//! to OS entropy exists. Determinism contract (ARCHITECTURE.md): same
+//! `Registry` fingerprint + serialized `AppState` (including `rng` word) +
+//! ordered inputs (commands + day count) → bit-identical successor.
+//! Design tradeoff on §10.5 (domain-separated streams): Rivergate uses one
+//! state-owned stream rather than per-domain streams. This keeps the
+//! persistence contract minimal (one `u64` word) and makes every extra draw
+//! deterministically affect downstream ordering — acceptable because
+//! subsystems already share a single causal day order (ARCHITECTURE.md
+//! 18-step pipeline) and harness counterfactuals fork the whole `AppState`
+//! (including RNG) per branch. A future domain that needs draw isolation
+//! without cross-talk can derive `DeterministicRng::seeded(rng.next_u64())`
+//! as a child stream; the single-root design preserves that upgrade path.
 //! Focused tests: `src/rng.rs::tests` distinct and identical streams,
 //! `src/simulation/*` cross-day determinism, persistence round-trip includes RNG.
 
@@ -36,6 +47,11 @@ use serde::{Deserialize, Serialize};
 /// iteration determines draw order, so changing iteration order would change
 /// the stream. Tests assert identical seeds reproduce identical 16-draw
 /// windows and distinct seeds diverge on the first draw.
+///
+/// `SplitMix64` was chosen because it is a single-word, branch-free, fully
+/// deterministic mixing function with no platform-specific library dependency,
+/// so the same seed produces the same words on every toolchain and host.
+/// It is not used for secrecy — only for reproducible variation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeterministicRng {
     state: u64,
@@ -50,6 +66,12 @@ impl DeterministicRng {
     }
 
     /// Advances the stream by one `SplitMix64` step and returns the next `u64`.
+    ///
+    /// The `wrapping_add` increment is the `SplitMix64` gamma (`0x9E3779B97F4A7C15`,
+    /// the fractional part of the golden ratio) that guarantees a full-period
+    /// traversal before mixing; the subsequent xor-multiply-xor steps are the
+    /// standard avalanche mixing that makes successive outputs uncorrelated
+    /// while remaining fully deterministic.
     ///
     /// # Panics
     ///

@@ -80,6 +80,10 @@ pub fn validate_invariants(registry: &Registry, state: &AppState) {
 
 /// Shared body of [`validate_invariants`] for callers that run it across many
 /// consecutive states with one registry, such as the daily simulation loop.
+///
+/// The `RegistryIds` cache avoids re-collecting the same four `BTreeSet`s on
+/// every simulated day while keeping the release build at zero cost: caller
+/// pre-computes once per `advance_days` call and reuses across the hot loop.
 pub(crate) fn validate_invariants_with_ids(
     registry: &Registry,
     state: &AppState,

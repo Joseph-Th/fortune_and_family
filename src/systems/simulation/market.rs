@@ -30,6 +30,13 @@ pub(crate) const PRICE_SHOCKS_PER_DAY: u32 = 3;
 /// suppression reader so wording drift can never silently break suppression.
 pub(crate) const PRICE_SHOCK_SUMMARY_SEPARATOR: &str = " moved by ";
 
+/// Applies daily spoilage to market stock and every business inventory.
+///
+/// Spoilage is a pure proportional decay (`stock * basis_points / 10_000`)
+/// so a zero-spoilage good never loses stock and a high-spoilage staple
+/// cannot go negative — `saturating_sub` prevents underflow even under
+/// extreme rounding. This runs before pricing so decayed supply
+/// immediately tightens the next price formation.
 pub(crate) fn apply_market_spoilage(registry: &Registry, state: &mut AppState) {
     for good in registry.goods() {
         let quote = state

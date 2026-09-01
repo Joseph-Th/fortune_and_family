@@ -181,4 +181,9 @@ All verification is local; no hosted CI. `bash scripts/test.sh <lane>` (or `.\sc
 
 ```bash
 python ../tools/check_no_github_actions.py   # must pass before completion
+python ../tools/check_standards.py          # portfolio structural checks
 ```
+
+- `fast` / `standard` are the routine developer gates; `soak` / `gameplay` / `adapters` are specialized and add only the contracts they own (see `TESTING.md` § Completion gate).
+- `standard` already reuses the debug CLI build and includes `docs`; do not run an extra `fast` before it.
+- No `unsafe`, no ambient mutable state, and no credentials/tokens are present; the only persistence side-effects are bounded saves and staged generated artifacts described in `ARCHITECTURE.md` and `STATUS.md`.

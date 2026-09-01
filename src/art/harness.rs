@@ -1,8 +1,12 @@
 //! The visual review harness: batch sprite generation, automated findings, and a
-//! self-contained HTML contact sheet.
+//! self-contained HTML contact sheet (Artifact Generation profile).
 //!
 //! Purpose: drive one `ArtReviewConfig` → `ArtReview` → `ArtReviewReport`
-//! → HTML/JSON pipeline that is deterministic and self-contained.
+//! → HTML/JSON pipeline that is deterministic and self-contained. The
+//! semantic input (`ArtReviewConfig` + `CharacterSpec` role seeds) is the
+//! source of truth; generated HTML/PNG are derived artifacts written via
+//! staged publication (`write_generated_file`) so a failed generation never
+//! leaves a plausible partial at the final path.
 //! Owns: `ArtReviewConfig` validation, sheet generation, lint invocation,
 //! PNG data-URI embedding, and standalone report rendering.
 //! Reads: `sprite::CharacterSpec` / `SpriteSheet`, `lint` findings.

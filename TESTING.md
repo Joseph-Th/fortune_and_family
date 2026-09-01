@@ -143,6 +143,10 @@ Harness changes should cover candidate discoverability, classification, pacing, 
 
 A useful failure identifies the violated contract, expected and observed values, relevant entity IDs/state, and the first differing path when state should remain equal. Collection helpers show observed members; candidate and finding helpers show available candidates or finding titles.
 
+## Policy gates
+
+No GitHub Actions are used; `python ../tools/check_no_github_actions.py` must pass. Document contracts must stay consistent (`python scripts/check_docs.py` via `docs` lane). Portfolio structural checks via `python ../tools/check_standards.py` should pass after portfolio-standard changes.
+
 ## Completion gate
 
 While editing, run the narrowest relevant subset. Once behavior is ready, run one routine lane:

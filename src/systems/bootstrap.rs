@@ -141,9 +141,17 @@ fn normalize_player_name(value: &str) -> Result<String, char> {
     Ok(normalized)
 }
 
+/// Constructs the blank `AppState` that `build_new_game` populates.
+///
+/// No records exist yet; caller inserts dynasties, businesses, and households.
+/// The RNG word is seeded from `seed` so the entire downstream insertion
+/// order (which itself is `BTreeMap`-ordered) remains deterministic.
 fn empty_state(registry: &Registry, seed: u64) -> AppState {
     // Starting float in the market's internal cash pool. It is part of the
-    // canonical scenario bootstrap, so changing it changes every campaign.
+    // canonical scenario bootstrap, so changing it changes every campaign
+    // and every regression snapshot. Keep the value explicit here rather
+    // than in `registry` so `MarketState` invariants can be proved without
+    // a registry round-trip.
     const INITIAL_MARKET_CLEARING_COPPER: i64 = 2_000_000;
     let market = MarketState {
         quotes: registry

@@ -301,12 +301,37 @@ registry (fingerprint-bound) + serialized AppState (clock, RNG, allocators, reco
 
 ## Invariant layers
 
-1. Types and visibility restrict unsupported mutation.
-2. System validation before commit.
-3. Runtime invariants during simulation.
-4. Release-mode validation at persistence boundaries.
+Ownership layers match validation layers (§5.12): each layer guards the
+facts its owner can actually keep consistent.
 
-Groups include registry references, derived indexes, ownership and occupancy, lifecycle agreement, numeric bounds, histories, and ID allocator validity.
+1. **Type and visibility layer** — private fields, typed IDs (`src/ids.rs`),
+   exhaustive enums, and `Option<T>` for optional relations make unsupported
+   mutation unrepresentable before it reaches runtime validation.
+2. **System validation layer** — every consequential operation (`apply_player_command`,
+   `advance_days` day steps, strategic settlements) validates references,
+   ownership, permission, lifecycle, capacity, ranges, and `Money`/`Quantity`
+   arithmetic before any mutation and fails atomically on rejection.
+3. **Runtime invariant layer** — `validate_invariants` (debug-only, zero cost
+   in release via `prepare_invariant_ids` short-circuit) sweeps registry refs,
+   synchronized indexes (`CharacterStore`/`BusinessStore`/`HouseholdStore`), lifecycle
+   membership, numeric bounds, history monotonicity (`audit_log` days
+   nondecreasing), and allocator coherence after every simulated day.
+4. **Release persistence layer** — `validate_state` in `src/persistence.rs`
+   re-proves the same properties plus schema/fingerprint/bounded-file checks
+   on every load and before every save, so a corrupted or mismatched file
+   fails closed even in release builds where the runtime sweep is elided.
+
+Invariant groups and where they are checked:
+
+| Group | Debug runtime | Release persistence |
+|---|---|---|
+| Registry reference validity (good/recipe/district/institution IDs) | `invariants::validate_*` via `RegistryIds` | `validate_definition_references` |
+| Synchronized indexes & ownership exclusivity (`by_owner`/`by_district`) | `validate_*` index coherence asserts | `validate_primary_records` |
+| Lifecycle agreement (character status ↔ business/household/employment) | `validate_characters`/`validate_institutions` | `validate_*` lifecycle |
+| Numeric bounds & `Money`/`Quantity` ranges | `validate_numeric_ranges` | `validate_numeric_ranges` |
+| History monotonicity & append-only `HistoryLog` | `validate_history` | `validate_history` |
+| Allocator validity (`NextIds` exhaustion bands) | `validate_next_ids` | `validate_identifier_allocation` |
+| Strategic scheduling (`is_schedulable_day`, weekly settleability fortnight) | `is_settleable_weekly_due_day` | `validate_state` schedule checks |
 
 ## Extension map
 
@@ -328,7 +353,13 @@ Groups include registry references, derived indexes, ownership and occupancy, li
 
 `TESTING.md` owns lane selection; `ARCHITECTURE.md` extension map points to the narrowest proof per change class. Routine completion is `bash scripts/test.sh standard`; specialized surfaces add `soak` (long horizons), `adapters` (CLI), `gameplay`/`gameplay-audit` (harness matrices), and `docs` (link/doc consistency). Policy checks are `python tools/check_standards.py` and `python tools/check_no_github_actions.py` (no hosted CI; see `TESTING.md` § Completion gate).
 
+Every lane is local-only and composes without hidden CI: `fast`/`standard` stay incremental (~2s/~4s warm), `soak`/`gameplay` run release-optimized but share the same assertions, and `standard` already reuses the debug CLI build across `docs`/`cli` sub-steps so an extra `fast` before `standard` adds no evidence (AGENTS.md completion guardrail).
+
 BCA policy is `advisory` (see `AGENTS.md`): run BCA selectively on nontrivial orchestrators or refactors; no mandatory gate or baseline. Tooling lives in `scripts/test.sh` and `scripts/check_docs.py`; verification reuses incremental compilation and cached fixtures where isolation permits.
+
+**No `unsafe` and no ambient mutable state:** the crate declares no `unsafe` blocks and no `static mut`; `AppState.rng` is the sole randomness owner, and `HistoryLog` memo atomics are the only interior mutability — both documented in their owning modules (`rng.rs`, `history.rs`, `core/state.rs`).
+
+**Sensitive data and platform boundaries:** Rivergate has no credentials, tokens, or secret material; saves are bounded JSON (256 MiB) written atomically (same-directory temp → `persist` → optional parent-dir `sync_all` on Unix — `persistence.rs` and `STATUS.md` persistence guarantees). Platform-specific behavior (Unix directory fsync) is isolated behind `sync_save_directory` and degrades to `CommittedWithDegradedDurability` when unavailable rather than silently switching semantics.
 
 ## Public API
 

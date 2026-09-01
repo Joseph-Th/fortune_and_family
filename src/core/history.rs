@@ -3,7 +3,10 @@
 //! Purpose: give the audit log, chronicle, and outbox a shared immutable bulk
 //! so every transactional clone stays cheap even as campaigns age. Mutation is
 //! append-only; clones share the bulk through an `Arc` and keep a small
-//! exclusive tail. Iteration order and serialized shape match a plain `Vec`.
+//! exclusive tail. Iteration order and serialized shape match a plain `Vec`,
+//! so `HistoryLog` is interchangeable with `Vec` at the persistence and
+//! iteration boundaries but keeps clone/drop of the daily working copy
+//! proportional to the day's delta rather than total campaign history.
 //! Owns: `HistoryLog<T>` copy-on-write + incremental structural checksum,
 //! `HistoryLogIter`/`HistoryLogIterMut`, and the atomic memo.
 //! Reads: serialized entries for the running checksum only.

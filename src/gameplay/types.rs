@@ -4,7 +4,11 @@
 //! `GameplayCampaignReport`, `GameplayAggregate`, `GameplaySnapshot`,
 //! `GameplayTraceStep`, `GameplayFinding`, etc.) and its
 //! `GAMEPLAY_REPORT_SCHEMA_VERSION` so reports are reproducible and
-//! versioned.
+//! versioned. Raw evidence (per-campaign traces, snapshots, counterfactual
+//! deltas) is retained beneath derived findings (§18 / §19) so a follow-up
+//! can reproduce why a finding fired; the JSON schema is the stable
+//! boundary between generation (`harness.rs`/`candidates.rs`) and
+//! interpretation (`findings.rs`/`scoring.rs`).
 //! Owns: `GameplayCommandKind` (32), `GameplayDomain` (17),
 //! `GameplayHarnessConfig`, all projection/score/finding/snapshot structs,
 //! and `serde(deny_unknown_fields)` schemas.

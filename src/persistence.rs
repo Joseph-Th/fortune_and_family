@@ -336,6 +336,16 @@ fn save_state_impl(
 
 /// Serializes the complete application state to a JSON save file.
 ///
+/// The write is atomic from the reader's perspective: the payload is first
+/// written to a synchronized temporary in the destination directory and only
+/// then `persist`ed over the final path, so a crash cannot leave a half-
+/// written JSON visible. The visibility commit (`persist`) is distinguished
+/// from the durability boundary (parent-directory `sync`): both succeed
+/// yields `Committed`; visibility without durability yields
+/// `CommittedWithDegradedDurability` (see `SaveOutcome`). Callers that need
+/// optimistic concurrency should use `save_state_cas` with a previously
+/// observed `SaveRevision`.
+///
 /// # Errors
 ///
 /// Returns an error when state validation fails, the parent directory or temporary file cannot be
@@ -388,6 +398,11 @@ fn sync_save_directory(parent: &Path) -> Result<(), PersistenceError> {
 /// art review reports) with the same staging, visibility, and durability
 /// contract as campaign saves: synchronized same-directory temporary file,
 /// atomic replacement, then best-effort parent-directory synchronization.
+///
+/// This reuses the save contract so a failed or cancelled generation never
+/// leaves a plausible partial artifact at the final path — either the
+/// previous valid artifact remains or the temporary is removed — satisfying
+/// the Artifact Generation profile's staged-publication requirement.
 ///
 /// An existing destination must be a regular file; symlinks, directories, and
 /// other non-regular targets are rejected.
