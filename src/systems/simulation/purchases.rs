@@ -24,6 +24,8 @@ use crate::registry::Registry;
 use crate::systems::SimulationError;
 use crate::systems::transactions::next_business_finance_version;
 
+use super::day_rotation_key;
+
 #[derive(Clone, Debug)]
 pub(crate) struct BusinessPurchaseLine {
     pub(crate) business_id: BusinessId,
@@ -57,10 +59,8 @@ pub(crate) fn decide_business_purchases(
         available_cash[business.id().value() as usize] = business.cash();
     }
     let mut lines = Vec::new();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let day_hash = state.clock.day() as u32;
     let mut businesses: Vec<_> = state.businesses.iter().collect();
-    businesses.sort_by_key(|business| business.id().value().wrapping_add(day_hash));
+    businesses.sort_by_key(|business| day_rotation_key(state, business.id().value()));
 
     for business in businesses {
         if matches!(

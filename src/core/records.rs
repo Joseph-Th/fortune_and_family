@@ -30,9 +30,7 @@ use crate::ids::{
 use crate::money::{Money, Quantity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::str::FromStr;
 use std::sync::Arc;
-use thiserror::Error;
 
 /// Founder trade that seeds the player's first business and starting district.
 ///
@@ -46,10 +44,6 @@ pub enum StartingBackground {
     ClothTrader,
     Blacksmith,
 }
-
-#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-#[error("expected baker, cloth-trader, or blacksmith")]
-pub struct ParseStartingBackgroundError;
 
 impl StartingBackground {
     #[must_use]
@@ -67,19 +61,6 @@ impl StartingBackground {
             Self::Baker => "Founder's Oven",
             Self::ClothTrader => "Founder's Loomhouse",
             Self::Blacksmith => "Founder's Smithy",
-        }
-    }
-}
-
-impl FromStr for StartingBackground {
-    type Err = ParseStartingBackgroundError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "baker" => Ok(Self::Baker),
-            "cloth-trader" | "cloth_trader" | "weaver" => Ok(Self::ClothTrader),
-            "blacksmith" | "smith" => Ok(Self::Blacksmith),
-            _ => Err(ParseStartingBackgroundError),
         }
     }
 }
@@ -694,6 +675,37 @@ impl AuditSubject {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Canonical subject for an institution/dynasty pair. Producers and
+    /// validators share this constructor so the persisted round-trip cannot
+    /// drift apart unnoticed.
+    #[must_use]
+    pub fn institution_dynasty(institution_id: InstitutionId, dynasty_id: DynastyId) -> Self {
+        Self(Arc::from(format!(
+            "institution:{institution_id};dynasty:{dynasty_id}"
+        )))
+    }
+
+    /// Whether this subject is exactly the canonical institution/dynasty
+    /// pair: validators compare shape through the shared constructor, not
+    /// re-formatted text.
+    #[must_use]
+    pub fn is_institution_dynasty(
+        &self,
+        institution_id: InstitutionId,
+        dynasty_id: DynastyId,
+    ) -> bool {
+        *self == Self::institution_dynasty(institution_id, dynasty_id)
+    }
+
+    /// Canonical subject for an institution/character pair, shared by
+    /// producers so nomination, patronage, and succession records agree.
+    #[must_use]
+    pub fn institution_character(institution_id: InstitutionId, character_id: CharacterId) -> Self {
+        Self(Arc::from(format!(
+            "institution:{institution_id}:character:{character_id}"
+        )))
     }
 
     #[must_use]

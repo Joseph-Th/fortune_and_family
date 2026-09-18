@@ -24,8 +24,10 @@ use super::*;
 /// crisis. Material relief is never diminished — only the legitimacy credit.
 const CRISIS_STANDING_WINDOW_DAYS: i64 = 360;
 
-/// Standing multiplier for a crisis response given prior responses inside the
-/// window: full credit, then half, quarter, and one-eighth as the floor.
+/// Standing multiplier for a crisis response given prior crisis service inside
+/// the window: full credit, then half, quarter, and one-eighth as the floor.
+/// Only organized service (relief / reform / suppression) counts — profiteering
+/// is the opposite of service and must neither earn nor discount standing.
 fn scale_repeated_service_standing(state: &AppState, base_gain: u16) -> u16 {
     let window_start = state
         .clock
@@ -36,7 +38,10 @@ fn scale_repeated_service_standing(state: &AppState, base_gain: u16) -> u16 {
         .iter()
         .rev()
         .take_while(|record| record.day() >= window_start)
-        .filter(|record| record.kind() == AuditKind::CrisisResponse)
+        .filter(|record| {
+            record.kind() == AuditKind::CrisisResponse
+                && crate::systems::strategic::crisis_response_contains_crisis(record)
+        })
         .count();
     let shift = u32::try_from(prior_responses).unwrap_or(u32::MAX).min(3);
     u16::try_from((i64::from(base_gain) * i64::from(10_000 >> shift)) / 10_000).unwrap_or(base_gain)
@@ -291,36 +296,30 @@ pub(crate) fn heal_disrupted_routes(state: &mut AppState, mut aid_basis_points: 
 }
 
 pub(crate) fn reduce_crisis(state: &mut AppState, crisis_id: CrisisId, amount: u16) {
+    // A tracked trade disruption holds at the condition that spawned it: a
+    // response cannot mark it resolved while the capacity-weighted route
+    // disruption that detection and the monthly pass consult remains at or
+    // above the detection threshold, or the next monthly pass would
+    // immediately re-detect an identical replacement crisis and orphan this
+    // audit trail. Read before borrowing the crisis record.
+    let tracked_route_disruption = crate::systems::capacity_weighted_route_disruption(state);
     let crisis = state
         .crises
         .get_mut(&crisis_id)
         .expect("validated crisis must exist");
     let severity_before_response = crisis.severity_basis_points;
     let reduced = severity_before_response.saturating_sub(amount);
-    // A tracked trade disruption holds at the condition that spawned it: a
-    // response cannot mark it resolved while any route remains disrupted at or
-    // above the detection threshold, or the next monthly pass would immediately
-    // re-detect an identical replacement crisis and orphan this audit trail.
-    if crisis.kind == CrisisKind::TradeDisruption {
-        let worst_route_disruption = state
-            .external_routes
-            .values()
-            .map(|route| route.disruption_basis_points)
-            .max()
-            .unwrap_or(0);
-        if worst_route_disruption
+    if crisis.kind == CrisisKind::TradeDisruption
+        && tracked_route_disruption
             >= crate::systems::strategic::TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD
-        {
-            // The response re-anchors onto the tracked route condition without
-            // ever raising the metric it responds to: routes that deepened past
-            // this crisis's severity since detection are left for the monthly
-            // pass to reflect, instead of a paid response silently worsening
-            // the headline number.
-            crisis.severity_basis_points =
-                reduced.max(worst_route_disruption.min(severity_before_response));
-        } else {
-            crisis.severity_basis_points = reduced;
-        }
+    {
+        // The response re-anchors onto the tracked route condition without
+        // ever raising the metric it responds to: conditions that deepened
+        // past this crisis's severity since detection are left for the
+        // monthly pass to reflect, instead of a paid response silently
+        // worsening the headline number.
+        crisis.severity_basis_points =
+            reduced.max(tracked_route_disruption.min(severity_before_response));
     } else {
         crisis.severity_basis_points = reduced;
     }

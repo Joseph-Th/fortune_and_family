@@ -847,11 +847,6 @@ impl AppState {
     }
 
     #[must_use]
-    pub fn get_dynasty(&self, id: DynastyId) -> Option<&Dynasty> {
-        self.dynasties.get(&id)
-    }
-
-    #[must_use]
     pub const fn characters(&self) -> &CharacterStore {
         &self.characters
     }

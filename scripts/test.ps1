@@ -1,4 +1,4 @@
-# Native PowerShell Test and Verification Runner for Civic Dynasty
+﻿# Native PowerShell Test and Verification Runner for Civic Dynasty
 param(
     [Parameter(Position=0)]
     [string]$Mode = "fast",
@@ -57,7 +57,6 @@ TIPS:
   CIVIC_DYNASTY_SKIP_CLI_BUILD=1 .\scripts\test.ps1 standard   lib-only (skip CLI)
   CIVIC_DYNASTY_SKIP_DOCS=1 .\scripts\test.ps1 standard        skip docs (~1s faster)
   CIVIC_DYNASTY_JOBS=4 .\scripts\test.ps1 fast                cap cargo + harness parallelism
-"@
 
 inner loop — solo local, every lane incremental (no world rebuild):
   .\scripts\test.ps1 fast simulation   82 tests, 0.12s exec, <1s total warm

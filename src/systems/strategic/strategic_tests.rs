@@ -9541,6 +9541,96 @@ mod ai {
     }
 
     #[test]
+    fn ai_upkeep_is_never_negative_for_destitute_houses() {
+        // Wealth stewardship applies only above the threshold: below it the
+        // base charges stand, so the obligation can never go negative and pay
+        // a house for being poor.
+        assert_eq!(
+            ai_dynasty_monthly_upkeep(Money::ZERO, 0, 0),
+            AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY,
+            "a destitute house owes at least the household base upkeep"
+        );
+        let below_threshold =
+            AI_DYNASTY_WEALTH_UPKEEP_THRESHOLD.saturating_sub(Money::from_copper(1));
+        assert_eq!(
+            ai_dynasty_monthly_upkeep(below_threshold, 0, 0),
+            AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY,
+            "wealth below the threshold must not reduce the upkeep"
+        );
+        let stewardship = ai_dynasty_monthly_upkeep(
+            AI_DYNASTY_WEALTH_UPKEEP_THRESHOLD.saturating_add(Money::from_copper(10_000)),
+            0,
+            0,
+        );
+        assert!(
+            stewardship > AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY,
+            "wealth above the threshold must add stewardship upkeep"
+        );
+    }
+
+    #[test]
+    fn ai_upkeep_of_houseless_destitute_dynasty_never_creates_money() {
+        let mut state = make_test_campaign();
+        let dynasty_id = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|dynasty_id| *dynasty_id != state.player_dynasty_id)
+            .expect("campaign must contain a rival dynasty");
+        {
+            let dynasty = state
+                .dynasties
+                .get_mut(&dynasty_id)
+                .expect("rival dynasty must exist");
+            dynasty.resources.treasury = Money::ZERO;
+        }
+        let legitimacy_before = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("rival dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        // Strip every upkeep-relevant obligation: no active family members
+        // (the pre-fix stewardship rebate was most negative for such houses)
+        // and no operating businesses.
+        state.family_councils.remove(&dynasty_id);
+        for business_id in state
+            .businesses
+            .ids_for_owner(dynasty_id)
+            .expect("rival owner index must exist")
+            .clone()
+        {
+            state
+                .businesses
+                .get_mut(business_id)
+                .expect("owned business must exist")
+                .operations
+                .status = BusinessStatus::Closed;
+        }
+        let clearing_before = state.market.clearing_account;
+
+        apply_ai_dynasty_upkeep(&mut state).expect("AI dynasty upkeep must commit");
+
+        let dynasty = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("rival dynasty must exist");
+        assert_eq!(
+            dynasty.treasury(),
+            Money::ZERO,
+            "a destitute house must never receive upkeep money"
+        );
+        assert!(
+            dynasty.resources.legitimacy_basis_points < legitimacy_before,
+            "unpaid upkeep must still damage the destitute house's legitimacy"
+        );
+        assert!(
+            state.market.clearing_account >= clearing_before,
+            "the clearing account must never be debited to fund a destitute house"
+        );
+    }
+
+    #[test]
     fn chronically_unprofitable_ai_businesses_are_not_recapitalized() {
         let registry = test_registry();
         let mut state = make_test_campaign();

@@ -57,7 +57,8 @@ mod names {
 
         let state = build_new_game(registry, config).expect("game must build");
         let dynasty = state
-            .get_dynasty(state.player_dynasty_id())
+            .dynasties
+            .get(&state.player_dynasty_id())
             .expect("player dynasty must exist");
         let founder = state
             .characters()
@@ -139,7 +140,8 @@ mod names {
             )
             .expect("game must build");
             let dynasty = state
-                .get_dynasty(state.player_dynasty_id())
+                .dynasties
+                .get(&state.player_dynasty_id())
                 .expect("player dynasty must exist");
             let founder = state
                 .characters()

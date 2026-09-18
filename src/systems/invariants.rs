@@ -1784,8 +1784,7 @@ fn validate_audit_record_invariants(state: &AppState, record: &crate::core::Audi
                 state.institutions.contains_key(&institution_id)
                     && subject.dynasty_id().is_some_and(|dynasty_id| {
                         state.dynasties.contains_key(&dynasty_id)
-                            && subject.as_str()
-                                == format!("institution:{institution_id};dynasty:{dynasty_id}")
+                            && subject.is_institution_dynasty(institution_id, dynasty_id)
                     })
             }),
             "Record Reference Validity: institution endowment audit record has invalid institution/dynasty subject"
@@ -1816,8 +1815,7 @@ fn validate_audit_record_invariants(state: &AppState, record: &crate::core::Audi
             .is_some_and(|(institution_id, dynasty_id)| {
                 state.institutions.contains_key(&institution_id)
                     && state.dynasties.contains_key(&dynasty_id)
-                    && subject.as_str()
-                        == format!("institution:{institution_id};dynasty:{dynasty_id}")
+                    && subject.is_institution_dynasty(institution_id, dynasty_id)
             });
         debug_assert!(
             valid_subject,
@@ -1832,8 +1830,7 @@ fn validate_audit_record_invariants(state: &AppState, record: &crate::core::Audi
             .is_some_and(|(institution_id, dynasty_id)| {
                 state.institutions.contains_key(&institution_id)
                     && state.dynasties.contains_key(&dynasty_id)
-                    && subject.as_str()
-                        == format!("institution:{institution_id};dynasty:{dynasty_id}")
+                    && subject.is_institution_dynasty(institution_id, dynasty_id)
             });
         debug_assert!(
             valid_attribution,

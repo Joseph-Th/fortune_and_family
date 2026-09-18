@@ -688,7 +688,8 @@ mod html {
         let registry = rivergate_registry_for_test();
         let state = make_test_campaign();
         let player_name = state
-            .get_dynasty(state.player_dynasty_id())
+            .dynasties
+            .get(&state.player_dynasty_id())
             .expect("player dynasty must exist")
             .name();
 

@@ -662,7 +662,7 @@ pub(crate) fn adjust_information_relationship(
     memory: &str,
 ) {
     let player_id = state.player_dynasty_id;
-    crate::systems::strategic::adjust_dynasty_relationship(
+    crate::systems::strategic::apply_relationship_event(
         state,
         player_id,
         counterparty_id,
@@ -673,11 +673,6 @@ pub(crate) fn adjust_information_relationship(
             resentment_change,
             obligation_change,
         ),
-    );
-    crate::systems::strategic::remember_dynasty_interaction(
-        state,
-        player_id,
-        counterparty_id,
         memory,
     );
 }

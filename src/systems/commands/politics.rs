@@ -69,7 +69,7 @@ pub(crate) fn apply_institution_withdrawal(
     state.audit_log.push(AuditRecord {
         day,
         kind: AuditKind::InstitutionWithdrawal,
-        subject: institution_support_subject(institution_id, character_id).into(),
+        subject: institution_character_subject(institution_id, character_id).into(),
         detail: if resigned_office {
             crate::systems::OFFICE_RESIGNATION_AUDIT_DETAIL
                 .to_owned()
@@ -206,7 +206,7 @@ pub(crate) fn apply_institution_support(
         .get(&institution_id)
         .ok_or(CommandError::MissingInstitution { institution_id })?;
     validate_institution_support_standing(registry, state, institution_id, character_id)?;
-    let subject = institution_support_subject(institution_id, character_id);
+    let subject = institution_character_subject(institution_id, character_id);
     if institution.members.contains(&character_id) {
         return Err(CommandError::InstitutionSupportAlreadyEstablished {
             institution_id,
@@ -243,13 +243,11 @@ pub(crate) fn apply_institution_support(
             incoming: support_cost,
         },
     )?;
-    let member_dynasties: BTreeSet<_> = institution
-        .members
-        .iter()
-        .filter_map(|member_id| state.characters.get(*member_id))
-        .map(Character::dynasty_id)
-        .filter(|dynasty_id| *dynasty_id != state.player_dynasty_id)
-        .collect();
+    let member_dynasties = crate::systems::strategic::institution_member_dynasties_excluding(
+        state,
+        &institution.members,
+        state.player_dynasty_id,
+    );
     let established_day =
         checked_future_day(state.clock.day(), INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS)?;
     spend_player_treasury(state, support_cost)?;
@@ -283,16 +281,11 @@ pub(crate) fn record_institution_patronage_relationships(
 ) {
     let player_dynasty_id = state.player_dynasty_id;
     for member_dynasty_id in member_dynasties {
-        crate::systems::strategic::adjust_dynasty_relationship(
+        crate::systems::strategic::apply_relationship_event(
             state,
             player_dynasty_id,
             member_dynasty_id,
             crate::systems::strategic::RelationshipDelta::new(180, 260, 0, -60, 75),
-        );
-        crate::systems::strategic::remember_dynasty_interaction(
-            state,
-            player_dynasty_id,
-            member_dynasty_id,
             &format!(
                 "the player dynasty patronized institution {institution_id} for character {character_id}"
             ),
@@ -410,13 +403,11 @@ pub(crate) fn validate_institution_endowment(
                 current: institution.budget,
                 incoming: amount,
             })?;
-    let member_dynasties: BTreeSet<_> = institution
-        .members
-        .iter()
-        .filter_map(|character_id| state.characters.get(*character_id))
-        .map(Character::dynasty_id)
-        .filter(|dynasty_id| *dynasty_id != player_id)
-        .collect();
+    let member_dynasties = crate::systems::strategic::institution_member_dynasties_excluding(
+        state,
+        &institution.members,
+        player_id,
+    );
     let legitimacy_gain = u16::try_from((amount.copper() / 200).clamp(25, 250))
         .expect("bounded endowment legitimacy gain must fit u16");
     let relationship_scale =
@@ -459,7 +450,7 @@ pub(crate) fn commit_institution_endowment(
         .min(10_000);
     let applied_legitimacy_gain = institution.legitimacy_basis_points - legitimacy_before;
     for member_dynasty_id in &endowment.member_dynasties {
-        crate::systems::strategic::adjust_dynasty_relationship(
+        crate::systems::strategic::apply_relationship_event(
             state,
             endowment.player_id,
             *member_dynasty_id,
@@ -470,11 +461,6 @@ pub(crate) fn commit_institution_endowment(
                 -endowment.relationship_scale.saturating_mul(5),
                 i32::from((endowment.relationship_scale.saturating_add(1)) / 2),
             ),
-        );
-        crate::systems::strategic::remember_dynasty_interaction(
-            state,
-            endowment.player_id,
-            *member_dynasty_id,
             &format!(
                 "the player dynasty endowed institution {} with {}, strengthening its standing among the membership",
                 endowment.institution_id, endowment.amount
@@ -741,7 +727,7 @@ pub(crate) fn apply_office_nomination(
         .get_mut(&institution_id)
         .expect("validated institution must exist");
     institution.next_selection_day = institution.next_selection_day.min(selection_day);
-    let subject = office_nomination_subject(institution_id, character_id);
+    let subject = institution_character_subject(institution_id, character_id);
     state.audit_log.push(AuditRecord {
         day: state.clock.day(),
         kind: AuditKind::OfficeNomination,
@@ -1078,7 +1064,7 @@ pub(crate) fn office_nomination_delivery_requirement(
     )
 }
 
-pub(crate) fn office_nomination_subject(
+pub(crate) fn institution_character_subject(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> String {
@@ -1104,13 +1090,6 @@ pub(crate) fn office_nomination_next_day(
     let dynasty_office_resignation = latest_player_office_resignation_day(state)
         .map(|day| future_day_or_terminal(day, INSTITUTION_WITHDRAWAL_RECOVERY_DAYS));
     campaign.into_iter().chain(dynasty_office_resignation).max()
-}
-
-pub(crate) fn institution_support_subject(
-    institution_id: InstitutionId,
-    character_id: CharacterId,
-) -> String {
-    format!("institution:{institution_id}:character:{character_id}")
 }
 
 pub(crate) fn institution_support_next_day(
@@ -1214,6 +1193,6 @@ pub(crate) fn institution_support_day(
     institution_id: InstitutionId,
     character_id: CharacterId,
 ) -> Option<i64> {
-    let subject = institution_support_subject(institution_id, character_id);
+    let subject = institution_character_subject(institution_id, character_id);
     latest_audit_day_for_subject(state, AuditKind::InstitutionPatronage, &subject)
 }

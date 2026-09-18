@@ -1139,27 +1139,21 @@ pub(crate) fn apply_office_concentration_backlash(
         .unwrap_or(i16::MAX)
         .saturating_mul(OFFICE_CONCENTRATION_BACKLASH_PER_ADDITIONAL_OFFICE)
         .min(MAX_OFFICE_CONCENTRATION_BACKLASH);
-    let member_dynasties: BTreeSet<_> = state
-        .institutions
-        .get(&institution_id)
-        .expect("selected institution must exist")
-        .members
-        .iter()
-        .filter_map(|character_id| state.characters.get(*character_id))
-        .map(crate::core::Character::dynasty_id)
-        .filter(|dynasty_id| *dynasty_id != winner_dynasty_id)
-        .collect();
+    let member_dynasties = institution_member_dynasties_excluding(
+        state,
+        &state
+            .institutions
+            .get(&institution_id)
+            .expect("selected institution must exist")
+            .members,
+        winner_dynasty_id,
+    );
     for member_dynasty_id in member_dynasties {
-        adjust_dynasty_relationship(
+        apply_relationship_event(
             state,
             winner_dynasty_id,
             member_dynasty_id,
             RelationshipDelta::new(-(backlash / 2), 30, backlash / 3, backlash, 0),
-        );
-        remember_dynasty_interaction(
-            state,
-            winner_dynasty_id,
-            member_dynasty_id,
             &format!(
                 "house {winner_dynasty_id} consolidated {office_count} offices after winning institution {institution_id}, increasing coalition resistance"
             ),
@@ -1197,7 +1191,7 @@ pub(crate) fn has_recent_office_nomination(
     day: i64,
 ) -> bool {
     let nomination_subject =
-        crate::systems::commands::office_nomination_subject(institution_id, character_id);
+        crate::systems::commands::institution_character_subject(institution_id, character_id);
     // Chronologically ordered history: stop once records predate the
     // nomination-recency window.
     for record in state.audit_log.iter().rev() {
@@ -1236,16 +1230,15 @@ pub(crate) fn institution_relationship_support(
     institution_id: crate::ids::InstitutionId,
     candidate_dynasty_id: DynastyId,
 ) -> u32 {
-    let member_dynasties: BTreeSet<_> = state
-        .institutions
-        .get(&institution_id)
-        .expect("institution runtime must exist")
-        .members
-        .iter()
-        .filter_map(|character_id| state.characters.get(*character_id))
-        .map(crate::core::Character::dynasty_id)
-        .filter(|dynasty_id| *dynasty_id != candidate_dynasty_id)
-        .collect();
+    let member_dynasties = institution_member_dynasties_excluding(
+        state,
+        &state
+            .institutions
+            .get(&institution_id)
+            .expect("institution runtime must exist")
+            .members,
+        candidate_dynasty_id,
+    );
     let mut total = 0_u32;
     let mut count = 0_u32;
     for dynasty_id in member_dynasties {

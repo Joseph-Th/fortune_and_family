@@ -268,10 +268,12 @@ pub fn apply_player_command(
     state: &mut AppState,
     command: PlayerCommand,
 ) -> Result<CommandOutcome, CommandError> {
-    if state.scenario_key() != registry.scenario().key() {
+    if let Some((state_scenario, registry_scenario)) =
+        super::registry_scenario_mismatch(registry, state)
+    {
         return Err(super::SimulationError::RegistryMismatch {
-            state_scenario: state.scenario_key().to_owned(),
-            registry_scenario: registry.scenario().key().to_owned(),
+            state_scenario,
+            registry_scenario,
         }
         .into());
     }
@@ -296,10 +298,12 @@ pub(crate) fn apply_player_command_scratch(
     state: &mut AppState,
     command: PlayerCommand,
 ) -> Result<CommandOutcome, CommandError> {
-    if state.scenario_key() != registry.scenario().key() {
+    if let Some((state_scenario, registry_scenario)) =
+        super::registry_scenario_mismatch(registry, state)
+    {
         return Err(super::SimulationError::RegistryMismatch {
-            state_scenario: state.scenario_key().to_owned(),
-            registry_scenario: registry.scenario().key().to_owned(),
+            state_scenario,
+            registry_scenario,
         }
         .into());
     }

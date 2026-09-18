@@ -34,10 +34,10 @@ pub(crate) use super::transactions::{
     next_family_charter_version,
 };
 pub(crate) use crate::core::{
-    AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, CharacterRole, CharacterStatus,
-    ChronicleEntry, ChronicleKind, CivicDebtStatus, ContractStatus, Crisis, CrisisKind,
-    CrisisStatus, DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw,
-    ExternalRoute, FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance,
+    AiObjective, AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterRole,
+    CharacterStatus, ChronicleEntry, ChronicleKind, CivicDebtStatus, ContractStatus, Crisis,
+    CrisisKind, CrisisStatus, DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus,
+    EnactedLaw, ExternalRoute, FamilyCouncilState, FamilyLink, FamilyLinkKind, HouseGovernance,
     InformationConfidence, InformationReport, InformationTarget, InstitutionRuntime, LawKind,
     LegalCase, LegalCaseKind, LegalCaseStatus, LegalClaimSource, Loan, LoanStatus, ObjectiveKind,
     ObjectiveStatus, OfficePower, OutboxKind, OutboxMessage, Property, PropertyKind, PublicWork,
@@ -383,10 +383,12 @@ pub enum StrategicError {
 }
 
 fn ensure_registry_matches(registry: &Registry, state: &AppState) -> Result<(), StrategicError> {
-    if state.scenario_key() != registry.scenario().key() {
+    if let Some((state_scenario, registry_scenario)) =
+        super::registry_scenario_mismatch(registry, state)
+    {
         return Err(StrategicError::RegistryMismatch {
-            state_scenario: state.scenario_key().to_owned(),
-            registry_scenario: registry.scenario().key().to_owned(),
+            state_scenario,
+            registry_scenario,
         });
     }
     Ok(())
@@ -707,6 +709,36 @@ pub(crate) fn adjust_dynasty_relationship(
 
 pub(crate) const MAX_RELATIONSHIP_MEMORIES: usize = 12;
 
+/// Dynasties represented among an institution's members, excluding one house.
+/// Member characters resolve to their dynasties so standing effects land on
+/// houses rather than seats; characters missing from the store contribute
+/// nothing.
+pub(crate) fn institution_member_dynasties_excluding(
+    state: &AppState,
+    members: &BTreeSet<CharacterId>,
+    excluded: DynastyId,
+) -> BTreeSet<DynastyId> {
+    members
+        .iter()
+        .filter_map(|member_id| state.characters.get(*member_id))
+        .map(Character::dynasty_id)
+        .filter(|dynasty_id| *dynasty_id != excluded)
+        .collect()
+}
+
+/// Applies a relationship delta and records its narrative memory for one
+/// dynasty pair: standing changes always carry their cause.
+pub(crate) fn apply_relationship_event(
+    state: &mut AppState,
+    left_dynasty_id: DynastyId,
+    right_dynasty_id: DynastyId,
+    delta: RelationshipDelta,
+    memory: &str,
+) {
+    adjust_dynasty_relationship(state, left_dynasty_id, right_dynasty_id, delta);
+    remember_dynasty_interaction(state, left_dynasty_id, right_dynasty_id, memory);
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub(crate) enum DurableFeedbackError {
     #[error(transparent)]
@@ -962,12 +994,7 @@ fn update_information_reports(
         ))
     });
     let Some((_, good_id, name, price, causes)) = most_changed.max_by_key(|item| item.0) else {
-        state.market.month_start_prices = state
-            .market
-            .quotes
-            .iter()
-            .map(|(good_id, quote)| (*good_id, quote.price()))
-            .collect();
+        state.market.month_start_prices = snapshot_month_start_prices(state);
         return Ok(());
     };
     let expires_day = checked_future_day(day, 120)?;
@@ -988,13 +1015,19 @@ fn update_information_reports(
             summary: format!("{name} is priced at {price}; identified causes: {causes:?}."),
         },
     );
-    state.market.month_start_prices = state
+    state.market.month_start_prices = snapshot_month_start_prices(state);
+    Ok(())
+}
+
+/// Captures today's quotes as the reference prices next month's market report
+/// measures movement against.
+fn snapshot_month_start_prices(state: &AppState) -> BTreeMap<GoodId, Money> {
+    state
         .market
         .quotes
         .iter()
         .map(|(good_id, quote)| (*good_id, quote.price()))
-        .collect();
-    Ok(())
+        .collect()
 }
 
 pub(crate) fn run_annual_strategic_systems(state: &mut AppState) -> Result<(), SimulationError> {

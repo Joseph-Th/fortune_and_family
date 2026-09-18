@@ -38,8 +38,7 @@ pub use history::{HistoryLog, HistoryLogIter, HistoryLogIterMut};
 pub use records::{
     AuditKind, AuditRecord, AuditSubject, Business, BusinessPolicy, BusinessStatus, CampaignPhase,
     Character, CharacterRole, CharacterStatus, ChronicleEntry, ChronicleKind, Dynasty, Household,
-    MarketCause, MarketQuote, MarketState, ParseStartingBackgroundError, SocialClass,
-    StartingBackground,
+    MarketCause, MarketQuote, MarketState, SocialClass, StartingBackground,
 };
 pub(crate) use records::{
     BusinessFinance, BusinessIdentity, BusinessOperations, CharacterCapabilities,

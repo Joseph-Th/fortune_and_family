@@ -139,6 +139,24 @@ pub(crate) fn manager_holds_chartered_guild_membership(
         .is_some_and(|institution| institution.members.contains(&manager_id))
 }
 
+/// Registry-identity guard shared by every mutation entry point: state and
+/// registry must describe the same scenario before time advances, a command
+/// commits, or a strategic pass runs. Each error family keeps its typed
+/// variant; this owns the single comparison they all consult.
+pub(crate) fn registry_scenario_mismatch(
+    registry: &Registry,
+    state: &crate::core::AppState,
+) -> Option<(String, String)> {
+    if state.scenario_key() == registry.scenario().key() {
+        None
+    } else {
+        Some((
+            state.scenario_key().to_owned(),
+            registry.scenario().key().to_owned(),
+        ))
+    }
+}
+
 /// Capacity-weighted disruption across active external routes, mirroring
 /// household and import-trade availability. Centralized so crisis detection,
 /// household income, and import-trade throttling share one weighting.

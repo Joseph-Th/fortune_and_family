@@ -46,13 +46,18 @@ pub(crate) fn ai_dynasty_monthly_upkeep(
         .saturating_mul(i64::try_from(family_members).unwrap_or(i64::MAX));
     let portfolio = AI_DYNASTY_UPKEEP_PER_BUSINESS
         .saturating_mul(i64::try_from(business_count).unwrap_or(i64::MAX));
+    // Stewardship applies only to wealth above the threshold: a thin treasury
+    // must never turn the obligation negative, which would pay the house for
+    // being destitute and silently skip its shortfall penalty.
     let excess_wealth = treasury.saturating_sub(AI_DYNASTY_WEALTH_UPKEEP_THRESHOLD);
-    let wealth_stewardship =
-        excess_wealth.saturating_mul_ratio(AI_DYNASTY_WEALTH_UPKEEP_BASIS_POINTS, 10_000);
+    let wealth_stewardship = excess_wealth
+        .max(Money::ZERO)
+        .saturating_mul_ratio(AI_DYNASTY_WEALTH_UPKEEP_BASIS_POINTS, 10_000);
     AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY
         .saturating_add(family)
         .saturating_add(portfolio)
         .saturating_add(wealth_stewardship)
+        .max(Money::ZERO)
 }
 
 impl ObjectiveProgress {
@@ -119,7 +124,8 @@ pub(crate) fn apply_ai_dynasty_upkeep(state: &mut AppState) -> Result<(), Simula
     let mut total_upkeep = Money::ZERO;
     let mut total_shortfall = Money::ZERO;
     for (dynasty_id, family_members, business_count, treasury) in dynasties {
-        let required = ai_dynasty_monthly_upkeep(treasury, family_members, business_count);
+        let required =
+            ai_dynasty_monthly_upkeep(treasury, family_members, business_count).max(Money::ZERO);
         if required == Money::ZERO {
             continue;
         }

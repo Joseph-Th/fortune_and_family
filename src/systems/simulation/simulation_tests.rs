@@ -12,6 +12,9 @@
 //! Relevant invariants: as stated in this header.
 //! Focused tests: sibling test suite.
 
+use super::market::{
+    PRICE_SHOCK_REPEAT_SUPPRESSION_DAYS, ceil_div_nonnegative_wide, production_price_floors,
+};
 use super::*;
 use crate::core::{
     BusinessStatus, ContractStatus, EnactedLaw, LawKind, NewGameConfig, StartingBackground,

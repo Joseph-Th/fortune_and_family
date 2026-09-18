@@ -244,6 +244,35 @@ fn sync_save_directory_with_injection(
     Ok(())
 }
 
+/// Creates the same-directory staging temporary for an atomic file
+/// publication: a hidden tempfile beside the destination so the later
+/// `persist` rename is an atomic replacement.
+fn create_staging_temporary(
+    parent: &Path,
+    prefix: &str,
+) -> std::io::Result<tempfile::NamedTempFile> {
+    Builder::new().prefix(prefix).tempfile_in(parent)
+}
+
+/// Publishes staged bytes through a same-directory temporary: synchronized
+/// write, atomic replacement of the destination, then best-effort
+/// parent-directory synchronization. A failure leaves the previous valid
+/// file untouched; no partial file is left at the final path.
+fn persist_staged_bytes(
+    mut temporary: tempfile::NamedTempFile,
+    parent: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> std::io::Result<SaveOutcome> {
+    temporary.write_all(bytes)?;
+    temporary.as_file_mut().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(match sync_save_directory_with_injection(parent) {
+        Ok(()) => SaveOutcome::Committed,
+        Err(_) => SaveOutcome::CommittedWithDegradedDurability,
+    })
+}
+
 fn save_state_impl(
     path: &Path,
     state: &AppState,
@@ -306,31 +335,18 @@ fn save_state_impl(
         .file_name()
         .and_then(|name| name.to_str())
         .map_or_else(|| ".campaign-save-".to_owned(), |name| format!(".{name}."));
-    let mut temporary = Builder::new()
-        .prefix(&prefix)
-        .tempfile_in(parent)
-        .map_err(|source| PersistenceError::CreateTemporary {
+    let temporary = create_staging_temporary(parent, &prefix).map_err(|source| {
+        PersistenceError::CreateTemporary {
             path: path.to_path_buf(),
             source,
-        })?;
-    temporary
-        .write_all(&bytes)
-        .and_then(|()| temporary.as_file_mut().sync_all())
-        .map_err(|source| PersistenceError::Write {
+        }
+    })?;
+    let outcome = persist_staged_bytes(temporary, parent, path, &bytes).map_err(|source| {
+        PersistenceError::Write {
             path: path.to_path_buf(),
             source,
-        })?;
-    temporary
-        .persist(path)
-        .map_err(|error| PersistenceError::Write {
-            path: path.to_path_buf(),
-            source: error.error,
-        })?;
-
-    let outcome = match sync_save_directory_with_injection(parent) {
-        Ok(()) => SaveOutcome::Committed,
-        Err(_) => SaveOutcome::CommittedWithDegradedDurability,
-    };
+        }
+    })?;
     Ok(outcome)
 }
 
@@ -443,15 +459,8 @@ pub fn write_generated_file(
         || ".generated-output-".to_owned(),
         |name| format!(".{name}."),
     );
-    let mut temporary = Builder::new().prefix(&prefix).tempfile_in(parent)?;
-    temporary.write_all(contents)?;
-    temporary.as_file_mut().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-
-    Ok(match sync_save_directory_with_injection(parent) {
-        Ok(()) => SaveOutcome::Committed,
-        Err(_) => SaveOutcome::CommittedWithDegradedDurability,
-    })
+    let temporary = create_staging_temporary(parent, &prefix)?;
+    persist_staged_bytes(temporary, parent, path, contents)
 }
 
 /// Loads and validates a current-schema JSON save file, returning its committed file revision.
@@ -2643,7 +2652,7 @@ fn validate_office_directive_audit_reference(
             "OfficeDirective audit record references missing dynasty {dynasty_id}"
         ));
     }
-    if subject.as_str() != format!("institution:{institution_id};dynasty:{dynasty_id}") {
+    if !subject.is_institution_dynasty(institution_id, dynasty_id) {
         return Err("OfficeDirective audit record has an invalid dynasty attribution".to_owned());
     }
     Ok(())
@@ -2665,7 +2674,7 @@ fn validate_institution_endowment_audit_reference(
             "InstitutionEndowment audit record references missing dynasty {dynasty_id}"
         ));
     }
-    if subject.as_str() != format!("institution:{institution_id};dynasty:{dynasty_id}") {
+    if !subject.is_institution_dynasty(institution_id, dynasty_id) {
         return Err(
             "InstitutionEndowment audit record has an invalid dynasty attribution".to_owned(),
         );
@@ -2698,7 +2707,7 @@ fn validate_office_duty_audit_reference(
             record.kind()
         ));
     }
-    if subject.as_str() != format!("institution:{institution_id};dynasty:{dynasty_id}") {
+    if !subject.is_institution_dynasty(institution_id, dynasty_id) {
         return Err(format!(
             "{:?} audit record has an invalid office-duty subject shape",
             record.kind()

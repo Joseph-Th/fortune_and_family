@@ -30,10 +30,7 @@
 //! deterministic-replay gates.
 
 use super::SimulationError;
-#[allow(unused_imports)]
-use super::transactions::{
-    checked_future_day, next_business_finance_version, next_family_charter_version,
-};
+use super::transactions::next_business_finance_version;
 #[allow(unused_imports)]
 use crate::core::{
     AppState, AuditKind, AuditRecord, BusinessStatus, Character, CharacterCapabilities,
@@ -50,25 +47,28 @@ use crate::core::{EmploymentStatus, MarketCause};
 #[allow(unused_imports)]
 use crate::ids::{BusinessId, CharacterId, DynastyId, GoodId, RecipeId};
 use crate::money::{Money, Quantity, affordable_quantity, checked_cost_for, cost_for};
-#[allow(unused_imports)]
-use crate::registry::{GoodCategory, RecipeDef, Registry};
-#[allow(unused_imports)]
-use std::collections::{BTreeMap, BTreeSet};
+use crate::registry::{RecipeDef, Registry};
+use std::collections::BTreeMap;
 
 pub(crate) mod market;
 mod purchases;
 mod succession;
-#[allow(unused_imports)]
 pub(crate) use market::{
-    PRICE_SHOCK_REPEAT_SUPPRESSION_DAYS, PRICE_SHOCK_SUMMARY_SEPARATOR, PRICE_SHOCKS_PER_DAY,
-    apply_market_spoilage, business_sustainable_unit_cost, ceil_div_nonnegative_wide,
-    price_shock_good_name, price_shock_summary, production_price_floors, recently_shocked_goods,
-    update_market_prices,
+    apply_market_spoilage, business_sustainable_unit_cost, update_market_prices,
 };
 #[allow(unused_imports)]
 pub(crate) use purchases::{apply_business_purchases, decide_business_purchases};
 #[allow(unused_imports)]
 pub(crate) use succession::*;
+
+/// Deterministic daily rotation key for scarce-resource allocation: rotates
+/// priority by campaign day so low IDs do not always win the tool race.
+/// Wrapping on `clock.day()` is intentional.
+pub(crate) fn day_rotation_key(state: &AppState, id_value: u32) -> u32 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let day_hash = state.clock.day() as u32;
+    id_value.wrapping_add(day_hash)
+}
 
 #[derive(Clone, Debug)]
 struct ProductionLine {
@@ -154,10 +154,12 @@ fn validate_advance_preconditions(
             requested_days: days,
         });
     }
-    if state.scenario_key != registry.scenario().key() {
+    if let Some((state_scenario, registry_scenario)) =
+        super::registry_scenario_mismatch(registry, state)
+    {
         return Err(SimulationError::RegistryMismatch {
-            state_scenario: state.scenario_key.clone(),
-            registry_scenario: registry.scenario().key().to_owned(),
+            state_scenario,
+            registry_scenario,
         });
     }
     validate_market_quotes(registry, state)
@@ -324,11 +326,9 @@ fn decide_production(
     let mut remaining_tools_stock = tools_quote.stock;
     let mut lines = Vec::new();
     // Rotate tool-allocation priority by campaign day so low IDs do not always win the scarce
-    // tool race. Wrapping on `clock.day()` is intentional.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let day_hash = state.clock.day() as u32;
+    // tool race.
     let mut businesses: Vec<_> = state.businesses.iter().collect();
-    businesses.sort_by_key(|business| business.id().value().wrapping_add(day_hash));
+    businesses.sort_by_key(|business| day_rotation_key(state, business.id().value()));
     for business in businesses {
         let Some(line) = decide_business_production(
             registry,
@@ -869,10 +869,8 @@ fn decide_business_sales(
             .max(Quantity::ZERO);
     }
     let mut lines = Vec::new();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let day_hash = state.clock.day() as u32;
     let mut businesses: Vec<_> = state.businesses.iter().collect();
-    businesses.sort_by_key(|business| business.id().value().wrapping_add(day_hash));
+    businesses.sort_by_key(|business| day_rotation_key(state, business.id().value()));
 
     for business in businesses {
         if matches!(
@@ -1186,10 +1184,8 @@ fn decide_household_consumption(registry: &Registry, state: &AppState) -> Househ
     let cloth_ratio_basis_points = cloth_price_ratio_basis_points(registry, state);
     let mut lines = Vec::new();
     let mut food_satisfaction = BTreeMap::new();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let day_hash = state.clock.day() as u32;
     let mut households: Vec<_> = state.households.iter().collect();
-    households.sort_by_key(|household| household.id().value().wrapping_add(day_hash));
+    households.sort_by_key(|household| day_rotation_key(state, household.id().value()));
 
     for household in households {
         let mut cash = household.cash;
@@ -1456,9 +1452,9 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
         .expect("Rivergate market must define tools");
     let tools_price = tools_quote.price;
     let mut remaining_tools_stock = tools_quote.stock;
-    // Low-word hash of campaign day — wrapping is intentional for the rotation below.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let day_hash = state.clock.day() as u32;
+    // Maintenance priority rotates daily like production (see
+    // `day_rotation_key`) so scarce tools do not systematically starve
+    // high-ID workshops.
     let mut snapshots: Vec<_> = state
         .businesses
         .iter()
@@ -1508,7 +1504,7 @@ fn decide_maintenance(registry: &Registry, state: &mut AppState) -> MaintenanceP
         .collect();
     // Rotate maintenance tool priority same as production: deterministic daily rotation avoids
     // systematic starvation of high-ID workshops when tools are scarce.
-    snapshots.sort_by_key(|snapshot| snapshot.business_id.value().wrapping_add(day_hash));
+    snapshots.sort_by_key(|snapshot| day_rotation_key(state, snapshot.business_id.value()));
     let lines = snapshots
         .into_iter()
         .map(|snapshot| {

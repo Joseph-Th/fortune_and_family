@@ -144,7 +144,7 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
             state.audit_log.push(AuditRecord {
                 day: support_day,
                 kind: AuditKind::InstitutionPatronage,
-                subject: institution_support_subject(institution_id, *character_id).into(),
+                subject: institution_character_subject(institution_id, *character_id).into(),
                 detail: "test support".into(),
             });
         }
@@ -3544,7 +3544,7 @@ mod politics {
         assert!(institution.members.contains(&character_id));
         assert!(state.audit_log.iter().any(|record| {
             record.kind() == AuditKind::InstitutionPatronage
-                && record.subject() == institution_support_subject(institution_id, character_id)
+                && record.subject() == institution_character_subject(institution_id, character_id)
         }));
 
         let nomination_delivery_requirement =
@@ -3863,7 +3863,7 @@ mod politics {
             .expect("player dynasty must exist")
             .resources
             .treasury = Money::from_copper(10_000);
-        let subject = institution_support_subject(institution_id, character_id);
+        let subject = institution_character_subject(institution_id, character_id);
         let patronage_records_before = state
             .audit_log
             .iter()
@@ -6032,7 +6032,7 @@ mod politics {
             expected_cost.copper(),
             "the surcharged contribution must still land in the institution budget"
         );
-        let subject = institution_support_subject(institution_id, character_id);
+        let subject = institution_character_subject(institution_id, character_id);
         let patronage = state
             .audit_log
             .iter()
@@ -6221,15 +6221,15 @@ mod crises {
             .crises
             .get(&crisis_id)
             .expect("crisis must remain recorded");
-        let worst_remaining = state
-            .external_routes
-            .values()
-            .map(|route| route.disruption_basis_points)
-            .max()
-            .expect("campaign must contain regional routes");
+        // Detection and the monthly advance consult the capacity-weighted
+        // route metric, so a paid response re-anchors onto the same metric
+        // (capped at the pre-response severity) instead of the worst single
+        // route, which overweight tiny disrupted routes.
+        let tracked_disruption = crate::systems::capacity_weighted_route_disruption(&state);
         assert_eq!(
-            crisis.severity_basis_points, worst_remaining,
-            "a tracked trade disruption holds at its worst remaining route instead of declaring victory over unresolved disruption"
+            crisis.severity_basis_points,
+            (severity - 2_500).max(tracked_disruption.min(severity)),
+            "a tracked trade disruption re-anchors onto the capacity-weighted route condition instead of declaring victory over unresolved disruption"
         );
         validate_invariants(registry, &state);
     }
@@ -6550,6 +6550,76 @@ mod crises {
             &before,
             &state,
             "a containment response must still close further crisis actions",
+        );
+    }
+
+    #[test]
+    fn exploitation_does_not_diminish_later_crisis_service_standing() {
+        // Profiteering is the opposite of service: it must neither earn nor
+        // discount the legitimacy credit a later genuine relief earns.
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let exploit_crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            exploit_crisis_id,
+            crate::core::Crisis {
+                id: exploit_crisis_id,
+                kind: crate::core::CrisisKind::NobleDemand,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 4_000,
+                status: CrisisStatus::Active,
+                cause: "test exploitation".to_owned(),
+            },
+        );
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id: exploit_crisis_id,
+                response: CrisisResponse::Exploit,
+            },
+        )
+        .expect("exploitation must succeed");
+
+        let relief_crisis_id = state.next_ids.crisis();
+        state.crises.insert(
+            relief_crisis_id,
+            crate::core::Crisis {
+                id: relief_crisis_id,
+                kind: crate::core::CrisisKind::NobleDemand,
+                district_id: None,
+                started_day: state.clock.day(),
+                severity_basis_points: 4_000,
+                status: CrisisStatus::Active,
+                cause: "test service after exploitation".to_owned(),
+            },
+        );
+        let legitimacy_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        apply_player_command(
+            registry,
+            &mut state,
+            PlayerCommand::RespondToCrisis {
+                crisis_id: relief_crisis_id,
+                response: CrisisResponse::Relief,
+            },
+        )
+        .expect("relief after exploitation must succeed");
+        let legitimacy_after = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        assert_eq!(
+            u32::from(legitimacy_after - legitimacy_before),
+            u32::from(crate::systems::commands::CRISIS_RELIEF_LEGITIMACY_GAIN),
+            "relief after an exploitation must still earn full standing credit"
         );
     }
 
