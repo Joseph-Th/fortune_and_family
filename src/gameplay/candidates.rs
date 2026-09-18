@@ -7728,9 +7728,8 @@ fn inject_exploratory_ward(
     // Ward adoption is normally gated by discretionary floor and commercial
     // standing; exploratory sampling relaxes only the standing reserve so the
     // route is proven reachable without bankrupting the house.
-    let player = match state.dynasties.get(&state.player_dynasty_id) {
-        Some(p) => p,
-        None => return false,
+    let Some(player) = state.dynasties.get(&state.player_dynasty_id) else {
+        return false;
     };
     if player.treasury() < WARD_ADOPTION_COST {
         return false;
@@ -7841,9 +7840,8 @@ fn inject_exploratory_education(
     persona: GameplayPersona,
     candidates: &mut Vec<Candidate>,
 ) -> bool {
-    let player = match state.dynasties.get(&state.player_dynasty_id) {
-        Some(p) => p,
-        None => return false,
+    let Some(player) = state.dynasties.get(&state.player_dynasty_id) else {
+        return false;
     };
     if player.treasury() < FAMILY_EDUCATION_COST {
         return false;
@@ -7889,7 +7887,7 @@ fn inject_exploratory_acquisition(
         .characters
         .iter()
         .find(|c| c.dynasty_id() == player_id && c.status() == CharacterStatus::Active)
-        .map(|c| c.id())
+        .map(crate::core::Character::id)
     else {
         return false;
     };

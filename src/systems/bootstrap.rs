@@ -245,8 +245,7 @@ fn insert_player_foundation(
         StartingBackground::Blacksmith => required_district(registry, "northgate"),
     };
     let capacity_batches_per_day = match background {
-        StartingBackground::Baker => 4,
-        StartingBackground::ClothTrader => 4,
+        StartingBackground::Baker | StartingBackground::ClothTrader => 4,
         StartingBackground::Blacksmith => 3,
     };
     insert_business(
