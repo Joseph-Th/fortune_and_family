@@ -109,7 +109,7 @@ Impact map: `ARCHITECTURE.md` § Extension map lists required companion work per
 - Project-owned enums are exhaustive; consequential fields are private; domain failures use typed errors with variant fields, not string parsing; replaced internal paths are deleted.
 - History is append-only via `HistoryLog<T>` (cheap clone, structural checksum); `CampaignEvidenceMemo` and checksum memos are pure derivations excluded from serialization/equality and rebuilt lazily.
 - Ad hoc saves, reports, captures, and scratch copies belong under ignored `target/agent-output/<task>/` or an OS temp dir, never in `../` or the workspace root. Remove task-owned transient output before handoff.
-- Verification is local: `bash scripts/test.sh <lane>` (or `.\scripts\test.ps1 <lane>` on Windows). Do not create or depend on GitHub Actions workflows; `python ../tools/check_no_github_actions.py` must pass.
+- Verification is local: `bash scripts/test.sh <lane>` (or `.\scripts\test.ps1 <lane>` on Windows); `python ../tools/check_no_github_actions.py` must pass.
 
 ## Completion
 
