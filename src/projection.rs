@@ -6,7 +6,7 @@
 //! reimplementation. Every projection captures one coherent lifecycle moment
 //! (the completed state after the last `advance_days` day) so CLI `summary`,
 //! `inspect`, `dashboard`, and gameplay `snapshot` never mix values from
-//! incompatible ticks — satisfying `STANDARDS.md` §5.6 / §12 observation
+//! incompatible ticks — satisfying `STANDARDS.md` OWN-2 / `STANDARDS_BEHAVIOR_EVALUATION.md` EVAL-5 observation
 //! timing. Runtime values (durable results of the completed day) are kept
 //! distinct from projected values (read-only forecasts for the next decision)
 //! and the latter are labelled explicitly where both appear.
