@@ -21,13 +21,13 @@ Use focused runs during implementation; use release matrices for cross-domain va
 
 ## Commands
 
-Inner loop — debug harness, <1s warm, no release build:
+Inner loop — debug harness, no release build:
 
 ```bash
-bash scripts/test.sh playtest  # 60-day single-persona smoke, <1s warm
+bash scripts/test.sh playtest  # 60-day single-persona smoke
 bash scripts/test.sh playtest --days 90 --persona entrepreneur --background baker
 cargo run --locked -- playtest --days 90 --persona steward
-# Gate-fidelity iteration (same candidates, optimized sim, still ~1s warm after first release build):
+# Gate-fidelity iteration (same candidates, optimized sim, after the first release build):
 CIVIC_DYNASTY_PROFILE=release bash scripts/test.sh playtest --days 360 --persona entrepreneur
 cargo run --release --locked -- playtest --days 360 --persona entrepreneur --trace-limit 20
 ```
@@ -39,11 +39,11 @@ cargo run --release --locked -- playtest
 cargo run --release --locked -- playtest --start-seed 1 --seeds 10 --days 1080 --json --output gameplay-report.json
 ```
 
-Repository gates — always release, one CLI build (warm after one-time cold ~56s):
+Repository gates — always release, one CLI build after a one-time cold build:
 
 ```bash
-bash scripts/test.sh gameplay        # ~16s warm: 36 + 3 campaigns, 60k days
-bash scripts/test.sh gameplay-audit  # ~30s warm: multi-seed / generation / credit-stress
+bash scripts/test.sh gameplay        # 36 + 3 campaigns, 60k days
+bash scripts/test.sh gameplay-audit  # multi-seed / generation / credit-stress
 ```
 
 `playtest` without args is the solo-dev default: debug CLI, 60 days, one persona, trace-limit 8. `gameplay`/`gameplay-audit` always use release. Every run prints one progress line to stderr (`elapsed, campaigns, simulated days, actions, overall score, findings, days/s`) and fails with the exact score reason when a quality gate is not met.
@@ -97,7 +97,8 @@ Candidate generation may rank per persona, but must not create domain state or b
 
 Standing policies:
 
-- Candidate scores include deterministic exploration variation (range 1800, jitter ±28 days) derived from
+- Candidate scores include deterministic exploration variation (`ORGANIC_CANDIDATE_VARIATION_RANGE` in
+  `src/gameplay/persona.rs`, day jitter in `src/gameplay/harness.rs`) derived from
   campaign state and persona. Timing jitter mixes persona, generation, business/property, and crisis state;
   score variation mixes generation, business, property, legal, and crisis state. Both flip close calls
   without overriding urgency, reserves, or persona priorities.
@@ -273,7 +274,7 @@ Divergence between harness and game is a harness defect.
 
 - Activation predicates are checked every cycle (`ActivationPredicateDrift` on mismatch).
 - Report schema version bumps on any semantic change (activation, scoring, findings, trace meaning).
-- Organic variation (jitter ±28 days plus score range 1800, each persona- and state-aware, plus bounded exploratory injection) prevents rigid replay while urgency and persona priorities remain dominant.
+- Organic variation (day jitter plus score range, each persona- and state-aware, plus bounded exploratory injection) prevents rigid replay while urgency and persona priorities remain dominant.
 - Bounded work: probe caps, horizons, trace limits bound every run. Parallelism capped by `CIVIC_DYNASTY_JOBS`; ordering is stable.
 
 ## Interpretation limits

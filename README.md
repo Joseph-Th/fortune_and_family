@@ -94,7 +94,7 @@ src/
   systems/
     bootstrap.rs      New campaign construction
     commands/         PlayerCommand schema and dispatch
-    simulation.rs     Daily simulation pipeline
+    simulation/       Daily simulation pipeline
     strategic/        Scheduled cross-domain systems by domain
     legal.rs          Grounded legal claims
     progression.rs    Campaign progression milestones

@@ -2,6 +2,9 @@
 
 **BCA policy:** advisory
 
+
+**Rust agent diagnostics:** advisory. Use bounded cargo-modules structure views only when the file-header/architecture routing still leaves ownership unclear, targeted cargo-mutants selection/execution when focused command, persistence, or invariant tests may not constrain a consequential rule, and cargo-expand only when generated Rust is material. These diagnostics do not replace the completion lanes in [TESTING.md](TESTING.md).
+
 **Profiles:** Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation
 
 Execution card for repository work. `ARCHITECTURE.md` owns structure and mutation contracts, `STATUS.md` owns capability and schemas, `TESTING.md` owns test policy, `DESIGN.md` owns intent, `GAMEPLAY_HARNESS.md` owns harness semantics. Root `../AGENTS.md` owns workspace coordination, task leases, and filesystem hygiene.
@@ -88,7 +91,7 @@ All builds, tests, checks, and audits run through repository-owned local command
 
 ## Profiles
 
-**Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation.** Sections 5, 6, 7, 9, 10, 29-32, 38 apply universally; persistence/projection, harness evaluation, and procedural art follow their companion standards.
+**Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation.** Universal rules apply throughout; persistence and projection follow DATA and the stateful OWN rules; harness evaluation in `src/gameplay/` follows the Automated Behavior Evaluation companion; procedural art in `src/art/` and HTML/report output follow the Artifact Generation companion with PROD-1.
 
 ## Procedure
 

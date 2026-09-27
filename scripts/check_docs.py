@@ -97,12 +97,16 @@ def check_repository_references() -> None:
     )
     for document in REQUIRED_DOCS:
         text = read(document)
-        for raw_target in reference_pattern.findall(text):
-            target = raw_target.rstrip(".,;:")
-            if "*" in target:
+        owned = generated_contract_lines(text)
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if line_number in owned:
                 continue
-            if not (ROOT / target).exists():
-                fail(f"{document} references missing path {target}")
+            for raw_target in reference_pattern.findall(line):
+                target = raw_target.rstrip(".,;:")
+                if "*" in target:
+                    continue
+                if not (ROOT / target).exists():
+                    fail(f"{document} references missing path {target}")
 
 
 def check_readme_map() -> None:
@@ -137,16 +141,44 @@ def check_test_runner_contract() -> None:
         )
 
 
+def generated_contract_lines(text: str) -> set[int]:
+    """1-based line numbers inside the synced workspace-contract block.
+
+    The block is owned by the workspace (tools/sync_agent_context.py), so
+    project style and reference checks must not police its wording.
+    """
+    owned: set[int] = set()
+    inside = False
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if "workspace-contract:begin" in line:
+            inside = True
+            continue
+        if "workspace-contract:end" in line:
+            inside = False
+            continue
+        if inside:
+            owned.add(line_number)
+    return owned
+
+
 def check_document_style() -> None:
     maximum_line_length = 500
 
     for document in REQUIRED_DOCS:
         text = read(document)
-        lowered = text.lower()
+        owned = generated_contract_lines(text)
+        body = "\n".join(
+            line
+            for line_number, line in enumerate(text.splitlines(), start=1)
+            if line_number not in owned
+        )
+        lowered = body.lower()
         for phrase in RETROSPECTIVE_PHRASES:
             if phrase.lower() in lowered:
                 fail(f"{document} contains retrospective phrase {phrase!r}")
         for line_number, line in enumerate(text.splitlines(), start=1):
+            if line_number in owned:
+                continue
             if len(line) > maximum_line_length:
                 fail(
                     f"{document}:{line_number} exceeds {maximum_line_length} characters; "
