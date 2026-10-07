@@ -317,6 +317,9 @@ pub struct GameplaySnapshot {
     pub quality_reputation: u16,
     pub reliability_reputation: u16,
     pub generation: u16,
+    pub player_head_age_years: i64,
+    pub player_head_health_basis_points: u16,
+    pub player_succession_risk_basis_points: u16,
     pub family_unity: u16,
     pub family_charter_version: u64,
     pub house_governance: HouseGovernance,
@@ -895,6 +898,9 @@ pub(crate) struct CivicSnapshotPart {
     pub quality_reputation: u16,
     pub reliability_reputation: u16,
     pub generation: u16,
+    pub player_head_age_years: i64,
+    pub player_head_health_basis_points: u16,
+    pub player_succession_risk_basis_points: u16,
     pub family_unity: u16,
     pub family_charter_version: u64,
     pub house_governance: HouseGovernance,
@@ -1003,11 +1009,24 @@ impl CivicSnapshotPart {
             .expect("player family council must exist");
         let laws = LawSnapshotPart::capture(state);
         let public_works = PublicWorkSnapshotPart::capture(state, player_id);
+        let (head_age_years, head_health_basis_points) = state
+            .characters
+            .get(player.head_id())
+            .map(|head| {
+                (
+                    state.clock.day().saturating_sub(head.birth_day()) / 360,
+                    head.runtime.health_basis_points,
+                )
+            })
+            .unwrap_or((0, 0));
         Self {
             legitimacy: player.resources.legitimacy_basis_points,
             quality_reputation: player.resources.reputation_quality_basis_points,
             reliability_reputation: player.resources.reputation_reliability_basis_points,
             generation: player.runtime.generation,
+            player_head_age_years: head_age_years,
+            player_head_health_basis_points: head_health_basis_points,
+            player_succession_risk_basis_points: player.runtime.succession_risk_basis_points,
             family_unity: council.unity_basis_points,
             family_charter_version: council.charter_version,
             house_governance: council.governance,
@@ -1366,6 +1385,9 @@ macro_rules! assemble_gameplay_snapshot {
             quality_reputation: $civic.quality_reputation,
             reliability_reputation: $civic.reliability_reputation,
             generation: $civic.generation,
+            player_head_age_years: $civic.player_head_age_years,
+            player_head_health_basis_points: $civic.player_head_health_basis_points,
+            player_succession_risk_basis_points: $civic.player_succession_risk_basis_points,
             family_unity: $civic.family_unity,
             family_charter_version: $civic.family_charter_version,
             house_governance: $civic.house_governance,
@@ -1489,6 +1511,9 @@ pub struct GameplayDecisionContext {
     pub active_wards: u16,
     pub family_unity: u16,
     pub generation: u16,
+    pub player_head_age_years: i64,
+    pub player_head_health_basis_points: u16,
+    pub player_succession_risk_basis_points: u16,
     pub player_disputed_employment: u16,
     pub maximum_contract_relationship_pressure_basis_points: u16,
     pub player_open_legal_cases_as_defendant: u16,
@@ -1533,6 +1558,9 @@ impl From<&GameplaySnapshot> for GameplayDecisionContext {
             active_wards: snapshot.active_wards,
             family_unity: snapshot.family_unity,
             generation: snapshot.generation,
+            player_head_age_years: snapshot.player_head_age_years,
+            player_head_health_basis_points: snapshot.player_head_health_basis_points,
+            player_succession_risk_basis_points: snapshot.player_succession_risk_basis_points,
             player_disputed_employment: snapshot.player_disputed_employment,
             maximum_contract_relationship_pressure_basis_points: snapshot
                 .maximum_contract_relationship_pressure_basis_points,

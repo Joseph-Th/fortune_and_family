@@ -12,7 +12,7 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 | Save schema | 31 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 81 |
+| Gameplay report schema | 82 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -29,7 +29,7 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 |---|---|
 | World | One city (six districts), regional routes, seasonal pressure, external disruption. Capacity-weighted route health scales household income and trade output. Living costs 28/52/78 copper per member monthly (Laboring/Artisan/Merchant) × rent index. |
 | Population | Dynasties, notable characters, grouped households, health, loyalty, family links, wards, education, councils, heirs, succession. Collapsed head with no heir: most capable adult is designated; sole collapsed head generates a successor. No business retains an inactive manager after the annual pass; three collapsed years ends life. Prepared succession preserves legitimacy (floor 1800 bp), reduces cohesion loss, retains seats; unprepared retains floor 1200 bp, loses seats. |
-| Succession pacing | Founder pressure targets median first transition near day 720-900 (eligibility 56, founders 54-56, 1500 bp/year): late enough that office normally precedes succession, early enough that legacy aftermath is playable. |
+| Succession pacing | Founder pressure targets first transitions in the third campaign year (eligibility 56, founders 54-56, 1500 bp/year): late enough that office normally precedes succession; the 1080-day gate ends where legacy aftermath begins, so generation-length runs own the full continuity verdict. |
 | Businesses | Ownership, management, policy, wages, cash, inventory, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, owner distributions. Recovery requires 4 vs 3 days of operating cover; distressed workshops retain 75% efficiency; quality mean-reverts; operating/maintenance costs credit the clearing pool. |
 | Business transfer | Failing trades sell at discount to book value; going concerns quote at 140% controlling premium. Book value uses registry base price. Portfolio growth converts wealth into capacity and administrative load. Tool-allocation priority rotates daily. |
 | Markets | Scarce procurement, production, business/household/industrial demand, tool-constrained production and maintenance, spoilage, price formation, controls, regional supply. Production-cost floors override speculative ceilings at break-even. Households prefer bread, fall back to cheaper staples under scarcity/poverty, and reduce cloth demand above reference price. Unowned property purchases credit the clearing pool. |

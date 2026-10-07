@@ -1302,7 +1302,7 @@ pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut S
             };
             let _ = writeln!(
                 output,
-                "  day {:>4} {:<19} | treasury {:>9} | biz {:>9} | businesses {}{} | offices {} | legit {:.0}% | gen {}{} | crises {} | {}",
+                "  day {:>4} {:<19} | treasury {:>9} | biz {:>9} | businesses {}{} | offices {} | legit {:.0}% | gen {} head {}y {:.0}%{} | crises {} | {}",
                 step.day,
                 phase_label_at_day(&campaign.fantasy_arc, step.day),
                 context.player_treasury,
@@ -1316,6 +1316,8 @@ pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut S
                 context.offices_held,
                 f64::from(context.legitimacy) / 100.0,
                 context.generation,
+                context.player_head_age_years,
+                f64::from(context.player_head_health_basis_points) / 100.0,
                 legal_pressure_suffix(context),
                 context.active_crises,
                 action_text,
@@ -1343,12 +1345,26 @@ pub(crate) fn render_trace_alternatives(step: &GameplayTraceStep, output: &mut S
         output,
         "             alternatives (shared projected horizon):"
     );
+    let top_score = distinct_projected_alternatives(&step.viable_options)
+        .first()
+        .map(|option| option.score)
+        .unwrap_or(0);
     for option in distinct_projected_alternatives(&step.viable_options) {
+        // Scores alone do not explain why one commitment beats another; flag
+        // close calls (within the persona variation band) so a reader knows
+        // when the ranking flipped on exploration noise versus decisive
+        // urgency or persona priority.
+        let close_mark = if top_score.saturating_sub(option.score) <= CLOSE_CHOICE_SCORE_GAP {
+            " close"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "               {:<18} score {:>5} | {}d later [{}] | changes [{}]",
+            "               {:<18} score {:>5}{} | {}d later [{}] | changes [{}]",
             option.command.label(),
             option.score,
+            close_mark,
             option.projected_horizon_days,
             domain_labels(&option.projected_domains),
             format_measure_changes(&option.projected_profile),
@@ -1471,7 +1487,28 @@ pub(crate) fn render_feedback_group(
         Some(days) => format!("{label} over {days}d"),
         None => label.to_owned(),
     };
-    let summaries = feedback
+    // City-wide market ticks and business churn drown player-relevant signals:
+    // collapse routine PriceShock / distress / recovery / new-year chronicle
+    // noise into counts so crisis, succession, office, legal, contract, and
+    // family events stay legible. Outbox notices are always player-directed
+    // and keep priority.
+    let is_churn = |kind: &str| {
+        matches!(
+            kind,
+            "PriceShock" | "BusinessDistress" | "BusinessRecovered" | "NewYear"
+        )
+    };
+    let mut notable = Vec::new();
+    let mut churn_counts: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for event in feedback {
+        if event.channel == "chronicle" && is_churn(&event.kind) {
+            *churn_counts.entry(event.kind.as_str()).or_default() += 1;
+        } else {
+            notable.push(event);
+        }
+    }
+    let mut parts: Vec<String> = notable
         .iter()
         .take(3)
         .map(|event| {
@@ -1487,11 +1524,19 @@ pub(crate) fn render_feedback_group(
                 truncate_label(&event.text, 120)
             )
         })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let omitted = feedback.len().saturating_sub(3);
+        .collect();
+    if !churn_counts.is_empty() {
+        let churn_summary = churn_counts
+            .iter()
+            .map(|(kind, count)| format!("{count}x {kind}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("[market/city churn collapsed: {churn_summary}]"));
+    }
+    let summaries = parts.join(" | ");
+    let omitted = notable.len().saturating_sub(3);
     let suffix = if omitted > 0 {
-        format!(" (+{omitted} more)")
+        format!(" (+{omitted} more notable)")
     } else {
         String::new()
     };

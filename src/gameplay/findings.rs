@@ -47,6 +47,7 @@ pub(crate) fn derive_findings(
     add_rival_commercial_pressure_finding(aggregate, campaigns, &mut findings);
     add_succession_cohesion_finding(campaigns, &mut findings);
     add_succession_political_recovery_finding(campaigns, &mut findings);
+    add_short_horizon_legacy_truncation_finding(aggregate, campaigns, &mut findings);
     add_long_substantive_gap_finding(campaigns, &mut findings);
     add_asset_liquidity_drought_finding(campaigns, &mut findings);
     add_economic_recovery_dead_end_finding(campaigns, &mut findings);
@@ -603,6 +604,52 @@ pub(crate) fn add_succession_political_recovery_finding(
             campaign.end.offices_held,
             campaign.end.player_institutions_represented,
             campaign.end.legitimacy,
+        ),
+    });
+}
+
+pub(crate) fn add_short_horizon_legacy_truncation_finding(
+    aggregate: &GameplayAggregate,
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    // The default 1080-day gate ends where the dynastic fantasy begins: office
+    // is usually reached by day ~700 while succession clusters at the horizon
+    // edge, so the legacy aftermath is truncated rather than played. Longer
+    // 7200-day runs own the full succession verdict; this short-horizon
+    // signal keeps pacing visible in every gate without duplicating it.
+    let average_days = average_campaign_days(aggregate);
+    if average_days < 720 || average_days >= 3_600 || campaigns.is_empty() {
+        return;
+    }
+    let office_reached = campaigns
+        .iter()
+        .filter(|campaign| campaign.fantasy_arc.first_office_day.is_some())
+        .count();
+    let succession_reached = campaigns
+        .iter()
+        .filter(|campaign| campaign.fantasy_arc.first_succession_day.is_some())
+        .count();
+    if scaled_ratio_usize(office_reached, campaigns.len(), 100) < 75
+        || scaled_ratio_usize(succession_reached, campaigns.len(), 100) >= 50
+    {
+        return;
+    }
+    let mut succession_days: Vec<i64> = campaigns
+        .iter()
+        .filter_map(|campaign| campaign.fantasy_arc.first_succession_day)
+        .collect();
+    succession_days.sort_unstable();
+    let median_succession = succession_days
+        .get(succession_days.len() / 2)
+        .copied()
+        .unwrap_or(0);
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Info,
+        title: "Short-horizon legacy aftermath is truncated".to_owned(),
+        evidence: format!(
+            "{office_reached} of {} campaigns reached office but only {succession_reached} reached succession within {average_days} average days (median succession day {median_succession}). The founder builds standing and wins authority inside the measured horizon, but the heir's aftermath mostly falls beyond it; use generation-length runs to judge dynastic continuity rather than treating the short horizon as a full legacy verdict.",
+            campaigns.len(),
         ),
     });
 }

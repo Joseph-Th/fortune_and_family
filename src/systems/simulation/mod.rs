@@ -356,9 +356,9 @@ const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASIS
 /// annual chance ramp, the first transition falls inside a playable session
 /// while founders aged 54-56 have time to establish institutional standing
 /// before succession pressure begins. Eligibility at 56 keeps the youngest
-/// founders two years clear of the first roll so office (median day ~600)
-/// normally precedes succession; the steeper yearly ramp below still pulls
-/// the median into the third campaign year.
+/// founders near the first roll so office (median day ~600) normally precedes
+/// succession; the steeper yearly ramp below still pulls the median into
+/// the third campaign year.
 const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 56;
 
 /// Health floor an heir resumes natural aging from on accession. The annual
@@ -428,17 +428,14 @@ pub(crate) fn business_status_after_capitalization(
 }
 
 /// Annual succession-chance pressure per year of head age past the eligibility
-/// threshold. The rate places the median first transition near 800-1000 days
-/// (late second to middle third year): late enough that a founder pursuing
-/// institutional standing reliably reaches office and established memberships
-/// before succession tests continuity, early enough that dynastic continuity
-/// remains ordinary play rather than only generation-length simulations.
-/// Steeper than the old 280 bp so the post-eligibility ramp compresses
-/// world-seed variance instead of letting one seed die in year one and
-/// another never die in three years. At 1500 bp the median lands near
-/// day 720-900: founders who win office are tested by succession in the
-/// same session that made them powerful, with enough horizon left to
-/// play the legacy aftermath.
+/// threshold. The rate places first transitions in the third campaign year:
+/// late enough that a founder pursuing institutional standing reliably
+/// reaches office and established memberships before succession tests
+/// continuity. Steeper than the old 280 bp so the post-eligibility ramp
+/// compresses world-seed variance instead of letting one seed die in year
+/// one and another never die in three years. The 1080-day gate ends where
+/// the legacy aftermath begins; generation-length runs own the full
+/// continuity verdict.
 const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 1500;
 
 fn decide_business_production(

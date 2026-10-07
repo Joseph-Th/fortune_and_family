@@ -419,13 +419,14 @@ fn insert_dynasty(
             // becomes material, so the first generational transition lands
             // inside the campaign session that builds the dynasty rather
             // than beyond it. At 54-56 years with eligibility at 56 the
-            // median first succession sits near 800-1000 days: late enough
-            // that a founder who pursues institutional standing reliably
-            // reaches office and established memberships before succession
-            // tests continuity, early enough that dynastic continuity
-            // remains ordinary play. Steeper per-year age pressure (1500 bp)
-            // compresses world-seed variance so year-one deaths before office
-            // become rare without pushing continuity beyond a session.
+            // median first succession sits near the third campaign year:
+            // late enough that a founder who pursues institutional standing
+            // reliably reaches office and established memberships before
+            // succession tests continuity. Steeper per-year age pressure
+            // (1500 bp) compresses world-seed variance so year-one deaths
+            // before office stay rare; the 1080-day gate ends where the
+            // legacy aftermath begins, so generation-length runs own the
+            // full continuity verdict.
             birth_day: -19_600 - i64::from(state.rng.range_u32(720)),
         },
         capabilities: CharacterCapabilities {

@@ -208,9 +208,10 @@ Unexecuted routes aggregate into three summary findings by cause: activations wi
 
 Each step records its phase and three consequence profiles: immediate changes at commit, action-attributable changes at the horizon vs the baseline, and ambient baseline changes. Feedback groups state coverage (`simulation_window_days`, `ambient_window_days`): substantive cycles attribute over the horizon; quiet cycles use the ordinary advance for both.
 
-Traces retain bounded outbox and chronicle feedback events. Alternatives carry `projected_horizon_days` and compare over a shared horizon of three decision intervals bounded by `max_consequence_horizon_days`. The human log deduplicates identical projected outcomes and caps quiet-reason lists with a remainder count; the structured report keeps full lists.
+Traces retain bounded outbox and chronicle feedback events. Alternatives carry `projected_horizon_days` and compare over a shared horizon of three decision intervals bounded by `max_consequence_horizon_days`.
+The human log deduplicates identical projected outcomes, marks close score calls within the persona variation band, collapses routine market and business churn into counts while keeping player-directed notices legible, and caps quiet-reason lists with a remainder count; the structured report keeps full lists.
 
-Context lines carry treasury, business cash, offices, legitimacy, generation, and legal exposure.
+Context lines carry treasury, business cash, offices, legitimacy, generation, head age and health, and legal exposure.
 
 ### Operational routes and pacing
 
