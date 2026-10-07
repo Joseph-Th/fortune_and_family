@@ -1302,7 +1302,7 @@ pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut S
             };
             let _ = writeln!(
                 output,
-                "  day {:>4} {:<19} | treasury {:>9} | biz {:>9} | businesses {}{} | offices {} | legit {:.0}% | gen {} head {}y {:.0}%{} | crises {} | {}",
+                "  day {:>4} {:<19} | treasury {:>9} | biz {:>9} | businesses {}{} | offices {} | legit {:.0}% | deliv {:>3} rep {:.0}% | gen {} head {}y {:.0}%{} | crises {} | {}",
                 step.day,
                 phase_label_at_day(&campaign.fantasy_arc, step.day),
                 context.player_treasury,
@@ -1315,6 +1315,12 @@ pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut S
                 },
                 context.offices_held,
                 f64::from(context.legitimacy) / 100.0,
+                context.player_contract_deliveries,
+                f64::from(
+                    context
+                        .quality_reputation
+                        .max(context.reliability_reputation)
+                ) / 100.0,
                 context.generation,
                 context.player_head_age_years,
                 f64::from(context.player_head_health_basis_points) / 100.0,
@@ -1488,21 +1494,27 @@ pub(crate) fn render_feedback_group(
         None => label.to_owned(),
     };
     // City-wide market ticks and business churn drown player-relevant signals:
-    // collapse routine PriceShock / distress / recovery / new-year chronicle
-    // noise into counts so crisis, succession, office, legal, contract, and
-    // family events stay legible. Outbox notices are always player-directed
-    // and keep priority.
-    let is_churn = |kind: &str| {
-        matches!(
-            kind,
-            "PriceShock" | "BusinessDistress" | "BusinessRecovered" | "NewYear"
-        )
-    };
+    // collapse routine distress / recovery / new-year chronicle noise into
+    // counts so crisis, succession, office, legal, contract, and family events
+    // stay legible. Price shocks name their good and price ("Flour ... to
+    // 0.25 cr"), which is exactly the commercial intelligence the fantasy
+    // needs, so the first two stay legible and only the remainder collapses.
+    // Outbox notices are always player-directed and keep priority.
+    let is_collapsible_churn =
+        |kind: &str| matches!(kind, "BusinessDistress" | "BusinessRecovered" | "NewYear");
     let mut notable = Vec::new();
+    let mut price_shock_kept = 0_usize;
     let mut churn_counts: std::collections::BTreeMap<&str, usize> =
         std::collections::BTreeMap::new();
     for event in feedback {
-        if event.channel == "chronicle" && is_churn(&event.kind) {
+        if event.channel == "chronicle" && event.kind == "PriceShock" {
+            if price_shock_kept < 2 {
+                price_shock_kept += 1;
+                notable.push(event);
+            } else {
+                *churn_counts.entry(event.kind.as_str()).or_default() += 1;
+            }
+        } else if event.channel == "chronicle" && is_collapsible_churn(&event.kind) {
             *churn_counts.entry(event.kind.as_str()).or_default() += 1;
         } else {
             notable.push(event);

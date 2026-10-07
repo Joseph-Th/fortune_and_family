@@ -78,8 +78,8 @@ const AI_DYNASTY_UPKEEP_PER_BUSINESS: Money = Money::from_copper(400);
 /// threshold each month. Hoarded treasure therefore bleeds instead of
 /// compounding without limit, keeping rivals reachably mortal and the city's
 /// wealth circulating through the same economy everyone else uses.
-const AI_DYNASTY_WEALTH_UPKEEP_THRESHOLD: Money = Money::from_copper(40_000);
-const AI_DYNASTY_WEALTH_UPKEEP_BASIS_POINTS: i64 = 200;
+const AI_DYNASTY_WEALTH_UPKEEP_THRESHOLD: Money = Money::from_copper(30_000);
+const AI_DYNASTY_WEALTH_UPKEEP_BASIS_POINTS: i64 = 300;
 const AI_DYNASTY_UPKEEP_SHORTFALL_LEGITIMACY_PENALTY: u16 = 60;
 const AI_DYNASTY_UPKEEP_SHORTFALL_RELIABILITY_PENALTY: u16 = 120;
 const OFFICE_DUTY_FAILURE_NOTIFICATION_INTERVAL_DAYS: i64 = 90;

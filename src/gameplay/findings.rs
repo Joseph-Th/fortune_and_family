@@ -1394,6 +1394,19 @@ pub(crate) fn add_crisis_determinism_finding(
         return;
     }
     let total = campaigns.len();
+    // Personas sharing a seed share a world, so crisis kinds are world
+    // content: count distinct world seeds, not campaigns, before calling a
+    // schedule deterministic. Twelve personas in two worlds that both fire
+    // NobleDemand is 2/2 worlds, not 24 independent rolls.
+    let mut worlds: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    let mut kind_worlds: std::collections::BTreeMap<CrisisKind, std::collections::BTreeSet<u64>> =
+        std::collections::BTreeMap::new();
+    for campaign in campaigns {
+        worlds.insert(campaign.seed);
+        for kind in &campaign.observed_crisis_kinds {
+            kind_worlds.entry(*kind).or_default().insert(campaign.seed);
+        }
+    }
     let mut kind_counts: std::collections::BTreeMap<CrisisKind, usize> =
         std::collections::BTreeMap::new();
     for campaign in campaigns {
@@ -1401,14 +1414,17 @@ pub(crate) fn add_crisis_determinism_finding(
             *kind_counts.entry(*kind).or_default() += 1;
         }
     }
-    for (kind, count) in &kind_counts {
-        let share = scaled_ratio_usize(*count, total, 100);
-        if share >= 95 {
+    let world_total = worlds.len().max(1);
+    for (kind, seeds) in &kind_worlds {
+        let count = kind_counts.get(kind).copied().unwrap_or(0);
+        let world_share = scaled_ratio_usize(seeds.len(), world_total, 100);
+        if world_share >= 95 && seeds.len() >= 3 {
             findings.push(GameplayFinding {
                 severity: GameplayFindingSeverity::Info,
                 title: format!("{kind:?} is near-deterministic, not emergent"),
                 evidence: format!(
-                    "{count} of {total} campaigns observed {kind:?} ({share}%). When a crisis kind appears in essentially every world seed it is a guaranteed schedule rather than an emergent response to structural weakness. Consider raising its disruption/threshold so route and credit stress must actually accumulate.",
+                    "{count} of {total} campaigns across {} of {world_total} worlds observed {kind:?} ({world_share}% of worlds). When a crisis kind appears in essentially every world seed it is a guaranteed schedule rather than an emergent response to structural weakness. Consider raising its disruption/threshold so route and credit stress must actually accumulate.",
+                    seeds.len(),
                 ),
             });
         }
@@ -3494,7 +3510,7 @@ pub(crate) fn add_absolute_fantasy_pacing_finding(
                     campaign.fantasy_arc.first_city_shaping_action_day,
                 ),
                 (Some(standing), Some(support), Some(campaign_day), Some(city_day))
-                    if standing <= 420 && support <= 480 && campaign_day <= 600 && city_day <= 900
+                    if standing <= 300 && support <= 360 && campaign_day <= 480 && city_day <= 720
             )
         })
         .count();
@@ -3505,7 +3521,7 @@ pub(crate) fn add_absolute_fantasy_pacing_finding(
         severity: GameplayFindingSeverity::Warning,
         title: "The core fantasy arc is compressed into the opening establishment cycle".to_owned(),
         evidence: format!(
-            "{compressed} of {} campaigns established a commercial record within 420 days, cultivated institutional support within 480 days, began an office campaign within 600 days, and exercised city-shaping power within 900 days. Foundation, social ascent, and institutional authority may not be receiving distinct enough phases for a multi-generation campaign.",
+            "{compressed} of {} campaigns established a commercial record within 300 days, cultivated institutional support within 360 days, began an office campaign within 480 days, and exercised city-shaping power within 720 days. Foundation, social ascent, and institutional authority may not be receiving distinct enough phases for a multi-generation campaign.",
             eligible.len()
         ),
     });

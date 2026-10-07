@@ -8458,6 +8458,68 @@ mod findings {
     }
 
     #[test]
+    fn crisis_determinism_counts_worlds_not_campaigns() {
+        let report = cached_focused_report(30);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        // Eight campaigns sharing two worlds: every persona sees NobleDemand
+        // because the world fired it, not because the schedule is
+        // deterministic. Two worlds cannot prove determinism.
+        let shared_worlds: Vec<_> = (0_u64..8)
+            .map(|index| {
+                let mut campaign = template.clone();
+                campaign.seed = 1 + (index % 2);
+                campaign.simulated_days = 1_080;
+                campaign.observed_crisis_kinds.clear();
+                campaign
+                    .observed_crisis_kinds
+                    .insert(CrisisKind::NobleDemand);
+                campaign
+            })
+            .collect();
+        let mut aggregate = report.aggregate.clone();
+        aggregate.campaigns = 8;
+        aggregate.simulated_days = 8_640;
+        let mut shared_findings = Vec::new();
+        add_crisis_determinism_finding(&aggregate, &shared_worlds, &mut shared_findings);
+        assert!(
+            shared_findings.is_empty(),
+            "two shared worlds observing one crisis kind must not read as deterministic"
+        );
+
+        // Nine campaigns across three worlds: every world fired it, so the
+        // schedule is deterministic and the evidence must say worlds.
+        let distinct_worlds: Vec<_> = (0_u64..9)
+            .map(|index| {
+                let mut campaign = template.clone();
+                campaign.seed = 1 + (index % 3);
+                campaign.simulated_days = 1_080;
+                campaign.observed_crisis_kinds.clear();
+                campaign
+                    .observed_crisis_kinds
+                    .insert(CrisisKind::NobleDemand);
+                campaign
+            })
+            .collect();
+        aggregate.campaigns = 9;
+        aggregate.simulated_days = 9_720;
+        let mut distinct_findings = Vec::new();
+        add_crisis_determinism_finding(&aggregate, &distinct_worlds, &mut distinct_findings);
+        let finding = finding_with_title(
+            &distinct_findings,
+            "NobleDemand is near-deterministic, not emergent",
+        );
+        assert!(
+            finding.evidence.contains("3 of 3 worlds"),
+            "determinism evidence must count worlds, not campaigns: {}",
+            finding.evidence
+        );
+    }
+
+    #[test]
     fn findings_surface_a_city_where_counterparty_performance_never_fails() {
         let report = cached_focused_report(30);
         let template = report

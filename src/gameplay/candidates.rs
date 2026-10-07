@@ -3589,9 +3589,11 @@ pub(crate) fn has_acquisition_borrow_need(
     })
 }
 
-/// Fresh ordinary advances scale to the lender's available treasury.
+/// Fresh ordinary advances scale to the lender's available treasury, capped
+/// below the commercial-standing grind so a single loan cannot pledge the
+/// house's whole property base for one year's deliveries.
 pub(crate) fn borrow_principal(lender_treasury: Money) -> Money {
-    Money::from_copper((lender_treasury.copper() / 8).clamp(1_000, 12_000))
+    Money::from_copper((lender_treasury.copper() / 10).clamp(1_000, 8_000))
 }
 
 pub(crate) fn lending_limits(persona: GameplayPersona) -> (Money, usize) {
