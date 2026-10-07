@@ -354,7 +354,7 @@ const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASIS
 
 /// Heads become eligible for succession at this age. Combined with the
 /// annual chance ramp, the first transition falls inside a playable session
-/// while founders aged 50-52 have time to establish institutional standing
+/// while founders aged 54-56 have time to establish institutional standing
 /// before succession pressure begins.
 const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 52;
 
@@ -425,8 +425,8 @@ pub(crate) fn business_status_after_capitalization(
 }
 
 /// Annual succession-chance pressure per year of head age past the eligibility
-/// threshold. The rate places the median first transition near 850-1050 days
-/// (late second to early third year): late enough that a founder pursuing
+/// threshold. The rate places the median first transition near 900-1100 days
+/// (middle third year): late enough that a founder pursuing
 /// institutional standing reliably reaches office and established memberships
 /// before succession tests continuity, early enough that dynastic continuity
 /// remains ordinary play rather than only generation-length simulations.

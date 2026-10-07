@@ -52,7 +52,10 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
         .phase_stats
         .get(&GameplayPhase::DynasticGovernance)
         .map_or(0.0, |s| {
-            f64::from(s.decision_cycles) / total / f64::from(aggregate.campaigns) * 100.0
+            #[allow(clippy::cast_precision_loss)]
+            let share =
+                f64::from(s.decision_cycles) * 100.0 / aggregate.decision_cycles.max(1) as f64;
+            share
         });
     let succession_reached = report
         .campaigns
@@ -241,7 +244,7 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
             .map_or(0, |c| c.rival_context.dynasty_count);
         let _ = writeln!(
             output,
-            "  wealth mobility: {poorest}/{} bottom-ranked | best rank {best_rank}/{dynasty_cnt}",
+            "  wealth standing: {poorest}/{} bottom-ranked | best rank {best_rank}/{dynasty_cnt}",
             report.campaigns.len()
         );
     }
@@ -778,7 +781,7 @@ pub(crate) fn render_health_summary(report: &GameplayHarnessReport, output: &mut
     let _ = writeln!(output, "Experience health");
     let _ = writeln!(
         output,
-        "  trajectory ranges: city food {:.2}-{:.2}% | worst district food {:.2}-{:.2}% | operating businesses {}-{} | peak offices {}-{}/{} | represented institutions {}-{}/{} | peak unread {}-{}",
+        "  trajectory ranges (worst day per campaign): city food {:.2}-{:.2}% | worst district food {:.2}-{:.2}% | minimum operating businesses {}-{} | peak offices {}-{}/{} | represented institutions {}-{}/{} | peak unread {}-{}",
         f64::from(summary.minimum_food.0) / 100.0,
         f64::from(summary.minimum_food.1) / 100.0,
         f64::from(summary.minimum_district_food.0) / 100.0,
@@ -1063,7 +1066,7 @@ pub(crate) fn render_quiet_diagnosis(report: &GameplayHarnessReport, output: &mu
         );
         let _ = writeln!(
             output,
-            "    (world offered the route but the house had no material need: wages were already fair, investments were healthy, governance cooldowns not yet strategic; this is intentional pacing, not missing content)"
+            "    (the canonical game would still accept these routes — a human could invest in a healthy shop, commission intelligence, support an institution, or educate family — but the agent narrows them to strategic-need conditions, so long quiet streaks mean peacetime offered little urgent work, not that the game forbids action; acknowledge counts are housekeeping fallbacks, not choices)"
         );
     }
     if !diagnostic.generator_gaps.is_empty() {

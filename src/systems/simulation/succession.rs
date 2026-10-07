@@ -761,8 +761,8 @@ pub(crate) fn succession_chance_basis_points(
         return 0;
     }
     // The ramp must mature succession pressure inside the session that builds
-    // the dynasty: founders begin at 56-58 years old, so this rate puts the
-    // median first transition in the second or third campaign year while
+    // the dynasty: founders begin at 54-56 years old, so this rate puts the
+    // median first transition in the third campaign year while
     // still leaving most of an establishment phase untouched.
     let age_pressure = (age_years - SUCCESSION_ELIGIBILITY_AGE_YEARS)
         .saturating_mul(AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY);
