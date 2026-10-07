@@ -2087,6 +2087,57 @@ mod household_demand {
         );
     }
 
+    #[test]
+    fn dear_ale_halves_household_demand_without_vanishing() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let ale_id = registry
+            .get_good_id("ale")
+            .expect("registry must define ale");
+        let reference_price = registry
+            .get_good(ale_id)
+            .expect("ale must exist in the registry")
+            .base_price();
+        for household in state.households.iter_mut() {
+            household.cash = Money::from_copper(100_000);
+        }
+        for quote in state.market.quotes.values_mut() {
+            quote.stock = Quantity::from_units(10_000);
+        }
+        let reference_plan = decide_household_consumption(registry, &state);
+        let demand_at_reference = demand_of(&reference_plan, ale_id);
+        assert!(demand_at_reference > Quantity::ZERO);
+
+        // A price four times the reference halves demand at the habitual
+        // floor: households drink less instead of ratcheting a shortage.
+        state
+            .market
+            .quotes
+            .get_mut(&ale_id)
+            .expect("ale quote must exist")
+            .price = reference_price.saturating_mul(4);
+        let dear_plan = decide_household_consumption(registry, &state);
+        let demand_when_dear = demand_of(&dear_plan, ale_id);
+
+        assert!(
+            demand_when_dear.milliunits() * 2 <= demand_at_reference.milliunits(),
+            "dear ale must scale household demand back to roughly half: reference={demand_at_reference}, dear={demand_when_dear}"
+        );
+        assert!(
+            demand_when_dear.milliunits() * 10 >= demand_at_reference.milliunits() * 4,
+            "price discipline must not collapse ale demand below the habitual floor: reference={demand_at_reference}, dear={demand_when_dear}"
+        );
+    }
+
+    fn demand_of(plan: &HouseholdConsumptionPlan, good_id: GoodId) -> Quantity {
+        plan.lines
+            .iter()
+            .filter(|line| line.good_id == good_id)
+            .fold(Quantity::ZERO, |total, line| {
+                total.saturating_add(line.quantity)
+            })
+    }
+
     fn cloth_demand_of(plan: &HouseholdConsumptionPlan, cloth_id: GoodId) -> Quantity {
         plan.lines
             .iter()

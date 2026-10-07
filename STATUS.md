@@ -12,7 +12,7 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 | Save schema | 31 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 84 |
+| Gameplay report schema | 85 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |

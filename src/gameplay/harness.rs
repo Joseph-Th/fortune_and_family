@@ -1271,8 +1271,8 @@ pub(crate) fn build_rival_context(state: &AppState) -> GameplayRivalContext {
             .into_iter()
             .flatten()
             .filter_map(|business_id| state.businesses.get(*business_id))
-            .map(|business| business.cash())
-            .fold(Money::ZERO, |total, cash| total.saturating_add(cash))
+            .map(crate::core::Business::cash)
+            .fold(Money::ZERO, Money::saturating_add)
     };
     let property_value_by_dynasty = |dynasty_id: DynastyId| -> Money {
         state
@@ -1280,7 +1280,7 @@ pub(crate) fn build_rival_context(state: &AppState) -> GameplayRivalContext {
             .values()
             .filter(|property| property.owner_dynasty_id == Some(dynasty_id))
             .map(|property| property.value)
-            .fold(Money::ZERO, |total, value| total.saturating_add(value))
+            .fold(Money::ZERO, Money::saturating_add)
     };
     let standings: Vec<GameplayRivalStanding> = state
         .dynasties

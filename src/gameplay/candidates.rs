@@ -2056,6 +2056,22 @@ pub(crate) fn generate_business_investment_candidate(
     ) {
         return;
     }
+    // A deeply losing firm is not recapitalized: lifetime costs more than
+    // 30% above lifetime revenue mark a bad rescue that would churn treasury
+    // without recovering, mirroring the autonomous houses' own rescue rule.
+    // The exception is the last firm standing, where retreat means losing
+    // the portfolio's only income entirely.
+    let portfolio_emergency = player_has_no_active_business(state);
+    if !portfolio_emergency
+        && business.finance.lifetime_revenue > Money::ZERO
+        && business.finance.lifetime_costs
+            > business
+                .finance
+                .lifetime_revenue
+                .saturating_mul_ratio(130, 100)
+    {
+        return;
+    }
     if has_internal_cash_recovery(registry, state, business) {
         return;
     }
@@ -2073,7 +2089,6 @@ pub(crate) fn generate_business_investment_candidate(
         .is_some_and(|good| good.category() == GoodCategory::Staple)
         && average_food_satisfaction < 5_000;
     let severe_rehabilitation = business.operations.condition_basis_points < 2_000;
-    let portfolio_emergency = player_has_no_active_business(state);
     let dynasty_reserve = if portfolio_emergency {
         Money::ZERO
     } else if severe_rehabilitation {
@@ -3398,6 +3413,21 @@ pub(crate) fn add_borrow_candidate(
                 && defaulted_loan_restructuring_available(state, loan)
         })
         .min_by_key(|loan| (loan.next_due_day, loan.id));
+    // A strained house works out its existing claims instead of shopping
+    // fresh debt around the city: while any player borrowing stands
+    // delinquent or defaulted, fresh advances wait for the cure or the
+    // workout window even when another lender would canonically advance.
+    // Recovery precedes growth; the activation predicate still mirrors the
+    // game's pair-scoped gate, so the restraint reads as agent policy rather
+    // than a coverage hole.
+    if restructuring_default.is_none()
+        && state.loans.values().any(|loan| {
+            loan.borrower_dynasty_id == player_id
+                && matches!(loan.status, LoanStatus::Delinquent | LoanStatus::Defaulted)
+        })
+    {
+        return;
+    }
     if restructuring_default.is_none() {
         let fresh_lender_exists = state.dynasties.values().any(|dynasty| {
             dynasty.id() != player_id

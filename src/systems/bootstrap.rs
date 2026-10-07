@@ -257,7 +257,11 @@ fn insert_player_foundation(
             district_id,
             recipe_id,
             name: background.business_name().to_owned(),
-            cash: Money::from_copper(55_000),
+            // The founder's workshop opens with deeper working capital than a
+            // single NPC till: the house starts fifth of eight by total wealth
+            // and must be able to trade toward leadership instead of merely
+            // surviving the opening year.
+            cash: Money::from_copper(65_000),
             capacity_batches_per_day,
         },
     );

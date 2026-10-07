@@ -409,7 +409,7 @@ pub(crate) fn initialize_contracts(registry: &Registry, state: &mut AppState) {
                         .get_recipe(*seller_recipe_id)
                         .is_some_and(|recipe| recipe.output_good_id() == input.good_id())
                 });
-            let Some((seller_id, seller_owner, _)) = seller else {
+            let Some((seller_id, _, _)) = seller else {
                 continue;
             };
             let price = state
@@ -426,13 +426,7 @@ pub(crate) fn initialize_contracts(registry: &Registry, state: &mut AppState) {
                     .saturating_mul_ratio(STANDARD_CONTRACT_BATCHES_PER_WEEK, 1),
                 unit_price: price,
                 penalty: cost_for(input.quantity(), price).saturating_mul(2),
-                duration_weeks: if *buyer_owner == state.player_dynasty_id
-                    || *seller_owner == state.player_dynasty_id
-                {
-                    26
-                } else {
-                    52
-                },
+                duration_weeks: 52,
             };
             if let Ok(token) = validate_supply_contract(registry, state, terms) {
                 token.commit(registry, state).expect(

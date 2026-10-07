@@ -757,7 +757,7 @@ mod integration {
     use super::*;
 
     #[test]
-    fn player_bootstrap_contracts_are_provisional_while_city_contracts_stabilize_trade() {
+    fn bootstrap_contracts_stabilize_trade_for_every_house() {
         let state = make_test_campaign();
         let mut player_involved = 0;
         let mut ambient = 0;
@@ -777,12 +777,15 @@ mod integration {
                 .get(contract.seller_business_id)
                 .expect("contract seller must exist")
                 .owner_dynasty_id();
+            // Founding supply commitments last a full year for every house:
+            // the player's input security matches the city's, so commercial
+            // standing is earned through performance rather than fitted with
+            // a shorter leash.
+            assert_eq!(contract.end_day, 52 * 7);
             if buyer_owner == state.player_dynasty_id || seller_owner == state.player_dynasty_id {
                 player_involved += 1;
-                assert_eq!(contract.end_day, 26 * 7);
             } else {
                 ambient += 1;
-                assert_eq!(contract.end_day, 52 * 7);
             }
         }
 

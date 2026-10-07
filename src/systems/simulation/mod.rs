@@ -1182,12 +1182,14 @@ fn decide_household_consumption(registry: &Registry, state: &AppState) -> Househ
         stock[slot] = quote.stock;
         prices[slot] = quote.price;
     }
-    // Cloth demand discipline scales with the market's current reference-price
+    // Demand discipline scales with each market's current reference-price
     // ratio, which is identical for every household in the same planning pass.
-    // Resolving the good and its ratio once per day keeps the per-household
+    // Resolving the ratios once per day keeps the per-household
     // loop free of repeated registry string lookups without changing any
     // computed value.
-    let cloth_ratio_basis_points = cloth_price_ratio_basis_points(registry, state);
+    let cloth_ratio_basis_points =
+        price_discipline_ratio_basis_points(registry, state, "cloth", 2_500);
+    let ale_ratio_basis_points = price_discipline_ratio_basis_points(registry, state, "ale", 5_000);
     let mut lines = Vec::new();
     let mut food_satisfaction = BTreeMap::new();
     let mut households: Vec<_> = state.households.iter().collect();
@@ -1216,20 +1218,22 @@ fn decide_household_consumption(registry: &Registry, state: &AppState) -> Househ
             food_acquired = food_acquired.saturating_add(quantity);
         }
         let (charcoal_need, cloth_need) = household_secondary_needs(household.social_class());
-        // Cloth is the one secondary staple whose market must stay balanced
-        // against the city's weaving capacity. Households do not pay any
-        // price for it: dear cloth means mending and waiting, so demand
-        // scales down with the going price instead of ratcheting a shortage
-        // ever upward. Tools are an industrial input consumed only by
-        // workshops and civic construction; households do not consume tools
-        // as a daily staple, so tool demand is driven by production and
-        // maintenance rather than household shopping.
-        let cloth_need = match cloth_ratio_basis_points {
-            Some(ratio_basis_points) => cloth_need.saturating_mul_ratio(ratio_basis_points, 10_000),
-            None => cloth_need,
-        };
+        // Cloth must stay balanced against the city's weaving capacity and
+        // ale against its brewing capacity: dear cloth means mending and
+        // waiting, dear ale means halving the habitual cup, so both scale
+        // down with the going price instead of ratcheting a shortage ever
+        // upward. Tools are an industrial input consumed only by workshops
+        // and civic construction; households do not consume tools as a daily
+        // staple, so tool demand is driven by production and maintenance
+        // rather than household shopping.
+        let (ale_need, cloth_need) = disciplined_discretionary_needs(
+            household,
+            cloth_need,
+            cloth_ratio_basis_points,
+            ale_ratio_basis_points,
+        );
         for (good_id, need) in [
-            (ale_id, household.ale_need_daily),
+            (ale_id, ale_need),
             (charcoal_id, charcoal_need),
             (cloth_id, cloth_need),
         ] {
@@ -1306,7 +1310,7 @@ fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity) 
     // nominal cloth needs sit just under the city's weaving capacity (the
     // player's loomhouse plus the Veyra workshop), so both weavers sell at
     // viable margins instead of glutting the market into structural losses,
-    // while [`cloth_price_ratio_basis_points`] scales need back when prices
+    // while [`price_discipline_ratio_basis_points`] scales need back when prices
     // climb so a shortage cannot ratchet. The household income in bootstrap is
     // calibrated to carry this budget alongside food. Tools are industrial
     // inputs for workshops and civic works, not household staples.
@@ -1321,22 +1325,52 @@ fn household_secondary_needs(social_class: SocialClass) -> (Quantity, Quantity) 
     )
 }
 
-/// Cloth demand's price-discipline ratio in basis points, resolved once per
-/// planning pass: at or below the good's registry reference price households
-/// buy their full clothing need; above it they economize proportionally,
-/// never falling below a quarter of the need. Without this response, a
-/// crisis- or shortage-driven cloth price spike ratchets unchecked because
-/// fixed demand cannot answer a rising price, and households burn their food
-/// buffer on expensive cloth.
-fn cloth_price_ratio_basis_points(registry: &Registry, state: &AppState) -> Option<i64> {
-    let cloth_id = registry.get_good_id("cloth")?;
+/// Applies market price discipline to the discretionary daily needs: cloth
+/// scales to its price ratio with the mending-and-waiting floor, ale to its
+/// ratio with the higher habitual-cup floor. A multi-year stockout of either
+/// cannot ratchet its price upward forever.
+fn disciplined_discretionary_needs(
+    household: &crate::core::Household,
+    cloth_need: Quantity,
+    cloth_ratio_basis_points: Option<i64>,
+    ale_ratio_basis_points: Option<i64>,
+) -> (Quantity, Quantity) {
+    let cloth_need = match cloth_ratio_basis_points {
+        Some(ratio_basis_points) => cloth_need.saturating_mul_ratio(ratio_basis_points, 10_000),
+        None => cloth_need,
+    };
+    let ale_need = match ale_ratio_basis_points {
+        Some(ratio_basis_points) => household
+            .ale_need_daily
+            .saturating_mul_ratio(ratio_basis_points, 10_000),
+        None => household.ale_need_daily,
+    };
+    (ale_need, cloth_need)
+}
+
+/// Price-discipline ratio for a discretionary good in basis points, resolved
+/// once per planning pass: at or below the good's registry reference price
+/// households buy their full need; above it they economize proportionally,
+/// never falling below `floor_basis_points` of the need. Without this
+/// response, a shortage-driven price spike ratchets unchecked because fixed
+/// demand cannot answer a rising price, and households burn their food
+/// buffer on the dear good. Cloth carries the lower floor (mending and
+/// waiting); ale carries the higher floor (the habitual cup halves but
+/// does not vanish).
+fn price_discipline_ratio_basis_points(
+    registry: &Registry,
+    state: &AppState,
+    good_key: &str,
+    floor_basis_points: i64,
+) -> Option<i64> {
+    let good_id = registry.get_good_id(good_key)?;
     let reference = registry
-        .get_good(cloth_id)
+        .get_good(good_id)
         .map(crate::registry::GoodDef::base_price)?;
-    let quote = state.market.quotes.get(&cloth_id)?;
+    let quote = state.market.quotes.get(&good_id)?;
     let reference_copper = reference.copper().max(1);
     let current_copper = quote.price.copper().max(1);
-    Some((reference_copper * 10_000 / current_copper).clamp(2_500, 10_000))
+    Some((reference_copper * 10_000 / current_copper).clamp(floor_basis_points, 10_000))
 }
 
 fn apply_household_consumption(

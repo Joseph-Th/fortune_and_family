@@ -680,7 +680,7 @@ pub(crate) fn add_short_horizon_legacy_truncation_finding(
     // 7200-day runs own the full succession verdict; this short-horizon
     // signal keeps pacing visible in every gate without duplicating it.
     let average_days = average_campaign_days(aggregate);
-    if average_days < 720 || average_days >= 3_600 || campaigns.is_empty() {
+    if !(720_u64..3_600_u64).contains(&average_days) || campaigns.is_empty() {
         return;
     }
     let office_reached = campaigns
@@ -3537,7 +3537,15 @@ pub(crate) fn add_fantasy_arc_compression_findings(
                     campaign.fantasy_arc.first_office_day,
                     campaign.fantasy_arc.first_city_shaping_action_day,
                 ),
-                (Some(office), Some(city_action)) if city_action <= office.saturating_add(90)
+                // The window tracks the office-power vesting wait: shaping the
+                // season power vests is the designed payoff, so only action
+                // with no intervening duties period at all trips the wire.
+                // Office days carry observation granularity (up to one
+                // decision interval late), so the comparison stays a
+                // tripwire rather than a precise duties count.
+                (Some(office), Some(city_action))
+                    if city_action
+                        <= office.saturating_add(OFFICE_POWER_ESTABLISHMENT_DAYS)
             )
         })
         .count();
@@ -3546,8 +3554,9 @@ pub(crate) fn add_fantasy_arc_compression_findings(
             severity: GameplayFindingSeverity::Warning,
             title: "Officeholding immediately becomes city-shaping power".to_owned(),
             evidence: format!(
-                "{immediate_city_power} of {} campaigns sponsored a law, started a public work, or issued an office directive within 90 days of first taking office, leaving little time for office-specific duties or coalition building.",
-                campaigns.len()
+                "{immediate_city_power} of {} campaigns sponsored a law, started a public work, or issued an office directive within {} days of first taking office, leaving little time for office-specific duties or coalition building.",
+                campaigns.len(),
+                OFFICE_POWER_ESTABLISHMENT_DAYS
             ),
         });
     }
@@ -3574,8 +3583,14 @@ pub(crate) fn add_absolute_fantasy_pacing_finding(
                     campaign.fantasy_arc.first_office_campaign_day,
                     campaign.fantasy_arc.first_city_shaping_action_day,
                 ),
+                // The bars mark a first-year completion: commercial record in
+                // the first third, support by mid-year, candidacy before the
+                // fourth quarter, shaping inside the opening year. A healthy
+                // arc reaches shaping in the second year and then governs, so
+                // only a collapse of the whole climb into the opening cycle
+                // trips the wire.
                 (Some(standing), Some(support), Some(campaign_day), Some(city_day))
-                    if standing <= 300 && support <= 360 && campaign_day <= 480 && city_day <= 720
+                    if standing <= 120 && support <= 180 && campaign_day <= 270 && city_day <= 360
             )
         })
         .count();
@@ -3586,7 +3601,7 @@ pub(crate) fn add_absolute_fantasy_pacing_finding(
         severity: GameplayFindingSeverity::Warning,
         title: "The core fantasy arc is compressed into the opening establishment cycle".to_owned(),
         evidence: format!(
-            "{compressed} of {} campaigns established a commercial record within 300 days, cultivated institutional support within 360 days, began an office campaign within 480 days, and exercised city-shaping power within 720 days. Foundation, social ascent, and institutional authority may not be receiving distinct enough phases for a multi-generation campaign.",
+            "{compressed} of {} campaigns established a commercial record within 120 days, cultivated institutional support within 180 days, began an office campaign within 270 days, and exercised city-shaping power within 360 days. Foundation, social ascent, and institutional authority may not be receiving distinct enough phases for a multi-generation campaign.",
             eligible.len()
         ),
     });

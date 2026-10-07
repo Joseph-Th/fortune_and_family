@@ -213,7 +213,7 @@ Each step records its phase and three consequence profiles: immediate changes at
 Traces retain bounded outbox and chronicle feedback events. Alternatives carry `projected_horizon_days` and compare over a shared horizon of three decision intervals bounded by `max_consequence_horizon_days`.
 The human log deduplicates identical projected outcomes, marks close score calls within the persona variation band, collapses routine market and business churn into counts while keeping player-directed notices legible, and caps quiet-reason lists with a remainder count; the structured report keeps full lists.
 
-Context lines carry treasury, business cash, offices, legitimacy, generation, head age and health, and legal exposure.
+Context lines carry treasury, business cash, offices, legitimacy, generation, head age and health, commercial-standing progress (deliveries and reputation against the office gates), and legal exposure.
 
 ### Operational routes and pacing
 

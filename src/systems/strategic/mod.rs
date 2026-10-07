@@ -409,7 +409,8 @@ fn grant_maturing_institution_support(state: &mut AppState) -> Result<(), Simula
     let Some(establishment_day) = day.checked_sub(INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS) else {
         return Ok(());
     };
-    // Patronage records mature exactly 90 days after they are appended, and
+    // Patronage records mature exactly INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS
+    // after they are appended, and
     // the audit log is day-ordered: skip to the single establishment day
     // instead of scanning the whole history every day.
     let start = state

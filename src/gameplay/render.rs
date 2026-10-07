@@ -266,10 +266,17 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
         .iter()
         .filter_map(|c| c.fantasy_arc.first_succession_day)
         .collect();
+    let mut shaping_days: Vec<i64> = report
+        .campaigns
+        .iter()
+        .filter_map(|c| c.fantasy_arc.first_city_shaping_action_day)
+        .collect();
     office_days.sort_unstable();
     succession_days.sort_unstable();
+    shaping_days.sort_unstable();
     let median_office = office_days.get(office_days.len() / 2).copied();
     let median_succession = succession_days.get(succession_days.len() / 2).copied();
+    let median_shaping = shaping_days.get(shaping_days.len() / 2).copied();
     let pacing_note = match (median_office, median_succession) {
         (Some(o), Some(s)) if o < s => "office leads succession (healthy)".to_owned(),
         (Some(o), Some(s)) => format!(
@@ -282,8 +289,9 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
     };
     let _ = writeln!(
         output,
-        "  timing: median office {} | median succession {} | {pacing_note}",
+        "  timing: median office {} | median city-shaping {} | median succession {} | {pacing_note}",
         median_office.map_or("—".to_owned(), |d| format!("day {d}")),
+        median_shaping.map_or("—".to_owned(), |d| format!("day {d}")),
         median_succession.map_or("—".to_owned(), |d| format!("day {d}")),
     );
     let _ = writeln!(
@@ -1146,13 +1154,20 @@ pub(crate) fn render_findings(report: &GameplayHarnessReport, output: &mut Strin
     let _ = writeln!(output);
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn render_campaign_summaries(report: &GameplayHarnessReport, output: &mut String) {
     let _ = writeln!(output, "Campaign summaries");
+    // Consecutive campaigns usually share a world seed, so their city
+    // leaderboards repeat with only small treasury drift. Render the full
+    // leaderboard once per distinct leader order and collapse repeats to one
+    // line so rival movement across seeds stays visible without burying
+    // per-campaign results in duplicated tables.
+    let mut last_leader_signature: Vec<String> = Vec::new();
     for campaign in &report.campaigns {
         let actions: u32 = campaign.commands.values().map(|stats| stats.executed).sum();
         let _ = writeln!(
             output,
-            "  seed {:>3} | {:<12} | {:<11?} | score {:>3} | actions {:>3} | choices {:>4} | treasury {} (peak {}) | businesses A:{} D:{} I:{}",
+            "  seed {:>3} | {:<12} | {:<11?} | score {:>3} | actions {:>3} | choices {:>4} | treasury {} (peak {}) | legit {:.0}% | businesses A:{} D:{} I:{}",
             campaign.seed,
             campaign.persona.label(),
             campaign.background,
@@ -1161,6 +1176,7 @@ pub(crate) fn render_campaign_summaries(report: &GameplayHarnessReport, output: 
             campaign.total_viable_choices,
             campaign.end.player_treasury,
             campaign.peak_player_treasury,
+            f64::from(campaign.end.legitimacy) / 100.0,
             campaign.end.active_businesses,
             campaign.end.distressed_businesses,
             campaign.end.insolvent_businesses
@@ -1201,18 +1217,36 @@ pub(crate) fn render_campaign_summaries(report: &GameplayHarnessReport, output: 
             campaign.peak_route_disruption_basis_points,
             campaign.peak_city_distressed_businesses
         );
-        for leader in &campaign.rival_context.leaders_by_wealth {
+        let signature: Vec<String> = campaign
+            .rival_context
+            .leaders_by_wealth
+            .iter()
+            .map(|leader| leader.name.clone())
+            .collect();
+        if signature == last_leader_signature {
             let _ = writeln!(
                 output,
-                "        {}{} | wealth {} (treasury {}) | legit {:.0}% | offices {} | firms {}",
-                if leader.is_player { "> " } else { "" },
-                leader.name,
-                leader.total_wealth,
-                leader.treasury,
-                f64::from(leader.legitimacy_basis_points) / 100.0,
-                leader.offices_held,
-                leader.operating_businesses
+                "        leaders unchanged from above | wealth rank {}/{} | legitimacy rank {}/{}",
+                campaign.rival_context.player_wealth_rank,
+                campaign.rival_context.dynasty_count,
+                campaign.rival_context.player_legitimacy_rank,
+                campaign.rival_context.dynasty_count
             );
+        } else {
+            for leader in &campaign.rival_context.leaders_by_wealth {
+                let _ = writeln!(
+                    output,
+                    "        {}{} | wealth {} (treasury {}) | legit {:.0}% | offices {} | firms {}",
+                    if leader.is_player { "> " } else { "" },
+                    leader.name,
+                    leader.total_wealth,
+                    leader.treasury,
+                    f64::from(leader.legitimacy_basis_points) / 100.0,
+                    leader.offices_held,
+                    leader.operating_businesses
+                );
+            }
+            last_leader_signature = signature;
         }
         if let Some(transition) = campaign.succession_transition {
             let _ = writeln!(
@@ -1235,6 +1269,7 @@ pub(crate) fn render_campaign_summaries(report: &GameplayHarnessReport, output: 
     let _ = writeln!(output);
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut String) {
     let selected =
         decision_log_campaigns(report, usize::from(report.config.decision_log_campaigns));
@@ -1247,6 +1282,10 @@ pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut S
         "  campaigns shown: {} (of {}); ordered to favor city-shaping, succession, quiet diagnosis, and command variety",
         selected.len(),
         report.campaigns.len()
+    );
+    let _ = writeln!(
+        output,
+        "  legend: offered/viable = candidates considered/passed validation | now = domains changed at commit, later = action-attributable changes at horizon | standing deliv/rep = commercial progress vs office gates | deltas: immediate = this command, attributable = vs no-action baseline at horizon, ambient = baseline drift without the command"
     );
     for campaign in selected {
         let no_action_cycles = campaign.quiet_cycles + campaign.blocked_cycles;
@@ -1302,7 +1341,7 @@ pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut S
             };
             let _ = writeln!(
                 output,
-                "  day {:>4} {:<19} | treasury {:>9} | biz {:>9} | businesses {}{} | offices {} | legit {:.0}% | deliv {:>3} rep {:.0}% | gen {} head {}y {:.0}%{} | crises {} | {}",
+                "  day {:>4} {:<19} | treasury {:>9} | biz {:>9} | businesses {}{} | offices {} | legit {:.0}% | standing deliv {:>3}/{} rep {:.0}%/{}% | gen {} head {}y {:.0}%{} | crises {} | {}",
                 step.day,
                 phase_label_at_day(&campaign.fantasy_arc, step.day),
                 context.player_treasury,
@@ -1316,11 +1355,13 @@ pub(crate) fn render_decision_log(report: &GameplayHarnessReport, output: &mut S
                 context.offices_held,
                 f64::from(context.legitimacy) / 100.0,
                 context.player_contract_deliveries,
+                OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
                 f64::from(
                     context
                         .quality_reputation
                         .max(context.reliability_reputation)
                 ) / 100.0,
+                f64::from(OFFICE_NOMINATION_REPUTATION_REQUIREMENT) / 100.0,
                 context.generation,
                 context.player_head_age_years,
                 f64::from(context.player_head_health_basis_points) / 100.0,
@@ -1353,8 +1394,7 @@ pub(crate) fn render_trace_alternatives(step: &GameplayTraceStep, output: &mut S
     );
     let top_score = distinct_projected_alternatives(&step.viable_options)
         .first()
-        .map(|option| option.score)
-        .unwrap_or(0);
+        .map_or(0, |option| option.score);
     for option in distinct_projected_alternatives(&step.viable_options) {
         // Scores alone do not explain why one commitment beats another; flag
         // close calls (within the persona variation band) so a reader knows

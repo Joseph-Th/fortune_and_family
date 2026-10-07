@@ -1012,13 +1012,12 @@ impl CivicSnapshotPart {
         let (head_age_years, head_health_basis_points) = state
             .characters
             .get(player.head_id())
-            .map(|head| {
+            .map_or((0, 0), |head| {
                 (
                     state.clock.day().saturating_sub(head.birth_day()) / 360,
                     head.runtime.health_basis_points,
                 )
-            })
-            .unwrap_or((0, 0));
+            });
         Self {
             legitimacy: player.resources.legitimacy_basis_points,
             quality_reputation: player.resources.reputation_quality_basis_points,

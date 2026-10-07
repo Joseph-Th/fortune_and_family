@@ -54,7 +54,10 @@ pub(crate) const OFFICE_TERM_DAYS: i64 = 360;
 /// instead of locking its office — and its powers and stipend flow — away for
 /// a full term.
 pub(crate) const OFFICE_VACANCY_RETRY_DAYS: i64 = 30;
-pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 90;
+/// A new officeholder's powers become usable two months into the term, so a
+/// founder who wins office in the first year still legislates, builds, and
+/// directs inside the same session.
+pub(crate) const OFFICE_POWER_ESTABLISHMENT_DAYS: i64 = 60;
 
 /// Returns whether a scheduled day can still arrive: the terminal sentinel is
 /// never schedulable.

@@ -3940,6 +3940,59 @@ mod candidates {
     }
 
     #[test]
+    fn delinquent_borrowing_blocks_fresh_advances_until_the_cure() {
+        let mut state = make_test_campaign();
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        let mut candidates = Vec::new();
+        add_borrow_candidate(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+        let first_terms = match &candidates
+            .first()
+            .expect("liquidity need must generate credit")
+            .command
+        {
+            PlayerCommand::IssueLoan { terms } => terms.clone(),
+            command => panic!("expected loan candidate, found {command:?}"),
+        };
+        let loan_id = issue_loan(&mut state, first_terms).expect("first loan must issue");
+        {
+            let loan = state
+                .loans
+                .get_mut(&loan_id)
+                .expect("issued loan must exist");
+            loan.status = LoanStatus::Delinquent;
+            loan.missed_payments = 1;
+        }
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::ZERO;
+        candidates.clear();
+
+        add_borrow_candidate(
+            rivergate_registry_for_test(),
+            &state,
+            GameplayPersona::Entrepreneur,
+            &mut candidates,
+        );
+        assert!(
+            candidates.is_empty(),
+            "a house missing installments must cure or restructure before fresh advances, not stack new debt"
+        );
+    }
+
+    #[test]
     fn underfunded_civic_treasury_offers_public_debt_when_credit_is_available() {
         let registry = rivergate_registry_for_test();
         let mut state = make_test_campaign();
@@ -4419,6 +4472,75 @@ mod candidates {
             PlayerCommand::InvestInBusiness { amount, .. }
                 if amount > Money::from_copper(3_000) && amount <= Money::from_copper(5_000)
         ));
+    }
+
+    #[test]
+    fn deeply_losing_firms_are_not_thrown_good_money() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        // A second, active firm means the distressed one is not the last
+        // income standing, so the hopeless-rescue restraint must apply.
+        add_second_player_business(&mut state);
+        let business_id = *state
+            .businesses
+            .ids_for_owner(state.player_dynasty_id)
+            .and_then(|ids| ids.iter().next())
+            .expect("player dynasty must own a business");
+        {
+            let business = state
+                .businesses
+                .get_mut(business_id)
+                .expect("player business must exist");
+            business.operations.status = BusinessStatus::Distressed;
+            business.operations.condition_basis_points = 500;
+            business.finance.cash = Money::ZERO;
+            business.finance.lifetime_revenue = Money::from_copper(10_000);
+            business.finance.lifetime_costs = Money::from_copper(14_000);
+        }
+        state
+            .dynasties
+            .get_mut(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .resources
+            .treasury = Money::from_copper(5_000);
+        let mut candidates = Vec::new();
+        generate_business_investment_candidate(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            state
+                .businesses
+                .get(business_id)
+                .expect("player business must exist"),
+            &mut candidates,
+        );
+        assert!(
+            candidates.is_empty(),
+            "a firm lifetime-losing by more than 30 percent is a bad rescue that would churn treasury without recovering"
+        );
+
+        state
+            .businesses
+            .get_mut(business_id)
+            .expect("player business must exist")
+            .finance
+            .lifetime_costs = Money::from_copper(12_000);
+        generate_business_investment_candidate(
+            registry,
+            &state,
+            GameplayPersona::Entrepreneur,
+            state
+                .businesses
+                .get(business_id)
+                .expect("player business must exist"),
+            &mut candidates,
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == GameplayCommandKind::InvestInBusiness),
+            "a distressed but viable firm must still be recapitalized"
+        );
     }
 
     #[test]
@@ -9903,7 +10025,7 @@ mod findings {
         campaign.fantasy_arc.first_commercial_standing_day = Some(70);
         campaign.fantasy_arc.first_institution_support_day = Some(100);
         campaign.fantasy_arc.first_office_campaign_day = Some(140);
-        campaign.fantasy_arc.first_city_shaping_action_day = Some(420);
+        campaign.fantasy_arc.first_city_shaping_action_day = Some(300);
 
         let findings = derive_findings(&report.aggregate, &report.campaigns);
 
