@@ -6062,7 +6062,7 @@ mod crises {
             .get_mut(&state.player_dynasty_id)
             .expect("player dynasty must exist")
             .resources
-            .legitimacy_basis_points = 599;
+            .legitimacy_basis_points = 749;
         let crisis_id = state.next_ids.crisis();
         state.crises.insert(
             crisis_id,
@@ -6090,8 +6090,8 @@ mod crises {
         assert_eq!(
             result,
             Err(CommandError::InsufficientPlayerLegitimacy {
-                available: 599,
-                required: 600,
+                available: 749,
+                required: 750,
             })
         );
         assert_state_unchanged(

@@ -12,7 +12,7 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 | Save schema | 31 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 80 |
+| Gameplay report schema | 81 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -28,8 +28,8 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 | Domain | Capability |
 |---|---|
 | World | One city (six districts), regional routes, seasonal pressure, external disruption. Capacity-weighted route health scales household income and trade output. Living costs 28/52/78 copper per member monthly (Laboring/Artisan/Merchant) × rent index. |
-| Population | Dynasties, notable characters, grouped households, health, loyalty, family links, wards, education, councils, heirs, succession. Collapsed head with no heir: most capable adult is designated; sole collapsed head generates a successor. No business retains an inactive manager after the annual pass; three collapsed years ends life. Prepared succession preserves legitimacy (floor 1800 bp) and reduces cohesion loss; unprepared retains floor 1200 bp. |
-| Succession pacing | Founder pressure targets median first transition in the middle of year three: late enough that commercial/institutional standing exists to test, early enough that continuity is ordinary play. |
+| Population | Dynasties, notable characters, grouped households, health, loyalty, family links, wards, education, councils, heirs, succession. Collapsed head with no heir: most capable adult is designated; sole collapsed head generates a successor. No business retains an inactive manager after the annual pass; three collapsed years ends life. Prepared succession preserves legitimacy (floor 1800 bp), reduces cohesion loss, retains seats; unprepared retains floor 1200 bp, loses seats. |
+| Succession pacing | Founder pressure targets median first transition in the late second to middle third year (eligibility 56, founders 54-56, 800 bp/year): late enough that office normally precedes succession, early enough that continuity is ordinary play. |
 | Businesses | Ownership, management, policy, wages, cash, inventory, production, quality, condition, distress, insolvency, closure, recovery, acquisition, recapitalization, owner distributions. Recovery requires 4 vs 3 days of operating cover; distressed workshops retain 75% efficiency; quality mean-reverts; operating/maintenance costs credit the clearing pool. |
 | Business transfer | Failing trades sell at discount to book value; going concerns quote at 140% controlling premium. Book value uses registry base price. Portfolio growth converts wealth into capacity and administrative load. Tool-allocation priority rotates daily. |
 | Markets | Scarce procurement, production, business/household/industrial demand, tool-constrained production and maintenance, spoilage, price formation, controls, regional supply. Production-cost floors override speculative ceilings at break-even. Households prefer bread, fall back to cheaper staples under scarcity/poverty, and reduce cloth demand above reference price. Unowned property purchases credit the clearing pool. |
@@ -39,7 +39,7 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 | Property | Ownership, value drift with district conditions, monthly 180 bp condition repair, tenancy, occupancy, rent scaled by district index (discounted for fire damage), purchase, collateral, liquidation, lien settlement, distressed civic guarantees. Closed/insolvent occupants are evicted weekly; recovered firms re-occupy. Each district seeds one affordable vacant workshop. |
 | Labor | Employment agreements, player-set wage posture, wage fairness vs market reference, capacity, conditions, loyalty, disputes, suspension, recovery, player responses. Sub-fair wages erode loyalty toward dispute; generous wages build a buffer; stingy pay stalls recovery. Employers retain one week of operating cover during settlement; closure returns workers to household pool. |
 | Institutions | Eleven guild, merchant, council, court, watch, treasury, charity, and market institutions with membership, budgets, legitimacy, coalitions, powers, terms, endowments, deterministic selection. Every trade maps to one chartered guild: managers sustain higher quality targets; legitimacy scales office rewards; entry restrictions reserve access for members and surcharge outsiders. |
-| Political office | Commercial and capability gates, patronage, nomination, powers, directives, recurring duties funded to institutional budgets, monthly fees repaid from budgets, administrative load, coalition response, withdrawal, forfeiture, re-election limits. |
+| Political office | Commercial and capability gates, patronage, nomination, powers, directives, recurring duties funded to institutional budgets, monthly fees repaid from budgets, funded duties earn standing (+20 per power), administrative load, coalition response, withdrawal, forfeiture, re-election limits. |
 | Civic systems | Laws, differentiated public works, district conditions, grounded legal cases and settlements (filing fees fund the Civic Court), crisis response, municipal debt, private funding of unfinished public works with legitimacy earned by external contributors. |
 | Relationships | Trust, fear, respect, obligation, resentment, memories, interaction dates. |
 | Information | Source, confidence, subject, summary, creation, expiry, passive reports, paid market/district/counterparty intelligence. |

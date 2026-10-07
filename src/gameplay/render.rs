@@ -230,12 +230,12 @@ pub(crate) fn render_player_fantasy_fidelity(report: &GameplayHarnessReport, out
         let poorest = report
             .campaigns
             .iter()
-            .filter(|c| c.rival_context.player_treasury_rank == c.rival_context.dynasty_count)
+            .filter(|c| c.rival_context.player_wealth_rank == c.rival_context.dynasty_count)
             .count();
         let best_rank = report
             .campaigns
             .iter()
-            .map(|c| c.rival_context.player_treasury_rank)
+            .map(|c| c.rival_context.player_wealth_rank)
             .min()
             .unwrap_or(0);
         let dynasty_cnt = report
@@ -1192,7 +1192,7 @@ pub(crate) fn render_campaign_summaries(report: &GameplayHarnessReport, output: 
             output,
             "      city | houses {} | wealth rank {}/{} | legitimacy rank {}/{} | breach victims seen {} | cases filed {} | route disruption peak {} bp | distressed firms peak {}",
             campaign.rival_context.dynasty_count,
-            campaign.rival_context.player_treasury_rank,
+            campaign.rival_context.player_wealth_rank,
             campaign.rival_context.dynasty_count,
             campaign.rival_context.player_legitimacy_rank,
             campaign.rival_context.dynasty_count,
@@ -1201,12 +1201,13 @@ pub(crate) fn render_campaign_summaries(report: &GameplayHarnessReport, output: 
             campaign.peak_route_disruption_basis_points,
             campaign.peak_city_distressed_businesses
         );
-        for leader in &campaign.rival_context.leaders_by_treasury {
+        for leader in &campaign.rival_context.leaders_by_wealth {
             let _ = writeln!(
                 output,
-                "        {}{} | treasury {} | legit {:.0}% | offices {} | firms {}",
+                "        {}{} | wealth {} (treasury {}) | legit {:.0}% | offices {} | firms {}",
                 if leader.is_player { "> " } else { "" },
                 leader.name,
+                leader.total_wealth,
                 leader.treasury,
                 f64::from(leader.legitimacy_basis_points) / 100.0,
                 leader.offices_held,

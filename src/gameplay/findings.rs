@@ -308,21 +308,21 @@ pub(crate) fn add_wealth_rank_persistence_finding(
         .map_or(0, |c| c.rival_context.dynasty_count);
     let poorest = campaigns
         .iter()
-        .filter(|c| c.rival_context.player_treasury_rank == dynasty_count)
+        .filter(|c| c.rival_context.player_wealth_rank == dynasty_count)
         .count();
     if scaled_ratio_usize(poorest, campaigns.len(), 100) < 75 {
         return;
     }
     let best_rank = campaigns
         .iter()
-        .map(|c| c.rival_context.player_treasury_rank)
+        .map(|c| c.rival_context.player_wealth_rank)
         .min()
         .unwrap_or(dynasty_count);
     findings.push(GameplayFinding {
         severity: GameplayFindingSeverity::Warning,
         title: "Player wealth stays persistently bottom-ranked".to_owned(),
         evidence: format!(
-            "{poorest} of {} campaigns ended ranked {dynasty_count}/{dynasty_count} by treasury (poorest), with best rank {best_rank}/{dynasty_count}. Persistent bottom wealth suggests starting capital, early margins, or AI wealth scaling leaves little room to outcompete rivals within the evaluated horizon.",
+            "{poorest} of {} campaigns ended ranked {dynasty_count}/{dynasty_count} by total wealth (treasury + business cash + property, poorest), with best rank {best_rank}/{dynasty_count}. Persistent bottom wealth suggests starting capital, early margins, or AI wealth scaling leaves little room to outcompete rivals within the evaluated horizon.",
             campaigns.len()
         ),
     });

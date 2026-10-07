@@ -110,8 +110,11 @@ pub(crate) const CRISIS_RELIEF_UNREST_REDUCTION: u16 = 800;
 pub(crate) const CRISIS_REFORM_UNREST_REDUCTION: u16 = 500;
 pub(crate) const CRISIS_SUPPRESS_UNREST_INCREASE: u16 = 700;
 /// Exploit gates on and pays the same legitimacy: profiteering spends standing
-/// outright rather than merely requiring it.
-pub(crate) const CRISIS_EXPLOIT_LEGITIMACY_COST: u16 = 600;
+/// outright rather than merely requiring it. At 750 (up from 600) a house
+/// that earns +20/power monthly from funded offices must still save several
+/// months to profiteer, so governance income cannot fund collapse-inducing
+/// exploitation spam in long-horizon stress.
+pub(crate) const CRISIS_EXPLOIT_LEGITIMACY_COST: u16 = 750;
 pub(crate) const CRISIS_EXPLOIT_SEVERITY_INCREASE: u16 = 500;
 pub(crate) const CRISIS_EXPLOIT_UNREST_INCREASE: u16 = 600;
 pub(crate) const INFORMATION_REPORT_LIFETIME_DAYS: i64 = 540;

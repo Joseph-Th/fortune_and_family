@@ -19,9 +19,9 @@
 //! Focused tests: `src/systems/simulation/simulation_tests.rs` succession.
 
 use crate::core::{
-    AppState, AuditKind, Character, CharacterCapabilities, CharacterIdentity, CharacterRole,
-    CharacterRuntime, CharacterStatus, ChronicleEntry, ChronicleKind, CrisisKind, FamilyLink,
-    FamilyLinkKind, HouseGovernance, OutboxKind,
+    AppState, AuditKind, AuditRecord, Character, CharacterCapabilities, CharacterIdentity,
+    CharacterRole, CharacterRuntime, CharacterStatus, ChronicleEntry, ChronicleKind, CrisisKind,
+    FamilyLink, FamilyLinkKind, HouseGovernance, OutboxKind,
 };
 use crate::ids::{BusinessId, CharacterId, DynastyId};
 use crate::systems::SimulationError;
@@ -761,9 +761,10 @@ pub(crate) fn succession_chance_basis_points(
         return 0;
     }
     // The ramp must mature succession pressure inside the session that builds
-    // the dynasty: founders begin at 54-56 years old, so this rate puts the
-    // median first transition in the third campaign year while
-    // still leaving most of an establishment phase untouched.
+    // the dynasty: founders begin at 54-56 years old with eligibility at 56,
+    // so this rate puts the median first transition in the late second to
+    // third campaign year while still leaving most of an establishment
+    // phase untouched and keeping office ahead of succession.
     let age_pressure = (age_years - SUCCESSION_ELIGIBILITY_AGE_YEARS)
         .saturating_mul(AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY);
     let governance_pressure = i64::from(succession_risk_basis_points / 2);
@@ -800,15 +801,26 @@ pub(crate) fn update_institutions_for_succession(
     outgoing_head_id: CharacterId,
     incoming_head_id: CharacterId,
     replacement_selection_day: Option<i64>,
+    formally_prepared: bool,
 ) {
     // Non-player heads hold institutional seats by dynasty standing, so the
     // incoming head inherits them. Player dynasties earn membership through
-    // patronage instead, so their seats are not transferred.
-    let transfer_membership = dynasty_id != state.player_dynasty_id;
+    // patronage, but a formally prepared heir was explicitly designated and
+    // trained to continue the house's institutional work: prepared succession
+    // preserves those seats so continuity is tested by shock losses, not by
+    // wiping the organization's embedding. Unprepared player succession still
+    // loses seats, making preparation the difference between a disruption
+    // and a collapse.
+    let transfer_membership = dynasty_id != state.player_dynasty_id || formally_prepared;
+    let is_player_prepared_transfer = dynasty_id == state.player_dynasty_id && formally_prepared;
+    let mut inherited_institutions = Vec::new();
     for institution in state.institutions.values_mut() {
-        institution.members.remove(&outgoing_head_id);
-        if transfer_membership {
+        let had_membership = institution.members.remove(&outgoing_head_id);
+        if transfer_membership && had_membership {
             institution.members.insert(incoming_head_id);
+            if is_player_prepared_transfer {
+                inherited_institutions.push(institution.institution_id);
+            }
         }
         if institution.office_holder_id == Some(outgoing_head_id) {
             institution.office_holder_id = None;
@@ -816,6 +828,18 @@ pub(crate) fn update_institutions_for_succession(
                 .next_selection_day
                 .min(replacement_selection_day.expect("office replacement day was preflighted"));
         }
+    }
+    // Prepared player heirs inherit seats, so record cultivated support for
+    // the incoming head: the membership invariant requires a patronage
+    // audit per player member, and continuity should be visible as inherited
+    // standing rather than an audit gap.
+    for institution_id in inherited_institutions {
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionPatronage,
+            subject: format!("institution:{institution_id}:character:{incoming_head_id}").into(),
+            detail: format!("inherited prepared succession from {outgoing_head_id}").into(),
+        });
     }
 }
 
@@ -993,6 +1017,7 @@ pub(crate) fn apply_successions_in_place(
             outgoing_head_id,
             incoming_head_id,
             replacement_selection_day,
+            formally_prepared,
         );
         reassign_managed_businesses(state, dynasty_id, outgoing_head_id, incoming_head_id);
         let new_heir_id = insert_succession_heir(

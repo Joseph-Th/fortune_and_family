@@ -483,6 +483,22 @@ pub(crate) fn apply_office_duty(
             paid,
             required.saturating_sub(paid),
         )?;
+    } else if required > Money::ZERO {
+        // Funded service builds public standing: holding office must convert
+        // treasury work into legitimacy, otherwise directives (100), laws
+        // (250), and crisis suppression (450) drain the house while AI
+        // campaigning (+80/month) and legitimacy work (+120/month) climb for
+        // free. +20 per power (~60 for a three-power seat) makes a funded
+        // office net-positive standing without removing its cash cost or
+        // funding profiteering spam (exploit costs 750).
+        let reward = u16::try_from(power_count.saturating_mul(20).min(100)).unwrap_or(100);
+        if let Some(dynasty) = state.dynasties.get_mut(&dynasty_id) {
+            dynasty.resources.legitimacy_basis_points = dynasty
+                .resources
+                .legitimacy_basis_points
+                .saturating_add(reward)
+                .min(10_000);
+        }
     }
     Ok(())
 }

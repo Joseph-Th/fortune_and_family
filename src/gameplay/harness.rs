@@ -1245,6 +1245,10 @@ pub(crate) fn finish_campaign_report(
 
 /// Ranks every house in the city at campaign end so the report shows whether
 /// the player is actually competing for standing, not just accumulating.
+/// Wealth ranks by total holdings (treasury + business cash + owned property
+/// value): ranking liquid treasury alone punishes houses that converted cash
+/// into workshops and stock, which is exactly the productive competence the
+/// core fantasy rewards.
 pub(crate) fn build_rival_context(state: &AppState) -> GameplayRivalContext {
     let offices_by_dynasty = |dynasty_id: DynastyId| -> u16 {
         usize_to_u16(
@@ -1259,6 +1263,24 @@ pub(crate) fn build_rival_context(state: &AppState) -> GameplayRivalContext {
                 })
                 .count(),
         )
+    };
+    let business_cash_by_dynasty = |dynasty_id: DynastyId| -> Money {
+        state
+            .businesses
+            .ids_for_owner(dynasty_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|business_id| state.businesses.get(*business_id))
+            .map(|business| business.cash())
+            .fold(Money::ZERO, |total, cash| total.saturating_add(cash))
+    };
+    let property_value_by_dynasty = |dynasty_id: DynastyId| -> Money {
+        state
+            .properties
+            .values()
+            .filter(|property| property.owner_dynasty_id == Some(dynasty_id))
+            .map(|property| property.value)
+            .fold(Money::ZERO, |total, value| total.saturating_add(value))
     };
     let standings: Vec<GameplayRivalStanding> = state
         .dynasties
@@ -1277,26 +1299,31 @@ pub(crate) fn build_rival_context(state: &AppState) -> GameplayRivalContext {
                     )
                 })
                 .count();
+            let total_wealth = dynasty
+                .treasury()
+                .saturating_add(business_cash_by_dynasty(dynasty.id()))
+                .saturating_add(property_value_by_dynasty(dynasty.id()));
             GameplayRivalStanding {
                 dynasty_id: dynasty.id(),
                 name: dynasty.name().to_owned(),
                 is_player: dynasty.id() == state.player_dynasty_id,
                 treasury: dynasty.treasury(),
+                total_wealth,
                 legitimacy_basis_points: dynasty.resources.legitimacy_basis_points,
                 offices_held: offices_by_dynasty(dynasty.id()),
                 operating_businesses: usize_to_u16(operating_businesses),
             }
         })
         .collect();
-    let mut by_treasury = standings.clone();
+    let mut by_wealth = standings.clone();
     // Stable descending wealth order; the dynasty ID breaks ties so parallel
     // runs and repeated renders cannot reorder the leaderboard.
-    by_treasury.sort_by(|a, b| {
-        b.treasury
-            .cmp(&a.treasury)
+    by_wealth.sort_by(|a, b| {
+        b.total_wealth
+            .cmp(&a.total_wealth)
             .then(a.dynasty_id.cmp(&b.dynasty_id))
     });
-    let player_treasury_rank = by_treasury
+    let player_wealth_rank = by_wealth
         .iter()
         .position(|standing| standing.is_player)
         .map_or(0, |index| usize_to_u16(index + 1));
@@ -1312,12 +1339,9 @@ pub(crate) fn build_rival_context(state: &AppState) -> GameplayRivalContext {
         .map_or(0, |index| usize_to_u16(index + 1));
     GameplayRivalContext {
         dynasty_count: usize_to_u16(state.dynasties.len()),
-        player_treasury_rank,
+        player_wealth_rank,
         player_legitimacy_rank,
-        leaders_by_treasury: by_treasury
-            .into_iter()
-            .take(RIVAL_LEADERBOARD_SIZE)
-            .collect(),
+        leaders_by_wealth: by_wealth.into_iter().take(RIVAL_LEADERBOARD_SIZE).collect(),
     }
 }
 

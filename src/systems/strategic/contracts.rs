@@ -38,15 +38,15 @@ pub struct SupplyContractTerms {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DueContract {
-    id: crate::ids::ContractId,
-    buyer_id: BusinessId,
-    seller_id: BusinessId,
-    good_id: GoodId,
-    quantity: Quantity,
-    unit_price: Money,
-    penalty: Money,
-    due_day: i64,
-    end_day: i64,
+    pub(crate) id: crate::ids::ContractId,
+    pub(crate) buyer_id: BusinessId,
+    pub(crate) seller_id: BusinessId,
+    pub(crate) good_id: GoodId,
+    pub(crate) quantity: Quantity,
+    pub(crate) unit_price: Money,
+    pub(crate) penalty: Money,
+    pub(crate) due_day: i64,
+    pub(crate) end_day: i64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -681,10 +681,15 @@ pub(crate) fn terminate_inactive_contract(
         .get_mut(&due.id)
         .expect("contract must exist");
     contract.missed_deliveries = contract.missed_deliveries.saturating_add(1);
-    if let Some((breacher, victim)) = breaching_dynasty_id.zip(breach_victim_dynasty_id) {
-        // Preserve any earlier attribution: the defendant for accrued
-        // recoverable debt must remain identifiable even when this
-        // termination is mutually inactive.
+    if let Some((breacher, victim)) = breaching_dynasty_id.zip(breach_victim_dynasty_id)
+        && contract.breaching_dynasty_id.is_none()
+        && contract.breach_victim_dynasty_id.is_none()
+    {
+        // First attributable miss sticks: the defendant for accrued
+        // recoverable debt must remain identifiable even when later
+        // terminations name different owners (acquisitions) or are
+        // mutually inactive. Overwriting would orphan a filed legal
+        // claim's parties.
         contract.breaching_dynasty_id = Some(breacher);
         contract.breach_victim_dynasty_id = Some(victim);
     }
@@ -844,6 +849,8 @@ pub(crate) fn finalize_expired_contract(
     if let Some((breacher, victim)) = settlement
         .breaching_dynasty_id()
         .zip(settlement.breach_victim_dynasty_id())
+        && contract.breaching_dynasty_id.is_none()
+        && contract.breach_victim_dynasty_id.is_none()
     {
         // A final-delivery miss attributes its breach without erasing any
         // earlier attributable miss; fulfillment preserves accrued recoverable
@@ -984,6 +991,8 @@ pub(crate) fn settle_failed_contract(
         if let Some((breacher, victim)) = settlement
             .breaching_dynasty_id()
             .zip(settlement.breach_victim_dynasty_id())
+            && contract.breaching_dynasty_id.is_none()
+            && contract.breach_victim_dynasty_id.is_none()
         {
             // Attribution records who owes the recoverable claim from the
             // first attributable miss and persists until the claim is

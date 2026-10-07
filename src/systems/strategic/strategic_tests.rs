@@ -2159,6 +2159,136 @@ mod gameplay_stability {
     }
 
     #[test]
+    fn funded_office_duties_earn_public_standing() {
+        let registry = test_registry();
+        let mut state = make_test_campaign();
+        let institution_id = registry
+            .get_institution_id("city_council")
+            .expect("registry must define the city council");
+        let player_id = state.player_dynasty_id;
+        let holder_id = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .head_id();
+        for institution in state.institutions.values_mut() {
+            institution.office_holder_id = None;
+        }
+        state
+            .institutions
+            .get_mut(&institution_id)
+            .expect("city council must exist")
+            .office_holder_id = Some(holder_id);
+        let legitimacy_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+
+        apply_office_duties(&mut state).expect("office duties must remain representable");
+
+        let legitimacy_after = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
+        assert!(
+            legitimacy_after > legitimacy_before,
+            "funded office service must convert treasury work into standing"
+        );
+    }
+
+    #[test]
+    fn contract_breach_attribution_survives_later_owner_change() {
+        let mut state = make_test_campaign();
+        let contract_id = active_contract_id(&state);
+        let (buyer_id, seller_id) = {
+            let contract = state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist");
+            (contract.buyer_business_id, contract.seller_business_id)
+        };
+        let original_buyer_owner = state
+            .businesses
+            .get(buyer_id)
+            .expect("buyer must exist")
+            .owner_dynasty_id();
+        let original_seller_owner = state
+            .businesses
+            .get(seller_id)
+            .expect("seller must exist")
+            .owner_dynasty_id();
+        // First attributable breach sticks.
+        {
+            let contract = state
+                .contracts
+                .get_mut(&contract_id)
+                .expect("contract must exist");
+            contract.breaching_dynasty_id = Some(original_seller_owner);
+            contract.breach_victim_dynasty_id = Some(original_buyer_owner);
+            contract.penalty = Money::from_copper(500);
+            contract.collected_breach_penalty = Money::ZERO;
+            contract.unpaid_breach_penalty = Money::from_copper(500);
+        }
+        let other_dynasty = state
+            .dynasties
+            .keys()
+            .copied()
+            .find(|id| *id != original_buyer_owner && *id != original_seller_owner)
+            .expect("campaign must contain a third dynasty");
+        let due = crate::systems::strategic::contracts::DueContract {
+            id: contract_id,
+            buyer_id,
+            seller_id,
+            good_id: state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .good_id,
+            quantity: state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .quantity_per_week,
+            unit_price: state
+                .contracts
+                .get(&contract_id)
+                .expect("contract must exist")
+                .unit_price,
+            penalty: Money::from_copper(500),
+            due_day: state.clock.day(),
+            end_day: state.clock.day() + 100,
+        };
+        crate::systems::strategic::contracts::terminate_inactive_contract(
+            &mut state,
+            &due,
+            other_dynasty,
+            original_seller_owner,
+            false,
+            true,
+        )
+        .expect("termination with new owners must remain representable");
+
+        let contract = state
+            .contracts
+            .get(&contract_id)
+            .expect("contract must exist");
+        assert_eq!(
+            contract.breaching_dynasty_id,
+            Some(original_seller_owner),
+            "a later termination naming new owners must not orphan the filed claim's defendant"
+        );
+        assert_eq!(
+            contract.breach_victim_dynasty_id,
+            Some(original_buyer_owner),
+            "a later termination naming new owners must not orphan the filed claim's plaintiff"
+        );
+    }
+
+    #[test]
     fn office_stipends_pay_fees_of_office_from_the_institution_budget() {
         let mut state = make_test_campaign();
         let player_id = state.player_dynasty_id;

@@ -3188,7 +3188,69 @@ mod health_and_succession {
         assert!(!institution.members.contains(&outgoing_head_id));
         assert!(
             !institution.members.contains(&incoming_head_id),
-            "personal patronage must not transfer automatically to a successor"
+            "unprepared personal patronage must not transfer automatically to a successor"
+        );
+        assert_eq!(institution.office_holder_id, None);
+        validate_invariants(registry, &state);
+    }
+
+    #[test]
+    fn prepared_player_succession_preserves_institution_memberships() {
+        let registry = rivergate_registry_for_test();
+        let mut state = make_test_campaign();
+        let dynasty_id = state.player_dynasty_id;
+        let dynasty = state
+            .dynasties
+            .get(&dynasty_id)
+            .expect("player dynasty must exist");
+        let outgoing_head_id = dynasty.head_id();
+        let incoming_head_id = dynasty.heir_id().expect("player dynasty must have an heir");
+        let institution_id = *state
+            .institutions
+            .keys()
+            .next()
+            .expect("campaign must contain an institution");
+        {
+            let institution = state
+                .institutions
+                .get_mut(&institution_id)
+                .expect("institution must exist");
+            institution.members.insert(outgoing_head_id);
+            institution.office_holder_id = Some(outgoing_head_id);
+        }
+        // Formal preparation names the incoming head, so the house's
+        // institutional embedding survives the transition.
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::InstitutionPatronage,
+            subject: format!("institution:{institution_id}:character:{outgoing_head_id}").into(),
+            detail: "test cultivated support".into(),
+        });
+        state.audit_log.push(AuditRecord {
+            day: state.clock.day(),
+            kind: AuditKind::HeirDesignation,
+            subject: format!("dynasty:{dynasty_id}").into(),
+            detail: format!("prior_heir={incoming_head_id};heir={incoming_head_id};confirmation=true;legitimacy_cost=0;unity_cost=0").into(),
+        });
+        state
+            .characters
+            .get_mut(outgoing_head_id)
+            .expect("outgoing head must exist")
+            .runtime
+            .health_basis_points = 0;
+
+        let successions =
+            decide_successions(&mut state).expect("forced succession must remain representable");
+        apply_successions(&mut state, successions).expect("succession application must succeed");
+
+        let institution = state
+            .institutions
+            .get(&institution_id)
+            .expect("institution must exist");
+        assert!(!institution.members.contains(&outgoing_head_id));
+        assert!(
+            institution.members.contains(&incoming_head_id),
+            "prepared succession must preserve the house's institutional seats"
         );
         assert_eq!(institution.office_holder_id, None);
         validate_invariants(registry, &state);
@@ -4039,17 +4101,17 @@ mod health_and_succession {
             "poor health must increase annual succession probability"
         );
         assert_eq!(
-            succession_chance_basis_points(51, 10_000, 0),
+            succession_chance_basis_points(55, 10_000, 0),
             0,
             "the minimum succession age remains explicit"
         );
         assert!(
-            succession_chance_basis_points(52, 1_000, 9_000) > 0,
+            succession_chance_basis_points(56, 1_000, 9_000) > 0,
             "an eligible head must begin to accumulate annual succession pressure"
         );
         assert!(
             succession_chance_basis_points(60, 1_000, 9_000)
-                > succession_chance_basis_points(50, 1_000, 9_000),
+                > succession_chance_basis_points(57, 1_000, 9_000),
             "age must increase annual succession pressure once eligible"
         );
     }

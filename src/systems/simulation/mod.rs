@@ -355,8 +355,11 @@ const PRODUCTION_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASIS
 /// Heads become eligible for succession at this age. Combined with the
 /// annual chance ramp, the first transition falls inside a playable session
 /// while founders aged 54-56 have time to establish institutional standing
-/// before succession pressure begins.
-const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 52;
+/// before succession pressure begins. Eligibility at 56 keeps the youngest
+/// founders two years clear of the first roll so office (median day ~600)
+/// normally precedes succession; the steeper yearly ramp below still pulls
+/// the median into the third campaign year.
+const SUCCESSION_ELIGIBILITY_AGE_YEARS: i64 = 56;
 
 /// Health floor an heir resumes natural aging from on accession. The annual
 /// health pass pins a designated heir's collapsed health at a survivable
@@ -425,12 +428,16 @@ pub(crate) fn business_status_after_capitalization(
 }
 
 /// Annual succession-chance pressure per year of head age past the eligibility
-/// threshold. The rate places the median first transition near 900-1100 days
-/// (middle third year): late enough that a founder pursuing
+/// threshold. The rate places the median first transition near 800-1000 days
+/// (late second to middle third year): late enough that a founder pursuing
 /// institutional standing reliably reaches office and established memberships
 /// before succession tests continuity, early enough that dynastic continuity
 /// remains ordinary play rather than only generation-length simulations.
-const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 280;
+/// Steeper than the old 280 bp so the post-eligibility ramp compresses
+/// world-seed variance instead of letting one seed die in year one and
+/// another never die in three years. At 800 bp even the youngest founders
+/// (two rolls in-horizon) reach ~45% continuity pressure by day 1080.
+const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 800;
 
 fn decide_business_production(
     registry: &Registry,

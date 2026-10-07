@@ -1910,6 +1910,10 @@ pub struct GameplayRivalStanding {
     pub name: String,
     pub is_player: bool,
     pub treasury: Money,
+    /// Treasury plus operating business cash plus owned property value, so
+    /// houses that converted liquid wealth into capacity are not misranked
+    /// as poor for investing.
+    pub total_wealth: Money,
     pub legitimacy_basis_points: u16,
     pub offices_held: u16,
     pub operating_businesses: u16,
@@ -1920,12 +1924,13 @@ pub struct GameplayRivalStanding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameplayRivalContext {
     pub dynasty_count: u16,
-    /// 1-based rank of the player's treasury among all houses.
-    pub player_treasury_rank: u16,
+    /// 1-based rank of the player's total wealth (treasury + business cash
+    /// + property value) among all houses.
+    pub player_wealth_rank: u16,
     /// 1-based rank of the player's legitimacy among all houses.
     pub player_legitimacy_rank: u16,
-    /// The strongest rival houses plus the player, ordered by treasury.
-    pub leaders_by_treasury: Vec<GameplayRivalStanding>,
+    /// The strongest rival houses plus the player, ordered by total wealth.
+    pub leaders_by_wealth: Vec<GameplayRivalStanding>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

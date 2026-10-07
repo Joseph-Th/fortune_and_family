@@ -30,8 +30,10 @@ pub(crate) const AI_BUSINESS_RECOVERY_TREASURY_RESERVE: Money = Money::from_copp
 /// Routine patronage buys rival legitimacy only up to this plateau: standing
 /// above it must come from offices, works, and crisis stewardship rather than
 /// a monthly stipend, so passive rivals cannot out-rank an actively governing
-/// house indefinitely.
-pub(crate) const AI_LEGITIMACY_OBJECTIVE_CEILING_BASIS_POINTS: u16 = 5_800;
+/// house indefinitely. At 5000 (near the 4500 bootstrap) idle rivals plateau
+/// just above founding standing; earned office service (+30/power monthly)
+/// and victories remain the way upward for every house including the player.
+pub(crate) const AI_LEGITIMACY_OBJECTIVE_CEILING_BASIS_POINTS: u16 = 5_000;
 
 /// The canonical rival-house monthly upkeep: household base, per-member and
 /// per-business charges, plus great-house wealth stewardship — a percentage of

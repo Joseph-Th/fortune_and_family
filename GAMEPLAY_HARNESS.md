@@ -194,7 +194,7 @@ Counts are recorded per campaign and summed in aggregates. Each quiet trace step
 - Private-credit lifecycle counts (delinquent, defaulted, restructured, repaid, written-off) with lending/borrowing attribution
 - Per-campaign commercial ledger: lifetime revenue, costs, margin, business cash
 - Per-campaign affordability: `peak_player_treasury` and `minimum_unowned_property_value`
-- Per-campaign rival context: house wealth, legitimacy, offices, operating firms; player treasury/legitimacy ranks; leaderboard
+- Per-campaign rival context: house wealth (treasury plus business cash plus owned property value), legitimacy, offices, operating firms; player total-wealth/legitimacy ranks; wealth leaderboard
 - Aggregate world stress: city-wide breach contracts, cumulative legal filings, peak route disruption, peak distressed-firm counts
 - Per-campaign `player_breach_victim_contracts`
 - Representative traces and chronological decision logs

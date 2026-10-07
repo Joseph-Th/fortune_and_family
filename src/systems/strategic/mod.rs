@@ -441,7 +441,7 @@ fn grant_maturing_institution_support(state: &mut AppState) -> Result<(), Simula
         dynasty.resources.legitimacy_basis_points = dynasty
             .resources
             .legitimacy_basis_points
-            .saturating_add(250)
+            .saturating_add(350)
             .min(10_000);
         try_push_outbox(
             state,
