@@ -66,9 +66,10 @@ pub(crate) const OFFICE_DUTY_COST_PER_POWER: Money = Money::from_copper(350);
 pub(crate) const OFFICE_DUTY_PORTFOLIO_SURCHARGE_PER_ADDITIONAL_OFFICE: Money =
     Money::from_copper(150);
 /// Monthly fees of office paid out of the holding institution's budget to the
-/// officeholder's dynasty. Offices stay a net cost (duties exceed the stipend),
-/// but service should materially compensate the house that performs it.
-const OFFICE_STIPEND_PER_POWER: Money = Money::from_copper(120);
+/// officeholder's dynasty. At 200 against a 350 duty, a prize office with
+/// contract or toll income pays for itself while a purely civic seat still
+/// costs cash: leadership compensates, but only lucrative power enriches.
+const OFFICE_STIPEND_PER_POWER: Money = Money::from_copper(200);
 const AI_DYNASTY_HOUSEHOLD_UPKEEP_MONTHLY: Money = Money::from_copper(500);
 const AI_DYNASTY_UPKEEP_PER_FAMILY_MEMBER: Money = Money::from_copper(250);
 const AI_DYNASTY_UPKEEP_PER_BUSINESS: Money = Money::from_copper(400);

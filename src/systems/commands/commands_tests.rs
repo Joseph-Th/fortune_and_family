@@ -3672,6 +3672,12 @@ mod politics {
             .get(&player_id)
             .expect("player dynasty must exist")
             .civic_contributions();
+        let house_legitimacy_before = state
+            .dynasties
+            .get(&player_id)
+            .expect("player dynasty must exist")
+            .resources
+            .legitimacy_basis_points;
         let amount = Money::from_copper(10_000);
 
         apply_player_command(
@@ -3702,6 +3708,10 @@ mod politics {
             institution_before.budget.saturating_add(amount)
         );
         assert!(institution.legitimacy_basis_points > institution_before.legitimacy_basis_points);
+        assert!(
+            player.resources.legitimacy_basis_points > house_legitimacy_before,
+            "a great endowment must credit the founder's house as well as the institution"
+        );
         let relationship = state
             .relationships
             .get(&pair)

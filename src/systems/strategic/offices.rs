@@ -802,6 +802,9 @@ pub(crate) fn apply_office_power(
             // Like vacancy income, toll and taxation revenue is funded by the
             // market's own clearing pool and may drive it into the validated
             // short-term deficit (consumer credit) but never beyond it.
+            // The institution keeps 100 for its budget; the presiding house
+            // takes a 150 licit cut to its treasury, so prize economic
+            // offices convert authority into wealth instead of only costs.
             const MAX_DEFICIT: i64 = -10_000_000;
             let available = state
                 .market
@@ -810,7 +813,9 @@ pub(crate) fn apply_office_power(
                 .saturating_sub(MAX_DEFICIT)
                 .max(0);
             let revenue = Money::from_copper(100).min(Money::from_copper(available));
-            if revenue <= Money::ZERO {
+            let holder_cut =
+                Money::from_copper(150).min(Money::from_copper(available).saturating_sub(revenue));
+            if revenue <= Money::ZERO && holder_cut <= Money::ZERO {
                 return Ok(());
             }
             let institution_budget = state
@@ -825,12 +830,23 @@ pub(crate) fn apply_office_power(
                     incoming: revenue,
                 },
             )?;
-            debit_market_clearing_account(state, revenue)?;
+            debit_market_clearing_account(state, revenue.saturating_add(holder_cut))?;
             state
                 .institutions
                 .get_mut(&institution_id)
                 .expect("office institution must exist")
                 .budget = next_budget;
+            if holder_cut > Money::ZERO {
+                let dynasty = state
+                    .dynasties
+                    .get_mut(&dynasty_id)
+                    .expect("officeholder dynasty must exist");
+                dynasty.resources.treasury = dynasty
+                    .resources
+                    .treasury
+                    .checked_add(holder_cut)
+                    .expect("bounded toll cut must fit holder treasury");
+            }
         }
         OfficePower::DebtEnforcement => adjust_reliability_reputation(state, dynasty_id, 15),
         OfficePower::CityContracts => award_city_contract(state, institution_id, dynasty_id)?,
@@ -884,7 +900,7 @@ pub(crate) fn award_city_contract(
         .get(&institution_id)
         .expect("city contract institution must exist")
         .budget;
-    let award = Money::from_copper(250).min(institution_budget);
+    let award = Money::from_copper(800).min(institution_budget);
     if award == Money::ZERO {
         return Ok(());
     }

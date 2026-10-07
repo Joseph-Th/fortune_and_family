@@ -449,6 +449,21 @@ pub(crate) fn commit_institution_endowment(
         .saturating_add(endowment.legitimacy_gain)
         .min(10_000);
     let applied_legitimacy_gain = institution.legitimacy_basis_points - legitimacy_before;
+    // A great gift carries the founder's name: the house earns public
+    // standing too (half the institutional gain), so endowment converts
+    // wealth into influence instead of only draining the treasury.
+    let house_gain = endowment.legitimacy_gain / 2;
+    if house_gain > 0 {
+        let player = state
+            .dynasties
+            .get_mut(&endowment.player_id)
+            .expect("validated player dynasty must exist");
+        player.resources.legitimacy_basis_points = player
+            .resources
+            .legitimacy_basis_points
+            .saturating_add(house_gain)
+            .min(10_000);
+    }
     for member_dynasty_id in &endowment.member_dynasties {
         crate::systems::strategic::apply_relationship_event(
             state,

@@ -423,7 +423,7 @@ fn insert_dynasty(
             // that a founder who pursues institutional standing reliably
             // reaches office and established memberships before succession
             // tests continuity, early enough that dynastic continuity
-            // remains ordinary play. Steeper per-year age pressure (800 bp)
+            // remains ordinary play. Steeper per-year age pressure (1500 bp)
             // compresses world-seed variance so year-one deaths before office
             // become rare without pushing continuity beyond a session.
             birth_day: -19_600 - i64::from(state.rng.range_u32(720)),

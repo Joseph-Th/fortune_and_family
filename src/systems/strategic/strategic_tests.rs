@@ -1933,6 +1933,11 @@ mod gameplay_stability {
             .get(business_id)
             .expect("player business must exist")
             .cash();
+        let treasury_before = state
+            .dynasties
+            .get(&state.player_dynasty_id)
+            .expect("player dynasty must exist")
+            .treasury();
 
         apply_office_power_effects(registry, &mut state).expect("office power effects must apply");
 
@@ -1944,6 +1949,15 @@ mod gameplay_stability {
                 .cash()
                 > cash_before,
             "holding an office with city-contract power must affect the holder's economy"
+        );
+        assert!(
+            state
+                .dynasties
+                .get(&state.player_dynasty_id)
+                .expect("player dynasty must exist")
+                .treasury()
+                >= treasury_before,
+            "toll and taxation offices must pay the presiding house a licit cut"
         );
     }
 
@@ -2334,7 +2348,7 @@ mod gameplay_stability {
 
         apply_office_stipends(&mut state).expect("office stipends must remain representable");
 
-        let expected_stipend = Money::from_copper(120).saturating_mul(power_count);
+        let expected_stipend = Money::from_copper(200).saturating_mul(power_count);
         let paid = expected_stipend.min(budget_after_duties);
         assert!(
             paid > Money::ZERO,

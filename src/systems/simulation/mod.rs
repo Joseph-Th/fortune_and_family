@@ -435,9 +435,11 @@ pub(crate) fn business_status_after_capitalization(
 /// remains ordinary play rather than only generation-length simulations.
 /// Steeper than the old 280 bp so the post-eligibility ramp compresses
 /// world-seed variance instead of letting one seed die in year one and
-/// another never die in three years. At 800 bp even the youngest founders
-/// (two rolls in-horizon) reach ~45% continuity pressure by day 1080.
-const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 800;
+/// another never die in three years. At 1500 bp the median lands near
+/// day 720-900: founders who win office are tested by succession in the
+/// same session that made them powerful, with enough horizon left to
+/// play the legacy aftermath.
+const AGE_PRESSURE_PER_YEAR_OVER_ELIGIBILITY: i64 = 1500;
 
 fn decide_business_production(
     registry: &Registry,
