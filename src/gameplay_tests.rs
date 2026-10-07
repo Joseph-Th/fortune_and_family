@@ -8520,6 +8520,65 @@ mod findings {
     }
 
     #[test]
+    fn wealth_ceiling_fires_when_no_campaign_contends_for_the_top() {
+        let report = cached_focused_report(30);
+        let template = report
+            .campaigns
+            .first()
+            .expect("focused configuration must produce one campaign")
+            .clone();
+        // Eight campaigns where the player never breaks the top three: the
+        // middle trap must read as a design signal even though no campaign
+        // collapses to last.
+        let campaigns: Vec<_> = (0_u64..8)
+            .map(|index| {
+                let mut campaign = template.clone();
+                campaign.seed = 1 + index;
+                campaign.rival_context.dynasty_count = 8;
+                campaign.rival_context.player_wealth_rank = 4 + (index % 4) as u16;
+                campaign.rival_context.leaders_by_wealth = vec![
+                    GameplayRivalStanding {
+                        dynasty_id: DynastyId::new(7),
+                        name: "Rival".to_owned(),
+                        is_player: false,
+                        treasury: Money::from_copper(90_000),
+                        total_wealth: Money::from_copper(1_200_000),
+                        legitimacy_basis_points: 7_000,
+                        offices_held: 1,
+                        operating_businesses: 2,
+                    },
+                    GameplayRivalStanding {
+                        dynasty_id: DynastyId::new(0),
+                        name: "Player".to_owned(),
+                        is_player: true,
+                        treasury: Money::from_copper(30_000),
+                        total_wealth: Money::from_copper(250_000),
+                        legitimacy_basis_points: 6_000,
+                        offices_held: 1,
+                        operating_businesses: 1,
+                    },
+                ];
+                campaign
+            })
+            .collect();
+        let mut findings = Vec::new();
+        add_wealth_ceiling_finding(&campaigns, &mut findings);
+        let finding =
+            finding_with_title(&findings, "Player wealth never contends for the top ranks");
+        assert_eq!(finding.severity, GameplayFindingSeverity::Warning);
+
+        // One breakthrough into the top three silences the rule.
+        let mut relieved = campaigns.clone();
+        relieved[0].rival_context.player_wealth_rank = 2;
+        let mut quiet = Vec::new();
+        add_wealth_ceiling_finding(&relieved, &mut quiet);
+        assert!(
+            quiet.is_empty(),
+            "a single top-three campaign must silence the ceiling rule"
+        );
+    }
+
+    #[test]
     fn findings_surface_a_city_where_counterparty_performance_never_fails() {
         let report = cached_focused_report(30);
         let template = report

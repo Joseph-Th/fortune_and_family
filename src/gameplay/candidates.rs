@@ -7020,7 +7020,20 @@ pub(crate) fn urgency_weight(state: &AppState, kind: GameplayCommandKind) -> i64
         GameplayCommandKind::AcquireBusiness => acquisition_urgency(state),
         GameplayCommandKind::AcknowledgeNotification => notification_urgency(state),
         GameplayCommandKind::BorrowFunds => borrowing_urgency(state),
-        GameplayCommandKind::SellProperty => 3_500,
+        // Liquidation urgency reflects genuine need, not a flat bribe: a
+        // distressed house must sell, an underperforming portfolio should
+        // consider it, and a healthy house treats a sale as the low-priority
+        // exploratory repositioning it is. A flat bonus would let an
+        // exploratory half-price sale outrank productive investment.
+        GameplayCommandKind::SellProperty => {
+            if player_needs_property_liquidation(state) {
+                3_500
+            } else if player_holds_underperforming_property(state) {
+                800
+            } else {
+                0
+            }
+        }
         GameplayCommandKind::TransferBusinessCash | GameplayCommandKind::WithdrawBusinessCash => {
             impaired_business_urgency(state, 2_800)
         }
@@ -7658,6 +7671,12 @@ pub(crate) fn inject_exploratory_candidates(
             GameplayCommandKind::AcquireBusiness => {
                 inject_exploratory_acquisition(registry, state, persona, candidates)
             }
+            GameplayCommandKind::SellProperty => {
+                inject_exploratory_sale(registry, state, candidates)
+            }
+            GameplayCommandKind::FundPublicWork => {
+                inject_exploratory_work_funding(registry, state, candidates)
+            }
             _ => false,
         };
         if injected_now {
@@ -7928,6 +7947,114 @@ fn inject_exploratory_acquisition(
             30,
         );
         let _ = persona;
+        return true;
+    }
+    false
+}
+
+fn inject_exploratory_sale(
+    registry: &Registry,
+    state: &AppState,
+    candidates: &mut Vec<Candidate>,
+) -> bool {
+    // Portfolio repositioning is normally gated on distress or an 8% yield
+    // hurdle; exploratory sampling relaxes only the strategic-need gate so
+    // the one-way portfolio (buy, never sell) is proven reachable without
+    // forcing a distress sale. Canonical validation still applies at probe.
+    if candidates
+        .iter()
+        .any(|c| c.kind == GameplayCommandKind::SellProperty)
+    {
+        return false;
+    }
+    let player_id = state.player_dynasty_id;
+    let owned: Vec<_> = state
+        .properties
+        .values()
+        .filter(|p| p.owner_dynasty_id == Some(player_id))
+        .filter(|p| p.collateral_loan_id.is_none())
+        .collect();
+    if owned.is_empty() {
+        return false;
+    }
+    for property in owned {
+        let property_id = property.id;
+        let buyer = state
+            .dynasties
+            .values()
+            .filter(|d| d.id() != player_id)
+            .find(|d| {
+                quote_property_liquidation(registry, state, player_id, d.id(), property_id).is_ok()
+                    && d.treasury()
+                        .checked_sub(PROPERTY_COUNTERPARTY_BUYER_RESERVE)
+                        .is_some()
+            });
+        if let Some(buyer) = buyer {
+            push_candidate(
+                candidates,
+                GameplayCommandKind::SellProperty,
+                PlayerCommand::SellProperty {
+                    property_id,
+                    buyer_dynasty_id: buyer.id(),
+                },
+                format!(
+                    "exploratory sell property {property_id} to {} (organic variation)",
+                    dynasty_label(state, buyer.id())
+                ),
+                30,
+            );
+            return true;
+        }
+    }
+    false
+}
+
+fn inject_exploratory_work_funding(
+    registry: &Registry,
+    state: &AppState,
+    candidates: &mut Vec<Candidate>,
+) -> bool {
+    // Civic acceleration is normally gated on a 50k treasury; exploratory
+    // sampling relaxes only the wealth gate so patronage of unfinished works
+    // is proven reachable. Canonical validation still applies at probe.
+    if candidates
+        .iter()
+        .any(|c| c.kind == GameplayCommandKind::FundPublicWork)
+    {
+        return false;
+    }
+    let treasury = match state.dynasties.get(&state.player_dynasty_id) {
+        Some(d) => d.treasury(),
+        None => return false,
+    };
+    if treasury <= Money::ZERO {
+        return false;
+    }
+    let work = state.public_works.values().find(|w| {
+        w.status.is_unfinished()
+            && w.sponsor_dynasty_id != Some(state.player_dynasty_id)
+            && w.budget.saturating_sub(w.spent).copper().is_positive()
+    });
+    if let Some(work) = work {
+        let remaining = work.budget.saturating_sub(work.spent);
+        let amount = remaining.min(treasury).min(Money::from_copper(5_000));
+        if amount <= Money::ZERO {
+            return false;
+        }
+        push_candidate(
+            candidates,
+            GameplayCommandKind::FundPublicWork,
+            PlayerCommand::FundPublicWork {
+                public_work_id: work.id,
+                amount,
+            },
+            format!(
+                "exploratory fund public work {} with {amount} (organic variation)",
+                work.id
+            ),
+            30,
+        );
+        let _ = registry;
         return true;
     }
     false

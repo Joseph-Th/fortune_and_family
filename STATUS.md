@@ -12,7 +12,7 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 | Save schema | 31 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 83 |
+| Gameplay report schema | 84 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -44,7 +44,7 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 | Relationships | Trust, fear, respect, obligation, resentment, memories, interaction dates. |
 | Information | Source, confidence, subject, summary, creation, expiry, passive reports, paid market/district/counterparty intelligence. |
 | AI houses | Objectives for property, supply, office, debt, legitimacy, liquidity, rival pressure; monthly upkeep with great-house stewardship penalizing hoards; credit participation that workouts aged defaults with the existing creditor before funding sound firms; speculative credit reserved for liquidity-strained or losing firms. Rival supply contracts commit near weekly input need at penalties scaled to scheduled value. |
-| Crises | Seven kinds (grain, banking, fire, epidemic, guild revolt, noble demand, trade disruption) with detection, escalation, response, resolution, recovery. Responses count as containment for a bounded window. Trade disruption resolves when all routes heal; paid responses do not inflate severity. Route spikes outweigh healing; levy is annual; resolved panic raises the default bar for three years. |
+| Crises | Seven kinds (grain, banking, fire, epidemic, guild revolt, noble demand, trade disruption) with detection, escalation, response, resolution, recovery. Responses count as containment for a bounded window. Trade disruption resolves when all routes heal; paid responses do not inflate severity. Detection requires accumulated route, stock, district, labor, or credit pressure; average drift heals without it; levy is annual; resolved panic raises the default bar for three years. |
 | Crisis standing | Grain shortage declares while staple stores thin against target stock under collapsed regional access — before shelves empty. Crisis service earns standing with diminishing returns inside one year (full, half, quarter, one-eighth); material relief is not reduced. |
 | Observability | State summary, campaign projection, HTML dashboard, outbox, chronicle, audit history, validation, campaign progression, gameplay reports with causal traces, art review reports. |
 

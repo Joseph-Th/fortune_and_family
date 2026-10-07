@@ -113,8 +113,8 @@ const ADDRESSED_CRISIS_MONTHLY_RECOVERY_BASIS_POINTS: u16 = 360;
 /// Route disruption at or above this level spawns a trade-disruption crisis;
 /// a tracked disruption holds until every route heals. At 6000 (60%
 /// capacity-weighted disruption) a sustained blockade or multiple degraded
-/// routes credibly interrupts import staples while still requiring material
-/// pressure.
+/// routes credibly interrupts import staples while requiring accumulated
+/// pressure rather than one bad season.
 pub(crate) const TRADE_DISRUPTION_ROUTE_DISRUPTION_THRESHOLD: u16 = 6_000;
 /// A resolved banking panic raises the default bar for a follow-up panic for
 /// three years; older panics stop counting so confidence can rebuild.
@@ -139,12 +139,12 @@ const PUBLIC_WORK_TOOL_SHARE_BASIS_POINTS: i64 = crate::systems::TOOL_SHARE_BASI
 const SPECULATIVE_LOAN_INTEREST_BASIS_POINTS: u16 = 5_800;
 const SPECULATIVE_LOAN_TERM_WEEKS: i64 = 8;
 const SPECULATIVE_LOAN_MAX_PRINCIPAL: Money = Money::from_copper(22_000);
-/// Monthly risk-appetite draw per liquid house. Speculative offers remain a
-/// minority of the lending book while arriving several times per campaign.
-/// Heavy, short terms make city-wide defaults and banking-panic detection
-/// surface in ordinary worlds while most loans stay repayable for
-/// deliberate recovery.
-const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 8_200;
+/// Monthly risk-appetite draw per liquid house. Speculative offers stay a
+/// minority of the lending book: frequent enough to surface distress in
+/// strained worlds, rare enough that calm worlds stay calm and banking panic
+/// remains an emergent response to accumulated defaults rather than a
+/// scheduled fallback.
+const SPECULATIVE_LOAN_MONTHLY_CHANCE_BASIS_POINTS: u16 = 4_500;
 
 mod ai;
 mod businesses;

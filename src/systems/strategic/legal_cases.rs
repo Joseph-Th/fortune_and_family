@@ -626,20 +626,20 @@ pub(crate) fn execute_judgment_against_collateral(
 
 /// A single bad month adds between these bounds of route disruption.
 ///
-/// The spike must outweigh routine calm-month recovery by a wide margin on
-/// the risky routes: with the seeded 9-15% monthly spike chances, a typical
-/// month drifts upward by roughly 150-360 basis points, so a standard
-/// multi-year session can realistically push a route past the trade-
-/// disruption detection threshold while calm years still heal it.
-pub(crate) const ROUTE_DISRUPTION_SPIKE_MIN_BASIS_POINTS: u16 = 2_600;
-pub(crate) const ROUTE_DISRUPTION_SPIKE_RANGE_BASIS_POINTS: u32 = 2_900;
+/// The spike outweighs routine calm-month recovery, but only modestly across
+/// the network: with the seeded 9-15% monthly spike chances, calm years heal
+/// while coincident bad seasons accumulate into a trade-disruption crisis.
+/// Neither a guaranteed schedule nor dead content.
+pub(crate) const ROUTE_DISRUPTION_SPIKE_MIN_BASIS_POINTS: u16 = 2_400;
+pub(crate) const ROUTE_DISRUPTION_SPIKE_RANGE_BASIS_POINTS: u32 = 2_600;
 /// Routine calm months remove this much accumulated route disruption.
-pub(crate) const ROUTE_DISRUPTION_CALM_RECOVERY_BASIS_POINTS: u16 = 180;
+pub(crate) const ROUTE_DISRUPTION_CALM_RECOVERY_BASIS_POINTS: u16 = 200;
 /// Post-crisis healing removes this much accumulated route disruption.
-pub(crate) const ROUTE_DISRUPTION_HEALING_BASIS_POINTS: u16 = 350;
+pub(crate) const ROUTE_DISRUPTION_HEALING_BASIS_POINTS: u16 = 400;
 
 /// The prince's levy is checked at this cadence, each check passing this
 /// often. A standard three-year session should see roughly one demand in a
-/// third of campaigns instead of the demand being effectively unreachable.
+/// sixth of campaigns: rare enough to feel like an imposition from outside,
+/// not a scheduled tax.
 pub(crate) const NOBLE_DEMAND_CHECK_INTERVAL_DAYS: i64 = 360;
-pub(crate) const NOBLE_DEMAND_CHANCE_BASIS_POINTS: u16 = 1_200;
+pub(crate) const NOBLE_DEMAND_CHANCE_BASIS_POINTS: u16 = 600;

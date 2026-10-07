@@ -281,15 +281,16 @@ pub(crate) fn detect_and_advance_crises(
         // long before bakers stop producing bread, so detection watches both
         // staples against their own target stock instead of an absolute
         // shelf floor that normal fluctuation can never approach.
-        // At 65% the shortage declares while shelves thin rather than
-        // after they have collapsed to 40%, leaving response routes
-        // something to protect.
+        // At 55% the shortage declares while shelves thin rather than
+        // after they have collapsed, but only once the grain route itself
+        // has severely failed: regional access must collapse, not merely
+        // soften, before the city feels a staple crisis.
         let staple_thinning = ["grain", "bread"].iter().any(|good_key| {
             registry
                 .get_good_id(good_key)
                 .and_then(|id| state.market.get_quote(id))
                 .is_some_and(|quote| {
-                    quote.stock() < quote.target_stock.saturating_mul_ratio(6_500, 10_000)
+                    quote.stock() < quote.target_stock.saturating_mul_ratio(5_500, 10_000)
                 })
         });
         // Detection must precede empty shelves, or response routes have
@@ -301,7 +302,7 @@ pub(crate) fn detect_and_advance_crises(
         // independently — a blocked Western Grain Road starves the city even
         // when upland trade is fine.
         let weighted_stressed =
-            crate::systems::simulation::import_trade_availability_basis_points(state) < 5_000;
+            crate::systems::simulation::import_trade_availability_basis_points(state) < 4_000;
         let grain_route_stressed = registry
             .get_good_id("grain")
             .and_then(|grain_id| {
@@ -310,7 +311,7 @@ pub(crate) fn detect_and_advance_crises(
                     .values()
                     .find(|route| route.good_id == grain_id)
             })
-            .is_some_and(|route| route.disruption_basis_points > 5_000);
+            .is_some_and(|route| route.disruption_basis_points > 5_500);
         let supply_stressed = weighted_stressed || grain_route_stressed;
         if staple_thinning && supply_stressed {
             insert_crisis(
@@ -372,13 +373,13 @@ pub(crate) fn detect_and_advance_crises(
         && prior_panics == 0
         && day > 0
         && day % 180 == 0
-        && state.loans.len() >= 4
+        && state.loans.len() >= 6
         && state
             .businesses
             .iter()
             .filter(|b| b.status() == crate::core::BusinessStatus::Distressed)
             .count()
-            >= 1
+            >= 2
         && state.rng.is_chance_success(2_500)
     {
         insert_crisis(
@@ -610,10 +611,17 @@ pub(crate) fn detect_urban_fire(state: &mut AppState) -> Result<(), SimulationEr
 
 pub(crate) fn urban_fire_probability_basis_points(safety: u16, fire_code: i64) -> u16 {
     let deficiency = 10_000_u16.saturating_sub(safety);
+    // Below 2500 deficiency (safety above 7500) routine prevention holds:
+    // suppress noise there so fire requires genuine neglect. The fire code
+    // helps at a fraction of its face value so a chartered code trims the
+    // worst risk without zeroing it while riverside rots.
+    if deficiency < 2_500 {
+        return 0;
+    }
     let chance = i64::from(deficiency)
-        .saturating_div(4)
-        .saturating_add(500)
-        .saturating_sub(fire_code / 5)
+        .saturating_div(5)
+        .saturating_add(150)
+        .saturating_sub(fire_code / 8)
         .clamp(0, 10_000);
     u16::try_from(chance).unwrap_or(0)
 }
@@ -640,14 +648,13 @@ pub(crate) fn detect_epidemic(state: &mut AppState) -> Result<(), SimulationErro
         return Ok(());
     };
     let deficiency = 10_000_u16.saturating_sub(sanitation);
-    // Epidemic chance is deficiency-driven: only genuine deprivation
-    // (>3500 deficiency) produces material pressure, so route and credit
-    // stress must actually accumulate before an outbreak is likely. A mid-range
-    // district (~6500 sanitation) therefore stays low-risk by design.
-    let chance = deficiency.saturating_div(5).saturating_add(120).min(10_000);
-    // Below 2800 deficiency (<7200 sanitation) the floor chance is insufficient
-    // to trigger without additional compounding risk; suppress noise there.
-    if deficiency < 2_800 {
+    // Epidemic chance is deficiency-driven and deliberately thin: only the
+    // worst deprivation produces material pressure, so an outbreak is rare
+    // drama rather than a scheduled tax. Mid-range districts stay safe.
+    let chance = deficiency.saturating_div(16).min(10_000);
+    // Below 4000 deficiency (<6000 sanitation) routine health holds;
+    // suppress noise there.
+    if deficiency < 4_000 {
         return Ok(());
     }
     if state.rng.is_chance_success(chance) {
@@ -724,7 +731,7 @@ pub(crate) fn detect_guild_revolt(
         .clamp(0, 10_000);
     let guild_deficit = chartered_guild_legitimacy_deficit(registry, state);
     let chance = guild_revolt_probability_basis_points(disputed_count, restriction, guild_deficit);
-    if disputed_count >= 2 || (chance > 0 && state.rng.is_chance_success(chance)) {
+    if disputed_count >= 3 || (chance > 0 && state.rng.is_chance_success(chance)) {
         let district_id = disputed_district.or_else(|| {
             state
                 .districts
@@ -830,13 +837,21 @@ pub(crate) fn guild_revolt_probability_basis_points(
     if disputed_count == 0 && restriction <= 0 && guild_deficit <= 0 {
         return 0;
     }
-    let chance = 400_i64
+    // No standing dispute and no entry restriction means no organized base:
+    // deficit alone can still sour the mood, but only at a fraction of the
+    // organized rate — a revolt needs a grievance to organize around, not
+    // background deficit alone.
+    if disputed_count == 0 && restriction <= 0 {
+        let deficit_only = guild_deficit.clamp(0, 10_000) / 20;
+        return u16::try_from(deficit_only).unwrap_or(0);
+    }
+    let chance = 100_i64
         .saturating_add(restriction.clamp(0, 10_000) / 5)
         .saturating_add(guild_deficit.clamp(0, 10_000) / 8)
         .saturating_add(
             i64::try_from(disputed_count)
                 .unwrap_or(i64::MAX)
-                .saturating_mul(800),
+                .saturating_mul(600),
         )
         .clamp(0, 10_000);
     u16::try_from(chance).unwrap_or(10_000)

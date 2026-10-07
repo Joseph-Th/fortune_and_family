@@ -8390,9 +8390,10 @@ mod routes {
         // Capacity-weighted disruption must exceed the threshold: a single
         // minor route cannot by itself represent a city-wide trade crisis,
         // so every active route is set above the threshold as a network-wide
-        // severe disruption.
+        // severe disruption. The value sits above the 7000 detection
+        // threshold even after the routine calm-month recovery applies first.
         for route in state.external_routes.values_mut() {
-            route.disruption_basis_points = 7_300;
+            route.disruption_basis_points = 7_800;
         }
 
         run_monthly_strategic_systems(registry, &mut state)

@@ -44,6 +44,7 @@ pub(crate) fn derive_findings(
     add_starting_trade_economic_balance_finding(campaigns, &mut findings);
     add_early_background_imbalance_finding(campaigns, &mut findings);
     add_wealth_rank_persistence_finding(campaigns, &mut findings);
+    add_wealth_ceiling_finding(campaigns, &mut findings);
     add_rival_commercial_pressure_finding(aggregate, campaigns, &mut findings);
     add_succession_cohesion_finding(campaigns, &mut findings);
     add_succession_political_recovery_finding(campaigns, &mut findings);
@@ -324,6 +325,66 @@ pub(crate) fn add_wealth_rank_persistence_finding(
         title: "Player wealth stays persistently bottom-ranked".to_owned(),
         evidence: format!(
             "{poorest} of {} campaigns ended ranked {dynasty_count}/{dynasty_count} by total wealth (treasury + business cash + property, poorest), with best rank {best_rank}/{dynasty_count}. Persistent bottom wealth suggests starting capital, early margins, or AI wealth scaling leaves little room to outcompete rivals within the evaluated horizon.",
+            campaigns.len()
+        ),
+    });
+}
+
+pub(crate) fn add_wealth_ceiling_finding(
+    campaigns: &[GameplayCampaignReport],
+    findings: &mut Vec<GameplayFinding>,
+) {
+    // Complements bottom-rank persistence: a house that never falls last but
+    // never contends for the top is stuck in the middle, not rising. The
+    // fantasy is to convert useful work into standing that can lead the
+    // city, so a persistent top-3 shutout is a design signal even when no
+    // campaign collapses to last.
+    if campaigns.len() < 8 {
+        return;
+    }
+    let dynasty_count = campaigns
+        .first()
+        .map_or(0, |c| c.rival_context.dynasty_count);
+    if dynasty_count < 4 {
+        return;
+    }
+    let best_rank = campaigns
+        .iter()
+        .map(|c| c.rival_context.player_wealth_rank)
+        .min()
+        .unwrap_or(dynasty_count);
+    if best_rank <= 3 {
+        return;
+    }
+    let top_wealth_gap = campaigns
+        .iter()
+        .filter_map(|c| {
+            let leader = c.rival_context.leaders_by_wealth.first()?;
+            let player = c
+                .rival_context
+                .leaders_by_wealth
+                .iter()
+                .find(|l| l.is_player)?;
+            let gap = leader
+                .total_wealth
+                .copper()
+                .saturating_sub(player.total_wealth.copper());
+            Some((c, gap))
+        })
+        .max_by_key(|(_, gap)| *gap);
+    let gap_note = top_wealth_gap.map_or_else(String::new, |(c, gap)| {
+        format!(
+            " Widest gap: seed {} {} trailed the leader by {}.",
+            c.seed,
+            c.persona.label(),
+            Money::from_copper(gap)
+        )
+    });
+    findings.push(GameplayFinding {
+        severity: GameplayFindingSeverity::Warning,
+        title: "Player wealth never contends for the top ranks".to_owned(),
+        evidence: format!(
+            "Across {} campaigns the best player wealth rank was {best_rank}/{dynasty_count} by total wealth (treasury + business cash + property); no campaign broke into the top three.{gap_note} Durable work should be able to carry a house toward city leadership within the evaluated horizon.",
             campaigns.len()
         ),
     });
@@ -1418,12 +1479,16 @@ pub(crate) fn add_crisis_determinism_finding(
     for (kind, seeds) in &kind_worlds {
         let count = kind_counts.get(kind).copied().unwrap_or(0);
         let world_share = scaled_ratio_usize(seeds.len(), world_total, 100);
-        if world_share >= 95 && seeds.len() >= 3 {
+        let campaign_share = scaled_ratio_usize(count, total, 100);
+        // Both bars must clear: a kind that touches every world but only a
+        // tenth of campaigns is rare drama amplified by world counting (12
+        // campaigns share each seed), not a guaranteed schedule.
+        if world_share >= 95 && campaign_share >= 30 && seeds.len() >= 3 {
             findings.push(GameplayFinding {
                 severity: GameplayFindingSeverity::Info,
                 title: format!("{kind:?} is near-deterministic, not emergent"),
                 evidence: format!(
-                    "{count} of {total} campaigns across {} of {world_total} worlds observed {kind:?} ({world_share}% of worlds). When a crisis kind appears in essentially every world seed it is a guaranteed schedule rather than an emergent response to structural weakness. Consider raising its disruption/threshold so route and credit stress must actually accumulate.",
+                    "{count} of {total} campaigns across {} of {world_total} worlds observed {kind:?} ({world_share}% of worlds, {campaign_share}% of campaigns). When a crisis kind appears in essentially every world seed and a material share of campaigns it is a guaranteed schedule rather than an emergent response to structural weakness. Consider raising its disruption/threshold so route and credit stress must actually accumulate.",
                     seeds.len(),
                 ),
             });

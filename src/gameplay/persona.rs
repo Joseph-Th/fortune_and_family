@@ -42,7 +42,7 @@ pub(crate) const AGENT_PLANNED_CAPITALIZATION_MAX: Money = Money::from_copper(8_
 /// Monthly maintenance copper per resident family member the agent reserves
 /// before committing treasury to property acquisitions.
 pub(crate) const FAMILY_MAINTENANCE_MONTHLY_COPPER: i64 = 250;
-pub(crate) const AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER: Money = Money::from_copper(90_000);
+pub(crate) const AGENT_CIVIC_ACCELERATION_TREASURY_TRIGGER: Money = Money::from_copper(70_000);
 pub(crate) const AGENT_CIVIC_ACCELERATION_MAX_CONTRIBUTION: Money = Money::from_copper(12_000);
 /// Minimum district need score (same scale as `public_work_need_score`)
 /// before the agent considers bankrolling a project it does not sponsor:
@@ -85,8 +85,10 @@ pub(crate) const AGENT_INFORMATION_COUNTERPARTY_RESENTMENT_THRESHOLD: u16 = 2_50
 /// command finding unreachable.
 pub(crate) const SUBSTANTIVE_STREAK_MAX_GAP_DAYS: i64 = 30;
 /// Close-call exploration is sized to surface genuine tradeoffs without overriding
-/// urgency or persona priorities.
-pub(crate) const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 1_800;
+/// urgency or persona priorities. The range sits just under the close-choice
+/// gap so only genuinely close calls flip: larger noise would manufacture
+/// false breadth by shuffling dominated options into selection.
+pub(crate) const ORGANIC_CANDIDATE_VARIATION_RANGE: i64 = 250;
 /// Fixed budget used by agent-proposed public-work candidates.
 pub(crate) const CANDIDATE_PUBLIC_WORK_BUDGET: Money = Money::from_copper(12_000);
 

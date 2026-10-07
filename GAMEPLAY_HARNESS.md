@@ -100,9 +100,11 @@ Standing policies:
 - Candidate scores include deterministic exploration variation (`ORGANIC_CANDIDATE_VARIATION_RANGE` in
   `src/gameplay/persona.rs`, day jitter in `src/gameplay/harness.rs`) derived from
   campaign state and persona. Timing jitter mixes persona, generation, business/property, and crisis state;
-  score variation mixes generation, business, property, legal, and crisis state. Both flip close calls
-  without overriding urgency, reserves, or persona priorities.
-- Exploratory injection samples restrained routes (~14% per eligible family, up to two per cycle) so
+  score variation mixes generation, business, property, legal, and crisis state. The variation sits
+  under the close-choice gap so only genuinely close calls flip, without overriding urgency,
+  reserves, or persona priorities.
+- Exploratory injection samples restrained routes (~14% per eligible family, up to two per cycle),
+  including portfolio sales and civic acceleration, so
   deliberately narrowed generators are still proven reachable.
 - Optional standing expenses (education, wards, patronage) respect a discretionary floor: emergency reserve plus two months of committed loan service. Below the floor, standing spending is deferred.
 - Standing-burning responses (suppression, profiteering) additionally respect a legitimacy reserve.
@@ -202,7 +204,7 @@ Counts are recorded per campaign and summed in aggregates. Each quiet trace step
 
 Milestone days prefer the exact chronicle day over the observation day (decision windows can straddle a year boundary).
 
-Unexecuted routes aggregate into three summary findings by cause: activations with no candidate construction (Critical for non-restraint routes, Warning for deliberate-restraint routes) and kinds the world never offered (Info).
+Unexecuted routes aggregate into three summary findings by cause: activations with no candidate construction (Critical for non-restraint routes, Warning for deliberate-restraint routes) and kinds the world never offered (Info). Crisis determinism requires both world breadth and a material campaign share, so rare drama amplified by shared world seeds does not read as a guaranteed schedule.
 
 ### Decision traces
 
@@ -248,6 +250,7 @@ Severity `Info`, `Warning`, `Critical`. Identify conditions such as:
 - Weak political progression or office utility
 - Succession without meaningful disruption
 - Excessive mature liquidity or background imbalance
+- Player wealth that never contends for the top ranks
 - Property market priced out of reach
 - Crisis kinds never detected
 - Counterparty performance that never fails
