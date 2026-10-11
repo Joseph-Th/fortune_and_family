@@ -1038,6 +1038,8 @@ mod harness {
 
         for heading in [
             "scores:",
+            "fantasy reach:",
+            "never reached:",
             "Persona comparison",
             "Experience health",
             "ending civic conditions:",

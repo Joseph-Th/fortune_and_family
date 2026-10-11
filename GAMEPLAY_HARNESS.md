@@ -234,7 +234,7 @@ Range 0–100:
 | Resilience | Business continuity, liquidity, credit/labor/crisis pressure, food access, civic conditions |
 | Overall | Weighted summary |
 
-Component scores and findings diagnose; overall score is a gate.
+Component scores and findings diagnose; overall score is a gate. The header prints fantasy reach on the line after the scores: how many of the nine core-fantasy milestones any campaign reached, and which none did. A high overall score with unreached milestones is a short-horizon or thin-play result, not a healthy one.
 
 ## Findings
 

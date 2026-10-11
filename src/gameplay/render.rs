@@ -469,38 +469,71 @@ pub(crate) fn render_limitations(report: &GameplayHarnessReport, output: &mut St
     let _ = writeln!(output);
 }
 
+type FantasyMilestone = (&'static str, fn(&GameplayFantasyArc) -> Option<i64>);
+
+/// The core-fantasy milestones in report order. The header and the arc section both read this
+/// list, so the headline cannot name a different set than the detail beneath it.
+const FANTASY_MILESTONES: [FantasyMilestone; 9] = [
+    ("reputation", |arc| arc.first_reputation_standing_day),
+    ("commercial", |arc| arc.first_commercial_standing_day),
+    ("support", |arc| arc.first_institution_support_day),
+    ("campaign", |arc| arc.first_office_campaign_day),
+    ("office", |arc| arc.first_office_day),
+    ("city-shaping", |arc| arc.first_city_shaping_action_day),
+    ("labor conflict", |arc| arc.first_player_labor_dispute_day),
+    ("heir", |arc| arc.first_heir_designation_day),
+    ("succession", |arc| arc.first_succession_day),
+];
+
+/// How many campaigns reached each core-fantasy milestone.
+fn fantasy_reach(report: &GameplayHarnessReport) -> Vec<(&'static str, usize)> {
+    FANTASY_MILESTONES
+        .iter()
+        .map(|(label, reached_day)| {
+            let campaigns = report
+                .campaigns
+                .iter()
+                .filter(|campaign| reached_day(&campaign.fantasy_arc).is_some())
+                .count();
+            (*label, campaigns)
+        })
+        .collect()
+}
+
+/// The headline beside the scores: which milestones no campaign reached. A high overall score
+/// over an unreached fantasy must read as such on the same screen.
+pub(crate) fn render_fantasy_reach_headline(report: &GameplayHarnessReport, output: &mut String) {
+    let reach = fantasy_reach(report);
+    let unreached = reach
+        .iter()
+        .filter(|(_, campaigns)| *campaigns == 0)
+        .map(|(label, _)| *label)
+        .collect::<Vec<_>>();
+    let never = if unreached.is_empty() {
+        "none".to_owned()
+    } else {
+        unreached.join(", ")
+    };
+    let _ = writeln!(
+        output,
+        "fantasy reach: {}/{} milestones reached in at least one campaign | never reached: {never}",
+        reach.len() - unreached.len(),
+        reach.len()
+    );
+}
+
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn render_fantasy_arcs(report: &GameplayHarnessReport, output: &mut String) {
     let total = report.campaigns.len().max(1) as f64;
-    let reached = |f: fn(&GameplayFantasyArc) -> Option<i64>| {
-        report
-            .campaigns
-            .iter()
-            .filter(|c| f(&c.fantasy_arc).is_some())
-            .count()
-    };
-    let rep = reached(|a| a.first_reputation_standing_day);
-    let com = reached(|a| a.first_commercial_standing_day);
-    let sup = reached(|a| a.first_institution_support_day);
-    let camp = reached(|a| a.first_office_campaign_day);
-    let office = reached(|a| a.first_office_day);
-    let shaping = reached(|a| a.first_city_shaping_action_day);
-    let labor = reached(|a| a.first_player_labor_dispute_day);
-    let heir = reached(|a| a.first_heir_designation_day);
-    let succ = reached(|a| a.first_succession_day);
+    let shares = fantasy_reach(report)
+        .iter()
+        .map(|(label, campaigns)| format!("{label} {:.0}%", *campaigns as f64 / total * 100.0))
+        .collect::<Vec<_>>()
+        .join(" | ");
     let _ = writeln!(
         output,
-        "Fantasy arc reach ({} campaigns): reputation {:.0}% | commercial {:.0}% | support {:.0}% | campaign {:.0}% | office {:.0}% | city-shaping {:.0}% | labor conflict {:.0}% | heir {:.0}% | succession {:.0}%",
-        report.campaigns.len(),
-        rep as f64 / total * 100.0,
-        com as f64 / total * 100.0,
-        sup as f64 / total * 100.0,
-        camp as f64 / total * 100.0,
-        office as f64 / total * 100.0,
-        shaping as f64 / total * 100.0,
-        labor as f64 / total * 100.0,
-        heir as f64 / total * 100.0,
-        succ as f64 / total * 100.0,
+        "Fantasy arc reach ({} campaigns): {shares}",
+        report.campaigns.len()
     );
     let _ = writeln!(output, "Core fantasy milestones");
     for campaign in &report.campaigns {
@@ -892,6 +925,7 @@ pub(crate) fn render_report_header(report: &GameplayHarnessReport, output: &mut 
         aggregate.scores.feedback,
         aggregate.scores.resilience
     );
+    render_fantasy_reach_headline(report, output);
     // Coverage counts only substantive command kinds; the three operational
     // housekeeping kinds are excluded from both numerator and denominator.
     let _ = writeln!(
