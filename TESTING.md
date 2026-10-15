@@ -28,9 +28,9 @@ Solo-dev iteration is one command — other lanes run only when their contract c
 | Art CLI | `bash scripts/test.sh art-cli` | fast | Sprite review CLI |
 | Harness CLI | `bash scripts/test.sh gameplay-cli` | fast | Harness CLI (30-day) |
 | Quick | `bash scripts/test.sh quick` | fast | Alias for `fast` (no docs/CLI) |
-| Release without audit | `bash scripts/test.sh slow` | ~45s | Release gates without `cargo-audit` |
-| Full design gate | `bash scripts/test.sh deep` | ~1.2min | `slow` + `gameplay-audit` |
-| Everything | `bash scripts/test.sh all` | ~25s | `standard` + `soak` + `adapters` + `gameplay` |
+| Release without audit | `bash scripts/test.sh slow` | slow | Release gates without `cargo-audit` |
+| Full design gate | `bash scripts/test.sh deep` | slow | `slow` + `gameplay-audit` |
+| Everything | `bash scripts/test.sh all` | slow | `standard` + `soak` + `adapters` + `gameplay` |
 
 Failures print full diagnostics. A filter matching no test exits with code 2. On Windows without bash, use `.\scripts\test.ps1 <mode> [filter>`.
 
