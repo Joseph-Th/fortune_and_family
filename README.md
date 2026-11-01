@@ -14,22 +14,22 @@ Each question has one owning document. Link to the owner; do not duplicate its c
 
 | Document | Owns |
 |---|---|
-| `AGENTS.md` | Change procedure, module ownership, repository rules |
-| `ARCHITECTURE.md` | Code structure, dependency direction, mutation flows, execution order |
-| `STATUS.md` | Current capability, schemas, runtime guarantees, deliberate limits |
-| `DESIGN.md` | Product intent, player fantasy, campaign arc, scope |
-| `TESTING.md` | Test tiers, assertion standards, completion gates |
-| `GAMEPLAY_HARNESS.md` | Harness mechanics and report semantics |
+| [`AGENTS.md`](AGENTS.md) | Change procedure, module ownership, repository rules |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Code structure, dependency direction, mutation flows, execution order |
+| [`STATUS.md`](STATUS.md) | Current capability, schemas, runtime guarantees, deliberate limits |
+| [`DESIGN.md`](DESIGN.md) | Product intent, player fantasy, campaign arc, scope |
+| [`TESTING.md`](TESTING.md) | Test tiers, assertion standards, completion gates |
+| [`GAMEPLAY_HARNESS.md`](GAMEPLAY_HARNESS.md) | Harness mechanics and report semantics |
 
 Profiles: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation**. Root `../AGENTS.md` owns workspace coordination. BCA policy is `advisory`.
 
 ## Cold start
 
-1. Read this map, then `AGENTS.md` for procedure and reading order.
-2. Read `STATUS.md` for capability and schemas; read `ARCHITECTURE.md` for the owning module.
+1. Read this map, then [`AGENTS.md`](AGENTS.md) for procedure and reading order.
+2. Read [`STATUS.md`](STATUS.md) for capability and schemas; read [`ARCHITECTURE.md`](ARCHITECTURE.md) for the owning module.
 3. Trace `src/lib.rs` to the canonical system, then its file header (`Purpose / Owns / Reads / Mutates / Does not own / Canonical operations / Relevant invariants / Focused tests`).
 4. Identify the narrowest test that proves the behavior before editing.
-5. Run the narrowest `bash scripts/test.sh <lane>` from `TESTING.md` — `fast <filter>` to iterate, `standard` to complete.
+5. Run the narrowest `bash scripts/test.sh <lane>` from [`TESTING.md`](TESTING.md) — `fast <filter>` to iterate, `standard` to complete.
 
 ## Requirements
 
