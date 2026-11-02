@@ -106,7 +106,7 @@ It returns bounded authority, verification, and likely-source evidence. Tool out
 | Procedural art | `src/art/` |
 | Core types & state | `src/core/`, `src/ids.rs`, `src/money.rs`, `src/rng.rs`, `src/registry/` |
 
-Impact map: `ARCHITECTURE.md` § Extension map lists required companion work per change class (state shape → validation/invariants/projection/tests; commands → feedback/projection/harness; schedule → ordering/tests; persistence → schema/round-trip; adapters → smoke).
+Impact map: [ARCHITECTURE.md § Extension map](ARCHITECTURE.md#extension-map) lists required companion work per change class (state shape → validation/invariants/projection/tests; commands → feedback/projection/harness; schedule → ordering/tests; persistence → schema/round-trip; adapters → smoke).
 
 ## Guardrails
 
