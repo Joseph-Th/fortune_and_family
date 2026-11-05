@@ -17,11 +17,11 @@ Each question has one owning document. Link to the owner; do not duplicate its c
 | [`AGENTS.md`](AGENTS.md) | Change procedure, module ownership, repository rules |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Code structure, dependency direction, mutation flows, execution order |
 | [`STATUS.md`](STATUS.md) | Current capability, schemas, runtime guarantees, deliberate limits |
-| [`DESIGN.md`](DESIGN.md) | Product intent, player fantasy, campaign arc, scope |
+| [`DESIGN.md`](DESIGN.md) | Product intent, player fantasy, campaign arc |
 | [`TESTING.md`](TESTING.md) | Test tiers, assertion standards, completion gates |
 | [`GAMEPLAY_HARNESS.md`](GAMEPLAY_HARNESS.md) | Harness mechanics and report semantics |
 
-Profiles: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation**. Root `../AGENTS.md` owns workspace coordination. BCA policy is `advisory`.
+Root `../AGENTS.md` owns workspace coordination; [`AGENTS.md`](AGENTS.md) declares the applicable profiles. BCA policy is `advisory`.
 
 ## Cold start
 
@@ -33,7 +33,7 @@ Profiles: **Universal, Stateful Application, Deterministic System, Automated Beh
 
 ## Requirements
 
-- Rust `1.97` minimum (`Cargo.toml` `rust-version`, pinned by `rust-toolchain.toml`), edition 2024.
+- Rust toolchain and edition are defined by `Cargo.toml` and pinned by `rust-toolchain.toml`; [`STATUS.md`](STATUS.md) mirrors the supported minimum.
 - Bash or PowerShell for `scripts/test.sh` / `scripts/test.ps1`.
 - Python for doc and structured-output checks; `cargo-audit` for `ci-gates`/`deep` lanes.
 

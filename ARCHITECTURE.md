@@ -2,7 +2,7 @@
 
 Code ownership, dependency direction, canonical mutation flows, and execution order.
 
-Profiles: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation**.
+Profiles are declared in `AGENTS.md`.
 
 Related authorities: `AGENTS.md` (execution card), `STATUS.md` (current scope), `TESTING.md` (verification), `DESIGN.md` (intent), `GAMEPLAY_HARNESS.md` (harness). Root `../AGENTS.md` owns workspace coordination.
 

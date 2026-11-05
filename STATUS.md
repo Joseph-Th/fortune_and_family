@@ -1,6 +1,6 @@
 # Project Status
 
-Current surface, schemas, runtime guarantees, and deliberate limits. Product intent is in `DESIGN.md`; implementation ownership is in `ARCHITECTURE.md`. Profiles: **Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation**.
+Current surface, schemas, runtime guarantees, and deliberate limits. Product intent is in `DESIGN.md`; implementation ownership is in `ARCHITECTURE.md`. Profiles are declared in [`AGENTS.md`](AGENTS.md).
 
 ## Platform contracts
 
@@ -95,6 +95,6 @@ Serialized contract changes require a schema increment. Earlier schemas are unsu
 - External powers act through routes, demands, privileges, and crises, not a full diplomacy simulation.
 - Religion and charity are institutionally represented without deep doctrine or faction simulation.
 - No interactive graphical campaign client; clients are CLI, JSON projection, and HTML dashboard.
-- Tactical combat, manual character movement, equal-detail multi-city simulation, routine crafting, repetitive dialogue, and non-systemic interiors are out of scope.
+- Product-level exclusions and intentional limitations are owned by [DESIGN.md](DESIGN.md).
 
 Validation workflow is in `TESTING.md`.
