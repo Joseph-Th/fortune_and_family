@@ -661,7 +661,7 @@ impl NextIds {
         ExternalRoute
     );
     test_next_id_method!(crisis, try_crisis, crisis, CrisisId, Crisis);
-    test_next_id_method!(outbox, try_outbox, outbox, OutboxMessageId, OutboxMessage);
+    try_next_id_method!(try_outbox, outbox, OutboxMessageId, OutboxMessage);
     next_id_method!(
         chronicle,
         try_chronicle,

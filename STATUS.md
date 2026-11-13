@@ -12,7 +12,6 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 | Save schema | 31 |
 | Supported save schemas | Current schema only |
 | Maximum save file size | 256 MiB |
-| Gameplay report schema | 85 |
 | Art review report schema | 1 |
 | Runtime services | None |
 | Core randomness | Serializable state-owned deterministic RNG |
@@ -20,8 +19,9 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 
 ## Product surface
 
-- Rust library API, CLI, versioned JSON persistence, read-only JSON projections, self-contained HTML dashboard, deterministic gameplay harness, deterministic sprite renderer and review harness.
+- Rust library API, CLI, versioned JSON persistence, read-only JSON projections, self-contained HTML dashboard, text-play command loop, deterministic sprite renderer and review harness.
 - Campaigns support deterministic continuation across multiple generations.
+- Play loop: `new` → `execute` (one JSON `PlayerCommand`) → `simulate` → `summary`/`inspect`/`dashboard`; [`PLAY.md`](PLAY.md) owns the loop and `apply_player_command_scratch` supports what-if probing on a disposable clone.
 
 ## Implemented domains
 
@@ -46,7 +46,7 @@ Current surface, schemas, runtime guarantees, and deliberate limits. Product int
 | AI houses | Objectives for property, supply, office, debt, legitimacy, liquidity, rival pressure; monthly upkeep with great-house stewardship penalizing hoards; credit participation that workouts aged defaults with the existing creditor before funding sound firms; speculative credit reserved for liquidity-strained or losing firms. Rival supply contracts commit near weekly input need at penalties scaled to scheduled value. |
 | Crises | Seven kinds (grain, banking, fire, epidemic, guild revolt, noble demand, trade disruption) with detection, escalation, response, resolution, recovery. Responses count as containment for a bounded window. Trade disruption resolves when all routes heal; paid responses do not inflate severity. Detection requires accumulated route, stock, district, labor, or credit pressure; average drift heals without it; levy is annual; resolved panic raises the default bar for three years. |
 | Crisis standing | Grain shortage declares while staple stores thin against target stock under collapsed regional access — before shelves empty. Crisis service earns standing with diminishing returns inside one year (full, half, quarter, one-eighth); material relief is not reduced. |
-| Observability | State summary, campaign projection, HTML dashboard, outbox, chronicle, audit history, validation, campaign progression, gameplay reports with causal traces, art review reports. |
+| Observability | State summary, campaign projection, HTML dashboard, outbox, chronicle, audit history, validation, campaign progression, art review reports. |
 
 ## Player command surface
 
@@ -66,7 +66,7 @@ All callers use the same validation and mutation paths.
 
 ## Public library surface
 
-`src/lib.rs` defines the integration facade: campaign construction and advancement, player commands, strategic quotes, persistence, projections, HTML rendering, gameplay analysis, art review, and invariant validation.
+`src/lib.rs` defines the integration facade: campaign construction and advancement, player command application and scratch probing, strategic quotes, persistence, projections, HTML rendering, art review, and invariant validation.
 
 ## Persistence guarantees
 

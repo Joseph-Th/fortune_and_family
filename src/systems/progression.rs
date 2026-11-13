@@ -2,10 +2,9 @@
 //!
 //! Purpose: own the single monotonic `CampaignPhase` ladder (Foundation →
 //! Establishment → Ascendancy → Dominion → Legacy) so `ARCHITECTURE.md`'s
-//! promised phase growth and `GAMEPLAY_HARNESS.md`'s phase grouping both
-//! derive from the same durable evidence. Phases are earned by commercial,
-//! institutional, civic, and succession milestones and never regress even
-//! when underlying standing later softens.
+//! promised phase growth derives from durable evidence. Phases are earned by
+//! commercial, institutional, civic, and succession milestones and never
+//! regress even when underlying standing later softens.
 //! Owns: `refresh_campaign_phases` (with `CampaignEvidenceMemo` incremental
 //! fold), `campaign_phase_is_consistent` / `are_consistent`, and
 //! `CampaignPhaseEvidence::collect` (one sweep for all dynasties).
@@ -17,7 +16,7 @@
 //! (audit shrinking or day regression forces rebuild); phase derived only
 //! from durable milestones, not volatile cache.
 //! Canonical operations: `refresh_campaign_phases`, `campaign_phase_is_consistent`.
-//! Focused tests: `src/systems/strategic/*` succession, harness phase diagnostics.
+//! Focused tests: `src/systems/strategic/*` succession and phase progression.
 
 use super::{OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT};
 use crate::core::{AppState, AuditKind, CampaignEvidenceMemo, CampaignPhase};

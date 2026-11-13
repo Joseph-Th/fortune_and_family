@@ -1,6 +1,6 @@
-//! Structural checksum folding shared by gameplay observation and history logs.
+//! Structural checksum folding shared by history logs.
 //!
-//! Purpose: give gameplay snapshots and `HistoryLog` streams a stable,
+//! Purpose: give `HistoryLog` streams a stable,
 //! content-sensitive fingerprint without depending on JSON formatting. Every
 //! `serde` callback writes a distinct type tag followed by fixed-width
 //! little-endian payload bytes into an FNV-1a fold, so two values collide
@@ -26,7 +26,7 @@ use serde::ser;
 
 /// Serialization error slot for the structural checksum folder.
 ///
-/// Serialization of gameplay observation state is infallible, so this type is
+/// Serialization of folded state is infallible, so this type is
 /// never constructed; it exists only to satisfy the [`Serializer`] trait.
 #[derive(Debug, Default)]
 pub(crate) struct ChecksumError;
@@ -72,10 +72,6 @@ impl ChecksumFolder {
 
     /// Returns the running fold so it can be resumed later.
     pub(crate) const fn raw(&self) -> u64 {
-        self.state
-    }
-
-    pub(crate) fn finish(self) -> u64 {
         self.state
     }
 

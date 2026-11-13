@@ -69,19 +69,6 @@ pub(crate) fn assert_state_unchanged(before: &AppState, after: &AppState, contex
 }
 
 #[track_caller]
-pub(crate) fn assert_set_eq<T>(expected: &BTreeSet<T>, actual: &BTreeSet<T>, context: &str)
-where
-    T: Debug + Ord,
-{
-    let missing: Vec<_> = expected.difference(actual).collect();
-    let unexpected: Vec<_> = actual.difference(expected).collect();
-    if missing.is_empty() && unexpected.is_empty() {
-        return;
-    }
-    panic!("{context}; missing members: {missing:#?}; unexpected members: {unexpected:#?}");
-}
-
-#[track_caller]
 pub(crate) fn assert_money_eq(actual: Money, expected: Money, context: &str) {
     if actual == expected {
         return;

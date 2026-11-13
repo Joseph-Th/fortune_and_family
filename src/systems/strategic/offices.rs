@@ -222,6 +222,7 @@ pub(crate) fn office_duty_required(power_count: usize, office_count: usize) -> M
         )
 }
 
+#[cfg(test)]
 pub(crate) fn projected_dynasty_monthly_office_duty(
     state: &AppState,
     dynasty_id: DynastyId,
@@ -238,6 +239,7 @@ pub(crate) fn projected_dynasty_monthly_office_duty(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn projected_dynasty_monthly_office_duty_with_additional_offices(
     state: &AppState,
     dynasty_id: DynastyId,

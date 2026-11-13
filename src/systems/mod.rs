@@ -5,7 +5,7 @@
 //! behind one import surface, expose shared constants/helpers
 //! (`capacity_weighted_route_disruption`, `DailyCapacityScratch`,
 //! `OfficePower::*` derivation, scheduling predicates), and re-export the
-//! handful of symbols the CLI, gameplay harness, and projection need. This is
+//! handful of symbols the CLI and projection need. This is
 //! the single discovery point for system ownership.
 //! Owns: subsystem module wiring and the shared scheduling/employment/route
 //! math that multiple domains read (weekly settleability, directive expiry,
@@ -15,8 +15,8 @@
 //! Does not own: any single domain's mutation (each subsystem owns its own
 //! validation → commit path).
 //! Canonical operations: `build_new_game` (bootstrap), `apply_player_command`
-//! / `apply_player_command_scratch` (commands), `advance_days` /
-//! `advance_days_scratch` (simulation), persistence `validate_invariants`;
+//! / `apply_player_command_scratch` (commands), `advance_days`
+//! (simulation), persistence `validate_invariants`;
 //! scheduling helpers `is_settleable_weekly_due_day` and
 //! `is_valid_*` used by persistence validation.
 //! Relevant invariants: `OFFICE_TERM_DAYS` / `OFFICE_VACANCY_RETRY_DAYS` and
@@ -38,8 +38,6 @@ mod progression;
 pub(crate) mod simulation;
 mod strategic;
 mod transactions;
-
-pub(crate) use strategic::active_law_value;
 
 pub(crate) const WORKERS_PER_BATCH: u16 = 4;
 pub(crate) const EMPLOYMENT_RECOVERY_BASIS_POINTS: u16 = 3_000;
@@ -477,8 +475,6 @@ pub(crate) fn synchronize_employment_for_business_status(
 }
 
 pub use bootstrap::{NewGameError, build_new_game};
-#[cfg(test)]
-pub(crate) use commands::INSTITUTION_SUPPORT_DELIVERY_REQUIREMENT;
 
 /// Canonical `heir={id}` component of a `HeirDesignation` audit detail. The
 /// writer and every reader share this one format, so reformatting the record
@@ -504,47 +500,19 @@ pub(crate) fn heir_audit_detail_matches(
 /// office. The writer and reader share this one constant.
 pub(crate) const OFFICE_RESIGNATION_AUDIT_DETAIL: &str = "resigned_office=true";
 
-pub(crate) use commands::apply_player_command_scratch;
-pub(crate) use commands::{
-    BUSINESS_POLICY_CHANGE_INTERVAL_DAYS, BUSINESS_WAGE_CHANGE_INTERVAL_DAYS,
-    CIVIC_DEBT_CREDITOR_RESERVE, COMMISSIONED_INFORMATION_SOURCE, CRISIS_REFORM_COST,
-    CRISIS_SUPPRESS_COST, CRISIS_SUPPRESS_LEGITIMACY_COST, FAMILY_COUNCIL_MEETING_COST,
-    FAMILY_COUNCIL_MEETING_INTERVAL_DAYS, FAMILY_EDUCATION_COST, HEIR_DESIGNATION_INTERVAL_DAYS,
-    HEIR_DESIGNATION_LEGITIMACY_COST, HEIR_DESIGNATION_UNITY_COST,
-    HOUSE_GOVERNANCE_CHANGE_INTERVAL_DAYS, HOUSE_GOVERNANCE_UNITY_COST,
-    INFORMATION_COMMISSION_COST, INFORMATION_COMMISSION_INTERVAL_DAYS, INFORMATION_LEVERAGE_COST,
-    INFORMATION_REPORT_LIFETIME_DAYS, INSTITUTION_ENDOWMENT_MAX, INSTITUTION_ENDOWMENT_MIN,
-    INSTITUTION_SUPPORT_COST, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
-    INSTITUTION_SUPPORT_REPUTATION_REQUIREMENT, LABOR_CONDITIONS_IMPROVEMENT_COST,
-    LABOR_NEGOTIATION_COST, LABOR_REPLACEMENT_COST, LAW_LEGITIMACY_REQUIREMENT,
-    LAW_SPONSORSHIP_COST, LAW_SPONSORSHIP_INTERVAL_DAYS, MAX_ACTIVE_SPONSORED_PUBLIC_WORKS,
-    MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER, MAX_WEEKLY_WAGE_PER_WORKER,
-    OFFICE_NOMINATION_CAMPAIGN_COST, OFFICE_NOMINATION_DELIVERY_REQUIREMENT,
-    OFFICE_NOMINATION_REPUTATION_REQUIREMENT, OFFICE_NOMINATION_RESOLUTION_DAYS,
-    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, OFFICE_POWER_DIRECTIVE_LEGITIMACY_COST,
-    PRIVATE_LOAN_COUNTERPARTY_RESERVE, PROPERTY_COUNTERPARTY_BUYER_RESERVE,
-    PUBLIC_WORK_SPONSORSHIP_INTERVAL_DAYS, WARD_ADOPTION_COST, WARD_ADOPTION_DELIVERY_REQUIREMENT,
-    WARD_ADOPTION_INTERVAL_DAYS, WARD_ADOPTION_LEGITIMACY_REQUIREMENT,
-    WARD_ADOPTION_REPUTATION_REQUIREMENT, WARD_ADOPTION_UNITY_COST, active_player_ward_count,
-    business_operating_spendable_cash, contract_counterparty_price_bounds,
-    contract_relationship_pressure_basis_points, crisis_relief_cost, family_education_next_day,
-    has_established_player_institution_membership, has_established_player_office_power,
-    has_player_office, institution_endowment_next_day, institution_membership_count,
-    institution_support_day, institution_support_delivery_requirement,
-    institution_support_next_day, office_nomination_delivery_requirement,
-    office_nomination_next_day, player_contract_deliveries,
-    private_loan_borrower_financing_pressure, public_work_initial_contribution,
-    quote_information_leverage, quote_player_legal_claim, quote_player_legal_settlement,
-    required_office_power_for_law,
-};
+pub use commands::apply_player_command_scratch;
+#[cfg(test)]
+pub(crate) use commands::contract_relationship_pressure_basis_points;
 pub use commands::{
     CommandError, CommandOutcome, CrisisResponse, EducationFocus, InformationFocus, LaborResponse,
     PlayerCommand, PublicWorkFundingError, apply_player_command,
 };
-#[cfg(test)]
 pub(crate) use commands::{
-    FAMILY_EDUCATION_INTERVAL_DAYS, INSTITUTION_SUPPORT_INTERVAL_DAYS,
-    INSTITUTION_WITHDRAWAL_RECOVERY_DAYS,
+    INFORMATION_REPORT_LIFETIME_DAYS, INSTITUTION_SUPPORT_ESTABLISHMENT_DAYS,
+    MAX_ACTIVE_SPONSORED_PUBLIC_WORKS, MAX_ACTIVE_WARDS, MAX_INSTITUTION_MEMBERSHIPS_PER_CHARACTER,
+    OFFICE_NOMINATION_DELIVERY_REQUIREMENT, OFFICE_NOMINATION_REPUTATION_REQUIREMENT,
+    OFFICE_POWER_DIRECTIVE_INTERVAL_DAYS, PRIVATE_LOAN_COUNTERPARTY_RESERVE,
+    quote_player_legal_settlement,
 };
 pub use invariants::validate_invariants;
 pub(crate) use legal::{
@@ -557,7 +525,6 @@ pub(crate) use progression::{
     refresh_campaign_phases,
 };
 pub use simulation::advance_days;
-pub(crate) use simulation::{advance_days_scratch, business_sustainable_unit_cost};
 pub(crate) use strategic::MAX_RELATIONSHIP_MEMORIES;
 #[cfg(test)]
 pub(crate) use strategic::issue_loan;
@@ -565,16 +532,13 @@ pub use strategic::{
     BusinessAcquisitionQuote, LoanTerms, PropertyLiquidationQuote, StrategicError,
     SupplyContractTerms, quote_business_acquisition, quote_property_liquidation,
 };
+#[cfg(test)]
+pub(crate) use strategic::{CRISIS_RESPONSE_WINDOW_DAYS, business_owner_distribution_reserve};
 pub(crate) use strategic::{
-    CRISIS_RESPONSE_WINDOW_DAYS, STANDARD_CONTRACT_BATCHES_PER_WEEK, acquire_business_scratch,
-    available_supply_contract_capacity, business_owner_distribution_reserve,
-    business_recapitalization_target, buy_unowned_property, capitalize_owned_business,
-    credit_pair_blocks_new_loan, crisis_response_contains_crisis,
-    defaulted_loan_restructuring_available, distribute_owned_business_cash,
+    acquire_business_scratch, available_supply_contract_capacity, business_recapitalization_target,
+    buy_unowned_property, capitalize_owned_business, distribute_owned_business_cash,
     district_unrest_pressures, dynasty_office_administrative_load, effective_property_weekly_rent,
-    expire_time_limited_state, institution_capability_score, latest_defaulted_loan_for_pair,
-    market_reference_weekly_wage, projected_dynasty_monthly_office_duty,
-    projected_dynasty_monthly_office_duty_with_additional_offices, sell_owned_property_scratch,
+    expire_time_limited_state, latest_defaulted_loan_for_pair, sell_owned_property_scratch,
     unresolved_default_owed_elsewhere, validate_loan, validate_supply_contract,
 };
 pub(crate) use transactions::transfer_business_cash;

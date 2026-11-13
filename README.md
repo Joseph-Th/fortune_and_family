@@ -19,7 +19,7 @@ Each question has one owning document. Link to the owner; do not duplicate its c
 | [`STATUS.md`](STATUS.md) | Current capability, schemas, runtime guarantees, deliberate limits |
 | [`DESIGN.md`](DESIGN.md) | Product intent, player fantasy, campaign arc |
 | [`TESTING.md`](TESTING.md) | Test tiers, assertion standards, completion gates |
-| [`GAMEPLAY_HARNESS.md`](GAMEPLAY_HARNESS.md) | Harness mechanics and report semantics |
+| [`PLAY.md`](PLAY.md) | Text-play loop, command discipline, what-if probing |
 
 Root `../AGENTS.md` owns workspace coordination; [`AGENTS.md`](AGENTS.md) declares the applicable profiles. BCA policy is `advisory`.
 
@@ -35,7 +35,7 @@ Root `../AGENTS.md` owns workspace coordination; [`AGENTS.md`](AGENTS.md) declar
 
 - Rust toolchain and edition are defined by `Cargo.toml` and pinned by `rust-toolchain.toml`; [`STATUS.md`](STATUS.md) mirrors the supported minimum.
 - Bash or PowerShell for `scripts/test.sh` / `scripts/test.ps1`.
-- Python for doc and structured-output checks; `cargo-audit` for `ci-gates`/`deep` lanes.
+- Python for doc and structured-output checks; `cargo-audit` for the `ci-gates` lane.
 
 Verification is local-only. `scripts/test.sh` is authoritative; `bash scripts/install_hooks.sh` installs optional git hooks.
 
@@ -60,8 +60,8 @@ cargo run --locked -- execute saves/valeri.json --command '{"SetHouseGovernance"
 Analysis and art:
 
 ```bash
-cargo run --release --locked -- playtest
-bash scripts/test.sh playtest --days 360 --persona entrepreneur
+bash scripts/test.sh play            # real text-play session on a scratch save
+cargo run --locked -- inspect saves/valeri.json
 cargo run --locked -- art --output target/sprite-review.html --seeds 2 --scale 6
 ```
 
@@ -102,12 +102,11 @@ src/
     invariants.rs     Runtime invariant checks
   persistence.rs      Current-schema save/load and release validation
   projection.rs       Read-only projections and HTML dashboard
-  gameplay/           Deterministic gameplay harness
   art/                Procedural sprite renderer and review harness
   main.rs             CLI adapter
   *_tests.rs          Sibling test suites
   test_support.rs     Shared fixtures and diagnostics
-scripts/              Test runner, smoke groups, doc and gameplay checks, git hooks
+scripts/              Test runner, smoke groups, play session, doc checks, git hooks
 ```
 
 `ARCHITECTURE.md` owns the complete map.
@@ -122,11 +121,11 @@ scripts/              Test runner, smoke groups, doc and gameplay checks, git ho
 | Create campaign | `build_new_game` |
 | Advance time | `advance_days` |
 | Apply player action | `apply_player_command` |
+| Probe a candidate action | `apply_player_command_scratch` |
 | Quote strategic actions | `quote_business_acquisition`, `quote_property_liquidation` |
 | Save / load | `save_state`, `load_state` |
 | Read models | `build_state_summary`, `build_campaign_projection` |
 | Render dashboard | `render_campaign_html` |
-| Gameplay analysis | `run_gameplay_harness`, `render_gameplay_report` |
 | Sprite review | `build_art_review`, `render_art_review_html` |
 | Check invariants | `validate_invariants` |
 
@@ -145,6 +144,6 @@ python ../tools/check_no_github_actions.py   # must pass before completion
 python ../tools/check_standards.py          # portfolio structural checks
 ```
 
-- `fast` / `standard` are routine gates; `soak` / `gameplay` / `adapters` add only their owned contracts (see `TESTING.md` § Completion gate).
+- `fast` / `standard` are routine gates; `soak` / `play` / `adapters` add only their owned contracts (see `TESTING.md` § Completion gate).
 - `standard` reuses the debug CLI build and includes `docs`; no extra `fast` before it.
 - No `unsafe`, no ambient mutable state, no credentials. Persistence side-effects are bounded saves and staged artifacts described in `ARCHITECTURE.md` and `STATUS.md`.

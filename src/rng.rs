@@ -1,7 +1,7 @@
 //! Serializable deterministic randomness owned by `AppState` — the sole entropy source.
 //!
-//! Purpose: supply reproducible entropy for simulation, bootstrap, and
-//! gameplay-harness variation without touching OS entropy, thread-local RNG,
+//! Purpose: supply reproducible entropy for simulation and bootstrap without
+//! touching OS entropy, thread-local RNG,
 //! or wall-clock time. Every decision that needs randomness reads
 //! `AppState.rng` so a saved campaign resumes with identical future draws.
 //! Owns: `DeterministicRng` state, its SplitMix64-derived `next_u64` step,
@@ -24,8 +24,8 @@
 //! persistence contract minimal (one `u64` word) and makes every extra draw
 //! deterministically affect downstream ordering — acceptable because
 //! subsystems already share a single causal day order (ARCHITECTURE.md
-//! 18-step pipeline) and harness counterfactuals fork the whole `AppState`
-//! (including RNG) per branch. A future domain that needs draw isolation
+//! 18-step pipeline), and a caller that branches a what-if lookahead forks the
+//! whole `AppState` (including RNG) per branch. A future domain that needs draw isolation
 //! without cross-talk can derive `DeterministicRng::seeded(rng.next_u64())`
 //! as a child stream; the single-root design preserves that upgrade path.
 //! Focused tests: `src/rng.rs::tests` distinct and identical streams,

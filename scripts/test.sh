@@ -23,32 +23,28 @@ DAILY LOOP (solo dev — fast, incremental, no world rebuild):
   $0 fast <filter>          one domain: fast simulation | fast strategic | fast commands
   $0 changed                auto-detects touched domains from git diff (<1s)
   $0 fast                   full lib sweep: 980 tests (~2s warm)
-  $0 playtest               60-day harness smoke, debug CLI (<1s warm)
+  $0 play                   real text-play session on a scratch save (debug CLI)
   $0 standard               pre-commit: check + lib + docs + CLI (~5s warm)
 
 FOCUSED DEBUG:
   $0 list [filter]          list matching test names
   $0 exact <name>           one fully-qualified test (--exact --include-ignored)
   $0 debug <name>           one test with --nocapture output
-  $0 playtest --days 90 --persona entrepreneur --background baker  # harness slice
 
 RELEASE GATES (one release build, cold ~56s once, warm ~1s):
   $0 soak                   long-horizon determinism (release, ~1s warm)
-  $0 gameplay               quality gate: 36+3 campaigns, 60k days (~16s warm)
-  $0 gameplay-audit         deep audit: multi-seed + generation + credit stress (~30s)
-  $0 all                    standard + soak + adapters + gameplay (~25s warm)
-  $0 slow                   release gates without audit  |  $0 deep  slow + audit
+  $0 all                    standard + soak + adapters + play (~25s warm)
+  $0 slow                   release gates
 
 CI (local only, no hosted runners):
   $0 ci-verify | ci         format + clippy + lib + docs (~5s warm, cold ~14s clippy)
-  $0 ci-gates               release lib + soaks + adapters + gameplay + audit
+  $0 ci-gates               release lib + soaks + adapters
   $0 docs | cli | adapters  doc or CLI smoke alone (reuse one CLI build)
 
 TIPS:
   CIVIC_DYNASTY_SKIP_CLI_BUILD=1 $0 standard   lib-only iteration (skip CLI build)
   CIVIC_DYNASTY_SKIP_DOCS=1 $0 standard        skip docs lane (~1s faster)
-  CIVIC_DYNASTY_JOBS=4 $0 fast                cap cargo + harness parallelism
-  CIVIC_DYNASTY_PROFILE=release $0 playtest --days 360  gate-fidelity harness
+  CIVIC_DYNASTY_JOBS=4 $0 fast                cap cargo parallelism
 EOF
   exit 2
 }
@@ -102,7 +98,7 @@ ensure_cli_binary() {
       fi
       return 0
     fi
-    printf 'CIVIC_DYNASTY_BINARY %q is not a release binary; rebuilding the release CLI for gameplay gates\n' \
+    printf 'CIVIC_DYNASTY_BINARY %q is not a release binary; rebuilding the release CLI for gate lanes\n' \
       "$CIVIC_DYNASTY_BINARY" >&2
   fi
 
@@ -155,26 +151,14 @@ run_cli_art() {
   run_step 'Art CLI smoke tests' bash scripts/verify_cli.sh art
 }
 
-run_cli_gameplay() {
-  run_step 'Gameplay CLI smoke tests' bash scripts/verify_cli.sh gameplay
-}
-
-# playtest is the focused harness entry for iteration. By default it uses the
-# debug CLI so a warm edit→playtest roundtrip is <1s. Release is enforced only
-# by explicit profile selection or by gate lanes (gameplay, ci-gates, etc.)
-run_playtest() {
+# The play lane proves the text-play surface end to end: create a campaign on a
+# scratch save, commit a real command, advance days, read the projection, and
+# render the dashboard. One observed session, not a scored simulation matrix.
+run_play() {
   local profile=${CIVIC_DYNASTY_PROFILE:-debug}
-  # Allow explicit override: CIVIC_DYNASTY_PROFILE=release makes playtest
-  # gate-faithful. Callers who set CIVIC_DYNASTY_BINARY directly already
-  # control the binary via ensure_cli_binary's release guard.
   ensure_cli_binary "$profile"
-  "$CIVIC_DYNASTY_BINARY" playtest "$@"
-}
-
-# release_playtest is used by gate lanes that must not inherit a debug CLI.
-run_release_playtest() {
-  ensure_cli_binary release
-  "$CIVIC_DYNASTY_BINARY" playtest "$@"
+  run_step 'Text-play session (create, execute, simulate, inspect, dashboard)' \
+    bash scripts/play_session.sh
 }
 
 run_standard() {
@@ -369,7 +353,6 @@ run_changed() {
       src/systems/bootstrap*|src/systems/invariants*|src/systems/legal*|src/systems/progression*|src/systems/transactions*|src/systems/mod.rs) add_filter bootstrap; docs_only=0 ;;
       src/core/*|src/ids.rs|src/money.rs|src/rng.rs) add_filter core; docs_only=0 ;;
       src/persistence*|src/projection*|src/registry/*) add_filter persistence; docs_only=0 ;;
-      src/gameplay/*|src/gameplay_tests.rs) add_filter gameplay; docs_only=0 ;;
       src/art/*) add_filter art; docs_only=0 ;;
       src/main.rs|src/lib.rs|src/test_support.rs) add_filter ""; docs_only=0 ;; # top-level -> full suite
       Cargo.toml|Cargo.lock|.cargo/*) add_filter ""; docs_only=0 ;; # build config -> full suite
@@ -479,75 +462,6 @@ run_docs() {
   run_step 'Documentation tests' cargo test --quiet --locked "${job_args[@]}" --doc
 }
 
-run_gameplay() {
-  run_step 'Gameplay quality gate (36 campaigns)' \
-    run_release_playtest \
-      --minimum-overall 75 \
-      --fail-on-critical \
-      --json \
-      --output target/gameplay-quality-gate.json
-}
-
-run_generation_gameplay() {
-  local python_command
-  python_command=$(resolve_python) || return
-  run_step 'Generation-length gameplay gate (3 campaigns, 7200 days)' \
-    run_release_playtest \
-      --days 7200 \
-      --persona steward \
-      --background baker \
-      --trace-limit 20 \
-      --minimum-overall 75 \
-      --fail-on-critical \
-      --json \
-      --output target/gameplay-generation-gate.json
-  run_step 'Generation-length fantasy validation' "$python_command" scripts/check_gameplay.py generation \
-    target/gameplay-generation-gate.json
-}
-
-run_gameplay_audit() {
-  local python_command
-  python_command=$(resolve_python) || return
-  run_step 'Mature multi-seed gameplay audit (2 seeds, 3600 days)' \
-    run_release_playtest \
-      --days 3600 \
-      --start-seed 1 \
-      --seeds 2 \
-      --trace-limit 30 \
-      --minimum-overall 75 \
-      --fail-on-critical \
-      --json \
-      --output target/gameplay-deep-audit.json
-  run_step 'Generation-length persona audit (4 personas, 7200 days)' \
-    run_release_playtest \
-      --days 7200 \
-      --persona steward \
-      --persona entrepreneur \
-      --persona power-broker \
-      --persona opportunist \
-      --background baker \
-      --trace-limit 30 \
-      --minimum-overall 75 \
-      --fail-on-critical \
-      --json \
-      --output target/gameplay-generation-matrix.json
-  run_step 'Opportunist credit stress audit (2 seeds, 7200 days)' \
-    run_release_playtest \
-      --days 7200 \
-      --start-seed 1 \
-      --seeds 2 \
-      --persona opportunist \
-      --trace-limit 20 \
-      --minimum-overall 75 \
-      --fail-on-critical \
-      --json \
-      --output target/gameplay-credit-stress.json
-  run_step 'Credit stress validation' "$python_command" scripts/check_gameplay.py credit-stress \
-    target/gameplay-credit-stress.json
-  run_step 'Deep gameplay fantasy validation' "$python_command" scripts/check_gameplay.py generation-matrix \
-    target/gameplay-generation-matrix.json
-}
-
 run_ci_verify() {
   run_shell_syntax
   run_step 'Format' cargo fmt --all -- --check
@@ -569,8 +483,7 @@ run_ci_gates() {
   ensure_cli_binary release
   run_cli_core
   run_cli_art
-  run_cli_gameplay
-  run_gameplay
+  run_play
   if command -v cargo-audit >/dev/null 2>&1 || cargo audit --version >/dev/null 2>&1; then
     run_step 'Dependency audit' cargo audit
   else
@@ -584,9 +497,7 @@ run_slow_gates() {
   ensure_cli_binary release
   run_cli_core
   run_cli_art
-  run_cli_gameplay
-  run_gameplay
-  run_generation_gameplay
+  run_play
 }
 
 run_all() {
@@ -594,9 +505,7 @@ run_all() {
   run_soak
   ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
   run_cli_art
-  run_cli_gameplay
-  run_gameplay
-  run_generation_gameplay
+  run_play
 }
 
 # Full unfiltered routine lanes may produce a validation receipt.
@@ -667,34 +576,15 @@ case "$mode" in
     ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
     run_cli_art
     ;;
-  gameplay-cli)
-    [[ $# -eq 1 ]] || usage
-    ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
-    run_cli_gameplay
-    ;;
   adapters)
     [[ $# -eq 1 ]] || usage
     ensure_cli_binary "${CIVIC_DYNASTY_PROFILE:-debug}"
     run_cli_core
     run_cli_art
-    run_cli_gameplay
     ;;
-  gameplay)
+  play)
     [[ $# -eq 1 ]] || usage
-    run_gameplay
-    run_generation_gameplay
-    ;;
-  playtest)
-    shift
-    if [[ $# -eq 0 ]]; then
-      run_step 'Gameplay harness run (60-day debug smoke, <1s warm)' run_playtest --days 60 --seeds 1 --persona steward --background baker --trace-limit 8
-    else
-      run_step 'Gameplay harness run' run_playtest "$@"
-    fi
-    ;;
-  gameplay-audit)
-    [[ $# -eq 1 ]] || usage
-    run_gameplay_audit
+    run_play
     ;;
   ci-verify)
     [[ $# -eq 1 ]] || usage
@@ -711,11 +601,6 @@ case "$mode" in
   slow)
     [[ $# -eq 1 ]] || usage
     run_slow_gates
-    ;;
-  deep)
-    [[ $# -eq 1 ]] || usage
-    run_slow_gates
-    run_gameplay_audit
     ;;
   all)
     [[ $# -eq 1 ]] || usage

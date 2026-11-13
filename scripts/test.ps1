@@ -9,8 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# The common modes take at most one filter argument; `playtest` forwards every
-# remaining argument to the gameplay-harness CLI verbatim.
+# The common modes take at most one filter argument.
 $Filter = if ($Rest -and $Rest.Count -gt 0) { $Rest[0] } else { "" }
 
 $ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path
@@ -33,7 +32,7 @@ DAILY LOOP (solo dev — incremental, no world rebuild):
   .\scripts\test.ps1 fast <filter>        one domain: fast simulation | fast strategic
   .\scripts\test.ps1 changed              auto-detects touched domains from git diff
   .\scripts\test.ps1 fast                 full sweep: 980 tests (~4s after edit, ~2s cached)
-  .\scripts\test.ps1 playtest             60-day harness smoke, debug CLI (<1s)
+  .\scripts\test.ps1 play                 real text-play session, debug CLI (<2s)
   .\scripts\test.ps1 standard             pre-commit: check + lib + docs + CLI (~7s warm)
 
 FOCUSED DEBUG:
@@ -43,33 +42,29 @@ FOCUSED DEBUG:
 
 RELEASE GATES (one release build, cold ~56s once, warm ~1s):
   .\scripts\test.ps1 soak                 long-horizon determinism (release, ~1s)
-  .\scripts\test.ps1 gameplay             quality gate: 36+3 campaigns, 60k days (~16s)
-  .\scripts\test.ps1 gameplay-audit       deep audit: multi-seed + generation + credit stress (~30s)
-  .\scripts\test.ps1 all                  standard + soak + adapters + gameplay (~25s)
-  .\scripts\test.ps1 slow                 release gates without audit  | deep  slow + audit
+  .\scripts\test.ps1 all                  standard + soak + adapters + play (~25s)
+  .\scripts\test.ps1 slow                 release gates
 
 CI (local only):
   .\scripts\test.ps1 ci-verify | ci       format + clippy + lib + docs (~5s warm, cold ~14s)
-  .\scripts\test.ps1 ci-gates             release lib + soaks + adapters + gameplay + audit
+  .\scripts\test.ps1 ci-gates             release lib + soaks + adapters + play
   .\scripts\test.ps1 docs | cli | adapters  doc or CLI smoke alone
 
 TIPS:
   CIVIC_DYNASTY_SKIP_CLI_BUILD=1 .\scripts\test.ps1 standard   lib-only (skip CLI)
   CIVIC_DYNASTY_SKIP_DOCS=1 .\scripts\test.ps1 standard        skip docs (~1s faster)
-  CIVIC_DYNASTY_JOBS=4 .\scripts\test.ps1 fast                cap cargo + harness parallelism
+  CIVIC_DYNASTY_JOBS=4 .\scripts\test.ps1 fast                cap cargo parallelism
 
 inner loop — solo local, every lane incremental (no world rebuild):
   .\scripts\test.ps1 fast simulation   82 tests, 0.12s exec, <1s total warm
   .\scripts\test.ps1 changed            auto-detects touched domain, <1s warm
   .\scripts\test.ps1 check              syntax only, cargo check shares dev cache
-  .\scripts\test.ps1 playtest            60-day single-persona harness smoke, debug <1s
-  .\scripts\test.ps1 playtest --days 90 --persona steward  # debug harness <1s
 
 warm budgets (incremental, after first build — cold once: clippy ~11s, release ~56s):
-  check <1s  fast-filter <1s  fast ~2s  standard ~4s  ci-verify ~5s  gameplay ~16s  all ~25s  deep ~1.2m
+  check <1s  fast-filter <1s  fast ~2s  standard ~4s  ci-verify ~5s  play <2s  all ~25s
 
 environment:
-  CIVIC_DYNASTY_JOBS           pass --jobs N to cargo test/build commands (also caps harness parallelism)
+  CIVIC_DYNASTY_JOBS           pass --jobs N to cargo test/build commands
   CIVIC_DYNASTY_PROFILE        debug (default) or release for adapter smoke builds
   CIVIC_DYNASTY_BINARY         reuse a prebuilt CLI binary for adapter smoke groups
   CIVIC_DYNASTY_SKIP_CLI_BUILD skip CLI rebuild when set (fast lib-only iteration)
@@ -188,7 +183,7 @@ function Ensure-CliBinary([string]$RequestedProfile = "debug") {
             $env:CIVIC_DYNASTY_BINARY = $binary
             return
         }
-        Write-Warning "CIVIC_DYNASTY_BINARY is not a release binary; rebuilding the release CLI for gameplay gates"
+        Write-Warning "CIVIC_DYNASTY_BINARY is not a release binary; rebuilding the release CLI for gate lanes"
     }
 
     $profileArgs = @()
@@ -298,8 +293,6 @@ function Run-Changed {
             "src/persistence*" { $candidate = "persistence"; $docsOnly = $false }
             "src/projection*" { $candidate = "projection"; $docsOnly = $false }
             "src/registry/*" { $candidate = "persistence"; $docsOnly = $false }
-            "src/gameplay/*" { $candidate = "gameplay"; $docsOnly = $false }
-            "src/gameplay_tests.rs" { $candidate = "gameplay"; $docsOnly = $false }
             "src/art/*" { $candidate = "art"; $docsOnly = $false }
             "src/main.rs" { $candidate = ""; $docsOnly = $false }
             "src/lib.rs" { $candidate = ""; $docsOnly = $false }
@@ -421,45 +414,19 @@ function Run-CliGroup([string]$Group) {
     }
 }
 
-function Run-GameplayGates {
-    Ensure-CliBinary "release"
-    Run-Step "Gameplay quality gate (36 campaigns)" {
-        & $env:CIVIC_DYNASTY_BINARY playtest --minimum-overall 75 --fail-on-critical --json --output target\gameplay-quality-gate.json
-        if ($LASTEXITCODE -ne 0) { throw "Gameplay quality gate failed" }
+function Run-Play {
+    # Real text-play session on a scratch save: create, execute one command,
+    # simulate, inspect the projection, render the dashboard.
+    $profile = if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" }
+    Ensure-CliBinary $profile
+    $bash = Resolve-BashInterpreter
+    if (-not $bash) {
+        Write-Host "`n==> Text-play session (skipped: bash not found)" -ForegroundColor Yellow
+        return
     }
-    Run-Step "Generation-length gameplay gate (3 campaigns, 7200 days)" {
-        & $env:CIVIC_DYNASTY_BINARY playtest --days 7200 --persona steward --background baker --trace-limit 20 --minimum-overall 75 --fail-on-critical --json --output target\gameplay-generation-gate.json
-        if ($LASTEXITCODE -ne 0) { throw "Generation gameplay gate failed" }
-    }
-    $python = Resolve-PythonInterpreter
-    Run-Step "Generation-length fantasy validation" {
-        & $python scripts\check_gameplay.py generation target\gameplay-generation-gate.json
-        if ($LASTEXITCODE -ne 0) { throw "Generation fantasy validation failed" }
-    }
-}
-
-function Run-GameplayAudit {
-    Ensure-CliBinary "release"
-    $python = Resolve-PythonInterpreter
-    Run-Step "Mature multi-seed gameplay audit (2 seeds, 3600 days)" {
-        & $env:CIVIC_DYNASTY_BINARY playtest --days 3600 --start-seed 1 --seeds 2 --trace-limit 30 --minimum-overall 75 --fail-on-critical --json --output target\gameplay-deep-audit.json
-        if ($LASTEXITCODE -ne 0) { throw "Mature multi-seed gameplay audit failed" }
-    }
-    Run-Step "Generation-length persona audit (4 personas, 7200 days)" {
-        & $env:CIVIC_DYNASTY_BINARY playtest --days 7200 --persona steward --persona entrepreneur --persona power-broker --persona opportunist --background baker --trace-limit 30 --minimum-overall 75 --fail-on-critical --json --output target\gameplay-generation-matrix.json
-        if ($LASTEXITCODE -ne 0) { throw "Generation persona audit failed" }
-    }
-    Run-Step "Opportunist credit stress audit (2 seeds, 7200 days)" {
-        & $env:CIVIC_DYNASTY_BINARY playtest --days 7200 --start-seed 1 --seeds 2 --persona opportunist --trace-limit 20 --minimum-overall 75 --fail-on-critical --json --output target\gameplay-credit-stress.json
-        if ($LASTEXITCODE -ne 0) { throw "Opportunist credit stress audit failed" }
-    }
-    Run-Step "Credit stress validation" {
-        & $python scripts\check_gameplay.py credit-stress target\gameplay-credit-stress.json
-        if ($LASTEXITCODE -ne 0) { throw "Credit stress validation failed" }
-    }
-    Run-Step "Deep gameplay fantasy validation" {
-        & $python scripts\check_gameplay.py generation-matrix target\gameplay-generation-matrix.json
-        if ($LASTEXITCODE -ne 0) { throw "Deep gameplay fantasy validation failed" }
+    Run-Step "Text-play session (create, execute, simulate, inspect, dashboard)" {
+        & $bash scripts/play_session.sh
+        if ($LASTEXITCODE -ne 0) { throw "Text-play session failed" }
     }
 }
 
@@ -513,8 +480,7 @@ function Run-CiGates {
     Ensure-CliBinary "release"
     Run-CliGroup "core"
     Run-CliGroup "art"
-    Run-CliGroup "gameplay"
-    Run-GameplayGates
+    Run-Play
     Run-Step "Dependency audit" {
         & cargo audit
         if ($LASTEXITCODE -ne 0) { throw "Cargo audit failed" }
@@ -530,8 +496,7 @@ function Run-SlowGates {
     Ensure-CliBinary "release"
     Run-CliGroup "core"
     Run-CliGroup "art"
-    Run-CliGroup "gameplay"
-    Run-GameplayGates
+    Run-Play
 }
 
 function Run-All {
@@ -539,8 +504,7 @@ function Run-All {
     Run-Soak
     Ensure-CliBinary $(if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" })
     Run-CliGroup "art"
-    Run-CliGroup "gameplay"
-    Run-GameplayGates
+    Run-Play
 }
 
 # Capture the exact repository bytes before a receipt-eligible lane starts. A
@@ -572,35 +536,16 @@ switch ($Mode) {
     "docs"           { Run-Docs }
     "cli"            { Ensure-CliBinary $(if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" }); Run-CliGroup "core" }
     "art-cli"        { Ensure-CliBinary $(if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" }); Run-CliGroup "art" }
-    "gameplay-cli"   { Ensure-CliBinary $(if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" }); Run-CliGroup "gameplay" }
     "adapters"       {
         Ensure-CliBinary $(if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" })
         Run-CliGroup "core"
         Run-CliGroup "art"
-        Run-CliGroup "gameplay"
     }
-    "gameplay"       { Run-GameplayGates }
-    "gameplay-audit" { Run-GameplayAudit }
-    "playtest"       {
-        $profile = if ($env:CIVIC_DYNASTY_PROFILE) { $env:CIVIC_DYNASTY_PROFILE } else { "debug" }
-        Ensure-CliBinary $profile
-        if (-not $Rest -or $Rest.Count -eq 0) {
-            Run-Step "Gameplay harness run" {
-                & $env:CIVIC_DYNASTY_BINARY playtest --days 60 --seeds 1 --persona steward --background baker --trace-limit 8
-                if ($LASTEXITCODE -ne 0) { throw "Gameplay harness run failed" }
-            }
-        } else {
-            Run-Step "Gameplay harness run" {
-                & $env:CIVIC_DYNASTY_BINARY playtest @Rest
-                if ($LASTEXITCODE -ne 0) { throw "Gameplay harness run failed" }
-            }
-        }
-    }
+    "play"           { Run-Play }
     "ci-verify"      { Run-CiVerify }
     "ci"             { Run-CiVerify }
     "ci-gates"       { Run-CiGates }
     "slow"           { Run-SlowGates }
-    "deep"           { Run-SlowGates; Run-GameplayAudit }
     "all"            { Run-All }
     default          { Show-Usage }
 }

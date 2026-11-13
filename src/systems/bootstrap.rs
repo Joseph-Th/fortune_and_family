@@ -7,7 +7,7 @@
 //! `validate_invariants`.
 //! Reads: `Registry` (immutable definitions).
 //! Mutates: the freshly constructed `AppState` (no prior state).
-//! Does not own: persistence IO, projection, or gameplay policy.
+//! Does not own: persistence IO, projection, or command policy.
 //! Relevant invariants: validated treasury / capacity / inventory; founder ages
 //! place first succession inside the playable horizon; RNG draws stay
 //! state-owned for replay.

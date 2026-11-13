@@ -23,8 +23,7 @@
 //! fortnight (checked at persistence); monthly district/rent/public-work
 //! drifts validate against shared helpers; office duties net cost but
 //! stipend offsets; acknowledged-outbox pruning respects retention window.
-//! Focused tests: `src/systems/strategic/strategic_tests.rs`, soak and
-//! gameplay gates.
+//! Focused tests: `src/systems/strategic/strategic_tests.rs`, soak gates.
 
 pub(crate) use super::SimulationError;
 pub(crate) use super::commands::CrisisResponse;

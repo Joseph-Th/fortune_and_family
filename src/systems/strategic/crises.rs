@@ -12,7 +12,7 @@
 //! or household income scaling (reads the shared `capacity_weighted_...`).
 //! Canonical operations: `detect_crises`, escalation, response effects, route risk.
 //! Relevant invariants: detection via route/price/food/stock signals; responses bounded window.
-//! Focused tests: `strategic_tests` crisis lifecycle, gameplay world-stress
+//! Focused tests: `strategic_tests` crisis lifecycle and world-stress
 //! aggregates.
 
 #[allow(clippy::wildcard_imports)]

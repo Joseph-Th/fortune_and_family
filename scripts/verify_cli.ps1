@@ -1,7 +1,7 @@
-# Native PowerShell CLI smoke verifier for Civic Dynasty
+﻿# Native PowerShell CLI smoke verifier for Civic Dynasty
 param(
     [Parameter(Position=0)]
-    [ValidateSet("core", "art", "gameplay", "all")]
+    [ValidateSet("core", "art", "all")]
     [string]$Mode = "core"
 )
 
@@ -295,71 +295,10 @@ if art["critical_findings"] != 0:
         if ($LASTEXITCODE -ne 0) { Fail "art review report validation script failed" }
     }
 
-    function Run-GameplaySmoke {
-        $playtestDir = Join-Path $WorkDir "exports\playtest"
-        New-Item -ItemType Directory -Path $playtestDir -Force | Out-Null
-        $playtest = Join-Path $playtestDir "playtest.json"
-
-        $res = Run-ProcessWithCapture @("playtest", "--days", "30", "--seeds", "1", "--persona", "steward", "--background", "baker", "--trace-limit", "3", "--json", "--output", $playtest)
-        if ($res.ExitCode -ne 0) { Fail "gameplay harness command failed" $res.StdErrPath }
-        Require-NonEmptyFile $playtest "gameplay harness JSON report"
-
-        $progress = Get-Content -Raw -Encoding utf8 $res.StdErrPath
-        if ($progress -notmatch 'playtest \d+\.\d{3}s \(') {
-            Fail "playtest progress line did not report concise timing"
-        }
-
-        $checkPlaytestPy = Join-Path $WorkDir "check_playtest.py"
-        $pyPlaytestCode = @'
-import json
-import sys
-from pathlib import Path
-
-playtest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-required = {
-    "schema_version",
-    "config",
-    "aggregate",
-    "persona_aggregates",
-    "campaigns",
-    "findings",
-}
-missing = sorted(required - playtest.keys())
-if missing:
-    raise SystemExit(f"playtest JSON missing fields: {', '.join(missing)}")
-if playtest["aggregate"]["campaigns"] != 1:
-    raise SystemExit("focused playtest must run exactly one campaign")
-if playtest["aggregate"]["simulated_days"] != 30:
-    raise SystemExit("focused playtest must simulate 30 days")
-if playtest["aggregate"]["successful_actions"] <= 0:
-    raise SystemExit("focused playtest must execute player actions")
-if len(playtest["persona_aggregates"]) != 1:
-    raise SystemExit("focused playtest must expose one persona aggregate")
-if not playtest["campaigns"] or not playtest["campaigns"][0]["trace"]:
-    raise SystemExit("focused playtest must contain a reproducible trace")
-'@
-        [System.IO.File]::WriteAllText($checkPlaytestPy, $pyPlaytestCode, [System.Text.Encoding]::UTF8)
-        & $Python $checkPlaytestPy $playtest
-        if ($LASTEXITCODE -ne 0) { Fail "playtest JSON report validation script failed" }
-
-        $gatedOutput = Join-Path $WorkDir "gated-playtest.txt"
-        $res = Run-ProcessWithCapture @("playtest", "--days", "7", "--persona", "steward", "--background", "baker", "--trace-limit", "1", "--minimum-overall", "100", "--output", $gatedOutput)
-        if ($res.ExitCode -eq 0) {
-            Fail "gameplay quality gate unexpectedly succeeded"
-        }
-        Require-NonEmptyFile $gatedOutput "gated gameplay report"
-
-        $gateReason = Get-Content -Raw -Encoding utf8 $res.StdErrPath
-        if ($null -eq $gateReason -or $gateReason -notmatch 'overall score') {
-            Fail "gameplay quality gate failure must report the score reason" $res.StdErrPath
-        }
-    }
-
     switch ($Mode) {
         "core"     { Run-CoreSmoke }
         "art"      { Run-ArtSmoke }
-        "gameplay" { Run-GameplaySmoke }
-        "all"      { Run-CoreSmoke; Run-ArtSmoke; Run-GameplaySmoke }
+        "all"      { Run-CoreSmoke; Run-ArtSmoke }
     }
 
     Write-Host "CLI $Mode smoke verification passed." -ForegroundColor Green

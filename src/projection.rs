@@ -1,13 +1,13 @@
 //! Read-only projections and self-contained HTML dashboard — no domain mutation.
 //!
 //! Purpose: derive immutable read models (`StateSummary`, `CampaignProjection`)
-//! and a standalone HTML dashboard from `Registry` + `AppState` for CLI,
-//! dashboard, and gameplay observation, with no mutation or domain rule
+//! and a standalone HTML dashboard from `Registry` + `AppState` for CLI and
+//! dashboard consumers, with no mutation or domain rule
 //! reimplementation. Every projection captures one coherent lifecycle moment
 //! (the completed state after the last `advance_days` day) so CLI `summary`,
-//! `inspect`, `dashboard`, and gameplay `snapshot` never mix values from
-//! incompatible ticks — satisfying `STANDARDS.md` OWN-2 / `STANDARDS_BEHAVIOR_EVALUATION.md` EVAL-5 observation
-//! timing. Runtime values (durable results of the completed day) are kept
+//! `inspect`, and `dashboard` never mix values from
+//! incompatible ticks — satisfying `STANDARDS.md` OWN-2 observation
+//! timing on one coherent snapshot. Runtime values (durable results of the completed day) are kept
 //! distinct from projected values (read-only forecasts for the next decision)
 //! and the latter are labelled explicitly where both appear.
 //! Owns: projection structs (`DynastyProjection`, `MarketProjection`, etc.),

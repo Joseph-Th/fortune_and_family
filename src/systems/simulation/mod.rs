@@ -5,8 +5,7 @@
 //! consumption → maintenance → spoilage/pricing → price controls → lifecycle
 //! → clock/expiry → weekly/monthly/annual strategic hooks → phase refresh →
 //! chronicle/audit → invariants). Order is a product contract.
-//! Owns: `advance_days` (clone-then-replace atomicity), `advance_days_scratch`
-//! (in-place variant for disposable harness branches), and the per-day
+//! Owns: `advance_days` (clone-then-replace atomicity) and the per-day
 //! decide/apply phases. `purchases.rs` owns input procurement;
 //! `market.rs` owns spoilage, pricing, and break-even floors; this file owns
 //! workshop maintenance and lifecycle.
@@ -15,8 +14,8 @@
 //! replacement — a failed day leaves the original unchanged.
 //! Does not own: scheduled weekly/monthly/annual rules (`strategic/*.rs`)
 //! or persistence/validation.
-//! Canonical operations: `advance_days(registry, &mut state, days)` and
-//! `advance_days_scratch` (disposable branch); `run_one_day` orchestrates
+//! Canonical operations: `advance_days(registry, &mut state, days)`;
+//! `run_one_day` orchestrates
 //! the 18 steps with `decide_*` → `apply_*` per phase.
 //! Relevant invariants: maintenance and procurement respect cash reserves and
 //! tool scarcity with daily rotation for fair allocation; pricing enforces
@@ -53,9 +52,7 @@ use std::collections::BTreeMap;
 pub(crate) mod market;
 mod purchases;
 mod succession;
-pub(crate) use market::{
-    apply_market_spoilage, business_sustainable_unit_cost, update_market_prices,
-};
+pub(crate) use market::{apply_market_spoilage, update_market_prices};
 #[allow(unused_imports)]
 pub(crate) use purchases::{apply_business_purchases, decide_business_purchases};
 #[allow(unused_imports)]
@@ -189,23 +186,7 @@ pub fn advance_days(
     Ok(())
 }
 
-/// Advances an exclusively owned scratch state in place.
-///
-/// Identical to [`advance_days`] on success, including validation and ordering.
-/// Skips the defensive whole-campaign copy: the caller must hold `state` as
-/// a disposable branch and discard it when a day fails (state may be partially advanced).
-/// Used by harness counterfactual branches to avoid a second deep copy per branch.
-pub(crate) fn advance_days_scratch(
-    registry: &Registry,
-    state: &mut AppState,
-    days: u32,
-) -> Result<(), SimulationError> {
-    validate_advance_preconditions(registry, state, days)?;
-    let invariant_ids = super::invariants::prepare_invariant_ids(registry);
-    run_day_loop(registry, state, days, invariant_ids.as_ref())
-}
-
-/// Shared day loop of both advance entries; `state` is mutated in place.
+/// Shared day loop of the advance entry; `state` is mutated in place.
 fn run_day_loop(
     registry: &Registry,
     state: &mut AppState,

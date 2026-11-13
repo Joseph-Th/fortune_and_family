@@ -31,7 +31,7 @@ thiserror = "2.0"
 # `opt-level 1` (deps at 2) so 980 tests finish ~1.5s exec, filtered domains
 # ~0.1s. `cargo check` shares the dev cache warm. Single-crate incremental
 # still recompiles dependents: ~4s after a lib edit, <1s when fully cached.
-# One-time cold costs: clippy ~12s, release ~56s. `release` is the harness
+# One-time cold costs: clippy ~12s, release ~56s. `release` is the soak
 # profile — full opt without LTO, warm ~1s, within ~10% of peak throughput.
 # Use `release-max` only when peak throughput itself is measured.
 [profile.dev]
@@ -54,9 +54,9 @@ split-debuginfo = "off"
 [profile.test.package."*"]
 opt-level = 2
 
-# Release is the everyday harness profile: full opt, 16 codegen units,
+# Release is the everyday soak profile: full opt, 16 codegen units,
 # incremental, no LTO. Warm rebuild ~1s; throughput within ~10% of
-# release-max. All gameplay output is identical.
+# release-max. All simulated output is identical.
 [profile.release]
 opt-level = 3
 codegen-units = 16

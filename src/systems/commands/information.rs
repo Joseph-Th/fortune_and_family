@@ -286,14 +286,6 @@ pub(crate) struct InformationLeveragePlan {
     pub(crate) effect: InformationLeverageEffect,
 }
 
-pub(crate) fn quote_information_leverage(
-    registry: &Registry,
-    state: &AppState,
-    report_id: InformationReportId,
-) -> Result<InformationLeverageQuote, CommandError> {
-    resolve_information_leverage(registry, state, report_id).map(|plan| plan.quote)
-}
-
 pub(crate) fn resolve_information_leverage(
     registry: &Registry,
     state: &AppState,

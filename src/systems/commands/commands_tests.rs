@@ -152,6 +152,62 @@ fn grant_office_nomination_record_for_test(state: &mut AppState) {
     state.audit_log.sort_by_key(AuditRecord::day);
 }
 
+mod scratch_probe {
+    use super::*;
+    use crate::test_support::assert_state_eq;
+
+    #[test]
+    fn scratch_probe_commits_the_same_outcome_as_the_atomic_command() {
+        let registry = rivergate_registry_for_test();
+        let committed = make_test_campaign();
+        let mut probe = committed.clone();
+        let command = PlayerCommand::SetHouseGovernance {
+            governance: HouseGovernance::FamilyPartnership,
+        };
+
+        let probe_outcome = apply_player_command_scratch(registry, &mut probe, command.clone())
+            .expect("scratch probe must accept a valid command");
+        let mut reference = committed.clone();
+        let committed_outcome = apply_player_command(registry, &mut reference, command)
+            .expect("atomic command must accept the same valid command");
+
+        assert_eq!(
+            probe_outcome.summary, committed_outcome.summary,
+            "the probe must report the same outcome as the committed path"
+        );
+        assert_state_eq(
+            &reference,
+            &probe,
+            "a successful scratch probe must leave the same state as the atomic path",
+        );
+    }
+
+    #[test]
+    fn rejected_scratch_probe_reports_a_typed_error() {
+        let registry = rivergate_registry_for_test();
+        let mut probe = make_test_campaign();
+        let missing_business = BusinessId::new(u32::MAX - 3);
+
+        let error = apply_player_command_scratch(
+            registry,
+            &mut probe,
+            PlayerCommand::WithdrawBusinessCash {
+                business_id: missing_business,
+                amount: Money::from_copper(1),
+            },
+        )
+        .expect_err("a probe against a missing business must be rejected");
+
+        assert_eq!(
+            error,
+            CommandError::MissingBusiness {
+                business_id: missing_business
+            },
+            "the probe must surface the same typed rejection as the atomic path"
+        );
+    }
+}
+
 mod validation {
     use super::*;
     use crate::systems::strategic::PROPERTY_LIQUIDATION_BASIS_POINTS;

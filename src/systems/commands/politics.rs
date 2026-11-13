@@ -135,6 +135,7 @@ pub(crate) fn has_player_office_power(state: &AppState, power: OfficePower) -> b
         .any(|institution| office_power_is_player_held(state, institution, power))
 }
 
+#[cfg(test)]
 pub(crate) fn player_office_power_available_day(
     state: &AppState,
     power: OfficePower,
@@ -170,6 +171,7 @@ pub(crate) fn checked_player_office_power_available_day(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn has_established_player_office_power(state: &AppState, power: OfficePower) -> bool {
     player_office_power_available_day(state, power)
         .is_some_and(|available_day| state.clock.day() >= available_day)

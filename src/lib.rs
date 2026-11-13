@@ -1,19 +1,19 @@
 //! Deterministic simulation kernel for Civic Dynasty — one city, one persistent `AppState`.
 //!
-//! Purpose: public library facade — one import surface for construction, commands, simulation, persistence, projection, harness, and art.
+//! Purpose: public library facade — one import surface for construction, commands, simulation, persistence, projection, and art.
 //! Owns: re-exports only; no domain logic or state.
 //! Reads: nothing directly (delegates to owning modules).
 //! Mutates: nothing directly (delegates to owning modules).
 //! Does not own: domain rules, state shape, or adapter I/O (see `ARCHITECTURE.md` owners).
-//! Canonical operations: `build_rivergate_registry`, `build_new_game`, `advance_days`, `apply_player_command`, `save_state`/`load_state`, `build_state_summary`/`render_campaign_html`, `run_gameplay_harness`, `build_art_review`.
+//! Canonical operations: `build_rivergate_registry`, `build_new_game`, `advance_days`, `apply_player_command`/`apply_player_command_scratch`, `save_state`/`load_state`, `build_state_summary`/`render_campaign_html`, `build_art_review`.
 //! Relevant invariants: facade preserves determinism and typed errors of owned systems; no alternate mutation path.
 //! Focused tests: exercised via `src/test_support.rs` and all domain suites.
 //!
 //! Profiles: **Universal · Stateful Application · Deterministic System ·
-//! Automated Behavior Evaluation · Artifact Generation**. Related authorities:
+//! Artifact Generation**. Related authorities:
 //! `README.md` (run/surface), `AGENTS.md` (execution card), `ARCHITECTURE.md`
 //! (ownership), `STATUS.md` (current scope/schemas), `TESTING.md`
-//! (verification), `DESIGN.md` (intent), `GAMEPLAY_HARNESS.md` (report).
+//! (verification), `DESIGN.md` (intent).
 //!
 //! Rivergate is a deterministic political economy: `Registry` (immutable defs) plus `AppState` (every mutable value needed for continuation, including RNG) flows through canonical `systems/*` mutations and is observed through read-only `projection`/HTML. Every adapter reuses the same production path.
 //!
@@ -40,14 +40,13 @@
 //! - `Registry` owns immutable Rivergate definitions.
 //! - `AppState` owns every mutable value required for continuation.
 //! - `systems/*` own canonical validation → commit pipelines.
-//! - `persistence` / `projection` / `gameplay` / `art` / `main.rs` are
+//! - `persistence` / `projection` / `art` / `main.rs` are
 //!   adapters that reuse the canonical path and own no domain rules.
 //!
 //! Verification: `bash scripts/test.sh <lane>` per `TESTING.md`; no hosted CI.
 
 pub mod art;
 pub mod core;
-pub mod gameplay;
 pub mod ids;
 pub mod money;
 pub mod persistence;
@@ -62,16 +61,6 @@ pub use art::{
     render_art_review_html,
 };
 pub use core::{AppState, HistoryLog, NewGameConfig};
-pub use gameplay::{
-    GAMEPLAY_REPORT_SCHEMA_VERSION, GameplayAggregate, GameplayCampaignReport,
-    GameplayCandidateRanking, GameplayCommandKind, GameplayCommandStats,
-    GameplayConsequenceProfile, GameplayDomain, GameplayFantasyArc, GameplayFeedbackEvent,
-    GameplayFeedbackSource, GameplayFinding, GameplayFindingSeverity, GameplayHarnessConfig,
-    GameplayHarnessError, GameplayHarnessReport, GameplayInteractionEdge, GameplayMeasure,
-    GameplayMeasureChange, GameplayPersona, GameplayPhase, GameplayPhaseStats,
-    GameplayQuietDiagnostic, GameplayScores, GameplaySnapshot, GameplaySuccessionTransition,
-    GameplayTraceStep, GameplayViableOption, render_gameplay_report, run_gameplay_harness,
-};
 pub use persistence::{
     PersistenceError, SaveOutcome, SaveRevision, StateValidationKind, load_state,
     load_state_with_revision, save_state, save_state_cas, save_state_new, write_generated_file,
@@ -85,8 +74,9 @@ pub use systems::{
     BusinessAcquisitionQuote, CommandError, CommandOutcome, CrisisResponse, EducationFocus,
     InformationFocus, LaborResponse, LoanTerms, NewGameError, PlayerCommand,
     PropertyLiquidationQuote, PublicWorkFundingError, SimulationError, StrategicError,
-    SupplyContractTerms, TimelineError, advance_days, apply_player_command, build_new_game,
-    quote_business_acquisition, quote_property_liquidation, validate_invariants,
+    SupplyContractTerms, TimelineError, advance_days, apply_player_command,
+    apply_player_command_scratch, build_new_game, quote_business_acquisition,
+    quote_property_liquidation, validate_invariants,
 };
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Canonical `PlayerCommand` schema, dispatch, and shared command plumbing.
 //!
-//! Purpose: own the single semantic mutation path every caller (CLI,
-//! gameplay harness, tests, AI) must use, with typed `CommandError` rejection
+//! Purpose: own the single semantic mutation path every caller (CLI, tests,
+//! AI) must use, with typed `CommandError` rejection
 //! and atomic commit via `apply_player_command*`.
 //! Owns: `PlayerCommand` enum, `CommandOutcome`/`CommandError`, dispatch
 //! table, treasury/market spending helpers, audit-cooldown lookups, and
@@ -14,8 +14,8 @@
 //! `strategic/*.rs` helpers it calls own their own policy).
 //! Canonical operations: `PlayerCommand` enum, `apply_player_command` dispatch.
 //! Relevant invariants: single dispatch; validation before mutation; atomic clone-then-replace.
-//! Focused tests: `src/systems/commands/commands_tests.rs`, gameplay candidate
-//! coverage, CLI `execute` smoke.
+//! Focused tests: `src/systems/commands/commands_tests.rs` and
+//! CLI `execute` smoke.
 
 pub(crate) use super::legal::{
     LEGAL_CASE_FILING_COST, LEGAL_CASE_FILING_INTERVAL_DAYS, LEGAL_CASE_HEARING_DELAY_DAYS,
@@ -249,7 +249,7 @@ impl From<super::strategic::DurableFeedbackError> for CommandError {
 /// Applies a validated player command through the owning subsystem's canonical mutation path.
 ///
 /// This is the single supported entry point for every caller (CLI `execute`,
-/// gameplay harness `probe`→`commit`, and tests): validation, permission/
+/// tests, and AI houses): validation, permission/
 /// lifecycle/capacity checks, complete multi-record resolution, atomic commit,
 /// and durable feedback all run behind this boundary, so no caller can
 /// bypass domain rules or create a second mutation path (§6.1 / §5.1).
@@ -290,10 +290,18 @@ pub fn apply_player_command(
 /// defensive whole-campaign copy: the caller must hold `state` as a
 /// disposable working branch whose rejection would simply be discarded.
 ///
-/// The gameplay harness probes candidates on private clones of the live
-/// campaign; cloning once per probe instead of twice halves the probing
-/// cost without weakening any externally observable guarantee.
-pub(crate) fn apply_player_command_scratch(
+/// This is the supported what-if probe entry point: clone the live campaign
+/// once, apply candidate commands to the clone through this function, and
+/// commit only the outcome you keep through [`apply_player_command`]. Cloning
+/// once per probe instead of twice halves the probing cost without weakening
+/// any externally observable guarantee.
+///
+/// # Errors
+///
+/// Returns the same typed [`CommandError`] variants as
+/// [`apply_player_command`]. A failed probe may leave the scratch campaign
+/// partially mutated, so the caller must discard it rather than keep it.
+pub fn apply_player_command_scratch(
     registry: &Registry,
     state: &mut AppState,
     command: PlayerCommand,

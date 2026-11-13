@@ -36,7 +36,7 @@ pub struct LoanTerms {
 ///
 /// Restructuring is pair-owned: a default can only be cured through the
 /// creditor that already owns that claim. Keeping the lookup in the credit
-/// system prevents command negotiation, gameplay policy, and AI underwriting
+/// system prevents command negotiation, policy, and AI underwriting
 /// from each reimplementing slightly different default semantics.
 pub(crate) fn latest_defaulted_loan_for_pair(
     state: &AppState,
@@ -93,21 +93,6 @@ pub(crate) fn unresolved_default_owed_elsewhere(
                 && loan.status == LoanStatus::Defaulted
         })
         .min_by_key(|loan| (loan.next_due_day, loan.id))
-}
-
-#[must_use]
-pub(crate) fn credit_pair_blocks_new_loan(
-    state: &AppState,
-    lender_dynasty_id: DynastyId,
-    borrower_dynasty_id: DynastyId,
-) -> bool {
-    state.loans.values().any(|loan| {
-        loan.lender_dynasty_id == lender_dynasty_id
-            && loan.borrower_dynasty_id == borrower_dynasty_id
-            && (loan.status.is_repayment_active()
-                || (loan.status == LoanStatus::Defaulted
-                    && !defaulted_loan_restructuring_available(state, loan)))
-    })
 }
 
 #[derive(Clone, Copy, Debug)]

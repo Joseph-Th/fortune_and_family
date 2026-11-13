@@ -1,30 +1,28 @@
 //! Thin CLI adapter: parse → call canonical kernel → report structured outcome.
 //!
 //! Purpose: expose `new` / `simulate` / `summary` / `inspect` / `dashboard` /
-//! `execute` / `validate` / `playtest` / `art` without owning domain rules.
+//! `execute` / `validate` / `art` without owning domain rules.
 //! Owns: `clap` argument shapes, `CliError` mapping, path-aliasing checks,
 //! parent-dir creation, `write_generated_file` delegation, and human summary
-//! formatting; `playtest`/`art` rotation is adapter-layer policy.
+//! formatting; `art` seed rotation is adapter-layer policy.
 //! Reads: `Registry`, `AppState` (via lib entry points).
 //! Mutates: only through `build_new_game`, `advance_days`,
 //! `apply_player_command`, `save_state*` / `write_generated_file`.
 //! Does not own: validation, simulation, pricing, legal, progression, or
 //! projection rules; every concrete step reuses the library's canonical path.
-//! Canonical operations: CLI dispatch - `new`, `simulate`, `execute`, `playtest`, `art`.
+//! Canonical operations: CLI dispatch - `new`, `simulate`, `execute`, `art`.
 //! Relevant invariants: CLI is thin adapter; no domain rules.
-//! Focused tests: `bash scripts/test.sh cli` / `art-cli` / `gameplay-cli`, plus
+//! Focused tests: `bash scripts/test.sh cli` / `art-cli`, plus
 //! `src/main.rs::tests` path-aliasing and generated-output isolation.
 
 use civic_dynasty::core::StartingBackground;
 use civic_dynasty::{
-    ArtReviewConfig, ArtReviewError, ArtSeverity, CommandError, GameplayFindingSeverity,
-    GameplayHarnessConfig, GameplayHarnessError, GameplayPersona, NewGameConfig, NewGameError,
+    ArtReviewConfig, ArtReviewError, ArtSeverity, CommandError, NewGameConfig, NewGameError,
     PersistenceError, PlayerCommand, Registry, SaveOutcome, SaveRevision, SimulationError,
     SpriteRole, advance_days, apply_player_command, build_art_review, build_art_review_report,
     build_campaign_projection, build_new_game, build_rivergate_registry, build_state_summary,
-    load_state, load_state_with_revision, render_art_review_html, render_campaign_html,
-    render_gameplay_report, run_gameplay_harness, save_state, save_state_cas, save_state_new,
-    validate_invariants, write_generated_file,
+    load_state, load_state_with_revision, render_art_review_html, render_campaign_html, save_state,
+    save_state_cas, save_state_new, validate_invariants, write_generated_file,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
@@ -91,8 +89,6 @@ enum Command {
     /// Load a campaign and validate it: full runtime invariants in debug
     /// builds, persistence-boundary validation everywhere.
     Validate { input: PathBuf },
-    /// Run deterministic player agents and report gameplay reachability and system reactions.
-    Playtest(PlaytestArgs),
     /// Render procedural sprites and write a self-contained visual review sheet.
     Art(ArtArgs),
 }
@@ -150,25 +146,6 @@ enum BackgroundArg {
     Baker,
     ClothTrader,
     Blacksmith,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum GameplayPersonaArg {
-    Steward,
-    Entrepreneur,
-    PowerBroker,
-    Opportunist,
-}
-
-impl From<GameplayPersonaArg> for GameplayPersona {
-    fn from(value: GameplayPersonaArg) -> Self {
-        match value {
-            GameplayPersonaArg::Steward => Self::Steward,
-            GameplayPersonaArg::Entrepreneur => Self::Entrepreneur,
-            GameplayPersonaArg::PowerBroker => Self::PowerBroker,
-            GameplayPersonaArg::Opportunist => Self::Opportunist,
-        }
-    }
 }
 
 impl From<BackgroundArg> for StartingBackground {
@@ -240,21 +217,6 @@ enum CliError {
     },
     #[error(transparent)]
     Command(#[from] CommandError),
-    #[error(transparent)]
-    GameplayHarness(#[from] GameplayHarnessError),
-    #[error("failed to serialize gameplay report: {source}")]
-    GameplayReportSerialization {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("failed to write gameplay report {path}: {source}")]
-    GameplayReportWrite {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("gameplay quality gate failed: {reason}")]
-    GameplayQualityGate { reason: String },
 }
 
 fn main() {
@@ -382,163 +344,22 @@ fn run_cli(cli: Cli, registry: &Registry) -> Result<(), CliError> {
                 invariant_scope
             );
         }
-        Command::Playtest(args) => run_playtest(registry, args)?,
         Command::Art(args) => run_art(args)?,
     }
     Ok(())
 }
 
-#[derive(Args, Debug)]
-struct PlaytestArgs {
-    /// First deterministic campaign seed. Omit to rotate deterministically by
-    /// UTC date, so recurring gates sample fresh worlds while any single run
-    /// stays exactly reproducible from the seed recorded in its report.
-    #[arg(long)]
-    start_seed: Option<u64>,
-    /// Number of consecutive seeds to run. Omit to use the configured default,
-    /// which samples several independent worlds so world-content findings
-    /// (crisis variety, breach rates, civic drift) are not single-world reads.
-    #[arg(long)]
-    seeds: Option<u16>,
-    /// Simulated days per campaign.
-    #[arg(long, default_value_t = 1_080)]
-    days: u32,
-    /// Days advanced after each player decision.
-    #[arg(long, default_value_t = 30)]
-    decision_interval: u16,
-    /// Maximum candidate commands validated per decision.
-    #[arg(long, default_value_t = 16)]
-    max_probes: u16,
-    /// Maximum simulated days used to attribute delayed command consequences.
-    #[arg(long, default_value_t = 360)]
-    consequence_horizon: u16,
-    /// Representative decisions retained per campaign.
-    #[arg(long, default_value_t = 40)]
-    trace_limit: u16,
-    /// Campaigns whose retained decision trace is rendered in the human-readable report. 0 disables the decision log.
-    #[arg(long, default_value_t = 3)]
-    decision_log: u8,
-    /// Player personas to run; repeat to select several. Omit to run all.
-    #[arg(long, value_enum)]
-    persona: Vec<GameplayPersonaArg>,
-    /// Starting backgrounds to run; repeat to select several. Omit to run all.
-    #[arg(long, value_enum)]
-    background: Vec<BackgroundArg>,
-    /// Emit the versioned structured JSON report instead of human-readable text.
-    #[arg(long)]
-    json: bool,
-    /// Write the report to a file instead of standard output.
-    #[arg(long)]
-    output: Option<PathBuf>,
-    /// Return failure after writing the report when any critical finding exists.
-    #[arg(long)]
-    fail_on_critical: bool,
-    /// Return failure after writing the report when its overall score is lower.
-    #[arg(long, value_parser = clap::value_parser!(u16).range(0..=100))]
-    minimum_overall: Option<u16>,
-}
-
-/// Deterministically rotates the default seed base by UTC calendar day: a
-/// recurring harness run samples fresh worlds without sacrificing
-/// reproducibility, because every run records its exact configuration. The
-/// library-level `GameplayHarnessConfig::default` stays fully deterministic;
-/// rotation is an adapter-layer choice for recurring CLI invocations.
+/// Deterministically rotates the default sprite seed by UTC calendar day: a
+/// recurring art review samples fresh procedural variations without
+/// sacrificing reproducibility, because every run records its exact
+/// configuration. Rotation is an adapter-layer choice for recurring CLI
+/// invocations.
 fn rotated_default_start_seed() -> u64 {
     const ROTATION_MODULUS: u64 = 997;
     let day = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() / 86_400);
     1 + day % ROTATION_MODULUS
-}
-
-fn run_playtest(registry: &Registry, args: PlaytestArgs) -> Result<(), CliError> {
-    let personas = if args.persona.is_empty() {
-        GameplayPersona::all().to_vec()
-    } else {
-        args.persona.into_iter().map(Into::into).collect()
-    };
-    let backgrounds = if args.background.is_empty() {
-        vec![
-            StartingBackground::Baker,
-            StartingBackground::ClothTrader,
-            StartingBackground::Blacksmith,
-        ]
-    } else {
-        args.background.into_iter().map(Into::into).collect()
-    };
-    let start_seed = args.start_seed.unwrap_or_else(rotated_default_start_seed);
-    eprintln!("world seed base: {start_seed}");
-    let config = GameplayHarnessConfig {
-        start_seed,
-        seed_count: args
-            .seeds
-            .unwrap_or(GameplayHarnessConfig::default().seed_count),
-        days_per_campaign: args.days,
-        decision_interval_days: args.decision_interval,
-        max_candidate_probes: args.max_probes,
-        max_consequence_horizon_days: args.consequence_horizon,
-        trace_limit_per_campaign: args.trace_limit,
-        decision_log_campaigns: args.decision_log,
-        personas,
-        backgrounds,
-    };
-    let started = Instant::now();
-    let report = run_gameplay_harness(registry, config)?;
-    let rendered = if args.json {
-        serde_json::to_string_pretty(&report)
-            .map_err(|source| CliError::GameplayReportSerialization { source })?
-    } else {
-        render_gameplay_report(&report)
-    };
-    if let Some(path) = args.output {
-        ensure_output_parent(&path)?;
-        let outcome = write_generated_file(&path, rendered.as_bytes()).map_err(|source| {
-            CliError::GameplayReportWrite {
-                path: path.clone(),
-                source,
-            }
-        })?;
-        report_save_outcome(path.as_path(), outcome);
-        println!("Wrote {}", path.display());
-    } else {
-        println!("{rendered}");
-    }
-    let elapsed = started.elapsed();
-    let elapsed_micros = elapsed.as_micros().max(1);
-    let days_per_second =
-        u128::from(report.aggregate.simulated_days).saturating_mul(1_000_000) / elapsed_micros;
-    eprintln!(
-        "playtest {:.3}s ({} campaigns, {} simulated days, {} actions, score {}/100, {} findings, {days_per_second} simulated days/s)",
-        elapsed.as_secs_f64(),
-        report.aggregate.campaigns,
-        report.aggregate.simulated_days,
-        report.aggregate.successful_actions,
-        report.aggregate.scores.overall,
-        report.findings.len(),
-    );
-    if let Some(minimum) = args.minimum_overall
-        && report.aggregate.scores.overall < minimum
-    {
-        return Err(CliError::GameplayQualityGate {
-            reason: format!(
-                "overall score {} is below required minimum {minimum}",
-                report.aggregate.scores.overall
-            ),
-        });
-    }
-    if args.fail_on_critical {
-        let critical = report
-            .findings
-            .iter()
-            .filter(|finding| finding.severity == GameplayFindingSeverity::Critical)
-            .count();
-        if critical > 0 {
-            return Err(CliError::GameplayQualityGate {
-                reason: format!("report contains {critical} critical findings"),
-            });
-        }
-    }
-    Ok(())
 }
 
 fn run_art(args: ArtArgs) -> Result<(), CliError> {

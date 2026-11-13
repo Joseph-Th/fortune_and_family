@@ -21,8 +21,6 @@ mod history;
 mod records;
 mod state;
 
-pub(crate) use checksum::ChecksumFolder;
-
 pub use extended::{
     AiObjective, CivicDebt, CivicDebtStatus, ContractStatus, Crisis, CrisisKind, CrisisStatus,
     DistrictRuntime, DynastyPair, EmploymentAgreement, EmploymentStatus, EnactedLaw, ExternalRoute,

@@ -15,7 +15,7 @@ REQUIRED_DOCS = (
     "DESIGN.md",
     "STATUS.md",
     "TESTING.md",
-    "GAMEPLAY_HARNESS.md",
+    "PLAY.md",
 )
 RETROSPECTIVE_PHRASES = (
     "Verified on",
@@ -56,9 +56,7 @@ def capture(pattern: str, text: str, source: str) -> str:
 def check_status_contracts() -> None:
     cargo = read("Cargo.toml")
     state = read("src/core/state.rs")
-    gameplay = read("src/gameplay/types.rs") + read("src/gameplay/mod.rs")
     art_harness = read("src/art/harness.rs")
-    read("scripts/check_gameplay.py")
     status = read("STATUS.md")
 
     crate_version = capture(r'^version\s*=\s*"([^"]+)"', cargo, "Cargo.toml")
@@ -66,11 +64,6 @@ def check_status_contracts() -> None:
     rust_version = capture(r'^rust-version\s*=\s*"([^"]+)"', cargo, "Cargo.toml")
     save_schema = capture(
         r"CURRENT_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)", state, "src/core/state.rs"
-    )
-    report_schema = capture(
-        r"GAMEPLAY_REPORT_SCHEMA_VERSION:\s*u16\s*=\s*(\d+)",
-        gameplay,
-        "src/gameplay/",
     )
     art_report_schema = capture(
         r"ART_REVIEW_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)",
@@ -83,7 +76,6 @@ def check_status_contracts() -> None:
         f"| Minimum Rust version | {rust_version} |",
         f"| Save schema | {save_schema} |",
         "| Supported save schemas | Current schema only |",
-        f"| Gameplay report schema | {report_schema} |",
         f"| Art review report schema | {art_report_schema} |",
     )
     for line in expected_lines:

@@ -5,9 +5,9 @@
 
 **Rust agent diagnostics:** advisory. Use bounded diagnostics only for unresolved ownership, test-strength, or macro questions; commands and verification routing: [TESTING.md](TESTING.md).
 
-**Profiles:** Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation
+**Profiles:** Universal, Stateful Application, Deterministic System, Artifact Generation
 
-Execution card for repository work. `ARCHITECTURE.md` owns structure and mutation contracts, `STATUS.md` owns capability and schemas, `TESTING.md` owns test policy, `DESIGN.md` owns intent, `GAMEPLAY_HARNESS.md` owns harness semantics. The embedded workspace contract owns shared execution and filesystem rules.
+Execution card for repository work. `ARCHITECTURE.md` owns structure and mutation contracts, `STATUS.md` owns capability and schemas, `TESTING.md` owns test policy, `DESIGN.md` owns intent, and `PLAY.md` owns the text-play loop. The embedded workspace contract owns shared execution and filesystem rules.
 
 <!-- workspace-contract:begin (generated from ../AGENTS.md by tools/sync_agent_context.py; edit the source, not this copy) -->
 ## Workspace contract
@@ -81,7 +81,7 @@ It returns bounded authority, verification, and likely-source evidence. Tool out
 
 ## Profiles
 
-**Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation, Artifact Generation.** Universal rules apply throughout; persistence and projection follow DATA and the stateful OWN rules; harness evaluation in `src/gameplay/` follows the Automated Behavior Evaluation companion; procedural art in `src/art/` and HTML/report output follow the Artifact Generation companion with PROD-1.
+**Universal, Stateful Application, Deterministic System, Artifact Generation.** Universal rules apply throughout; persistence and projection follow DATA and the stateful OWN rules; procedural art in `src/art/` and HTML/report output follow the Artifact Generation companion with PROD-1.
 
 ## Procedure
 
@@ -90,7 +90,7 @@ It returns bounded authority, verification, and likely-source evidence. Tool out
 3. Trace the public entry point (`src/lib.rs` → `src/systems/*`) to the owning module. Read its file header (`Purpose / Owns / Reads / Mutates / Does not own / Canonical operations / Relevant invariants / Focused tests`) before editing.
 4. Identify the narrowest test that proves the change. Run before editing only to reproduce a failure; otherwise run once behavior is ready.
 5. Select the smallest completion lane from `TESTING.md` that owns the changed surface.
-6. Update the one document that owns any changed architecture, behavior, schema, API, command, harness, or scope contract.
+6. Update the one document that owns any changed architecture, behavior, schema, API, command, play loop, or scope contract.
 
 ## Routing
 
@@ -102,15 +102,15 @@ It returns bounded authority, verification, and likely-source evidence. Tool out
 | Legal / progression | `src/systems/legal.rs`, `src/systems/progression.rs` |
 | Persistence & validation | `src/persistence.rs`, `src/systems/invariants.rs` |
 | Read models / HTML | `src/projection.rs` |
-| Gameplay analysis | `src/gameplay/` |
+| Text-play session | `PLAY.md`, CLI `new` / `execute` / `simulate` |
 | Procedural art | `src/art/` |
 | Core types & state | `src/core/`, `src/ids.rs`, `src/money.rs`, `src/rng.rs`, `src/registry/` |
 
-Impact map: [ARCHITECTURE.md § Extension map](ARCHITECTURE.md#extension-map) lists required companion work per change class (state shape → validation/invariants/projection/tests; commands → feedback/projection/harness; schedule → ordering/tests; persistence → schema/round-trip; adapters → smoke).
+Impact map: [ARCHITECTURE.md § Extension map](ARCHITECTURE.md#extension-map) lists required companion work per change class (state shape → validation/invariants/projection/tests; commands → feedback/projection/CLI smoke; schedule → ordering/tests; persistence → schema/round-trip; adapters → smoke).
 
 ## Guardrails
 
-- `Registry` owns immutable definitions; `AppState` and its stores own serializable runtime state; systems own validation and mutation; adapters (CLI, persistence, projection, HTML, gameplay, art) translate IO only and own no domain rules.
+- `Registry` owns immutable definitions; `AppState` and its stores own serializable runtime state; systems own validation and mutation; adapters (CLI, persistence, projection, HTML, art) translate IO only and own no domain rules.
 - Consequential operations validate references, ownership, permission, lifecycle, capacity, ranges, and arithmetic before one atomic commit; rejection preserves state and reports a typed `CommandError` / `SimulationError` variant.
 - Multi-record work resolves the complete result before commit or uses a consumed `Validated*` token with current-state revalidation; stale tokens fail without mutation.
 - Preserve state-owned deterministic randomness (`AppState.rng`), ordered `BTreeMap` iteration with typed-ID tie-breakers, fixed-point `Money`/`Quantity` with `i128` intermediates, checked scheduling (`checked_future_day`), and explicit overflow handling.

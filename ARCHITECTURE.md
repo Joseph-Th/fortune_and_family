@@ -4,7 +4,7 @@ Code ownership, dependency direction, canonical mutation flows, and execution or
 
 Profiles are declared in `AGENTS.md`.
 
-Related authorities: `AGENTS.md` (execution card), `STATUS.md` (current scope), `TESTING.md` (verification), `DESIGN.md` (intent), `GAMEPLAY_HARNESS.md` (harness). Root `../AGENTS.md` owns workspace coordination.
+Related authorities: `AGENTS.md` (execution card), `STATUS.md` (current scope), `TESTING.md` (verification), `DESIGN.md` (intent), `PLAY.md` (play loop). Root `../AGENTS.md` owns workspace coordination.
 
 ## System model
 
@@ -84,7 +84,6 @@ Remaining adapters:
 |---|---|
 | `src/persistence.rs` | Current-schema save/load, release validation, atomic writes |
 | `src/projection.rs` | Read-only projections and self-contained HTML |
-| `src/gameplay/` | Deterministic player agents, attribution, scores, findings, traces |
 | `src/art/*` | Deterministic sprite rendering and review |
 | `src/main.rs` | CLI adapter |
 
@@ -165,8 +164,6 @@ Each day runs in fixed 18-step order:
 
 Owners: `src/systems/simulation/`, `src/systems/strategic/`, `src/systems/progression.rs`. Execution order is a product contract; change it only with tests that establish the intended effect.
 
-`advance_days_scratch` is the in-place variant for exclusively owned disposable branches (harness counterfactuals): identical day loop, no defensive copy, caller must discard state on failure.
-
 Strategic scheduling (`src/systems/strategic/`):
 
 - **Daily**: routes, crisis effects, AI business recovery, external route supply.
@@ -222,19 +219,17 @@ Owner: `src/persistence.rs`. Schema changes require increment, round-trip tests,
 
 Projection code may aggregate and format. It must not mutate state or recreate command validation.
 
-### Gameplay harness
+### Player command and play loop
 
-Generates state-derived candidates, validates via `apply_player_command` on clones, commits through the same API, advances via `advance_days`, and compares action vs no-action branches.
+`PlayerCommand` → `apply_player_command` → validate → commit atomically → durable feedback → invariant validation. The CLI `execute` verb parses one JSON-encoded `PlayerCommand` and persists the result through the compare-and-swap save path; `new`, `simulate`, `summary`, `inspect`, `dashboard`, and `validate` complete the text-play loop documented in `PLAY.md`.
 
-Independent campaigns run in parallel; each owns its `AppState` and the shared `Registry` is immutable, so ordering and determinism are preserved. The harness never directly mutates domain records.
-
-Bounded work: `max_candidate_probes`, decision intervals, consequence horizons, and `trace_limit` bound every run. Wall-clock diagnostics (`simulated_days/s`) are advisory. See `GAMEPLAY_HARNESS.md`.
+`apply_player_command_scratch` applies a command to an exclusively owned scratch campaign. It runs the same validation and post-command refresh as `apply_player_command` and skips only the defensive whole-campaign copy, so an agent can probe candidate actions on a disposable clone and commit only the outcome it keeps.
 
 ### Art
 
 Owns rendering specifications, integer geometry/shading, sprite composition, encoding, automated review, and review HTML. It owns no campaign state or gameplay rules. Rendering is one-way: `CharacterSpec` → indexed `Canvas` → PNG bytes → embedded data URI. No round-trip is claimed.
 
-Staged publication: every generated file — dashboard HTML, gameplay report JSON/HTML, art review HTML/PNG — writes to a synchronized same-directory temp and atomically replaces the destination via `write_generated_file`. A failed generation removes the temp or leaves the previous valid artifact untouched; no partial file is left at the final path.
+Staged publication: every generated file — dashboard HTML and art review HTML/PNG — writes to a synchronized same-directory temp and atomically replaces the destination via `write_generated_file`. A failed generation removes the temp or leaves the previous valid artifact untouched; no partial file is left at the final path.
 
 Fidelity is explicit: HTML is standalone but not editable source, PNG is 8-bit indexed, report schemas are versioned and validated before rendering.
 
@@ -291,21 +286,20 @@ Each layer guards what its owner can keep consistent.
 |---|---|---|
 | Immutable content | `src/registry/mod.rs` | Registry tests, bootstrap, projection if visible |
 | Persistent state | `src/core/*`, `src/core/state.rs` | Bootstrap, validation, invariants, projection, tests |
-| Player command | `src/systems/commands/` | Command tests, feedback, projection, harness, CLI smoke if needed |
+| Player command | `src/systems/commands/` | Command tests, feedback, projection, CLI smoke if needed |
 | Daily rule | `src/systems/simulation/` | Simulation tests, ordering, invariants |
 | Scheduled rule | `src/systems/strategic/` domain file | Strategic tests, feedback, snapshots |
 | Cross-record transaction | Owning system or `src/systems/transactions.rs` | Typed errors, atomicity, stale-token tests |
 | Read-only output | `src/projection.rs` | Projection/rendering tests |
 | Save format | `src/persistence.rs` | Schema, validation, round trip, STATUS |
-| Gameplay evaluation | `src/gameplay/` | Report schema, tests, `GAMEPLAY_HARNESS.md` |
 | CLI syntax | `src/main.rs` | CLI smoke, README workflow if needed |
 | Art primitive/subject/check | `src/art/*` | Determinism, review coverage, schema/STATUS for serialized output |
 
 ## Verification routing
 
-`TESTING.md` owns lane selection; `ARCHITECTURE.md` extension map points to the narrowest proof per change class. Routine completion is `bash scripts/test.sh standard`; specialized surfaces add `soak` (long horizons), `adapters` (CLI), `gameplay`/`gameplay-audit` (harness matrices), and `docs` (link/doc consistency). Policy checks are `python tools/check_standards.py` and `python tools/check_no_github_actions.py` (no hosted CI; see `TESTING.md` § Completion gate).
+`TESTING.md` owns lane selection; `ARCHITECTURE.md` extension map points to the narrowest proof per change class. Routine completion is `bash scripts/test.sh standard`; specialized surfaces add `soak` (long horizons), `adapters` (CLI), `play` (real text-play session), and `docs` (link/doc consistency). Policy checks are `python tools/check_standards.py` and `python tools/check_no_github_actions.py` (no hosted CI; see `TESTING.md` § Completion gate).
 
-Every lane is local-only and composes without hidden CI: `fast`/`standard` stay incremental, `soak`/`gameplay` run release-optimized but share the same assertions, and `standard` already reuses the debug CLI build across `docs`/`cli` sub-steps so an extra `fast` before `standard` adds no evidence (`AGENTS.md` completion guardrail).
+Every lane is local-only and composes without hidden CI: `fast`/`standard` stay incremental, `soak` runs release-optimized but shares the same assertions, and `standard` already reuses the debug CLI build across `docs`/`cli` sub-steps so an extra `fast` before `standard` adds no evidence (`AGENTS.md` completion guardrail).
 
 BCA policy is `advisory` (see `AGENTS.md`); tooling lives in `scripts/test.sh` and `scripts/check_docs.py`.
 

@@ -8,11 +8,10 @@ mode=${1:-core}
 
 usage() {
   cat >&2 <<EOF
-usage: $0 [core|art|gameplay|all]
+usage: $0 [core|art|all]
 
   core      exercise campaign, projection, dashboard, and validation commands
   art       exercise sprite-review HTML/JSON output and argument rejection
-  gameplay  exercise focused playtest output and quality-gate failure
   all       run every CLI smoke group
 EOF
   exit 2
@@ -63,7 +62,7 @@ resolve_python() {
 }
 
 case "$mode" in
-  core|art|gameplay|all) ;;
+  core|art|all) ;;
   *) usage ;;
 esac
 
@@ -252,69 +251,6 @@ if art["critical_findings"] != 0:
 PY
 }
 
-run_gameplay_smoke() {
-  local playtest="$work_dir/exports/playtest/playtest.json"
-
-  "$binary" playtest \
-    --days 30 \
-    --seeds 1 \
-    --persona steward \
-    --background baker \
-    --trace-limit 3 \
-    --json \
-    --output "$playtest" \
-    >"$work_dir/playtest.txt" 2>"$work_dir/playtest-progress.txt" || fail 'gameplay harness command failed'
-  require_nonempty_file "$playtest" 'gameplay harness JSON report'
-  grep -Eq 'playtest [0-9]+\.[0-9]{3}s \(' "$work_dir/playtest-progress.txt" \
-    || fail 'playtest progress line did not report concise timing'
-
-  "$python_command" - "$playtest" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-playtest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-required = {
-    "schema_version",
-    "config",
-    "aggregate",
-    "persona_aggregates",
-    "campaigns",
-    "findings",
-}
-missing = sorted(required - playtest.keys())
-if missing:
-    raise SystemExit(f"playtest JSON missing fields: {', '.join(missing)}")
-if playtest["aggregate"]["campaigns"] != 1:
-    raise SystemExit("focused playtest must run exactly one campaign")
-if playtest["aggregate"]["simulated_days"] != 30:
-    raise SystemExit("focused playtest must simulate 30 days")
-if playtest["aggregate"]["successful_actions"] <= 0:
-    raise SystemExit("focused playtest must execute player actions")
-if len(playtest["persona_aggregates"]) != 1:
-    raise SystemExit("focused playtest must expose one persona aggregate")
-if not playtest["campaigns"] or not playtest["campaigns"][0]["trace"]:
-    raise SystemExit("focused playtest must contain a reproducible trace")
-PY
-
-  if "$binary" playtest \
-    --days 7 \
-    --persona steward \
-    --background baker \
-    --trace-limit 1 \
-    --minimum-overall 100 \
-    --output "$work_dir/gated-playtest.txt" \
-    >"$work_dir/gated-playtest-stdout.txt" \
-    2>"$work_dir/gated-playtest-stderr.txt"
-  then
-    fail 'gameplay quality gate unexpectedly succeeded'
-  fi
-  require_nonempty_file "$work_dir/gated-playtest.txt" 'gated gameplay report'
-  require_nonempty_file "$work_dir/gated-playtest-stderr.txt" 'gameplay quality gate error output'
-  grep -Fq 'overall score' "$work_dir/gated-playtest-stderr.txt" \
-    || fail 'gameplay quality gate failure must report the score reason'
-}
-
 case "$mode" in
   core)
     run_core_smoke
@@ -322,13 +258,9 @@ case "$mode" in
   art)
     run_art_smoke
     ;;
-  gameplay)
-    run_gameplay_smoke
-    ;;
   all)
     run_core_smoke
     run_art_smoke
-    run_gameplay_smoke
     ;;
 esac
 

@@ -410,7 +410,7 @@ fn sync_save_directory(parent: &Path) -> Result<(), PersistenceError> {
         })
 }
 
-/// Atomically writes adapter-generated output (dashboard HTML, gameplay and
+/// Atomically writes adapter-generated output (dashboard HTML, art review and
 /// art review reports) with the same staging, visibility, and durability
 /// contract as campaign saves: synchronized same-directory temporary file,
 /// atomic replacement, then best-effort parent-directory synchronization.
